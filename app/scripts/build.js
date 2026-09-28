@@ -1,0 +1,361 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+const appRoot = path.resolve(import.meta.dirname, '..');
+const srcRoot = path.join(appRoot, 'src');
+const distRoot = path.join(appRoot, 'dist');
+const entryFile = path.join(srcRoot, 'index.js');
+
+fs.mkdirSync(distRoot, { recursive: true });
+
+const packageJson = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+const graph = buildModuleGraph(entryFile);
+const compiled = renderBundle(graph, moduleId(entryFile));
+// 地图底图：源码里以相对路径引用的图片（内置 map-demo 与 assets/map-styles 下的自带款式）统一改写为 ./maps/<文件名> 并随 bundle 发布。
+const MAP_ASSET_DIRS = {
+    'fixtures/record-pages/assets': path.join(appRoot, 'fixtures', 'record-pages', 'assets'),
+    'assets/map-styles': path.join(srcRoot, 'visual', 'igs-ui', 'assets', 'map-styles'),
+};
+const MAP_ASSET_RE = /(?:\.\.?\/)+(fixtures\/record-pages\/assets|assets\/map-styles)\/([\w.-]+\.(?:png|webp|jpe?g))/g;
+const mapAssets = new Map();
+const mapped = compiled.replace(MAP_ASSET_RE, (_match, dir, file) => {
+    mapAssets.set(file, path.join(MAP_ASSET_DIRS[dir], file));
+    return `./maps/${file}`;
+});
+if (!mapAssets.has('map-demo-clean-night.png')) throw new Error('Map image path is missing from bundle.');
+const bundle = inlineTypewriterAudio(inlineDialogThemeAssets(mapped));
+
+const roundedFontWeights = [300, 400, 500, 700];
+const dialogFontAssets = [
+    { family: 'LXGW WenKai', file: 'LXGWWenKai-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'LXGW WenKai', file: 'LXGWWenKai-Light.ttf', weight: 300, style: 'normal', format: 'truetype' },
+    { family: 'LXGW WenKai Lite', file: 'LXGWWenKaiLite-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'LXGW Neo ZhiSong', file: 'LXGWNeoZhiSong.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'LXGW Neo XiHei', file: 'LXGWNeoXiHei.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    // 该文件是 Medium 字重，但按默认正文的 400 入口注册，确保未显式设置字重时也实际命中 Medium 字形。
+    { family: 'Source Han Sans CN', file: 'SourceHanSansCN-Medium.otf', weight: 400, style: 'normal', format: 'opentype' },
+    { family: 'Huiwen Mincho', file: 'HuiwenMincho.otf', weight: 400, style: 'normal', format: 'opentype' },
+    { family: 'Tsanger YuYang', file: 'TsangerYuYangT-W05.woff2', weight: 400, style: 'normal', format: 'woff2' },
+    { family: 'Smiley Sans', file: 'SmileySans-Oblique.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'ZCOOL KuaiLe', file: 'ZCOOLKuaiLe-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'Yozai', file: 'Yozai-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'Cinzel', file: 'Cinzel-Variable.ttf', weight: '100 900', style: 'normal', format: 'truetype' },
+    { family: 'Great Vibes', file: 'GreatVibes-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'Pinyon Script', file: 'PinyonScript-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    { family: 'Quicksand', file: 'Quicksand-Variable.ttf', weight: '300 700', style: 'normal', format: 'truetype' },
+    { family: 'Caveat', file: 'Caveat-Variable.ttf', weight: '400 700', style: 'normal', format: 'truetype' },
+    { family: 'IM Fell English SC', file: 'IMFellEnglishSC-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+];
+const classicFontAssets = [
+    { family: 'Source Han Serif CN', file: 'SourceHanSerifCN-Regular.otf', weight: 400, style: 'normal', format: 'opentype' },
+    { family: 'Cormorant Garamond', file: 'CormorantGaramond-Regular.woff2', weight: 400, style: 'normal', format: 'woff2' },
+    { family: 'Cormorant Garamond', file: 'CormorantGaramond-Italic.woff2', weight: 400, style: 'italic', format: 'woff2' },
+];
+const css = [
+    ...roundedFontWeights.map((weight) => `@font-face { font-family: "IGS Rounded"; font-style: normal; font-weight: ${weight}; font-display: swap; src: url("./fonts/nowar-rounded-bliz-${weight}.ttf") format("truetype"); }`),
+    ...dialogFontAssets.map(({ family, file, weight, style, format }) => `@font-face { font-family: "${family}"; font-style: ${style}; font-weight: ${weight}; font-display: swap; src: url("./fonts/${file}") format("${format}"); }`),
+    ...classicFontAssets.map(({ family, file, weight, style, format }) => `@font-face { font-family: "${family}"; font-style: ${style}; font-weight: ${weight}; font-display: swap; src: url("./fonts/${file}") format("${format}"); }`),
+    '.igs-stage { position: relative; width: 100%; height: 100%; min-height: 320px; overflow: hidden; background: #0b0d12; }',
+    '.igs-background-layer, .igs-generated-layer, .igs-effect-layer, .igs-character-layer, .igs-avatar-layer, .igs-dialogue-layer, .igs-hud-layer, .igs-choice-layer, .igs-system-layer { position: absolute; inset: 0; }',
+    '.igs-dialogue-layer { left: 0; right: 0; bottom: 0; width: 100%; min-height: 96px; padding: 24px; }',
+    '.igs-toolbar { display: flex; gap: 8px; padding: 6px; border-radius: 8px; }',
+    '',
+].join('\n');
+
+const manifest = {
+    name: 'Immersive Galgame System',
+    version: packageJson.version,
+    entry: 'igs.bundle.js',
+    style: 'igs.bundle.css',
+};
+
+const fontSourceDir = path.join(srcRoot, 'visual', 'igs-ui', 'assets', 'fonts');
+const fontTargetDir = path.join(distRoot, 'fonts');
+const fontLicenseFiles = [
+    'OFL.txt', 'SourceHanSerifCN-LICENSE.txt', 'SourceHanSansCN-LICENSE.txt',
+    'Cormorant-OFL.txt', 'Cormorant-OFL-FAQ.txt', 'LXGW-OFL.txt', 'Yozai-OFL.txt',
+    'HuiwenMincho-CC0.txt', 'TsangerYuYangT-MIT.txt', 'SmileySans-OFL.txt',
+    'Cinzel-OFL.txt', 'ZCOOLKuaiLe-OFL.txt', 'GreatVibes-OFL.txt', 'PinyonScript-OFL.txt',
+    'Quicksand-OFL.txt', 'Caveat-OFL.txt', 'IMFellEnglish-OFL.txt',
+];
+fs.mkdirSync(fontTargetDir, { recursive: true });
+for (const weight of roundedFontWeights) {
+    const name = `nowar-rounded-bliz-${weight}.ttf`;
+    const source = path.join(fontSourceDir, name);
+    if (!fs.existsSync(source) || fs.readFileSync(source).subarray(0, 4).toString('hex') !== '00010000') {
+        throw new Error(`Bundled font is missing or invalid: ${source}`);
+    }
+    fs.copyFileSync(source, path.join(fontTargetDir, name));
+}
+for (const asset of dialogFontAssets) {
+    const source = path.join(fontSourceDir, asset.file);
+    if (!fs.existsSync(source)) throw new Error(`Bundled dialog font is missing: ${source}`);
+    const signature = fs.readFileSync(source).subarray(0, 4).toString('ascii');
+    if (!['OTTO', 'wOF2', '\0\x01\0\0'].includes(signature)) throw new Error(`Bundled dialog font is invalid: ${source}`);
+    fs.copyFileSync(source, path.join(fontTargetDir, asset.file));
+}
+for (const asset of classicFontAssets) {
+    const source = path.join(fontSourceDir, asset.file);
+    if (!fs.existsSync(source)) {
+        throw new Error(`Bundled classic font is missing or invalid: ${source}`);
+    }
+    const signature = fs.readFileSync(source).subarray(0, 4).toString('ascii');
+    if (!['OTTO', 'wOF2', '\0\x01\0\0'].includes(signature)) throw new Error(`Bundled classic font is missing or invalid: ${source}`);
+    fs.copyFileSync(source, path.join(fontTargetDir, asset.file));
+}
+for (const licenseName of fontLicenseFiles) {
+    const source = path.join(fontSourceDir, licenseName);
+    if (!fs.existsSync(source)) throw new Error(`Bundled font license is missing: ${source}`);
+    fs.copyFileSync(source, path.join(fontTargetDir, licenseName));
+}
+// 地图页的既有城市美术随 bundle 一起发布；白天沿用现有 map-demo-day.png。
+const mapSourceDir = path.join(appRoot, 'fixtures', 'record-pages', 'assets');
+const mapTargetDir = path.join(distRoot, 'maps');
+fs.mkdirSync(mapTargetDir, { recursive: true });
+for (const variant of ['dawn', 'day', 'dusk', 'night', 'minight']) {
+    const sourceName = variant === 'day' ? 'map-demo-day.png' : `map-demo-clean-${variant}.png`;
+    const source = path.join(mapSourceDir, sourceName);
+    if (!fs.existsSync(source) || fs.readFileSync(source).subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
+        throw new Error(`Bundled map image is missing or invalid: ${source}`);
+    }
+    fs.copyFileSync(source, path.join(mapTargetDir, sourceName));
+}
+for (const [file, source] of mapAssets) {
+    if (!fs.existsSync(source)) throw new Error(`Bundled map image is missing: ${source}`);
+    fs.copyFileSync(source, path.join(mapTargetDir, file));
+}
+fs.writeFileSync(path.join(distRoot, 'igs.bundle.js'), bundle, 'utf8');
+fs.writeFileSync(path.join(distRoot, 'igs.bundle.css'), css, 'utf8');
+fs.writeFileSync(path.join(distRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+if (bundle.includes('__IGS_ASSET__') || bundle.includes('__IGS_TYPEWRITER_AUDIO__')) {
+    throw new Error('Build output contains unresolved asset placeholders.');
+}
+
+for (const name of ['igs.bundle.js', 'igs.bundle.css', 'manifest.json']) {
+    const file = path.join(distRoot, name);
+    if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
+        throw new Error(`Build output is missing or empty: ${name}`);
+    }
+}
+
+const builtBundle = fs.readFileSync(path.join(distRoot, 'igs.bundle.js'), 'utf8');
+if (/^\s*import\s/m.test(builtBundle) || builtBundle.includes("from '../src/index.js'")) {
+    throw new Error('Build output must be self-contained and must not import app/src modules at runtime.');
+}
+
+console.log('gate:build ok');
+
+function buildModuleGraph(rootFile) {
+    const modules = new Map();
+    visit(rootFile);
+    return modules;
+
+    function visit(file) {
+        const absolute = path.resolve(file);
+        const id = moduleId(absolute);
+        if (modules.has(id)) return;
+        const source = fs.readFileSync(absolute, 'utf8').replace(/\r\n?/g, '\n');
+        const dependencies = extractDependencies(source).map((request) => resolveLocalModule(absolute, request));
+        modules.set(id, { id, file: absolute, source, dependencies });
+        for (const dependency of dependencies) {
+            visit(dependency.file);
+        }
+    }
+}
+
+function renderBundle(graph, entryId) {
+    const transformed = [];
+    let entryExports = [];
+    for (const module of graph.values()) {
+        const result = transformModule(module);
+        if (module.id === entryId) entryExports = result.exportNames;
+        transformed.push([
+            `__igsRegister(${JSON.stringify(module.id)}, function(module, exports, require) {`,
+            result.code,
+            '});',
+        ].join('\n'));
+    }
+
+    const exportNames = Array.from(new Set(entryExports)).filter((name) => name !== 'default').sort();
+    const publicConstants = exportNames
+        .map((name) => `const ${name} = __igsEntry[${JSON.stringify(name)}];`)
+        .join('\n');
+    const publicExport = exportNames.length ? `export { ${exportNames.join(', ')} };\n` : '';
+
+    return [
+        '// Generated by app/scripts/build.js. Do not edit this file directly.',
+        `// IGS version: ${packageJson.version}`,
+        'const __igsModules = new Map();',
+        'const __igsCache = new Map();',
+        'function __igsRegister(id, factory) { __igsModules.set(id, factory); }',
+        'function __igsDefine(target, name, getter) { Object.defineProperty(target, name, { enumerable: true, get: getter }); }',
+        'function __igsReExport(target, source, pairs) { for (const pair of pairs) __igsDefine(target, pair[1], () => source[pair[0]]); }',
+        'function __igsRequire(id) {',
+        '    if (__igsCache.has(id)) return __igsCache.get(id).exports;',
+        '    const factory = __igsModules.get(id);',
+        '    if (!factory) throw new Error(`IGS module not found: ${id}`);',
+        '    const module = { exports: {} };',
+        '    __igsCache.set(id, module);',
+        '    factory(module, module.exports, __igsRequire);',
+        '    return module.exports;',
+        '}',
+        ...transformed,
+        `const __igsEntry = __igsRequire(${JSON.stringify(entryId)});`,
+        publicConstants,
+        'const __igsGlobalObject = globalThis.window || globalThis;',
+        'if (__igsGlobalObject && __igsGlobalObject.IGS_AUTO_BOOTSTRAP !== false && !__igsGlobalObject.IGS && typeof bootstrapIGS === "function") {',
+        '    bootstrapIGS({ global: __igsGlobalObject });',
+        '}',
+        publicExport + 'export default __igsEntry;',
+        '',
+    ].join('\n');
+}
+
+function inlineTypewriterAudio(bundle) {
+    const names = ['dududu.ogg', 'keyboard.ogg'];
+    let result = bundle;
+    for (const name of names) {
+        const placeholder = `__IGS_TYPEWRITER_AUDIO__${name}__`;
+        if (!result.includes(placeholder)) throw new Error(`Typewriter audio placeholder is missing: ${name}`);
+        const file = path.join(srcRoot, 'visual', 'igs-ui', 'assets', 'audio', `typewriter-${name}`);
+        if (!fs.existsSync(file)) throw new Error(`Typewriter audio asset is missing: ${file}`);
+        const bytes = fs.readFileSync(file);
+        if (bytes.length < 60 || bytes.subarray(0, 4).toString('ascii') !== 'OggS') {
+            throw new Error(`Typewriter audio asset is invalid: ${file}`);
+        }
+        result = result.replaceAll(placeholder, `data:audio/ogg;base64,${bytes.toString('base64')}`);
+    }
+    return result;
+}
+
+function inlineDialogThemeAssets(bundle) {
+    const cache = new Map();
+    return bundle.replace(/__IGS_ASSET__([a-z0-9-]+)\/([a-z-]+)\.png__/g, (_match, theme, part) => {
+        const key = `${theme}/${part}`;
+        if (!cache.has(key)) {
+            const file = path.join(srcRoot, 'visual', 'igs-ui', 'assets', 'dialog-themes', theme, `${part}.png`);
+            if (!fs.existsSync(file)) throw new Error(`Dialog theme asset is missing: ${file}`);
+            cache.set(key, `data:image/png;base64,${fs.readFileSync(file).toString('base64')}`);
+        }
+        return cache.get(key);
+    });
+}
+
+function transformModule(module) {
+    const exportNames = [];
+    const localExportNames = [];
+    let importCounter = 0;
+    let code = module.source;
+
+    code = code.replace(/^\s*import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"];\s*$/gm, (_match, clause, request) => {
+        const resolved = resolveLocalModule(module.file, request);
+        return renderImportClause(clause, resolved.id);
+    });
+
+    code = code.replace(/^\s*export\s+\{([\s\S]*?)\}\s+from\s+['"]([^'"]+)['"];\s*$/gm, (_match, specifierText, request) => {
+        const resolved = resolveLocalModule(module.file, request);
+        const pairs = parseSpecifierPairs(specifierText);
+        for (const pair of pairs) exportNames.push(pair.exported);
+        importCounter += 1;
+        return `const __igsReExportSource${importCounter} = require(${JSON.stringify(resolved.id)});\n__igsReExport(exports, __igsReExportSource${importCounter}, ${JSON.stringify(pairs.map((pair) => [pair.imported, pair.exported]))});`;
+    });
+
+    code = code.replace(/^\s*export\s+(async\s+function|function|class)\s+([A-Za-z_$][\w$]*)/gm, (_match, kind, name) => {
+        exportNames.push(name);
+        localExportNames.push(name);
+        return `${kind} ${name}`;
+    });
+
+    code = code.replace(/^\s*export\s+(const|let|var)\s+([A-Za-z_$][\w$]*)/gm, (_match, kind, name) => {
+        exportNames.push(name);
+        localExportNames.push(name);
+        return `${kind} ${name}`;
+    });
+
+    code = code.replace(/^\s*export\s+\{([\s\S]*?)\};\s*$/gm, (_match, specifierText) => {
+        const pairs = parseSpecifierPairs(specifierText);
+        for (const pair of pairs) exportNames.push(pair.exported);
+        return pairs.map((pair) => `__igsDefine(exports, ${JSON.stringify(pair.exported)}, () => ${pair.imported});`).join('\n');
+    });
+
+    const localExports = Array.from(new Set(localExportNames));
+    if (localExports.length) {
+        code += `\n${localExports.map((name) => `__igsDefine(exports, ${JSON.stringify(name)}, () => ${name});`).join('\n')}`;
+    }
+
+    if (/^\s*(import|export)\s/m.test(code)) {
+        throw new Error(`Unsupported module syntax remains in ${path.relative(appRoot, module.file)}`);
+    }
+
+    return { code, exportNames: Array.from(new Set(exportNames)) };
+}
+
+function renderImportClause(clause, targetId) {
+    const normalized = String(clause || '').trim();
+    if (!normalized) return `require(${JSON.stringify(targetId)});`;
+    if (normalized.startsWith('{')) {
+        return `const { ${renderDestructuring(parseSpecifierPairs(normalized.slice(1, -1)))} } = require(${JSON.stringify(targetId)});`;
+    }
+    if (normalized.startsWith('* as ')) {
+        const name = normalized.slice(5).trim();
+        return `const ${name} = require(${JSON.stringify(targetId)});`;
+    }
+    const commaIndex = normalized.indexOf(',');
+    if (commaIndex >= 0) {
+        const defaultName = normalized.slice(0, commaIndex).trim();
+        const namedClause = normalized.slice(commaIndex + 1).trim();
+        const lines = [`const ${defaultName} = require(${JSON.stringify(targetId)}).default;`];
+        if (namedClause.startsWith('{')) {
+            lines.push(`const { ${renderDestructuring(parseSpecifierPairs(namedClause.slice(1, -1)))} } = require(${JSON.stringify(targetId)});`);
+        }
+        return lines.join('\n');
+    }
+    return `const ${normalized} = require(${JSON.stringify(targetId)}).default;`;
+}
+
+function renderDestructuring(pairs) {
+    return pairs.map((pair) => pair.imported === pair.exported ? pair.imported : `${pair.imported}: ${pair.exported}`).join(', ');
+}
+
+function parseSpecifierPairs(text) {
+    return String(text || '')
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => {
+            const pieces = part.split(/\s+as\s+/);
+            const imported = pieces[0].trim();
+            const exported = (pieces[1] || pieces[0]).trim();
+            return { imported, exported };
+        });
+}
+
+function extractDependencies(source) {
+    const dependencies = [];
+    collect(/^\s*import\s+[\s\S]*?\s+from\s+['"]([^'"]+)['"];\s*$/gm);
+    collect(/^\s*export\s+\{[\s\S]*?\}\s+from\s+['"]([^'"]+)['"];\s*$/gm);
+    return dependencies;
+
+    function collect(regex) {
+        let match = regex.exec(source);
+        while (match) {
+            dependencies.push(match[1]);
+            match = regex.exec(source);
+        }
+    }
+}
+
+function resolveLocalModule(fromFile, request) {
+    if (!request.startsWith('.')) {
+        throw new Error(`Build does not support external dependency ${request} in ${path.relative(appRoot, fromFile)}`);
+    }
+    const resolved = path.resolve(path.dirname(fromFile), request);
+    if (!resolved.startsWith(srcRoot)) {
+        throw new Error(`Build dependency escapes src/: ${request} in ${path.relative(appRoot, fromFile)}`);
+    }
+    return { file: resolved, id: moduleId(resolved) };
+}
+
+function moduleId(file) {
+    return path.relative(appRoot, file).replace(/\\/g, '/');
+}

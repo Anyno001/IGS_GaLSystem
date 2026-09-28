@@ -1,0 +1,215 @@
+import { LEGACY_READER_MODES, resolveLegacyReaderMode } from '../../storage/legacy-igs.js';
+import { buildNarrativeSegments } from '../../scene/image-slots.js';
+import { SETTINGS_TAB_ALIASES, SETTINGS_TAB_DEFS } from './settings-tabs.js';
+import { TOOLBAR_ACTIONS, VN_THEME_PRESETS } from './reader-host-constants.js';
+import { esc, normalizeFiniteNumber } from './reader-value-utils.js';
+import { CLASSIC_DIALOG_THEME_DEFAULTS, isClassicDialogSkin, normalizeDialogSkin } from './classic-dialog-skin.js';
+import { getReferenceDialogTypography } from './dialog-theme-typography.js';
+import { normalizeStageShakeSettings } from './stage-shake-runtime.js';
+
+export function normalizeReaderMode(mode, bridge) {
+    if (mode === 'default') return 'default';
+    const resolved = resolveLegacyReaderMode(mode, '', bridge || {});
+    return LEGACY_READER_MODES.includes(resolved) ? resolved : 'pc';
+}
+
+export function normalizeSettingsTab(tab) {
+    const raw = String(tab || 'basic').trim();
+    const normalized = SETTINGS_TAB_ALIASES[raw] || raw;
+    return SETTINGS_TAB_DEFS.some(([id]) => id === normalized) ? normalized : 'basic';
+}
+
+export function normalizeSettingsValue(path, value) {
+    if (path === 'readerMode' || path === 'bridge.openMode' || path === 'bridge.imageApi.mode' || path === 'bridge.imageApi.externalAdapter' || path === 'readerSettings.imgMode') {
+        return String(value || '');
+    }
+    if (path.startsWith('readerSettings.')) {
+        if (value === null || value === 'null') return null;
+        if (path === 'readerSettings.typewriter.mode') return value === 'classic' ? 'classic' : 'soft';
+        if (/^readerSettings\.typewriter\.sound\.(volume|dialogueVolume|narrationVolume)$/.test(path)) {
+            const volume = Number(value);
+            return Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.5;
+        }
+        if (/^readerSettings\.chatShow\.(enabled|hideSprites|followTheme|typingIndicator|showAvatars|sound\.enabled)$/.test(path) || path === 'readerSettings.systemRole.showName') {
+            return value === true || value === 'true' || value === 1 || value === '1';
+        }
+        if (/^readerSettings\.chatShow\.(dim|sound\.volume)$/.test(path)) return Number(value);
+        if (/^readerSettings\.(titleCard|mangaFx|heartbeatFx|flashFx|favorToast|fxTags|fxSound)\.(enabled|onLocation|onTime|call|notify|flashback|letterbox|sfx|eye)$/.test(path)) {
+            return value === true || value === 'true' || value === 1 || value === '1';
+        }
+        if (path === 'readerSettings.fxSound.volume') {
+            const volume = Number(value);
+            return Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.5;
+        }
+        if (path === 'readerSettings.dialogFontWeight') return [300, 400, 500, 700].includes(Number(value)) ? Number(value) : null;
+        if (/fontSize|optionFontSize|dialogWidth|dialogHeight|classicDialogWidthPercent|skinDialogScale|toolbarScale|inputScale|imageCountOverride|imgBrightness|gradientVeil\.(heightPercent|opacity)/.test(path)) {
+            return Number(value);
+        }
+        if (/glassOpacity/.test(path)) {
+            return Number(value);
+        }
+        if (/^readerSettings\.typewriter\.(enabled|sound\.enabled)$/.test(path) || /^readerSettings\.stageShake\.enabled$/.test(path) || /^readerSettings\.weatherFx\.enabled$/.test(path) || /^readerSettings\.statusHud\.enabled$/.test(path) || /^readerSettings\.statusHud\.showEmotion$/.test(path) || /^readerSettings\.statusHud\.showLocation$/.test(path) || /^readerSettings\.statusHud\.showLocationDetails$/.test(path) || /^readerSettings\.statusHud\.showSpriteOnNsfw$/.test(path) || /^readerSettings\.statusHud\.dimSpriteOnNarration$/.test(path)) {
+            return value === true || value === 'true' || value === 1 || value === '1';
+        }
+    }
+    if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
+        return value === true || value === 'true' || value === 1 || value === '1';
+    }
+    if (/^bridge\.autoIllustration\.assets\.(spriteSize|backgroundSize|templates\.(background|backgroundNegative|sprite|spriteNegative|nsfwExtra))$/.test(path)) {
+        return String(value || '');
+    }
+    if (/^bridge\.autoIllustration\.(nsfwCount|interludeProbability|interludeMaxCount|assets\.maxPerFloor|llm\.contextFloors|llm\.timeoutMs|nai\.steps|nai\.scale|nai\.timeoutMs)$/.test(path)) {
+        return Number(value);
+    }
+    if (path === 'bridge.autoIllustration.llm.source' || path === 'bridge.autoIllustration.nai.transport') {
+        return String(value || '');
+    }
+    if (/^bridge\.imageApi\.(steps|requestTimeoutMs|pollIntervalMs|pollAttempts)$/.test(path)) {
+        return Number(value);
+    }
+    return value;
+}
+
+export function getPath(target, path) {
+    return String(path || '').split('.').reduce((value, key) => (value == null ? value : value[key]), target);
+}
+
+export function setPath(target, path, value) {
+    const parts = String(path || '').split('.');
+    let cursor = target;
+    for (let index = 0; index < parts.length - 1; index += 1) {
+        const key = parts[index];
+        if (!cursor[key] || typeof cursor[key] !== 'object' || Array.isArray(cursor[key])) {
+            cursor[key] = {};
+        }
+        cursor = cursor[key];
+    }
+    cursor[parts[parts.length - 1]] = value;
+}
+
+export function buildTextSegments(text) {
+    return buildNarrativeSegments(text);
+}
+
+export function normalizePinnedButtons(value) {
+    const allowed = new Set(TOOLBAR_ACTIONS.map(([id]) => id));
+    const output = [];
+    for (const id of Array.isArray(value) ? value : []) {
+        const normalized = String(id || '').trim();
+        if (!normalized || !allowed.has(normalized) || output.includes(normalized)) continue;
+        output.push(normalized);
+    }
+    return output;
+}
+
+export function normalizeHiddenButtons(value) {
+    const allowed = new Set(TOOLBAR_ACTIONS.map(([id]) => id));
+    const protected_ = new Set(['settings']);
+    const output = [];
+    for (const id of Array.isArray(value) ? value : []) {
+        const normalized = String(id || '').trim();
+        if (!normalized || !allowed.has(normalized) || protected_.has(normalized) || output.includes(normalized)) continue;
+        output.push(normalized);
+    }
+    return output;
+}
+
+export function normalizeBtnOrder(value) {
+    const canonical = TOOLBAR_ACTIONS.map(([id]) => id);
+    const allowed = new Set(canonical);
+    const output = [];
+    for (const id of Array.isArray(value) ? value : []) {
+        const normalized = String(id || '').trim();
+        if (!normalized || !allowed.has(normalized) || output.includes(normalized)) continue;
+        output.push(normalized);
+    }
+    for (const id of canonical) {
+        if (!output.includes(id)) output.push(id);
+    }
+    return output;
+}
+
+export function normalizeSpriteLayouts(value) {
+    const def = { posX: 50, posY: 100, scale: 100 };
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const out = {};
+    for (const key of Object.keys(value)) {
+        const src = (typeof value[key] === 'object' && value[key]) ? value[key] : {};
+        out[key] = {
+            posX: normalizeFiniteNumber(src.posX, def.posX),
+            posY: normalizeFiniteNumber(src.posY, def.posY),
+            scale: normalizeFiniteNumber(src.scale, def.scale),
+        };
+    }
+    return out;
+}
+
+export function resolveSpriteLayout(layouts, mode, character, mood) {
+    const def = { posX: 50, posY: 100, scale: 100 };
+    if (!layouts) return def;
+    if (character) {
+        if (mood) {
+            const moodKey = `${mode}::${character}::${mood}`;
+            if (layouts[moodKey]) return layouts[moodKey];
+        }
+        const charKey = `${mode}::${character}`;
+        if (layouts[charKey]) return layouts[charKey];
+    }
+    if (layouts[mode]) return layouts[mode];
+    return def;
+}
+
+export function resolveActiveTheme(snapshot) {
+    const readerSettings = snapshot.readerSettings || {};
+    const dialogSkin = normalizeDialogSkin(readerSettings.dialogSkin);
+    const classic = isClassicDialogSkin(readerSettings);
+    const referenceTypography = getReferenceDialogTypography(dialogSkin);
+    const vnTheme = classic ? (readerSettings.classicVnTheme || {}) : (readerSettings._vnTheme || readerSettings.vnTheme || {});
+    const presetName = classic ? 'custom' : (vnTheme.preset || 'genshin');
+    const preset = classic ? CLASSIC_DIALOG_THEME_DEFAULTS : (VN_THEME_PRESETS[presetName] || VN_THEME_PRESETS.genshin);
+    const activeTheme = !classic && presetName !== 'custom' ? { ...preset } : {
+        nameAlign: vnTheme.nameAlign || preset.nameAlign,
+        textAlign: vnTheme.textAlign || preset.textAlign || 'left',
+        narrationAlign: vnTheme.narrationAlign || preset.narrationAlign || 'left',
+        thoughtAlign: vnTheme.thoughtAlign || preset.thoughtAlign || 'left',
+        dividerSymbol: vnTheme.dividerSymbol != null ? vnTheme.dividerSymbol : preset.dividerSymbol,
+        nameFont: vnTheme.nameFont || preset.nameFont,
+        textFont: vnTheme.textFont || preset.textFont,
+        thoughtFont: vnTheme.thoughtFont || preset.thoughtFont,
+        narrationFont: vnTheme.narrationFont || preset.narrationFont,
+        nameColor: vnTheme.nameColor || preset.nameColor,
+        textColor: vnTheme.textColor || preset.textColor,
+        thoughtColor: vnTheme.thoughtColor || preset.thoughtColor,
+        narrationColor: vnTheme.narrationColor || preset.narrationColor,
+        dividerColor: vnTheme.dividerColor || preset.dividerColor,
+        dialogBg: vnTheme.dialogBg || preset.dialogBg,
+        bgOpacity: vnTheme.bgOpacity != null ? vnTheme.bgOpacity : null,
+    };
+    return referenceTypography ? applyReferenceTypographyDefaults(activeTheme, referenceTypography, preset) : activeTheme;
+}
+
+function applyReferenceTypographyDefaults(theme, referenceTypography, baseline) {
+    const result = { ...theme };
+    for (const [key, value] of Object.entries(referenceTypography)) {
+        if (result[key] == null || result[key] === baseline[key]) result[key] = value;
+    }
+    return result;
+}
+
+export function renderDialogueHtml(text, theme, sceneAssetsEnabled) {
+    const escaped = esc(text);
+    if (!sceneAssetsEnabled) return escaped;
+    const html = escaped.replace(/\*([^*]+)\*/g, (_, inner) => {
+        const styles = [];
+        if (theme.thoughtFont && theme.thoughtFont !== 'inherit') styles.push(`font-family:${cssFontValue(theme.thoughtFont)}`);
+        if (theme.thoughtColor) styles.push(`color:${theme.thoughtColor}`);
+        const styleAttr = styles.length ? ` style="${styles.join(';')}"` : '';
+        return `<span class="igs-thought"${styleAttr}>${inner}</span>`;
+    });
+    // 心理活动标记可能不成对（模型漏写右星号），残留的星号一律不渲染。
+    return html.replace(/\*/g, '');
+}
+
+function cssFontValue(font) {
+    return String(font || '').replace(/"/g, "'");
+}

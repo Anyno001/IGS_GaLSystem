@@ -1,0 +1,50 @@
+plan/
+
+/table/
+
+node_modules/
+npm-debug.log*
+pnpm-lock.yaml
+.DS_Store
+Thumbs.db
+
+# 本地运行缓存与临时数据
+.cache/
+.tmp/
+coverage/
+.playwright-mcp/
+
+# 真实用户数据和私有配置不得进入仓库
+pc-data/
+local-data/
+*.local.json
+*.secret.json
+*.key
+*.pem
+
+# 参考资料只作实现证据，不进入仓库
+/参考文件/
+
+# 过程日志与临时产物
+*.log
+.tmp-*/
+tmp/
+__pycache__/
+*.pyc
+
+# AI 工具的过程、计划与缓存
+.kilo/
+.limcode/
+.claude/
+.playwright/
+
+# 设计稿与素材原稿（运行时资源放在 app/src/**/assets 下，照常入库）
+/设计稿/
+/素材/
+
+# 文件系统挂载产生的临时隐藏文件
+**/.fuse_hidden*
+
+# build:loader 生成的本地调试 loader，不作为正式发布件
+/loader/igs-loader-debug.js
+/loader/igs-loader-debug.json

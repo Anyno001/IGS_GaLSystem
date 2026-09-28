@@ -1,0 +1,1832 @@
+import { DEFAULT_VIRTUAL_REGEX } from '../../scene/message-source.js';
+import { cloneData } from './reader-value-utils.js';
+import { DEFAULT_SCENE_PROMPT_RULE, TOOLBAR_ACTIONS } from './reader-host-constants.js';
+import { findDbgenApi } from '../../generated-images/image-backend.js';
+import { getNextSettingsTheme, normalizeSettingsTheme } from './settings-theme.js';
+import { DEFAULT_MOOD_GROUPS, normalizeMoodGroups } from '../../scene/mood-groups.js';
+import { loadScenePresets, saveScenePresets, saveActiveScenePresetName } from '../../scene/scene-preset-store.js';
+import { clearMoodReview, loadMoodReview, removeMoodReview } from '../../scene/mood-review-store.js';
+import { normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
+import { normalizeStatusAvatars } from '../../data/shujuku/status-hud-model.js';
+import { normalizeStageShakeSettings } from './stage-shake-runtime.js';
+import { CHAT_SHOW_PROMPT_RULE, isValidChatContactName, normalizeChatPromptRule, normalizeChatShowSettings } from './chat-show-runtime.js';
+import { normalizeSystemRoleSettings, stripRoleBrackets } from './system-role.js';
+import { playChatSfx } from './chat-sfx.js';
+import { normalizeWeatherFxSettings } from './weather-fx-runtime.js';
+import { FX_SETTINGS_NORMALIZERS, FX_WORD_LIST_PATHS } from './fx-settings.js';
+import { normalizeSpriteHeads } from './fx-anchor.js';
+import { formatImageJobLogText } from '../../generated-images/image-job-log.js';
+import { addGeneratedAssetToLibrary, normalizeGeneratedLibrary, removeGeneratedLibraryEntry, renameGeneratedLibraryEntry } from '../../scene/asset-match.js';
+import { NAI_OFFICIAL_MODELS } from '../../generated-images/request-builders/nai-v4-builder.js';
+
+// 草稿深拷贝后顶层 imageApi 与 bridge.imageApi 不再是同一对象，面板只改后者；生图读取优先顶层，这里对齐为面板当前值。
+function cloneImageDraft(draft) {
+    const settings = cloneData(draft);
+    if (settings && settings.bridge && settings.bridge.imageApi) settings.imageApi = settings.bridge.imageApi;
+    return settings;
+}
+
+const STATUS_AVATAR_MAX_BYTES = 512 * 1024;
+const STATUS_AVATAR_MIME = /^image\/(?:png|jpeg|jpg|webp|gif|bmp|svg\+xml)$/i;
+
+function decodeSeg(value) {
+    try { return decodeURIComponent(String(value == null ? '' : value)); }
+    catch (error) { return String(value == null ? '' : value); }
+}
+
+function operationFailed(result) {
+    return result === false || Boolean(result && typeof result === 'object' && result.ok === false);
+}
+
+function persistGeneratedLibrary(persistSettingsDraft) {
+    try {
+        return persistSettingsDraft();
+    } catch (error) {
+        return { ok: false, reason: 'generated-asset-persist-failed' };
+    }
+}
+
+function restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft) {
+    sceneAssets.generated = previousLibrary;
+    try {
+        const rollback = persistSettingsDraft();
+        return !operationFailed(rollback);
+    } catch (error) {
+        return false;
+    }
+}
+
+function generatedOperationFailure(globalObj, message, reason) {
+    if (globalObj && typeof globalObj.alert === 'function') globalObj.alert(message);
+    return { ok: false, reason };
+}
+
+export async function handleSettingsAction(action, ctx) {
+    const {
+        state,
+        options,
+        closeSettings,
+        persistSettingsDraft,
+        rerenderSettings,
+        buildRegexPreview,
+    } = ctx;
+
+    if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
+    const normalizedAction = String(action || '').trim();
+    const settingsState = state.activeSettings;
+
+    if (normalizedAction === 'toggle-settings-theme' || normalizedAction.startsWith('set-settings-theme:')) {
+        const bridge = settingsState.draft.bridge = settingsState.draft.bridge || {};
+        const nextTheme = normalizedAction === 'toggle-settings-theme'
+            ? getNextSettingsTheme(bridge.settingsTheme)
+            : normalizeSettingsTheme(normalizedAction.slice('set-settings-theme:'.length));
+        if (nextTheme === bridge.settingsTheme) return rerenderSettings();
+        bridge.settingsTheme = nextTheme;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'close') {
+        return closeSettings();
+    }
+
+    if (normalizedAction.startsWith('gen-lib-rename:')) {
+        const rest = normalizedAction.slice('gen-lib-rename:'.length);
+        const colon = rest.indexOf(':');
+        if (colon < 0) return rerenderSettings();
+        const type = decodeSeg(rest.slice(0, colon));
+        const oldName = decodeSeg(rest.slice(colon + 1));
+        if (type !== 'background' && type !== 'sprite') return rerenderSettings();
+        const globalObj = options.global || globalThis;
+        const newName = (globalObj.prompt && globalObj.prompt(`生成素材「${oldName}」的新名称：`, oldName) || '').trim();
+        if (!newName || newName === oldName) return rerenderSettings();
+        const bridge = settingsState.draft.bridge = settingsState.draft.bridge || {};
+        const sceneAssets = bridge.sceneAssets = bridge.sceneAssets || {};
+        const previousLibrary = normalizeGeneratedLibrary(sceneAssets.generated);
+        const result = renameGeneratedLibraryEntry(sceneAssets.generated, type, oldName, newName);
+        if (!result.ok) {
+            if (globalObj.alert) globalObj.alert(result.reason === 'name-exists' ? `生成素材「${newName}」已存在。` : '生成素材改名失败。');
+            return rerenderSettings();
+        }
+        sceneAssets.generated = result.library;
+        const persisted = persistGeneratedLibrary(persistSettingsDraft);
+        if (operationFailed(persisted)) {
+            if (!restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft)) {
+                return generatedOperationFailure(globalObj, '生成素材改名失败，且无法恢复原设置。', 'generated-asset-rename-rollback-failed');
+            }
+            return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('gen-lib-remove:')) {
+        const rest = normalizedAction.slice('gen-lib-remove:'.length);
+        const colon = rest.indexOf(':');
+        if (colon < 0) return rerenderSettings();
+        const type = decodeSeg(rest.slice(0, colon));
+        const name = decodeSeg(rest.slice(colon + 1));
+        if (type !== 'background' && type !== 'sprite') return rerenderSettings();
+        const globalObj = options.global || globalThis;
+        const bridge = settingsState.draft.bridge = settingsState.draft.bridge || {};
+        const sceneAssets = bridge.sceneAssets = bridge.sceneAssets || {};
+        const library = normalizeGeneratedLibrary(sceneAssets.generated);
+        const previousLibrary = library;
+        const bucket = type === 'background' ? library.scenes : library.characters;
+        if (!Object.prototype.hasOwnProperty.call(bucket, name)) return rerenderSettings();
+        const confirmed = typeof globalObj.confirm === 'function'
+            ? globalObj.confirm(`删除生成素材「${name}」及其图片？`) : true;
+        if (!confirmed) return rerenderSettings();
+        const result = removeGeneratedLibraryEntry(library, type, name);
+        sceneAssets.generated = result.library;
+        const persisted = persistGeneratedLibrary(persistSettingsDraft);
+        if (operationFailed(persisted)) {
+            if (!restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft)) {
+                return generatedOperationFailure(globalObj, '删除生成素材失败，且无法恢复原设置。', 'generated-asset-remove-rollback-failed');
+            }
+            return persisted;
+        }
+        const service = options.generatedAssets;
+        if (service && typeof service.deleteImages === 'function') {
+            try {
+                const deleted = await service.deleteImages(result.imageIds);
+                if (operationFailed(deleted)) {
+                    if (!restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft)) {
+                        return generatedOperationFailure(globalObj, '删除生成素材失败，且无法恢复原设置。', 'generated-asset-remove-rollback-failed');
+                    }
+                    return generatedOperationFailure(globalObj, '生成素材图片删除失败，已恢复素材库记录。', 'generated-asset-remove-images-failed');
+                }
+            } catch (error) {
+                if (!restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft)) {
+                    return generatedOperationFailure(globalObj, '删除生成素材失败，且无法恢复原设置。', 'generated-asset-remove-rollback-failed');
+                }
+                return generatedOperationFailure(globalObj, '生成素材图片删除失败，已恢复素材库记录。', 'generated-asset-remove-images-failed');
+            }
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('gen-temp-accept:')) {
+        const key = decodeSeg(normalizedAction.slice('gen-temp-accept:'.length));
+        const service = options.generatedAssets;
+        if (!service || typeof service.getRecord !== 'function' || typeof service.setStatus !== 'function') {
+            return { ok: false, reason: 'generated-assets-unavailable' };
+        }
+        const record = service.getRecord(key);
+        if (!record || !record.imageId) return rerenderSettings();
+        const globalObj = options.global || globalThis;
+        const suggestedName = String(record.name || '').trim();
+        const requestedName = typeof globalObj.prompt === 'function'
+            ? globalObj.prompt(`生成素材「${suggestedName}」的入库名称：`, suggestedName)
+            : suggestedName;
+        const name = String(requestedName == null ? '' : requestedName).trim();
+        if (!name) return rerenderSettings();
+        const bridge = settingsState.draft.bridge = settingsState.draft.bridge || {};
+        const sceneAssets = bridge.sceneAssets = bridge.sceneAssets || {};
+        const previousLibrary = normalizeGeneratedLibrary(sceneAssets.generated);
+        const added = addGeneratedAssetToLibrary(previousLibrary, record, name);
+        if (!added.ok) return rerenderSettings();
+        sceneAssets.generated = added.library;
+        const persisted = persistGeneratedLibrary(persistSettingsDraft);
+        if (operationFailed(persisted)) {
+            if (!restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft)) {
+                return generatedOperationFailure(globalObj, '生成素材入库失败，且无法恢复原设置。', 'generated-asset-accept-rollback-failed');
+            }
+            return persisted;
+        }
+        let status;
+        try {
+            status = await service.setStatus(key, 'library');
+        } catch (error) {
+            status = { ok: false, reason: 'generated-asset-status-failed' };
+        }
+        if (operationFailed(status)) {
+            if (!restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft)) {
+                return generatedOperationFailure(options.global || globalThis, '生成素材入库失败，且无法恢复原设置。', 'generated-asset-accept-rollback-failed');
+            }
+            return status;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('gen-temp-discard:')) {
+        const key = decodeSeg(normalizedAction.slice('gen-temp-discard:'.length));
+        const globalObj = options.global || globalThis;
+        const confirmed = typeof globalObj.confirm === 'function'
+            ? globalObj.confirm('丢弃这份临时生成素材及其图片？') : true;
+        if (!confirmed) return rerenderSettings();
+        const service = options.generatedAssets;
+        if (!service || typeof service.setStatus !== 'function') {
+            return { ok: false, reason: 'generated-assets-unavailable' };
+        }
+        let status;
+        try {
+            status = await service.setStatus(key, 'discarded');
+        } catch (error) {
+            status = { ok: false, reason: 'generated-asset-status-failed' };
+        }
+        if (operationFailed(status)) return status;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('status-hud-toggle-table:')) {
+        const rest = normalizedAction.slice('status-hud-toggle-table:'.length);
+        const colon = rest.indexOf(':');
+        if (colon < 0) return rerenderSettings();
+        const uid = decodeSeg(rest.slice(0, colon));
+        const name = decodeSeg(rest.slice(colon + 1));
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = normalizeStatusHudSettings(readerDraft.statusHud);
+        const key = uid || `name:${name}`;
+        const exists = current.tables.some((item) => (uid && item.uid === uid) || (!uid && item.name === name));
+        current.tables = exists
+            ? current.tables.filter((item) => !((uid && item.uid === uid) || (!uid && item.name === name)))
+            : current.tables.concat([{ uid, name }]);
+        readerDraft.statusHud = current;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('status-avatar-set-url:')) {
+        const rest = normalizedAction.slice('status-avatar-set-url:'.length);
+        const colon = rest.indexOf(':');
+        if (colon > 0) {
+            const charName = decodeSeg(rest.slice(0, colon));
+            const url = decodeSeg(rest.slice(colon + 1)).trim();
+            const sceneAssets = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+            const avatars = normalizeStatusAvatars(sceneAssets.statusAvatars);
+            if (url) {
+                const normalized = normalizeStatusAvatars({ [charName]: url });
+                if (!normalized[charName]) return rerenderSettings();
+                avatars[charName] = normalized[charName];
+            } else {
+                delete avatars[charName];
+            }
+            sceneAssets.statusAvatars = avatars;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('chat-show-')) {
+        const globalObj = options.global || globalThis;
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = normalizeChatShowSettings(readerDraft.chatShow);
+        const ask = (message) => String((globalObj.prompt ? globalObj.prompt(message, '') : '') || '').trim();
+        const [verb, ...args] = normalizedAction.slice('chat-show-'.length).split(':');
+        const [name, alias] = args.map(decodeSeg);
+        let changed = false;
+        if (verb === 'preview-sound') {
+            const sound = { volume: current.sound.volume, preset: current.sound.preset, audioScheduler: options.chatSfxScheduler };
+            playChatSfx('receive', sound);
+            playChatSfx('send', { ...sound, delay: 0.45 });
+            return { ok: true, previewed: current.sound.preset };
+        }
+        if (verb === 'save-prompt' || verb === 'reset-prompt') {
+            const draft = typeof settingsState.asyncState.chatPromptDraft === 'string' ? settingsState.asyncState.chatPromptDraft : '';
+            current.promptRule = verb === 'reset-prompt' ? '' : normalizeChatPromptRule(draft);
+            readerDraft.chatShow = current;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) {
+                settingsState.asyncState.chatPromptStatus = '保存失败，请重试。';
+                return rerenderSettings();
+            }
+            settingsState.asyncState.chatPromptDraft = current.promptRule || CHAT_SHOW_PROMPT_RULE;
+            settingsState.asyncState.chatPromptStatus = verb === 'reset-prompt'
+                ? '已恢复默认提示词并保存。'
+                : current.promptRule ? '自定义提示词已保存并更新注入规则。' : '内容为空或与默认一致，已使用默认提示词。';
+            return rerenderSettings();
+        }
+        if (verb === 'add-contact') {
+            const next = ask('新增联系人（角色主名，不能含 . | [ ]）：');
+            if (isValidChatContactName(next) && !current.contacts[next]) {
+                current.contacts[next] = { aliases: [], color: '', side: 'auto' };
+                changed = true;
+            }
+        } else if (verb === 'remove-contact' && current.contacts[name]) {
+            delete current.contacts[name];
+            changed = true;
+        } else if (verb === 'add-alias' && current.contacts[name]) {
+            const next = ask(`为「${name}」新增别名（网名、昵称等）：`);
+            if (next && next !== name && !current.contacts[name].aliases.includes(next)) {
+                current.contacts[name].aliases.push(next);
+                changed = true;
+            }
+        } else if (verb === 'remove-alias' && current.contacts[name]) {
+            current.contacts[name].aliases = current.contacts[name].aliases.filter((item) => item !== alias);
+            changed = true;
+        }
+        if (changed) {
+            readerDraft.chatShow = current;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'system-role-follow-color') {
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        readerDraft.systemRole = { ...normalizeSystemRoleSettings(readerDraft.systemRole), color: '' };
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'system-role-add-word' || normalizedAction.startsWith('system-role-remove-word:')) {
+        const globalObj = options.global || globalThis;
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = normalizeSystemRoleSettings(readerDraft.systemRole);
+        if (normalizedAction === 'system-role-add-word') {
+            const word = stripRoleBrackets(globalObj.prompt ? globalObj.prompt('新增系统类角色名（如 系统、公告、旁白君）：', '') : '');
+            if (!word || current.words.some((w) => w.toLowerCase() === word.toLowerCase())) return rerenderSettings();
+            current.words.push(word);
+        } else {
+            const word = decodeSeg(normalizedAction.slice('system-role-remove-word:'.length));
+            current.words = current.words.filter((w) => w !== word);
+        }
+        readerDraft.systemRole = current;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'stage-shake-add-emotion') {
+        const globalObj = options.global || globalThis;
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = normalizeStageShakeSettings(readerDraft.stageShake);
+        const raw = globalObj.prompt ? globalObj.prompt('新增震动触发情绪（中文）：', '') : '';
+        const emotion = String(raw == null ? '' : raw).trim();
+        if (emotion && !current.emotions.includes(emotion) && !/[A-Za-z]/u.test(emotion) && /[\u3400-\u9fff]/u.test(emotion)) {
+            current.emotions.push(emotion);
+            readerDraft.stageShake = current;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('stage-shake-remove-emotion:')) {
+        const emotion = decodeSeg(normalizedAction.slice('stage-shake-remove-emotion:'.length));
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = normalizeStageShakeSettings(readerDraft.stageShake);
+        current.emotions = current.emotions.filter((item) => item !== emotion);
+        readerDraft.stageShake = current;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    const fxWordAction = normalizedAction.match(/^fx-word-(add|remove):([^:]+)(?::(.*))?$/);
+    if (fxWordAction) {
+        const path = decodeSeg(fxWordAction[2]);
+        if (!FX_WORD_LIST_PATHS.includes(path)) return rerenderSettings();
+        const [top, ...rest] = path.split('.');
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = FX_SETTINGS_NORMALIZERS[top](readerDraft[top]);
+        const parent = rest.slice(0, -1).reduce((obj, key) => obj[key], current);
+        const leaf = rest[rest.length - 1];
+        let changed = false;
+        if (fxWordAction[1] === 'add') {
+            const globalObj = options.global || globalThis;
+            const raw = globalObj.prompt ? globalObj.prompt('新增触发情绪（中文）：', '') : '';
+            const emotion = String(raw == null ? '' : raw).trim();
+            if (emotion && !parent[leaf].includes(emotion) && !/[A-Za-z]/u.test(emotion) && /[\u3400-\u9fff]/u.test(emotion)) {
+                parent[leaf].push(emotion);
+                changed = true;
+            }
+        } else {
+            const emotion = decodeSeg(fxWordAction[3] || '');
+            parent[leaf] = parent[leaf].filter((item) => item !== emotion);
+            changed = true;
+        }
+        if (changed) {
+            readerDraft[top] = current;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    const weatherWordAdd = normalizedAction.match(/^weather-fx-add-(indoor|outdoor)$/);
+    if (weatherWordAdd) {
+        const scene = weatherWordAdd[1];
+        const globalObj = options.global || globalThis;
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = normalizeWeatherFxSettings(readerDraft.weatherFx);
+        const listKey = `${scene}Words`;
+        const raw = globalObj.prompt ? globalObj.prompt(scene === 'indoor' ? '新增室内地点词：' : '新增室外地点词：', '') : '';
+        const word = String(raw == null ? '' : raw).trim();
+        if (word && !current[listKey].includes(word)) {
+            current[listKey].push(word);
+            readerDraft.weatherFx = current;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    const weatherWordRemove = normalizedAction.match(/^weather-fx-remove-(indoor|outdoor):/);
+    if (weatherWordRemove) {
+        const listKey = `${weatherWordRemove[1]}Words`;
+        const word = decodeSeg(normalizedAction.slice(weatherWordRemove[0].length));
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const current = normalizeWeatherFxSettings(readerDraft.weatherFx);
+        current[listKey] = current[listKey].filter((item) => item !== word);
+        readerDraft.weatherFx = current;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('status-avatar-pick:')) {
+        const charName = decodeSeg(normalizedAction.slice('status-avatar-pick:'.length));
+        const globalObj = options.global || globalThis;
+        const doc = globalObj.document;
+        if (!doc || !charName) return rerenderSettings();
+        const picked = await pickStatusAvatarFile(doc);
+        if (!picked) return rerenderSettings();
+        if (picked.ok === false) {
+            if (globalObj.alert) globalObj.alert(picked.reason === 'too-large' ? '图片过大，请选择更小的图片。' : '仅支持图片文件。');
+            return rerenderSettings();
+        }
+        const sceneAssets = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        const avatars = normalizeStatusAvatars(sceneAssets.statusAvatars);
+        avatars[charName] = picked.dataUrl;
+        sceneAssets.statusAvatars = avatars;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('status-avatar-clear:')) {
+        const charName = decodeSeg(normalizedAction.slice('status-avatar-clear:'.length));
+        const sceneAssets = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        const avatars = normalizeStatusAvatars(sceneAssets.statusAvatars);
+        delete avatars[charName];
+        sceneAssets.statusAvatars = avatars;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'reset-virtual-regex') {
+        settingsState.draft.bridge.virtualRegex = cloneData(DEFAULT_VIRTUAL_REGEX);
+        settingsState.asyncState.virtualRegexPreview = '已恢复默认正文替换，已自动保存。';
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'test-virtual-regex') {
+        settingsState.asyncState.virtualRegexPreview = buildRegexPreview(settingsState.draft.bridge);
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'fetch-nai-models') {
+        settingsState.asyncState.naiModels = NAI_OFFICIAL_MODELS.slice();
+        settingsState.asyncState.naiModelsMessage = `NAI 官方没有模型列表接口，已载入内置 ${NAI_OFFICIAL_MODELS.length} 个模型（V5 / V4.5 / V4）。`;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'fetch-llm-models') {
+        if (typeof options.fetchLlmModels !== 'function') {
+            settingsState.asyncState.llmModelsMessage = '当前未接入副 LLM 模型拉取能力。';
+            return rerenderSettings();
+        }
+        try {
+            const result = await options.fetchLlmModels({ settings: cloneData(settingsState.draft) });
+            if (!result || result.ok === false || !Array.isArray(result.models) || !result.models.length) {
+                settingsState.asyncState.llmModelsMessage = String(result && (result.reason || result.error) || '副 LLM 模型拉取失败。');
+                return rerenderSettings();
+            }
+            settingsState.asyncState.llmModels = result.models;
+            settingsState.asyncState.llmModelsMessage = String(result.message || `已拉取 ${result.models.length} 个副 LLM 模型。`);
+        } catch (error) {
+            settingsState.asyncState.llmModelsMessage = String(error && error.message || '副 LLM 模型拉取失败。');
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'fetch-image-models') {
+        if (typeof options.fetchImageModels !== 'function') {
+            settingsState.asyncState.imageModelsMessage = '当前未接入内置图像模型拉取能力。';
+            return rerenderSettings();
+        }
+        const result = await options.fetchImageModels({
+            settings: cloneImageDraft(settingsState.draft),
+            message: state.activeReader && state.activeReader.payload && state.activeReader.payload.message || null,
+            mode: settingsState.readerMode,
+        });
+        if (!result || result.ok === false) {
+            settingsState.asyncState.imageModelsMessage = String(result && result.reason || '图像模型拉取失败');
+            return rerenderSettings();
+        }
+        settingsState.draft.bridge.imageApi.availableModels = Array.isArray(result.models)
+            ? result.models.filter(Boolean)
+            : [];
+        settingsState.draft.bridge.imageApi.modelsFetchedAt = String(result.modelsFetchedAt || new Date().toISOString());
+        settingsState.asyncState.imageModelsMessage = String(result.message || `已拉取 ${settingsState.draft.bridge.imageApi.availableModels.length} 个模型。`);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'image-log-refresh' || normalizedAction === 'image-log-clear' || normalizedAction === 'image-log-copy') {
+        const log = options.imageJobLog;
+        if (!log || typeof log.list !== 'function') {
+            settingsState.asyncState.imageLogStatus = '当前未接入生图日志。';
+            return rerenderSettings();
+        }
+        if (normalizedAction === 'image-log-clear') {
+            const result = log.clear();
+            settingsState.asyncState.imageLogStatus = `已清空 ${result.removed} 条日志。`;
+        } else if (normalizedAction === 'image-log-copy') {
+            const text = formatImageJobLogText(log.list());
+            const root = options.global || globalThis;
+            const clipboard = root && root.navigator && root.navigator.clipboard;
+            if (!text) {
+                settingsState.asyncState.imageLogStatus = '暂无日志可复制。';
+            } else if (clipboard && typeof clipboard.writeText === 'function') {
+                try {
+                    await clipboard.writeText(text);
+                    settingsState.asyncState.imageLogStatus = '已复制全部日志到剪贴板。';
+                } catch (error) {
+                    settingsState.asyncState.imageLogStatus = '复制失败：浏览器拒绝访问剪贴板，可手动选中日志复制。';
+                }
+            } else {
+                settingsState.asyncState.imageLogStatus = '当前环境不支持剪贴板，可手动选中日志复制。';
+            }
+        } else {
+            const pruned = typeof log.prune === 'function' ? log.prune().removed : 0;
+            settingsState.asyncState.imageLogStatus = pruned ? `已按自动清理规则移除 ${pruned} 条旧日志。` : '';
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'open-dbgen-settings') {
+        const api = findDbgenApi(options.global || globalThis);
+        if (!api || typeof api.openManagement !== 'function') {
+            settingsState.asyncState.imageResult = '未检测到数据库生图插件，请确认已安装并启用。';
+            return rerenderSettings();
+        }
+        await api.openManagement();
+        return { ok: true };
+    }
+
+    if (normalizedAction === 'test-image') {
+        if (typeof options.testImageApi !== 'function') {
+            settingsState.asyncState.imageResult = '当前未接入图像测试能力。';
+            return rerenderSettings();
+        }
+        const result = await options.testImageApi({
+            settings: cloneImageDraft(settingsState.draft),
+            message: state.activeReader && state.activeReader.payload && state.activeReader.payload.message || null,
+            mode: settingsState.readerMode,
+        });
+        settingsState.asyncState.imageResult = String(
+            result && (result.message || result.reason)
+            || (settingsState.draft.bridge.imageApi.mode === 'nai'
+                ? '图像 API 生成测试失败。'
+                : '插图扩展检测失败。'),
+        );
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('toggle-toolbar-pin:')) {
+        const id = normalizedAction.slice('toggle-toolbar-pin:'.length);
+        const allowed = TOOLBAR_ACTIONS.some(([actionId]) => actionId === id);
+        if (!allowed) return { ok: false, reason: 'unknown-toolbar-pin', id };
+        const currentPins = Array.isArray(settingsState.draft.readerSettings.pinnedBtns)
+            ? settingsState.draft.readerSettings.pinnedBtns.slice()
+            : [];
+        const currentHidden = Array.isArray(settingsState.draft.readerSettings.hiddenBtns)
+            ? settingsState.draft.readerSettings.hiddenBtns.slice()
+            : [];
+        const index = currentPins.indexOf(id);
+        if (index >= 0) {
+            currentPins.splice(index, 1);
+        } else {
+            if (!currentHidden.includes(id)) currentPins.push(id);
+        }
+        settingsState.draft.readerSettings.pinnedBtns = currentPins;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('toolbar-toggle-visible:')) {
+        const id = normalizedAction.slice('toolbar-toggle-visible:'.length);
+        const allowed = TOOLBAR_ACTIONS.some(([actionId]) => actionId === id);
+        if (!allowed) return { ok: false, reason: 'unknown-toolbar-btn', id };
+        const currentHidden = Array.isArray(settingsState.draft.readerSettings.hiddenBtns)
+            ? settingsState.draft.readerSettings.hiddenBtns.slice()
+            : [];
+        const idx = currentHidden.indexOf(id);
+        if (idx >= 0) {
+            currentHidden.splice(idx, 1);
+        } else {
+            currentHidden.push(id);
+            const currentPins = Array.isArray(settingsState.draft.readerSettings.pinnedBtns)
+                ? settingsState.draft.readerSettings.pinnedBtns.slice()
+                : [];
+            const pinIdx = currentPins.indexOf(id);
+            if (pinIdx >= 0) {
+                currentPins.splice(pinIdx, 1);
+                settingsState.draft.readerSettings.pinnedBtns = currentPins;
+            }
+        }
+        settingsState.draft.readerSettings.hiddenBtns = currentHidden;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('toolbar-move-up:')) {
+        const id = normalizedAction.slice('toolbar-move-up:'.length);
+        const order = Array.isArray(settingsState.draft.readerSettings.btnOrder)
+            ? settingsState.draft.readerSettings.btnOrder.slice()
+            : TOOLBAR_ACTIONS.map(([actionId]) => actionId);
+        const currentIndex = order.indexOf(id);
+        if (currentIndex <= 0) return { ok: true, reason: 'already-first' };
+        [order[currentIndex - 1], order[currentIndex]] = [order[currentIndex], order[currentIndex - 1]];
+        settingsState.draft.readerSettings.btnOrder = order;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'reset-prompt-rule') {
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.promptRule = DEFAULT_SCENE_PROMPT_RULE;
+        settingsState.asyncState.promptRuleDraft = DEFAULT_SCENE_PROMPT_RULE;
+        settingsState.asyncState.promptRuleStatus = '已恢复默认提示词并保存。';
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'save-prompt-rule') {
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        const nextRule = typeof settingsState.asyncState.promptRuleDraft === 'string'
+            ? settingsState.asyncState.promptRuleDraft
+            : String(settingsState.draft.bridge.sceneAssets.promptRule || '');
+        settingsState.draft.bridge.sceneAssets.promptRule = nextRule;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) {
+            settingsState.asyncState.promptRuleStatus = '保存失败，请重试。';
+            return rerenderSettings();
+        }
+        settingsState.asyncState.promptRuleDraft = nextRule;
+        settingsState.asyncState.promptRuleStatus = '提示词已保存并更新注入规则。';
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'scene-add-bg') {
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.scenes = settingsState.draft.bridge.sceneAssets.scenes || {};
+        const existingKeys = Object.keys(settingsState.draft.bridge.sceneAssets.scenes);
+        const newName = '场景' + (existingKeys.length + 1);
+        settingsState.draft.bridge.sceneAssets.scenes[newName] = { url: '', times: {} };
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-remove-bg:')) {
+        const name = decodeSeg(normalizedAction.slice('scene-remove-bg:'.length));
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.scenes = settingsState.draft.bridge.sceneAssets.scenes || {};
+        delete settingsState.draft.bridge.sceneAssets.scenes[name];
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-rename-bg:')) {
+        const oldName = decodeSeg(normalizedAction.slice('scene-rename-bg:'.length));
+        const globalObj = options.global || globalThis;
+        const newName = (globalObj.prompt && globalObj.prompt(`重命名场景「${oldName}」为：`, oldName) || '').trim();
+        if (newName && newName !== oldName) {
+            settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+            const scenes = settingsState.draft.bridge.sceneAssets.scenes || {};
+            if (Object.prototype.hasOwnProperty.call(scenes, newName)) {
+                if (globalObj.alert) globalObj.alert(`场景「${newName}」已存在（同名），已阻止`);
+                return rerenderSettings();
+            }
+            settingsState.draft.bridge.sceneAssets.scenes = reorderKey(scenes, oldName, newName);
+            const sl = settingsState.asyncState.expandedSceneSlots;
+            renameSetPrefix(sl, `bg\x00${oldName}`, `bg\x00${newName}`);
+            renameSetPrefix(sl, `time\x00${oldName}\x00`, `time\x00${newName}\x00`);
+            renameSetPrefix(sl, `weather\x00${oldName}\x00`, `weather\x00${newName}\x00`);
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-set-bg-url:')) {
+        const rest = normalizedAction.slice('scene-set-bg-url:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const name = decodeSeg(rest.slice(0, colonIdx));
+            const url = rest.slice(colonIdx + 1);
+            settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+            settingsState.draft.bridge.sceneAssets.scenes = settingsState.draft.bridge.sceneAssets.scenes || {};
+            const scene = settingsState.draft.bridge.sceneAssets.scenes[name];
+            if (scene && typeof scene === 'object') {
+                scene.url = url;
+            } else {
+                settingsState.draft.bridge.sceneAssets.scenes[name] = { url, times: {} };
+            }
+        }
+        return { ok: true };
+    }
+
+    if (normalizedAction.startsWith('scene-add-time:')) {
+        const sceneName = decodeSeg(normalizedAction.slice('scene-add-time:'.length));
+        const globalObj = options.global || globalThis;
+        const scenes = (settingsState.draft.bridge.sceneAssets || {}).scenes || {};
+        const scene = scenes[sceneName];
+        if (scene && typeof scene === 'object') {
+            const newTime = (globalObj.prompt && globalObj.prompt('时间名称（建议与时间组名一致）：', '') || '').trim();
+            if (!newTime) return rerenderSettings();
+            scene.times = scene.times || {};
+            if (Object.prototype.hasOwnProperty.call(scene.times, newTime)) {
+                if (globalObj.alert) globalObj.alert(`「${sceneName}」已有时间「${newTime}」（同名）`);
+                return rerenderSettings();
+            }
+            scene.times[newTime] = { url: '', weathers: {} };
+            const timeGroups = ensureTimeGroups(settingsState);
+            if (!timeGroups.some((g) => g.label === newTime)) timeGroups.unshift({ label: newTime, words: [newTime] });
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-remove-time:')) {
+        const rest = normalizedAction.slice('scene-remove-time:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const sceneName = decodeSeg(rest.slice(0, colonIdx));
+            const timeName = decodeSeg(rest.slice(colonIdx + 1));
+            const scenes = settingsState.draft.bridge.sceneAssets && settingsState.draft.bridge.sceneAssets.scenes || {};
+            const scene = scenes[sceneName];
+            if (scene && scene.times) delete scene.times[timeName];
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-rename-time:')) {
+        const rest = normalizedAction.slice('scene-rename-time:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const sceneName = decodeSeg(rest.slice(0, colonIdx));
+            const oldTime = decodeSeg(rest.slice(colonIdx + 1));
+            const globalObj = options.global || globalThis;
+            const newTime = (globalObj.prompt && globalObj.prompt(`重命名时间「${oldTime}」为：`, oldTime) || '').trim();
+            if (newTime && newTime !== oldTime) {
+                const scenes = settingsState.draft.bridge.sceneAssets && settingsState.draft.bridge.sceneAssets.scenes || {};
+                const scene = scenes[sceneName];
+                if (scene && scene.times) {
+                    if (Object.prototype.hasOwnProperty.call(scene.times, newTime)) {
+                        if (globalObj.alert) globalObj.alert(`时间「${newTime}」已存在（同名），已阻止`);
+                        return rerenderSettings();
+                    }
+                    scene.times = reorderKey(scene.times, oldTime, newTime);
+                    // global sync: rename same time slot in all other scenes
+                    for (const [otherSn, otherSv] of Object.entries(scenes)) {
+                        if (otherSn === sceneName || !otherSv || typeof otherSv !== 'object') continue;
+                        if (Object.prototype.hasOwnProperty.call(otherSv.times || {}, oldTime)
+                            && !Object.prototype.hasOwnProperty.call(otherSv.times, newTime)) {
+                            otherSv.times = reorderKey(otherSv.times, oldTime, newTime);
+                        }
+                    }
+                    // sync timeGroups label
+                    const timeGroups = ensureTimeGroups(settingsState);
+                    const tg = timeGroups.find((g) => g.label === oldTime);
+                    if (tg) {
+                        tg.label = newTime;
+                        const wi = Array.isArray(tg.words) ? tg.words.indexOf(oldTime) : -1;
+                        if (wi >= 0) tg.words[wi] = newTime;
+                    }
+                    // update Set keys for all scenes
+                    const sl = settingsState.asyncState.expandedSceneSlots;
+                    for (const sn of Object.keys(scenes)) {
+                        renameSetPrefix(sl, `time\x00${sn}\x00${oldTime}`, `time\x00${sn}\x00${newTime}`);
+                        renameSetPrefix(sl, `weather\x00${sn}\x00${oldTime}\x00`, `weather\x00${sn}\x00${newTime}\x00`);
+                    }
+                    const persisted = persistSettingsDraft();
+                    if (persisted.ok === false) return persisted;
+                }
+            }
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-set-time-url:')) {
+        const rest = normalizedAction.slice('scene-set-time-url:'.length);
+        const first = rest.indexOf(':');
+        if (first > 0) {
+            const sceneName = decodeSeg(rest.slice(0, first));
+            const after = rest.slice(first + 1);
+            const second = after.indexOf(':');
+            if (second > 0) {
+                const timeName = decodeSeg(after.slice(0, second));
+                const url = after.slice(second + 1);
+                const scenes = settingsState.draft.bridge.sceneAssets && settingsState.draft.bridge.sceneAssets.scenes || {};
+                const scene = scenes[sceneName];
+                if (scene && scene.times && scene.times[timeName] != null) {
+                    const t = scene.times[timeName];
+                    if (typeof t === 'object') t.url = url;
+                    else scene.times[timeName] = { url, weathers: {} };
+                    const persisted = persistSettingsDraft();
+                    if (persisted.ok === false) return persisted;
+                }
+            }
+        }
+        return { ok: true };
+    }
+
+    if (normalizedAction.startsWith('scene-add-weather:')) {
+        const rest = normalizedAction.slice('scene-add-weather:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const sceneName = decodeSeg(rest.slice(0, colonIdx));
+            const timeName = decodeSeg(rest.slice(colonIdx + 1));
+            const globalObj = options.global || globalThis;
+            const scenes = (settingsState.draft.bridge.sceneAssets || {}).scenes || {};
+            const scene = scenes[sceneName];
+            if (scene && scene.times && typeof scene.times[timeName] === 'object') {
+                const timeEntry = scene.times[timeName];
+                const newWeather = (globalObj.prompt && globalObj.prompt('天气名称（建议与天气组名一致）：', '') || '').trim();
+                if (!newWeather) return rerenderSettings();
+                timeEntry.weathers = timeEntry.weathers || {};
+                if (Object.prototype.hasOwnProperty.call(timeEntry.weathers, newWeather)) {
+                    if (globalObj.alert) globalObj.alert(`「${timeName}」已有天气「${newWeather}」（同名）`);
+                    return rerenderSettings();
+                }
+                timeEntry.weathers[newWeather] = { url: '' };
+                const weatherGroups = ensureWeatherGroups(settingsState);
+                if (!weatherGroups.some((g) => g.label === newWeather)) weatherGroups.unshift({ label: newWeather, words: [newWeather] });
+                const persisted = persistSettingsDraft();
+                if (persisted.ok === false) return persisted;
+            }
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-remove-weather:')) {
+        const rest = normalizedAction.slice('scene-remove-weather:'.length);
+        const first = rest.indexOf(':');
+        if (first > 0) {
+            const sceneName = decodeSeg(rest.slice(0, first));
+            const after = rest.slice(first + 1);
+            const second = after.indexOf(':');
+            if (second > 0) {
+                const timeName = decodeSeg(after.slice(0, second));
+                const weatherName = decodeSeg(after.slice(second + 1));
+                const scenes = settingsState.draft.bridge.sceneAssets && settingsState.draft.bridge.sceneAssets.scenes || {};
+                const scene = scenes[sceneName];
+                if (scene && scene.times && scene.times[timeName]) {
+                    const t = scene.times[timeName];
+                    if (t && t.weathers) delete t.weathers[weatherName];
+                }
+                const persisted = persistSettingsDraft();
+                if (persisted.ok === false) return persisted;
+            }
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-rename-weather:')) {
+        const rest = normalizedAction.slice('scene-rename-weather:'.length);
+        const first = rest.indexOf(':');
+        if (first > 0) {
+            const sceneName = decodeSeg(rest.slice(0, first));
+            const after = rest.slice(first + 1);
+            const second = after.indexOf(':');
+            if (second > 0) {
+                const timeName = decodeSeg(after.slice(0, second));
+                const oldWeather = decodeSeg(after.slice(second + 1));
+                const globalObj = options.global || globalThis;
+                const newWeather = (globalObj.prompt && globalObj.prompt(`重命名天气「${oldWeather}」为：`, oldWeather) || '').trim();
+                if (newWeather && newWeather !== oldWeather) {
+                    const scenes = settingsState.draft.bridge.sceneAssets && settingsState.draft.bridge.sceneAssets.scenes || {};
+                    const scene = scenes[sceneName];
+                    if (scene && scene.times && scene.times[timeName]) {
+                        const t = scene.times[timeName];
+                        if (t && t.weathers) {
+                            if (Object.prototype.hasOwnProperty.call(t.weathers, newWeather)) {
+                                if (globalObj.alert) globalObj.alert(`天气「${newWeather}」已存在（同名），已阻止`);
+                                return rerenderSettings();
+                            }
+                            // global sync: rename same weather slot across all scenes/times
+                            for (const [gsn, gsv] of Object.entries(scenes)) {
+                                if (!gsv || typeof gsv !== 'object') continue;
+                                for (const [gtn, gtv] of Object.entries(gsv.times || {})) {
+                                    if (!gtv || typeof gtv !== 'object') continue;
+                                    const gw = gtv.weathers || {};
+                                    if (Object.prototype.hasOwnProperty.call(gw, oldWeather)
+                                        && !Object.prototype.hasOwnProperty.call(gw, newWeather)) {
+                                        const ow = gw[oldWeather];
+                                        gw[oldWeather] = typeof ow === 'string' ? { url: ow } : (ow || { url: '' });
+                                        gtv.weathers = reorderKey(gw, oldWeather, newWeather);
+                                    }
+                                }
+                            }
+                            // sync weatherGroups label
+                            const weatherGroups = ensureWeatherGroups(settingsState);
+                            const wg = weatherGroups.find((g) => g.label === oldWeather);
+                            if (wg) {
+                                wg.label = newWeather;
+                                const wi = Array.isArray(wg.words) ? wg.words.indexOf(oldWeather) : -1;
+                                if (wi >= 0) wg.words[wi] = newWeather;
+                            }
+                            // update Set keys for all scenes/times
+                            const sl = settingsState.asyncState.expandedSceneSlots;
+                            for (const [gsn2, gsv2] of Object.entries(scenes)) {
+                                if (!gsv2 || typeof gsv2 !== 'object') continue;
+                                for (const gtn2 of Object.keys(gsv2.times || {})) {
+                                    renameSetPrefix(sl, `weather\x00${gsn2}\x00${gtn2}\x00${oldWeather}`, `weather\x00${gsn2}\x00${gtn2}\x00${newWeather}`);
+                                }
+                            }
+                            const persisted = persistSettingsDraft();
+                            if (persisted.ok === false) return persisted;
+                        }
+                    }
+                }
+            }
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-set-weather-url:')) {
+        const rest = normalizedAction.slice('scene-set-weather-url:'.length);
+        const first = rest.indexOf(':');
+        if (first > 0) {
+            const sceneName = decodeSeg(rest.slice(0, first));
+            const after = rest.slice(first + 1);
+            const second = after.indexOf(':');
+            if (second > 0) {
+                const timeName = decodeSeg(after.slice(0, second));
+                const after2 = after.slice(second + 1);
+                const third = after2.indexOf(':');
+                if (third > 0) {
+                    const weatherName = decodeSeg(after2.slice(0, third));
+                    const url = after2.slice(third + 1);
+                    const scenes = settingsState.draft.bridge.sceneAssets && settingsState.draft.bridge.sceneAssets.scenes || {};
+                    const scene = scenes[sceneName];
+                    if (scene && scene.times && scene.times[timeName]) {
+                        const t = scene.times[timeName];
+                        if (t && t.weathers) {
+                        const existing = t.weathers[weatherName];
+                        if (existing && typeof existing === 'object') {
+                            existing.url = url;
+                        } else {
+                            t.weathers[weatherName] = { url, words: [] };
+                        }
+                    }
+                    }
+                }
+            }
+        }
+        return { ok: true };
+    }
+
+    if (normalizedAction === 'scene-add-char') {
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.characters = settingsState.draft.bridge.sceneAssets.characters || {};
+        settingsState.draft.bridge.sceneAssets.characterAliases = settingsState.draft.bridge.sceneAssets.characterAliases || {};
+        const existingKeys = Object.keys(settingsState.draft.bridge.sceneAssets.characters);
+        const newName = '角色' + (existingKeys.length + 1);
+        settingsState.draft.bridge.sceneAssets.characters[newName] = { '默认': '' };
+        settingsState.draft.bridge.sceneAssets.characterAliases[newName] = [];
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-remove-char:')) {
+        const name = decodeSeg(normalizedAction.slice('scene-remove-char:'.length));
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.characters = settingsState.draft.bridge.sceneAssets.characters || {};
+        settingsState.draft.bridge.sceneAssets.characterAliases = settingsState.draft.bridge.sceneAssets.characterAliases || {};
+        delete settingsState.draft.bridge.sceneAssets.characters[name];
+        delete settingsState.draft.bridge.sceneAssets.characterAliases[name];
+        if (settingsState.draft.bridge.sceneAssets.statusAvatars && typeof settingsState.draft.bridge.sceneAssets.statusAvatars === 'object') {
+            delete settingsState.draft.bridge.sceneAssets.statusAvatars[name];
+        }
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-add-char-alias:')) {
+        const charName = decodeSeg(normalizedAction.slice('scene-add-char-alias:'.length));
+        const globalObj = options.global || globalThis;
+        const alias = (globalObj.prompt && globalObj.prompt(`为角色「${charName}」添加别名：`, '') || '').trim();
+        if (!alias) return rerenderSettings();
+        const sceneAssets = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        const characters = sceneAssets.characters || {};
+        const aliases = ensureCharacterAliases(settingsState);
+        if (Object.prototype.hasOwnProperty.call(characters, alias)) {
+            if (globalObj.alert) globalObj.alert(`「${alias}」已是角色主名称`);
+            return rerenderSettings();
+        }
+        const duplicateOwner = Object.keys(aliases).find((name) => Array.isArray(aliases[name]) && aliases[name].includes(alias));
+        if (duplicateOwner) {
+            if (globalObj.alert) globalObj.alert(`别名「${alias}」已属于角色「${duplicateOwner}」`);
+            return rerenderSettings();
+        }
+        if (!Object.prototype.hasOwnProperty.call(characters, charName)) return rerenderSettings();
+        aliases[charName].push(alias);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-remove-char-alias:')) {
+        const rest = normalizedAction.slice('scene-remove-char-alias:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const charName = decodeSeg(rest.slice(0, colonIdx));
+            const alias = decodeSeg(rest.slice(colonIdx + 1));
+            const aliases = ensureCharacterAliases(settingsState);
+            aliases[charName] = (aliases[charName] || []).filter((value) => value !== alias);
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-add-mood:')) {
+        const charName = decodeSeg(normalizedAction.slice('scene-add-mood:'.length));
+        const globalObj = options.global || globalThis;
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.characters = settingsState.draft.bridge.sceneAssets.characters || {};
+        const char = settingsState.draft.bridge.sceneAssets.characters[charName];
+        if (char && typeof char === 'object') {
+            const newMood = (globalObj.prompt && globalObj.prompt('情绪/槽名称（建议与情绪组名一致）：', '') || '').trim();
+            if (!newMood) return rerenderSettings();
+            if (Object.prototype.hasOwnProperty.call(char, newMood)) {
+                if (globalObj.alert) globalObj.alert(`「${charName}」已有「${newMood}」槽（同名）`);
+                return rerenderSettings();
+            }
+            char[newMood] = '';
+            // 槽名若在词库中无对应组，自动建组并把组名作为第一个词
+            const groups = ensureMoodGroups(settingsState);
+            if (!groups.some((g) => g.label === newMood)) {
+                groups.unshift({ label: newMood, words: [newMood] });
+            }
+        }
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-remove-mood:')) {
+        const rest = normalizedAction.slice('scene-remove-mood:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const charName = decodeSeg(rest.slice(0, colonIdx));
+            const mood = decodeSeg(rest.slice(colonIdx + 1));
+            settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+            settingsState.draft.bridge.sceneAssets.characters = settingsState.draft.bridge.sceneAssets.characters || {};
+            const char = settingsState.draft.bridge.sceneAssets.characters[charName];
+            if (char && typeof char === 'object') delete char[mood];
+        }
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-set-mood-url:')) {
+        const rest = normalizedAction.slice('scene-set-mood-url:'.length);
+        const firstColon = rest.indexOf(':');
+        if (firstColon > 0) {
+            const charName = decodeSeg(rest.slice(0, firstColon));
+            const afterChar = rest.slice(firstColon + 1);
+            const secondColon = afterChar.indexOf(':');
+            if (secondColon > 0) {
+                const mood = decodeSeg(afterChar.slice(0, secondColon));
+                const url = afterChar.slice(secondColon + 1);
+                settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+                settingsState.draft.bridge.sceneAssets.characters = settingsState.draft.bridge.sceneAssets.characters || {};
+                if (!settingsState.draft.bridge.sceneAssets.characters[charName]) {
+                    settingsState.draft.bridge.sceneAssets.characters[charName] = {};
+                }
+                settingsState.draft.bridge.sceneAssets.characters[charName][mood] = url;
+            }
+        }
+        return { ok: true };
+    }
+
+    if (normalizedAction.startsWith('scene-rename-char:')) {
+        const oldName = decodeSeg(normalizedAction.slice('scene-rename-char:'.length));
+        const globalObj = options.global || globalThis;
+        const newName = (globalObj.prompt && globalObj.prompt(`重命名角色「${oldName}」为：`, oldName) || '').trim();
+        if (newName && newName !== oldName) {
+            const sceneAssets = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+            const chars = sceneAssets.characters || {};
+            const aliases = ensureCharacterAliases(settingsState);
+            if (Object.prototype.hasOwnProperty.call(chars, newName)) {
+                if (globalObj.alert) globalObj.alert(`角色「${newName}」已存在（同名）`);
+                return rerenderSettings();
+            }
+            const aliasOwner = Object.keys(aliases).find((name) => Array.isArray(aliases[name]) && aliases[name].includes(newName));
+            if (aliasOwner) {
+                if (globalObj.alert) globalObj.alert(`「${newName}」已是角色「${aliasOwner}」的别名`);
+                return rerenderSettings();
+            }
+            sceneAssets.characters = reorderKey(chars, oldName, newName);
+            sceneAssets.characterAliases = reorderKey(aliases, oldName, newName);
+            if (sceneAssets.statusAvatars && typeof sceneAssets.statusAvatars === 'object') {
+                sceneAssets.statusAvatars = reorderKey(sceneAssets.statusAvatars, oldName, newName);
+            }
+            renameSetPrefix(settingsState.asyncState.expandedSpriteSlots, `${oldName}\x00`, `${newName}\x00`);
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-rename-mood:')) {
+        const rest = normalizedAction.slice('scene-rename-mood:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const charName = decodeSeg(rest.slice(0, colonIdx));
+            const oldMood = decodeSeg(rest.slice(colonIdx + 1));
+            const globalObj = options.global || globalThis;
+            const newMood = (globalObj.prompt && globalObj.prompt(`重命名情绪「${oldMood}」为：`, oldMood) || '').trim();
+            if (newMood && newMood !== oldMood) {
+                settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+                const chars = settingsState.draft.bridge.sceneAssets.characters || {};
+                // 同名检查：该角色已有同名槽，或词库已有同名情绪组 → 阻止，避免覆盖丢失
+                if (chars[charName] && Object.prototype.hasOwnProperty.call(chars[charName], newMood)) {
+                    if (globalObj.alert) globalObj.alert(`「${charName}」已有「${newMood}」槽（同名），改名会覆盖，已阻止`);
+                    return rerenderSettings();
+                }
+                const groups = ensureMoodGroups(settingsState);
+                if (groups.some((g) => g.label === newMood && g.label !== oldMood)) {
+                    if (globalObj.alert) globalObj.alert(`词库已有情绪组「${newMood}」（同名），改名会覆盖，已阻止`);
+                    return rerenderSettings();
+                }
+                // 改角色槽名
+                if (chars[charName]) {
+                    chars[charName] = reorderKey(chars[charName], oldMood, newMood);
+                    renameSetPrefix(settingsState.asyncState.expandedSpriteSlots, `${charName}\x00${oldMood}`, `${charName}\x00${newMood}`);
+                }
+                // 同步词库里同名情绪组的组名（全局：所有角色用到该组名的槽一起改）
+                const group = groups.find((g) => g.label === oldMood);
+                if (group) {
+                    group.label = newMood;
+                    const wordIdx = Array.isArray(group.words) ? group.words.indexOf(oldMood) : -1;
+                    if (wordIdx >= 0) group.words[wordIdx] = newMood;
+                    for (const otherName of Object.keys(chars)) {
+                        if (otherName === charName) continue;
+                        const other = chars[otherName];
+                        if (other && typeof other === 'object' && Object.prototype.hasOwnProperty.call(other, oldMood)
+                            && !Object.prototype.hasOwnProperty.call(other, newMood)) {
+                            chars[otherName] = reorderKey(other, oldMood, newMood);
+                            renameSetPrefix(settingsState.asyncState.expandedSpriteSlots, `${otherName}\x00${oldMood}`, `${otherName}\x00${newMood}`);
+                        }
+                    }
+                }
+                const persisted = persistSettingsDraft();
+                if (persisted.ok === false) return persisted;
+            }
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'reset-mood-groups') {
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.moodGroups = cloneData(DEFAULT_MOOD_GROUPS);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'mood-add-group') {
+        const globalObj = options.global || globalThis;
+        const groups = ensureMoodGroups(settingsState);
+        const raw = (globalObj.prompt && globalObj.prompt('新情绪组名称：', '') || '').trim();
+        if (!raw) return rerenderSettings();
+        if (groups.some((g) => g.label === raw)) {
+            if (globalObj.alert) globalObj.alert(`情绪组「${raw}」已存在（同名）`);
+            return rerenderSettings();
+        }
+        // 组名自动作为该组第一个词
+        groups.unshift({ label: raw, words: [raw] });
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('mood-remove-group:')) {
+        const label = decodeSeg(normalizedAction.slice('mood-remove-group:'.length));
+        const groups = ensureMoodGroups(settingsState);
+        const idx = groups.findIndex((g) => g.label === label);
+        if (idx >= 0) groups.splice(idx, 1);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('mood-rename-group:')) {
+        const oldLabel = decodeSeg(normalizedAction.slice('mood-rename-group:'.length));
+        const globalObj = options.global || globalThis;
+        const newLabel = (globalObj.prompt && globalObj.prompt(`重命名情绪组「${oldLabel}」为：`, oldLabel) || '').trim();
+        if (newLabel && newLabel !== oldLabel) {
+            const groups = ensureMoodGroups(settingsState);
+            if (groups.some((g) => g.label === newLabel)) {
+                if (globalObj.alert) globalObj.alert(`情绪组「${newLabel}」已存在`);
+                return rerenderSettings();
+            }
+            const group = groups.find((g) => g.label === oldLabel);
+            if (group) group.label = newLabel;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('mood-add-word:')) {
+        const label = decodeSeg(normalizedAction.slice('mood-add-word:'.length));
+        const globalObj = options.global || globalThis;
+        const word = (globalObj.prompt && globalObj.prompt(`向「${label}」组添加情绪词：`, '') || '').trim();
+        if (word) {
+            const groups = ensureMoodGroups(settingsState);
+            const dupGroup = groups.find((g) => Array.isArray(g.words) && g.words.includes(word));
+            if (dupGroup) {
+                // 词撞名：弹窗询问是否删掉重复词再加到当前组
+                const confirmFn = typeof globalObj.confirm === 'function' ? globalObj.confirm.bind(globalObj) : null;
+                const proceed = confirmFn
+                    ? confirmFn(`「${word}」已存在于「${dupGroup.label}」组。是否删除重复词并加入「${label}」组？`)
+                    : true;
+                if (!proceed) return rerenderSettings();
+                dupGroup.words = dupGroup.words.filter((w) => w !== word);
+            }
+            const group = groups.find((g) => g.label === label);
+            if (group) group.words.push(word);
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('mood-review-accept:') || normalizedAction.startsWith('mood-review-assign:')) {
+        const accept = normalizedAction.startsWith('mood-review-accept:');
+        const word = decodeSeg(normalizedAction.slice(normalizedAction.indexOf(':') + 1));
+        const globalObj = options.global || globalThis;
+        const storage = globalObj.localStorage;
+        const item = loadMoodReview(storage).find((entry) => entry.word === word);
+        const groups = ensureMoodGroups(settingsState);
+        let label = accept && item ? item.group : '';
+        if (!accept) {
+            const names = groups.map((g) => g.label).join('、');
+            label = (globalObj.prompt && globalObj.prompt(`把「${word}」加入哪个情绪组？
+可选：${names}`, item && item.group || '') || '').trim();
+            if (!label) return rerenderSettings();
+        }
+        const group = groups.find((g) => g.label === label);
+        if (!group) {
+            if (globalObj.alert) globalObj.alert(`情绪组「${label}」不存在`);
+            return rerenderSettings();
+        }
+        for (const other of groups) {
+            if (other !== group && Array.isArray(other.words)) other.words = other.words.filter((w) => w !== word);
+        }
+        if (!group.words.includes(word)) group.words.push(word);
+        removeMoodReview(storage, word);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('mood-review-dismiss:')) {
+        removeMoodReview((options.global || globalThis).localStorage, decodeSeg(normalizedAction.slice('mood-review-dismiss:'.length)));
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'mood-review-clear') {
+        clearMoodReview((options.global || globalThis).localStorage);
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('mood-remove-word:')) {
+        const rest = normalizedAction.slice('mood-remove-word:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const label = decodeSeg(rest.slice(0, colonIdx));
+            const word = decodeSeg(rest.slice(colonIdx + 1));
+            const groups = ensureMoodGroups(settingsState);
+            const group = groups.find((g) => g.label === label);
+            if (group) {
+                if (group.words.length <= 1) {
+                    const globalObj = options.global || globalThis;
+                    if (globalObj.alert) globalObj.alert('每个情绪组至少保留 1 个词');
+                    return rerenderSettings();
+                }
+                const wi = group.words.indexOf(word);
+                if (wi >= 0) group.words.splice(wi, 1);
+            }
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-toggle-mood:')) {
+        const rest = normalizedAction.slice('scene-toggle-mood:'.length);
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+            const charName = decodeSeg(rest.slice(0, colonIdx));
+            const mood = decodeSeg(rest.slice(colonIdx + 1));
+            const key = charName + "\x00" + mood;
+            if (!(settingsState.asyncState.expandedSpriteSlots instanceof Set)) {
+                settingsState.asyncState.expandedSpriteSlots = new Set();
+            }
+            const set = settingsState.asyncState.expandedSpriteSlots;
+            if (set.has(key)) set.delete(key); else set.add(key);
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('mood-create-group:')) {
+        const label = decodeSeg(normalizedAction.slice('mood-create-group:'.length));
+        const globalObj = options.global || globalThis;
+        const groups = ensureMoodGroups(settingsState);
+        if (groups.some((g) => g.label === label)) {
+            if (globalObj.alert) globalObj.alert(`情绪组「${label}」已存在（同名）`);
+            return rerenderSettings();
+        }
+        // 组名自动作为该组第一个词
+        groups.unshift({ label, words: [label] });
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'scene-preset-save') {
+        const globalObj = options.global || globalThis;
+        const sa = settingsState.draft.bridge.sceneAssets || {};
+        let name = settingsState.asyncState.scenePresetName || '';
+        if (!name) {
+            name = (globalObj.prompt && globalObj.prompt('预设名称：', '') || '').trim();
+            if (!name) return rerenderSettings();
+        }
+        const storage = globalObj.localStorage;
+        const presets = loadScenePresets(storage);
+        presets[name] = {
+            scenes: cloneData(sa.scenes || {}),
+            characters: cloneData(sa.characters || {}),
+            characterAliases: cloneData(sa.characterAliases || {}),
+            moodGroups: cloneData(sa.moodGroups || []),
+            statusAvatars: cloneData(sa.statusAvatars || {}),
+            timeGroups: cloneData(sa.timeGroups || []),
+            weatherGroups: cloneData(sa.weatherGroups || []),
+            spriteLayouts: cloneData((settingsState.draft.readerSettings && settingsState.draft.readerSettings.spriteLayouts) || {}),
+            spriteHeads: cloneData((settingsState.draft.readerSettings && settingsState.draft.readerSettings.spriteHeads) || {}),
+        };
+        saveScenePresets(storage, presets);
+        settingsState.asyncState.scenePresetName = saveActiveScenePresetName((options.global || globalThis).localStorage, name);
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-preset-apply:')) {
+        const name = decodeSeg(normalizedAction.slice('scene-preset-apply:'.length));
+        if (name) {
+            const globalObj = options.global || globalThis;
+            const presets = loadScenePresets(globalObj.localStorage);
+            const preset = presets[name];
+            if (preset) {
+                // 切预设会用预设内容整体覆盖当前场景配置与立绘位置。未存进任何预设的改动
+                // 会在覆盖后丢失，所以切换前先确认（取消则保持当前配置不动）。
+                const confirmFn = typeof globalObj.confirm === 'function' ? globalObj.confirm.bind(globalObj) : null;
+                if (confirmFn && !confirmFn(`切换到预设「${name}」会用该预设的场景、角色立绘和位置覆盖当前配置，未保存到预设的改动将丢失。是否继续？`)) {
+                    return rerenderSettings();
+                }
+                settingsState.asyncState.scenePresetName = saveActiveScenePresetName((options.global || globalThis).localStorage, name);
+                settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+                settingsState.draft.bridge.sceneAssets.scenes = cloneData(preset.scenes || {});
+                settingsState.draft.bridge.sceneAssets.characters = cloneData(preset.characters || {});
+                settingsState.draft.bridge.sceneAssets.characterAliases = cloneData(preset.characterAliases || {});
+                settingsState.draft.bridge.sceneAssets.moodGroups = cloneData(preset.moodGroups || []);
+                settingsState.draft.bridge.sceneAssets.statusAvatars = cloneData(preset.statusAvatars || {});
+                settingsState.draft.bridge.sceneAssets.timeGroups = cloneData(preset.timeGroups || []);
+                settingsState.draft.bridge.sceneAssets.weatherGroups = cloneData(preset.weatherGroups || []);
+                if (preset.spriteLayouts && typeof preset.spriteLayouts === 'object') {
+                    settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+                    settingsState.draft.readerSettings.spriteLayouts = cloneData(preset.spriteLayouts);
+                }
+                if (preset.spriteHeads && typeof preset.spriteHeads === 'object') {
+                    settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+                    settingsState.draft.readerSettings.spriteHeads = cloneData(preset.spriteHeads);
+                }
+                const persisted = persistSettingsDraft();
+                if (persisted.ok === false) return persisted;
+            } else {
+                settingsState.asyncState.scenePresetName = saveActiveScenePresetName((options.global || globalThis).localStorage, name);
+            }
+        } else {
+            settingsState.asyncState.scenePresetName = saveActiveScenePresetName((options.global || globalThis).localStorage, name);
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'scene-preset-rename') {
+        const oldName = settingsState.asyncState.scenePresetName || '';
+        if (!oldName) return rerenderSettings();
+        const globalObj = options.global || globalThis;
+        const newName = (globalObj.prompt && globalObj.prompt(`重命名预设「${oldName}」为：`, oldName) || '').trim();
+        if (!newName || newName === oldName) return rerenderSettings();
+        const storage = globalObj.localStorage;
+        const presets = loadScenePresets(storage);
+        if (!presets[oldName]) return rerenderSettings();
+        presets[newName] = presets[oldName];
+        delete presets[oldName];
+        saveScenePresets(storage, presets);
+        settingsState.asyncState.scenePresetName = saveActiveScenePresetName((options.global || globalThis).localStorage, newName);
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'scene-preset-import') {
+        const globalObj = options.global || globalThis;
+        const doc = globalObj.document;
+        if (!doc) return { ok: false, reason: 'no-document' };
+        const fileResult = await pickPresetFile(doc);
+        if (!fileResult) return rerenderSettings();
+        const name = (globalObj.prompt && globalObj.prompt('预设名称：', fileResult.fileName) || '').trim();
+        if (!name) return rerenderSettings();
+        const storage = globalObj.localStorage;
+        const presets = loadScenePresets(storage);
+        presets[name] = {
+            scenes: fileResult.data.scenes || {},
+            characters: fileResult.data.characters || {},
+            characterAliases: fileResult.data.characterAliases || {},
+            moodGroups: fileResult.data.moodGroups || [],
+            statusAvatars: (fileResult.data.statusAvatars && typeof fileResult.data.statusAvatars === 'object') ? fileResult.data.statusAvatars : {},
+            timeGroups: fileResult.data.timeGroups || [],
+            weatherGroups: fileResult.data.weatherGroups || [],
+            spriteLayouts: (fileResult.data.spriteLayouts && typeof fileResult.data.spriteLayouts === 'object') ? fileResult.data.spriteLayouts : {},
+            spriteHeads: normalizeSpriteHeads(fileResult.data.spriteHeads),
+        };
+        saveScenePresets(storage, presets);
+        settingsState.asyncState.scenePresetName = saveActiveScenePresetName((options.global || globalThis).localStorage, name);
+        settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        settingsState.draft.bridge.sceneAssets.scenes = cloneData(presets[name].scenes);
+        settingsState.draft.bridge.sceneAssets.characters = cloneData(presets[name].characters);
+        settingsState.draft.bridge.sceneAssets.characterAliases = cloneData(presets[name].characterAliases || {});
+        settingsState.draft.bridge.sceneAssets.statusAvatars = cloneData(presets[name].statusAvatars || {});
+        settingsState.draft.bridge.sceneAssets.moodGroups = cloneData(presets[name].moodGroups);
+        settingsState.draft.bridge.sceneAssets.timeGroups = cloneData(presets[name].timeGroups || []);
+        settingsState.draft.bridge.sceneAssets.weatherGroups = cloneData(presets[name].weatherGroups || []);
+        settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        settingsState.draft.readerSettings.spriteLayouts = cloneData(presets[name].spriteLayouts);
+        settingsState.draft.readerSettings.spriteHeads = cloneData(presets[name].spriteHeads);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'scene-preset-export') {
+        const name = settingsState.asyncState.scenePresetName || '';
+        if (!name) return rerenderSettings();
+        const globalObj = options.global || globalThis;
+        const presets = loadScenePresets(globalObj.localStorage);
+        const preset = presets[name];
+        if (!preset) return rerenderSettings();
+        const doc = globalObj.document;
+        if (!doc) return { ok: false, reason: 'no-document' };
+        const json = JSON.stringify({ scenes: preset.scenes || {}, characters: preset.characters || {}, characterAliases: preset.characterAliases || {}, moodGroups: preset.moodGroups || [], timeGroups: preset.timeGroups || [], weatherGroups: preset.weatherGroups || [], spriteLayouts: preset.spriteLayouts || {}, spriteHeads: preset.spriteHeads || {}, statusAvatars: preset.statusAvatars || {} }, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = doc.createElement('a');
+        a.href = url;
+        a.download = `${name}.json`;
+        doc.body.appendChild(a);
+        a.click();
+        doc.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        return { ok: true };
+    }
+
+    if (normalizedAction === 'scene-preset-delete') {
+        const name = settingsState.asyncState.scenePresetName || '';
+        if (!name) return rerenderSettings();
+        const globalObj = options.global || globalThis;
+        if (globalObj.confirm && !globalObj.confirm(`删除预设「${name}」？`)) return rerenderSettings();
+        const storage = globalObj.localStorage;
+        const presets = loadScenePresets(storage);
+        delete presets[name];
+        saveScenePresets(storage, presets);
+        settingsState.asyncState.scenePresetName = saveActiveScenePresetName((options.global || globalThis).localStorage, '');
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-toggle-bg:')) {
+        const key = 'bg\x00' + decodeSeg(normalizedAction.slice('scene-toggle-bg:'.length));
+        if (!(settingsState.asyncState.expandedSceneSlots instanceof Set)) settingsState.asyncState.expandedSceneSlots = new Set();
+        const set = settingsState.asyncState.expandedSceneSlots;
+        if (set.has(key)) set.delete(key); else set.add(key);
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-toggle-time:')) {
+        const rest = normalizedAction.slice('scene-toggle-time:'.length);
+        const c = rest.indexOf(':');
+        if (c > 0) {
+            const key = 'time\x00' + decodeSeg(rest.slice(0, c)) + '\x00' + decodeSeg(rest.slice(c + 1));
+            if (!(settingsState.asyncState.expandedSceneSlots instanceof Set)) settingsState.asyncState.expandedSceneSlots = new Set();
+            const set = settingsState.asyncState.expandedSceneSlots;
+            if (set.has(key)) set.delete(key); else set.add(key);
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-toggle-weather:')) {
+        const rest = normalizedAction.slice('scene-toggle-weather:'.length);
+        const c1 = rest.indexOf(':'); const c2 = c1 >= 0 ? rest.indexOf(':', c1 + 1) : -1;
+        if (c1 > 0 && c2 > c1) {
+            const key = 'weather\x00' + decodeSeg(rest.slice(0, c1)) + '\x00' + decodeSeg(rest.slice(c1 + 1, c2)) + '\x00' + decodeSeg(rest.slice(c2 + 1));
+            if (!(settingsState.asyncState.expandedSceneSlots instanceof Set)) settingsState.asyncState.expandedSceneSlots = new Set();
+            const set = settingsState.asyncState.expandedSceneSlots;
+            if (set.has(key)) set.delete(key); else set.add(key);
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-add-bg-word:')) {
+        const sceneName = decodeSeg(normalizedAction.slice('scene-add-bg-word:'.length));
+        const globalObj = options.global || globalThis;
+        const alias = (globalObj.prompt && globalObj.prompt(`为场景「${sceneName}」添加别名：`, '') || '').trim();
+        if (alias) {
+            const scenes = (settingsState.draft.bridge.sceneAssets || {}).scenes || {};
+            if (Object.prototype.hasOwnProperty.call(scenes, alias)) {
+                if (globalObj.alert) globalObj.alert(`「${alias}」已是场景主名称`);
+                return rerenderSettings();
+            }
+            const dup = findSceneWord(scenes, alias);
+            if (dup) {
+                const proceed = typeof globalObj.confirm === 'function'
+                    ? globalObj.confirm(`别名「${alias}」已属于${dup.label}。是否移动到场景「${sceneName}」？`)
+                    : true;
+                if (!proceed) return rerenderSettings();
+                removeSceneWordEntry(scenes, dup);
+            }
+            const s = scenes[sceneName];
+            if (s && typeof s === 'object') { if (!Array.isArray(s.words)) s.words = []; s.words.push(alias); }
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('scene-remove-bg-word:')) {
+        const rest = normalizedAction.slice('scene-remove-bg-word:'.length);
+        const c = rest.indexOf(':');
+        if (c > 0) {
+            const sceneName = decodeSeg(rest.slice(0, c)); const word = decodeSeg(rest.slice(c + 1));
+            const scenes = (settingsState.draft.bridge.sceneAssets || {}).scenes || {};
+            const s = scenes[sceneName];
+            if (s && Array.isArray(s.words)) {
+                s.words = s.words.filter((w) => w !== word);
+            }
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('time-add-word:')) {
+        const label = decodeSeg(normalizedAction.slice('time-add-word:'.length));
+        const globalObj = options.global || globalThis;
+        const word = (globalObj.prompt && globalObj.prompt(`向时间组「${label}」添加词：`, '') || '').trim();
+        if (word) {
+            const groups = ensureTimeGroups(settingsState);
+            const dup = groups.find((g) => Array.isArray(g.words) && g.words.includes(word));
+            if (dup) {
+                const proceed = typeof globalObj.confirm === 'function'
+                    ? globalObj.confirm(`「${word}」已存在于时间组「${dup.label}」。是否删除重复词并加入「${label}」？`) : true;
+                if (!proceed) return rerenderSettings();
+                dup.words = dup.words.filter((w) => w !== word);
+            }
+            const g = groups.find((g) => g.label === label);
+            if (g) g.words.push(word);
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('time-remove-word:')) {
+        const rest = normalizedAction.slice('time-remove-word:'.length);
+        const c = rest.indexOf(':');
+        if (c > 0) {
+            const label = decodeSeg(rest.slice(0, c)); const word = decodeSeg(rest.slice(c + 1));
+            const groups = ensureTimeGroups(settingsState);
+            const g = groups.find((g) => g.label === label);
+            if (g && Array.isArray(g.words)) {
+                const globalObj = options.global || globalThis;
+                if (g.words.length <= 1) { if (globalObj.alert) globalObj.alert('至少保留 1 个词'); return rerenderSettings(); }
+                g.words = g.words.filter((w) => w !== word);
+            }
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('time-create-group:')) {
+        const label = decodeSeg(normalizedAction.slice('time-create-group:'.length));
+        const globalObj = options.global || globalThis;
+        const groups = ensureTimeGroups(settingsState);
+        if (groups.some((g) => g.label === label)) { if (globalObj.alert) globalObj.alert(`时间组「${label}」已存在`); return rerenderSettings(); }
+        groups.unshift({ label, words: [label] });
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('weather-add-word:')) {
+        const label = decodeSeg(normalizedAction.slice('weather-add-word:'.length));
+        const globalObj = options.global || globalThis;
+        const word = (globalObj.prompt && globalObj.prompt(`向天气组「${label}」添加词：`, '') || '').trim();
+        if (word) {
+            const groups = ensureWeatherGroups(settingsState);
+            const dup = groups.find((g) => Array.isArray(g.words) && g.words.includes(word));
+            if (dup) {
+                const proceed = typeof globalObj.confirm === 'function'
+                    ? globalObj.confirm(`「${word}」已存在于天气组「${dup.label}」。是否删除重复词并加入「${label}」？`) : true;
+                if (!proceed) return rerenderSettings();
+                dup.words = dup.words.filter((w) => w !== word);
+            }
+            const g = groups.find((g) => g.label === label);
+            if (g) g.words.push(word);
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('weather-remove-word:')) {
+        const rest = normalizedAction.slice('weather-remove-word:'.length);
+        const c = rest.indexOf(':');
+        if (c > 0) {
+            const label = decodeSeg(rest.slice(0, c)); const word = decodeSeg(rest.slice(c + 1));
+            const groups = ensureWeatherGroups(settingsState);
+            const g = groups.find((g) => g.label === label);
+            if (g && Array.isArray(g.words)) {
+                const globalObj = options.global || globalThis;
+                if (g.words.length <= 1) { if (globalObj.alert) globalObj.alert('至少保留 1 个词'); return rerenderSettings(); }
+                g.words = g.words.filter((w) => w !== word);
+            }
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('weather-create-group:')) {
+        const label = decodeSeg(normalizedAction.slice('weather-create-group:'.length));
+        const globalObj = options.global || globalThis;
+        const groups = ensureWeatherGroups(settingsState);
+        if (groups.some((g) => g.label === label)) { if (globalObj.alert) globalObj.alert(`天气组「${label}」已存在`); return rerenderSettings(); }
+        groups.unshift({ label, words: [label] });
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    return { ok: false, reason: 'unknown-settings-action', action: normalizedAction };
+}
+
+function reorderKey(obj, oldKey, newKey) {
+    const result = {};
+    for (const [k, v] of Object.entries(obj)) result[k === oldKey ? newKey : k] = v;
+    return result;
+}
+
+function renameSetPrefix(set, oldPrefix, newPrefix) {
+    if (!(set instanceof Set)) return;
+    const toUpdate = [];
+    for (const key of set) if (key.startsWith(oldPrefix)) toUpdate.push(key);
+    for (const k of toUpdate) { set.delete(k); set.add(newPrefix + k.slice(oldPrefix.length)); }
+}
+
+function findSceneWord(scenes, word) {
+    for (const [sn, sv] of Object.entries(scenes || {})) {
+        const s = typeof sv === 'string' ? {} : (sv || {});
+        if (Array.isArray(s.words) && s.words.includes(word)) return { type: 'bg', keys: [sn], word, label: `场景「${sn}」` };
+    }
+    return null;
+}
+
+function removeSceneWordEntry(scenes, entry) {
+    const [sn, tn, wn] = entry.keys;
+    let arr = null;
+    if (entry.type === 'bg') arr = scenes[sn] && scenes[sn].words;
+    else if (entry.type === 'time') arr = scenes[sn] && scenes[sn].times && scenes[sn].times[tn] && scenes[sn].times[tn].words;
+    else arr = scenes[sn] && scenes[sn].times && scenes[sn].times[tn] && scenes[sn].times[tn].weathers && scenes[sn].times[tn].weathers[wn] && scenes[sn].times[tn].weathers[wn].words;
+    if (Array.isArray(arr)) { const i = arr.indexOf(entry.word); if (i >= 0) arr.splice(i, 1); }
+}
+
+function pickStatusAvatarFile(doc) {
+    return new Promise((resolve) => {
+        const input = doc.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        let done = false;
+        let timeoutId = null;
+        const finish = (val) => {
+            if (done) return;
+            done = true;
+            if (timeoutId !== null) clearTimeout(timeoutId);
+            resolve(val);
+        };
+        input.onchange = () => {
+            const file = input.files && input.files[0];
+            if (!file) { finish(null); return; }
+            const type = String(file.type || '');
+            if (type && !STATUS_AVATAR_MIME.test(type)) { finish({ ok: false, reason: 'not-image' }); return; }
+            if (Number(file.size) > STATUS_AVATAR_MAX_BYTES) { finish({ ok: false, reason: 'too-large' }); return; }
+            const fr = new FileReader();
+            fr.onload = (e) => {
+                const dataUrl = String((e && e.target && e.target.result) || '');
+                if (!/^data:image\//i.test(dataUrl)) { finish({ ok: false, reason: 'not-image' }); return; }
+                finish({ ok: true, dataUrl });
+            };
+            fr.onerror = () => finish({ ok: false, reason: 'read-failed' });
+            fr.readAsDataURL(file);
+        };
+        input.click();
+        timeoutId = setTimeout(() => finish(null), 300000);
+    });
+}
+
+function pickPresetFile(doc) {
+    return new Promise((resolve) => {
+        const input = doc.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        let done = false;
+        let timeoutId = null;
+        const finish = (val) => {
+            if (done) return;
+            done = true;
+            if (timeoutId !== null) clearTimeout(timeoutId);
+            resolve(val);
+        };
+        input.onchange = () => {
+            const file = input.files && input.files[0];
+            if (!file) { finish(null); return; }
+            const fileName = file.name.replace(/\.json$/i, '');
+            const fr = new FileReader();
+            fr.onload = (e) => { try { finish({ fileName, data: JSON.parse(e.target.result) }); } catch { finish(null); } };
+            fr.onerror = () => finish(null);
+            fr.readAsText(file);
+        };
+        input.click();
+        timeoutId = setTimeout(() => finish(null), 300000);
+    });
+}
+
+function ensureTimeGroups(settingsState) {
+    settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+    const sa = settingsState.draft.bridge.sceneAssets;
+    if (!Array.isArray(sa.timeGroups)) sa.timeGroups = [];
+    return sa.timeGroups;
+}
+
+function ensureWeatherGroups(settingsState) {
+    settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+    const sa = settingsState.draft.bridge.sceneAssets;
+    if (!Array.isArray(sa.weatherGroups)) sa.weatherGroups = [];
+    return sa.weatherGroups;
+}
+
+function ensureMoodGroups(settingsState) {    settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+    const sa = settingsState.draft.bridge.sceneAssets;
+    if (!Array.isArray(sa.moodGroups)) {
+        sa.moodGroups = normalizeMoodGroups(sa.moodGroups);
+    }
+    return sa.moodGroups;
+}
+
+function ensureCharacterAliases(settingsState) {
+    settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+    const sceneAssets = settingsState.draft.bridge.sceneAssets;
+    if (!sceneAssets.characterAliases || typeof sceneAssets.characterAliases !== 'object' || Array.isArray(sceneAssets.characterAliases)) {
+        sceneAssets.characterAliases = {};
+    }
+    for (const name of Object.keys(sceneAssets.characters || {})) {
+        if (!Array.isArray(sceneAssets.characterAliases[name])) sceneAssets.characterAliases[name] = [];
+    }
+    return sceneAssets.characterAliases;
+}

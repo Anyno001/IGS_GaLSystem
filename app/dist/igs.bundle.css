@@ -1,0 +1,28 @@
+@font-face { font-family: "IGS Rounded"; font-style: normal; font-weight: 300; font-display: swap; src: url("./fonts/nowar-rounded-bliz-300.ttf") format("truetype"); }
+@font-face { font-family: "IGS Rounded"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/nowar-rounded-bliz-400.ttf") format("truetype"); }
+@font-face { font-family: "IGS Rounded"; font-style: normal; font-weight: 500; font-display: swap; src: url("./fonts/nowar-rounded-bliz-500.ttf") format("truetype"); }
+@font-face { font-family: "IGS Rounded"; font-style: normal; font-weight: 700; font-display: swap; src: url("./fonts/nowar-rounded-bliz-700.ttf") format("truetype"); }
+@font-face { font-family: "LXGW WenKai"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/LXGWWenKai-Regular.ttf") format("truetype"); }
+@font-face { font-family: "LXGW WenKai"; font-style: normal; font-weight: 300; font-display: swap; src: url("./fonts/LXGWWenKai-Light.ttf") format("truetype"); }
+@font-face { font-family: "LXGW WenKai Lite"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/LXGWWenKaiLite-Regular.ttf") format("truetype"); }
+@font-face { font-family: "LXGW Neo ZhiSong"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/LXGWNeoZhiSong.ttf") format("truetype"); }
+@font-face { font-family: "LXGW Neo XiHei"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/LXGWNeoXiHei.ttf") format("truetype"); }
+@font-face { font-family: "Source Han Sans CN"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/SourceHanSansCN-Medium.otf") format("opentype"); }
+@font-face { font-family: "Huiwen Mincho"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/HuiwenMincho.otf") format("opentype"); }
+@font-face { font-family: "Tsanger YuYang"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/TsangerYuYangT-W05.woff2") format("woff2"); }
+@font-face { font-family: "Smiley Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/SmileySans-Oblique.ttf") format("truetype"); }
+@font-face { font-family: "ZCOOL KuaiLe"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/ZCOOLKuaiLe-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Yozai"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/Yozai-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Cinzel"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("./fonts/Cinzel-Variable.ttf") format("truetype"); }
+@font-face { font-family: "Great Vibes"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/GreatVibes-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Pinyon Script"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/PinyonScript-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Quicksand"; font-style: normal; font-weight: 300 700; font-display: swap; src: url("./fonts/Quicksand-Variable.ttf") format("truetype"); }
+@font-face { font-family: "Caveat"; font-style: normal; font-weight: 400 700; font-display: swap; src: url("./fonts/Caveat-Variable.ttf") format("truetype"); }
+@font-face { font-family: "IM Fell English SC"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/IMFellEnglishSC-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Source Han Serif CN"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/SourceHanSerifCN-Regular.otf") format("opentype"); }
+@font-face { font-family: "Cormorant Garamond"; font-style: normal; font-weight: 400; font-display: swap; src: url("./fonts/CormorantGaramond-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Cormorant Garamond"; font-style: italic; font-weight: 400; font-display: swap; src: url("./fonts/CormorantGaramond-Italic.woff2") format("woff2"); }
+.igs-stage { position: relative; width: 100%; height: 100%; min-height: 320px; overflow: hidden; background: #0b0d12; }
+.igs-background-layer, .igs-generated-layer, .igs-effect-layer, .igs-character-layer, .igs-avatar-layer, .igs-dialogue-layer, .igs-hud-layer, .igs-choice-layer, .igs-system-layer { position: absolute; inset: 0; }
+.igs-dialogue-layer { left: 0; right: 0; bottom: 0; width: 100%; min-height: 96px; padding: 24px; }
+.igs-toolbar { display: flex; gap: 8px; padding: 6px; border-radius: 8px; }
