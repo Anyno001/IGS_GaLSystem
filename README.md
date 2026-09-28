@@ -1,42 +1,35 @@
-# Immersive Galgame System
+# 沉浸式 Galgame 系统
 
-SillyTavern 酒馆助手脚本，提供视觉小说阅读器、场景素材、AI 图片生成集成和统一设置面板。
+**Immersive Galgame System** 是一套面向 SillyTavern 的酒馆助手脚本，把聊天中的叙事内容整理成视觉小说式的阅读与场景演绎体验。
 
-当前源码版本：`0.29.4`
+它提供对话框、旁白、选项、角色立绘、场景背景和状态信息等视觉层，并将正文解析、场景状态、图片素材和阅读器界面统一起来。你可以继续使用酒馆作为对话入口，也可以在阅读器中以更接近 Galgame 的方式浏览剧情。
 
-## 仓库边界
+## 主要功能
 
-- `app/src/`：运行源码。
-- `app/tests/`：Node 原生测试与模拟测试。
-- `app/fixtures/`：脱敏测试数据、素材和许可证相关 fixtures。
-- `app/scripts/`：结构门禁、静态门禁、构建和性能检查。
-- `app/dist/`：可由远程 loader 加载的自包含 bundle、样式、manifest 和运行时素材。
-- `loader/`：酒馆助手导入件与 loader 源码。
-- `docs/`：当前仓库的验证与发布说明，不保存阶段性截图、旧计划或本机路径。
+- **视觉小说阅读器**：对白、旁白、选项、分页和阅读状态管理。
+- **角色与场景演出**：背景、角色立绘、表情、天气、光照、舞台动画和状态栏。
+- **可调整的阅读界面**：多种对话框风格、字体、字号、工具栏、状态 HUD，以及桌面端、移动端和内嵌模式布局。
+- **AI 图片与素材集成**：为场景背景和插图提供生成与资源管理入口，并支持本地素材缓存。
+- **正文标签与演出效果**：场景标签、聊天块、打字机、音效、震动和其他视觉效果。
+- **设置与预设管理**：统一设置面板、场景与阅读器预设、导入导出契约，以及对旧版设置的兼容读取。
 
-不迁移外部工具箱的发布壳、旧仓库计划、过程记录、阶段性截图或历史自动更新副本；本仓库只保留运行所需源码、测试、fixtures、构建脚本、发布产物和当前文档。
+## 快速开始
 
-## 本地验证
+1. 下载 `loader/` 中当前版本的中文自动更新导入件：
+   `酒馆助手脚本-沉浸式Galgame系统（自动更新）json`。
+2. 将 JSON 导入 SillyTavern 的酒馆助手脚本。
+3. 启用脚本，等待远程 bundle 加载完成。
+4. 从酒馆助手的 `Gal模拟` 入口打开阅读器。
 
-在 `app/` 目录执行：
+自动更新 loader 会从发布仓库的 `main` 分支加载 `app/dist/` 中的运行时 bundle 和样式。若只想锁定某个版本，可使用 `loader/沉浸式Galgame系统 v0.23.21.json` 这类固定版导入件。
 
-- `npm.cmd run structure`
-- `npm.cmd run static`
-- `npm.cmd test`
-- `npm.cmd run simulate`
-- `npm.cmd run perf`
-- `npm.cmd run build`
-- `npm.cmd run build:loader -- --release v0.29.4`
-- `npm.cmd run gate`
+## 仓库结构
 
-`app/dist/igs.bundle.js` 必须是自包含 bundle，不能在运行时导入 `app/src/`。测试 fixtures 不得包含真实 API key、cookie、token 或私人数据。
+- `app/src/`：系统运行源码。
+- `app/tests/`：回归测试和模拟测试。
+- `app/fixtures/`：脱敏的测试数据、素材和契约样例。
+- `app/dist/`：可远程加载的自包含 bundle、样式、manifest 和运行时素材。
+- `loader/`：酒馆助手导入件与远程 loader 源码。
+- `docs/`：当前版本的使用、构建和素材契约说明。
 
-## 发布边界
-
-正式导入件包括 `loader/igs-loader.json` 和当前版本化的中文自动更新 JSON。`loader/igs-loader-debug.*` 只供本地调试，不属于正式发布件；固定版 `沉浸式Galgame系统 v0.23.21.json` 暂保留作为既有兼容性门禁 fixture，移除前必须同步修改并验证门禁契约。
-
-loader 当前指向公开仓库 `https://github.com/Anyno001/IGS_GaLSystem`，通过 jsDelivr 加载 `app/dist/`。本项目使用独立 Git 仓库；远端操作必须先审计首提交内容并确认地址。push 与 tag 分离，真机验收前不创建版本 tag。
-
-## 许可证与素材
-
-源码仓库未发现根级 `LICENSE`/`COPYING` 文件，因此本次迁移没有擅自声明项目许可证。字体和素材随源码及构建产物保留其现有许可证文件；正式公开前需要由维护者确认项目许可证和第三方素材授权边界。
+项目地址：<https://github.com/Anyno001/IGS_GaLSystem>
