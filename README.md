@@ -22,14 +22,3 @@
 4. 从酒馆助手的 `Gal模拟` 入口打开阅读器。
 
 自动更新 loader 会从发布仓库的 `main` 分支加载 `app/dist/` 中的运行时 bundle 和样式。若只想锁定某个版本，可使用 `loader/沉浸式Galgame系统 v0.23.21.json` 这类固定版导入件。
-
-## 仓库结构
-
-- `app/src/`：系统运行源码。
-- `app/tests/`：回归测试和模拟测试。
-- `app/fixtures/`：脱敏的测试数据、素材和契约样例。
-- `app/dist/`：可远程加载的自包含 bundle、样式、manifest 和运行时素材。
-- `loader/`：酒馆助手导入件与远程 loader 源码。
-- `docs/`：当前版本的使用、构建和素材契约说明。
-
-项目地址：<https://github.com/Anyno001/IGS_GaLSystem>
