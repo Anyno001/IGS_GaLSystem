@@ -141,6 +141,7 @@ test('gate:worldview:era-prompt-rule-and-notify-sfx-per-worldview', async () => 
     assert.match(resolveWorldviewPromptRule('scifi'), /科幻未来/);
     assert.match(resolveWorldviewPromptRule('apocalypse'), /末日之后/);
     assert.match(resolveWorldviewPromptRule('taisho'), /大正时代/);
+    assert.match(resolveWorldviewPromptRule('magic'), /魔法世界/);
     const taisho = applyFxWorldview({ fxTags: { enabled: true, call: true, voicemail: true }, dailyFx: { enabled: true, photo: true, tv: true, alarm: true }, liveFx: { enabled: true } }, 'taisho');
     assert.equal(taisho.fxTags.call, true, '大正保留座机来电');
     assert.equal(taisho.fxTags.voicemail, false);
@@ -149,7 +150,7 @@ test('gate:worldview:era-prompt-rule-and-notify-sfx-per-worldview', async () => 
     assert.equal(taisho.dailyFx.alarm, false);
     assert.equal(taisho.liveFx.enabled, false);
     const { FX_SFX_PARTIALS } = await import('../src/visual/igs-ui/fx-sfx.js');
-    for (const id of ['ancient', 'fantasy', 'scifi', 'apocalypse', 'taisho']) {
+    for (const id of ['ancient', 'fantasy', 'scifi', 'apocalypse', 'taisho', 'magic']) {
         const partials = FX_SFX_PARTIALS[`notify-${id}`];
         assert.ok(Array.isArray(partials) && partials.length > 0, id);
     }

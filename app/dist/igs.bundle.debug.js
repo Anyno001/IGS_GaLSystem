@@ -14693,7 +14693,7 @@ __igsDefine(exports, "createCgGalleryPanel", () => createCgGalleryPanel);
 __igsDefine(exports, "CG_GALLERY_STYLE_TEXT", () => CG_GALLERY_STYLE_TEXT);
 });
 __igsRegister("src/visual/igs-ui/fx-item.js", function(module, exports, require) {
-const { worldSkinOf } = require("src/scene/worldview.js");
+const { withMagicSkin, worldSkinOf } = require("src/scene/worldview.js");
 // 获得物品演出 DOM 层：挂在 fx 前层（立绘之上、对话层之下）。
 // 同一身份（消息|swipe|页）重绘不重播；图片后到只在身份仍一致时淡入替换占位；计时器统一回收。
 // 流程：（重要物品先走中央大演出）→ 卡片逐张弹出 → 停留（鼠标悬停 / 点开详情时暂停）→ 退场。
@@ -15104,7 +15104,7 @@ function cancelItemFx(root) {
 }
 
 // 颜色走变量：--igs-item-bg / --igs-item-ink / --igs-item-accent，对话框皮肤在 dialog-theme-hud 里按 HUD 面板换装。
-const ITEM_FX_STYLE_TEXT = `
+const ITEM_FX_STYLE_TEXT = withMagicSkin(`
 .igs-fx-item-stack{--igs-item-accent-c:var(--igs-item-accent,#ffcf5a);position:absolute;right:clamp(12px,4%,36px);top:clamp(56px,12%,96px);display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;z-index:3;}
 .igs-fx-item-card{position:relative;display:flex;align-items:center;gap:10px;max-width:min(320px,70vw);padding:8px 14px 8px 12px;border-radius:12px;background:var(--igs-item-bg,rgba(18,18,22,.8));color:var(--igs-item-ink,#fff);box-shadow:0 4px 16px rgba(0,0,0,.35);overflow:hidden;pointer-events:auto;cursor:pointer;animation:igs-fx-item-in .36s cubic-bezier(.2,.9,.3,1.2) both;}
 .igs-fx-item-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--igs-item-accent-c);}
@@ -15229,7 +15229,7 @@ const ITEM_FX_STYLE_TEXT = `
 @keyframes igs-fx-item-plate{0%{opacity:0;transform:translateY(24px) scale(.8);}100%{opacity:1;transform:none;}}
 @keyframes igs-fx-item-rays{to{transform:rotate(360deg);}}
 @media (prefers-reduced-motion: reduce){.igs-fx-item-card,.igs-fx-item-card *,.igs-fx-item-card *::after,.igs-fx-item-showcase,.igs-fx-item-showcase *,.igs-fx-item-flyer{animation:none!important;}}
-`;
+`);
 
 __igsDefine(exports, "safeItemImageUrl", () => safeItemImageUrl);
 __igsDefine(exports, "applyItemFxToDom", () => applyItemFxToDom);
@@ -15253,11 +15253,12 @@ const WORLDVIEWS = Object.freeze([
     Object.freeze({ id: 'scifi', label: '科幻', ready: true }),
     Object.freeze({ id: 'apocalypse', label: '末日', ready: true }),
     Object.freeze({ id: 'taisho', label: '大正', ready: true }),
+    Object.freeze({ id: 'magic', label: '魔法', ready: true }),
 ]);
 const DEFAULT_WORLDVIEW = 'modern';
 
 // 在现代演出结构上换皮的世界观（古代有独立分支，不在此列）；演出 / 音效层只经 worldSkinOf 判断，不各自维护列表。
-const WORLD_SKIN_IDS = Object.freeze(['fantasy', 'scifi', 'apocalypse', 'taisho']);
+const WORLD_SKIN_IDS = Object.freeze(['fantasy', 'scifi', 'apocalypse', 'taisho', 'magic']);
 function worldSkinOf(id) {
     return WORLD_SKIN_IDS.includes(id) ? id : '';
 }
@@ -15289,12 +15290,19 @@ function applyWorldview(sceneAssets, id) {
     return true;
 }
 
+// 魔法世界在战斗以外的演出沿用西幻换皮：把样式里的 fantasy 规则复制一份改成 magic。
+function withMagicSkin(css) {
+    const extra = css.split('\n').filter((line) => line.includes('fantasy')).map((line) => line.replace(/fantasy/g, 'magic'));
+    return extra.length ? `${css}\n${extra.join('\n')}` : css;
+}
+
 __igsDefine(exports, "worldSkinOf", () => worldSkinOf);
 __igsDefine(exports, "isKnownWorldview", () => isKnownWorldview);
 __igsDefine(exports, "isReadyWorldview", () => isReadyWorldview);
 __igsDefine(exports, "normalizeWorldview", () => normalizeWorldview);
 __igsDefine(exports, "resolveWorldview", () => resolveWorldview);
 __igsDefine(exports, "applyWorldview", () => applyWorldview);
+__igsDefine(exports, "withMagicSkin", () => withMagicSkin);
 __igsDefine(exports, "WORLDVIEWS", () => WORLDVIEWS);
 __igsDefine(exports, "DEFAULT_WORLDVIEW", () => DEFAULT_WORLDVIEW);
 __igsDefine(exports, "WORLD_SKIN_IDS", () => WORLD_SKIN_IDS);
@@ -15358,6 +15366,8 @@ function applyFxEra(readerSettings, ancient) {
 const FX_WORLDVIEW_OFF = Object.freeze({
     // 西幻没有现代电子设备：与古代共用现代专属表。
     fantasy: Object.freeze({ ...FX_ERA_MODERN_ONLY, features: FX_ERA_MODERN_FEATURES }),
+    // 魔法世界同西幻：没有现代电子设备。
+    magic: Object.freeze({ ...FX_ERA_MODERN_ONLY, features: FX_ERA_MODERN_FEATURES }),
     // 科幻保留全部现代演出，画面与说法由换皮和提示词切换。
     scifi: Object.freeze({ features: Object.freeze([]) }),
     // 末日：通讯（对讲机、广播）仍在，末日前才有的日常服务与直播拨掉。
@@ -15381,7 +15391,10 @@ const APOCALYPSE_ERA_PROMPT_RULE = `[igs时代背景]
 本故事发生在末日之后。上述igs标签里填写的文字使用末日幸存者的说法：通讯写对讲机、短波电台、残存终端或手写字条，时间写「天黑前」「第三天清晨」或幸存天数；物资匮乏，不要写外卖、影院、直播等末日前才有的日常服务。`;
 const TAISHO_ERA_PROMPT_RULE = `[igs时代背景]
 本故事发生在大正时代（和洋折衷的近代日本）。上述igs标签里填写的文字使用大正时代的说法与器物：通讯写电报、黑色座机、书信或差人传话，电话指要接线员转接的座机；娱乐写活动写真、留声机、咖啡馆；时间可写钟点；不要出现手机、电视、网络、直播等现代事物。`;
+const MAGIC_ERA_PROMPT_RULE = `[igs时代背景]
+本故事发生在隐藏于现实之下的魔法世界（魔法学院、古堡、魔法街巷）。上述igs标签里填写的文字使用魔法世界的说法与器物：通讯写猫头鹰送信、羊皮纸便条、壁炉传话或会动的画像传话，时间写「宵禁钟响后」「次日清晨」这类说法；战斗出招的招式名写咒语名称；不要出现手机、电视、网络、直播等现代电子设备。`;
 const WORLDVIEW_PROMPT_RULES = Object.freeze({
+    magic: MAGIC_ERA_PROMPT_RULE,
     ancient: ANCIENT_ERA_PROMPT_RULE,
     fantasy: FANTASY_ERA_PROMPT_RULE,
     scifi: SCIFI_ERA_PROMPT_RULE,
@@ -15428,6 +15441,7 @@ __igsDefine(exports, "FANTASY_ERA_PROMPT_RULE", () => FANTASY_ERA_PROMPT_RULE);
 __igsDefine(exports, "SCIFI_ERA_PROMPT_RULE", () => SCIFI_ERA_PROMPT_RULE);
 __igsDefine(exports, "APOCALYPSE_ERA_PROMPT_RULE", () => APOCALYPSE_ERA_PROMPT_RULE);
 __igsDefine(exports, "TAISHO_ERA_PROMPT_RULE", () => TAISHO_ERA_PROMPT_RULE);
+__igsDefine(exports, "MAGIC_ERA_PROMPT_RULE", () => MAGIC_ERA_PROMPT_RULE);
 __igsDefine(exports, "WORLDVIEW_PROMPT_RULES", () => WORLDVIEW_PROMPT_RULES);
 });
 __igsRegister("src/visual/igs-ui/fx-layer.js", function(module, exports, require) {
@@ -22260,6 +22274,8 @@ const FX_SFX_PARTIALS = Object.freeze({
         p('sine', 4186, 4186, start, 0.12, 0.08, { attack: 0.001 }),
     ])),
     // 科幻通报：终端数字提示音，两声上扬短扫频。
+    // 魔法通报：魔杖点出的一串上行铃音。
+    'notify-magic': Object.freeze([1568, 2093, 2637, 3136].map((f, i) => p('sine', f, f, i * 0.07, 0.3, 0.2, { attack: 0.002 }))),
     'notify-scifi': Object.freeze([
         p('sine', 880, 1320, 0, 0.08, 0.45, { attack: 0.002, sweep: 1 }),
         p('sine', 1320, 1980, 0.11, 0.1, 0.45, { attack: 0.002, sweep: 1 }),
@@ -35887,6 +35903,7 @@ const WEATHER_FX_STYLE_TEXT = `
 __igsDefine(exports, "WEATHER_FX_STYLE_TEXT", () => WEATHER_FX_STYLE_TEXT);
 });
 __igsRegister("src/visual/igs-ui/fx-style.js", function(module, exports, require) {
+const { withMagicSkin } = require("src/scene/worldview.js");
 // 演出样式：#igs-fx-stage 在立绘之上、对话层之下；#igs-fx-front 在对话层与选项之上、工具栏之下。
 // 区间演出由 #igs-stage-motion 上的 data-igs-fx-* 属性驱动，皮肤可覆写。
 // 瞬时演出时长读 --igs-fx-life（运行时按停留档位写入）；data-igs-fx-motion="snappy" 为灵动演出：
@@ -35895,7 +35912,7 @@ const HANDSET_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
 const HANDSET = `url("data:image/svg+xml,${encodeURIComponent(HANDSET_SVG)}")`;
 // 通话计时：注册成整数的自定义属性由动画逐秒步进，再经 counter 显示成 mm:ss，全程不需要脚本每秒改 DOM。
 const CALL_TIMER_ANIMATION = 'igs-fx-mm 3600s steps(60,end) infinite,igs-fx-ss 60s steps(60,end) infinite';
-const FX_STYLE_TEXT = `
+const FX_STYLE_TEXT = withMagicSkin(`
 @property --igs-fx-mm{syntax:"<integer>";inherits:false;initial-value:0;}
 @property --igs-fx-ss{syntax:"<integer>";inherits:false;initial-value:0;}
 .igs-fx-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;contain:layout paint style;}
@@ -36241,7 +36258,7 @@ const FX_STYLE_TEXT = `
 .igs-fx-notify.is-ancient{transform:none;}
 .igs-fx-symbol{transform:none;}
 }
-`.trim();
+`.trim());
 
 __igsDefine(exports, "FX_STYLE_TEXT", () => FX_STYLE_TEXT);
 });
@@ -36623,9 +36640,10 @@ const META_STYLE_TEXT = `
 __igsDefine(exports, "META_STYLE_TEXT", () => META_STYLE_TEXT);
 });
 __igsRegister("src/visual/igs-ui/fx-daily-style.js", function(module, exports, require) {
+const { withMagicSkin } = require("src/scene/worldview.js");
 // 日常演出样式。所有卡片的寿命由 --igs-dfx-life 驱动，进出场用百分比关键帧跟随寿命伸缩。
 const RED = '#c8392b';
-const DAILY_FX_STYLE_TEXT = `
+const DAILY_FX_STYLE_TEXT = withMagicSkin(`
 #igs-overlay .igs-dfx{position:absolute;inset:0;pointer-events:none;--igs-dfx-life:3000ms;}
 #igs-overlay .igs-dfx-sky{position:absolute;inset:0;pointer-events:none;overflow:hidden;}
 #igs-overlay .igs-dfx-sky canvas,#igs-overlay .igs-dfx-petals canvas{position:absolute;inset:0;width:100%;height:100%;}
@@ -36931,7 +36949,7 @@ const DAILY_FX_STYLE_TEXT = `
 #igs-overlay .igs-dfx-tea-steam i:nth-child(3){animation-delay:.8s;}
 #igs-overlay .igs-dfx-bow{display:none;}
 
-`;
+`);
 
 __igsDefine(exports, "DAILY_FX_STYLE_TEXT", () => DAILY_FX_STYLE_TEXT);
 });
@@ -37320,7 +37338,7 @@ function cancelBattleFx(root) {
     return Boolean(state);
 }
 const BATTLE_FX_STYLE_TEXT = `
-#igs-stage-motion{--igs-battle-accent:#ffd76a;}
+#igs-stage-motion{--igs-battle-accent:#ffe2a0;--igs-battle-bg:color-mix(in srgb,var(--igs-dialog-bg,rgba(31,34,37,.62)) 55%,rgba(14,15,18,.9));--igs-battle-ink:#f4f4f6;--igs-battle-line:rgba(255,255,255,.28);--igs-battle-on-accent:#16171a;--igs-battle-radius:8px;--igs-battle-shadow:0 6px 20px rgba(0,0,0,.35);--igs-battle-stroke:rgba(10,10,14,.85);}
 #igs-stage-motion[data-igs-fx-battle-show="1"] #igs-status-hud{visibility:hidden!important;}
 #igs-stage-motion[data-igs-fx-battle-letterbox] .igs-fx-letterbox-bar{transform:scaleY(1);}
 #igs-stage-motion[data-igs-fx-battle-shake="light"]{animation:igs-battle-shake-light .3s ease-out both;}
@@ -37329,11 +37347,11 @@ const BATTLE_FX_STYLE_TEXT = `
 @keyframes igs-battle-shake-heavy{0%,100%{transform:none}12%{transform:translate3d(12px,-5px,0)}28%{transform:translate3d(-11px,4px,0)}44%{transform:translate3d(8px,3px,0)}60%{transform:translate3d(-6px,-2px,0)}78%{transform:translate3d(3px,1px,0)}}
 .igs-fx-battle-skip{position:absolute;inset:0;z-index:8;pointer-events:auto;cursor:pointer;background:transparent;}
 .igs-fx-battle-vignette{position:absolute;inset:0;background:radial-gradient(ellipse at center,transparent 55%,rgba(120,10,20,.28) 100%);animation:igs-battle-fade-in .6s ease-out both;}
-.igs-fx-battle-plate{position:absolute;left:50%;top:clamp(8px,2.5%,22px);transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:min(420px,80%);padding:5px 14px 5px 6px;border:2px solid rgba(255,255,255,.88);border-radius:6px;background:linear-gradient(180deg,rgba(30,44,110,.92),rgba(10,16,52,.92));color:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.5),0 4px 14px rgba(0,0,0,.4);font-size:14px;letter-spacing:.06em;white-space:nowrap;animation:igs-battle-drop .4s cubic-bezier(.2,1.4,.4,1) both;}
-.igs-fx-battle-plate-mark{flex:none;padding:1px 6px;border-radius:3px;background:var(--igs-battle-accent);color:#1a1030;font-size:11px;font-weight:800;font-style:italic;}
-.igs-fx-battle-plate-name{overflow:hidden;text-overflow:ellipsis;text-shadow:1px 1px 0 #000;}
+.igs-fx-battle-plate{position:absolute;left:50%;top:clamp(8px,2.5%,22px);transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:min(420px,80%);padding:4px 14px 4px 5px;border:1px solid var(--igs-battle-line);border-radius:var(--igs-battle-radius);background:var(--igs-battle-bg);color:var(--igs-battle-ink);box-shadow:var(--igs-battle-shadow);font-size:13px;letter-spacing:.06em;white-space:nowrap;animation:igs-battle-drop .4s cubic-bezier(.2,1.4,.4,1) both;}
+.igs-fx-battle-plate-mark{flex:none;padding:1px 7px;border-radius:calc(var(--igs-battle-radius) * .6);background:var(--igs-battle-accent);color:var(--igs-battle-on-accent);font-size:11px;font-weight:800;}
+.igs-fx-battle-plate-name{overflow:hidden;text-overflow:ellipsis;}
 .igs-fx-battle-encounter{position:absolute;inset:0;overflow:hidden;z-index:6;}
-.igs-fx-battle-wipe{position:absolute;left:-30%;right:-30%;height:36%;background:repeating-linear-gradient(90deg,rgba(8,10,30,.94) 0 26px,rgba(20,26,70,.94) 26px 52px);transform:skewY(-8deg) translateX(-110%);}
+.igs-fx-battle-wipe{position:absolute;left:-30%;right:-30%;height:36%;background:var(--igs-battle-bg);border-block:2px solid var(--igs-battle-accent);transform:skewY(-8deg) translateX(-110%);}
 .igs-fx-battle-wipe.is-a{top:13%;animation:igs-battle-wipe-a var(--igs-battle-life,1.9s) cubic-bezier(.7,0,.2,1) both;}
 .igs-fx-battle-wipe.is-b{top:49%;animation:igs-battle-wipe-b var(--igs-battle-life,1.9s) cubic-bezier(.7,0,.2,1) both;}
 .igs-fx-battle-vs-portrait{position:absolute;right:4%;bottom:0;height:94%;max-width:52%;object-fit:contain;object-position:bottom;pointer-events:none;animation:igs-battle-portrait-in var(--igs-battle-life,1.9s) ease-out both;}
@@ -37344,14 +37362,14 @@ const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-foe[data-igs-battle-result="miss"] .igs-fx-battle-foe-body{animation-name:igs-battle-foe-dodge;animation-duration:.46s;}
 .igs-fx-battle-foe[data-igs-battle-result="heal"] .igs-fx-battle-foe-body{animation-name:igs-battle-foe-heal;animation-duration:.8s;}
 .igs-fx-battle-foe[data-igs-battle-result="ko"] .igs-fx-battle-foe-body{animation-name:igs-battle-foe-ko;animation-duration:.9s;animation-fill-mode:forwards;}
-.igs-fx-battle-vs{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;color:#fff;text-align:center;white-space:nowrap;animation:igs-battle-vs var(--igs-battle-life,1.9s) ease-out both;}
-.igs-fx-battle-vs-cap{font-size:13px;font-weight:800;letter-spacing:.5em;color:var(--igs-battle-accent);text-shadow:0 0 8px rgba(0,0,0,.8);}
-.igs-fx-battle-vs-foe{font-size:clamp(26px,6vw,46px);font-weight:900;letter-spacing:.08em;text-shadow:3px 3px 0 #000,0 0 18px rgba(255,80,80,.55);}
-.igs-fx-battle-vs-title{font-size:13px;opacity:.85;letter-spacing:.2em;text-shadow:1px 1px 0 #000;}
+.igs-fx-battle-vs{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;color:var(--igs-battle-ink);text-align:center;white-space:nowrap;animation:igs-battle-vs var(--igs-battle-life,1.9s) ease-out both;}
+.igs-fx-battle-vs-cap{font-size:13px;font-weight:800;letter-spacing:.5em;color:var(--igs-battle-accent);}
+.igs-fx-battle-vs-foe{font-size:clamp(26px,6vw,46px);font-weight:900;letter-spacing:.08em;text-shadow:0 2px 0 var(--igs-battle-stroke);}
+.igs-fx-battle-vs-title{font-size:13px;opacity:.85;letter-spacing:.2em;}
 .igs-fx-battle-hit{position:absolute;inset:0;z-index:5;}
-.igs-fx-battle-skill{position:absolute;left:50%;top:clamp(46px,11%,90px);transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;min-width:min(220px,60%);max-width:80%;padding:6px 22px;border:2px solid rgba(255,255,255,.9);border-radius:6px;background:linear-gradient(180deg,rgba(30,44,110,.94),rgba(10,16,52,.94));color:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.5),0 6px 18px rgba(0,0,0,.45);text-align:center;animation:igs-battle-skill var(--igs-battle-life,1.3s) ease-out both;}
+.igs-fx-battle-skill{position:absolute;left:50%;top:clamp(46px,11%,90px);transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;min-width:min(220px,60%);max-width:80%;padding:6px 22px;border:1px solid var(--igs-battle-line);border-bottom:2px solid var(--igs-battle-accent);border-radius:var(--igs-battle-radius);background:var(--igs-battle-bg);color:var(--igs-battle-ink);box-shadow:var(--igs-battle-shadow);text-align:center;animation:igs-battle-skill var(--igs-battle-life,1.3s) ease-out both;}
 .igs-fx-battle-skill-who{font-size:11px;opacity:.75;letter-spacing:.12em;}
-.igs-fx-battle-skill-name{font-size:18px;font-weight:800;letter-spacing:.12em;text-shadow:2px 2px 0 #000;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
+.igs-fx-battle-skill-name{font-size:18px;font-weight:800;letter-spacing:.12em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
 .igs-fx-battle-impact{position:absolute;left:50%;top:40%;height:56%;max-height:340px;aspect-ratio:1/1;transform:translate(-50%,-50%);}
 .igs-fx-battle-hit[data-igs-battle-target="sprite"] .igs-fx-battle-impact{height:44%;}
 .igs-fx-battle-slash{position:absolute;left:-10%;right:-10%;top:50%;height:10px;margin-top:-5px;border-radius:50%;background:linear-gradient(90deg,transparent,#fff 45%,#fff 55%,transparent);box-shadow:0 0 14px 4px var(--igs-battle-accent);transform:rotate(-32deg) scaleX(0);animation:igs-battle-slash .5s cubic-bezier(.2,.9,.3,1) both;}
@@ -37365,9 +37383,9 @@ const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-shield{position:absolute;inset:14%;color:#8fd8ff;filter:drop-shadow(0 0 10px rgba(120,200,255,.9));animation:igs-battle-shield .9s ease-out both;}
 .igs-fx-battle-spark{position:absolute;left:calc(22% + var(--i,0) * 11%);bottom:22%;width:12px;height:12px;border-radius:50%;background:radial-gradient(circle,#fff,#7dffb0 45%,transparent 70%);animation:igs-battle-spark 1.1s ease-out both;animation-delay:calc(var(--i,0) * .07s);}
 .igs-fx-battle-pop{position:absolute;left:50%;top:60%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;white-space:nowrap;animation:igs-battle-pop calc(var(--igs-battle-life,1.3s) * .85) cubic-bezier(.2,1.5,.4,1) both;animation-delay:.1s;}
-.igs-fx-battle-pop-label{font-size:clamp(24px,5vw,38px);font-weight:900;font-style:italic;letter-spacing:.06em;color:#fff;-webkit-text-stroke:1.5px #1a1030;text-shadow:3px 3px 0 #1a1030;}
-.igs-fx-battle-pop-dice{font-size:11px;font-weight:700;letter-spacing:.2em;color:#1a1030;background:var(--igs-battle-accent);padding:1px 8px;border-radius:3px;margin-bottom:3px;}
-.igs-fx-battle-pop-target{font-size:12px;color:#fff;padding:1px 8px;border-radius:999px;background:rgba(10,16,52,.75);text-shadow:1px 1px 0 #000;}
+.igs-fx-battle-pop-label{font-size:clamp(24px,5vw,38px);font-weight:900;font-style:italic;letter-spacing:.06em;color:#fff;-webkit-text-stroke:1.5px var(--igs-battle-stroke);text-shadow:0 2px 0 var(--igs-battle-stroke);}
+.igs-fx-battle-pop-dice{font-size:11px;font-weight:700;letter-spacing:.2em;color:var(--igs-battle-on-accent);background:var(--igs-battle-accent);padding:1px 8px;border-radius:3px;margin-bottom:3px;}
+.igs-fx-battle-pop-target{font-size:12px;color:var(--igs-battle-ink);padding:1px 8px;border-radius:999px;background:var(--igs-battle-bg);}
 .igs-fx-battle-hit[data-igs-battle-result="crit"] .igs-fx-battle-pop-label{color:var(--igs-battle-accent);font-size:clamp(30px,6.5vw,48px);}
 .igs-fx-battle-hit[data-igs-battle-result="miss"] .igs-fx-battle-pop-label{color:#c8d0e0;}
 .igs-fx-battle-hit[data-igs-battle-result="guard"] .igs-fx-battle-pop-label{color:#8fd8ff;}
@@ -37377,26 +37395,40 @@ const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-hit[data-igs-battle-target="sprite"] .igs-fx-battle-pop{top:50%;}
 .igs-fx-battle-result{position:absolute;inset:0;z-index:6;display:flex;align-items:center;justify-content:center;}
 .igs-fx-battle-result-veil{position:absolute;inset:0;background:rgba(0,0,0,.35);animation:igs-battle-veil var(--igs-battle-life,3s) ease-in-out both;}
-.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-result-veil{background:rgba(40,0,6,.55);backdrop-filter:grayscale(.85);-webkit-backdrop-filter:grayscale(.85);}
-.igs-fx-battle-ribbon{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:min(420px,78%);padding:14px 36px;background:linear-gradient(90deg,transparent,rgba(10,16,52,.92) 14%,rgba(10,16,52,.92) 86%,transparent);border-top:2px solid var(--igs-battle-accent);border-bottom:2px solid var(--igs-battle-accent);color:#fff;text-align:center;animation:igs-battle-ribbon var(--igs-battle-life,3s) cubic-bezier(.2,1,.3,1) both;}
-.igs-fx-battle-ribbon-title{font-size:clamp(30px,7vw,54px);font-weight:900;font-style:italic;letter-spacing:.14em;color:var(--igs-battle-accent);text-shadow:3px 3px 0 #000,0 0 22px rgba(255,215,106,.5);}
-.igs-fx-battle-ribbon-text{font-size:15px;letter-spacing:.4em;text-shadow:1px 1px 0 #000;}
+.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-result-veil{background:rgba(30,6,10,.6);}
+.igs-fx-battle-ribbon{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:min(420px,78%);padding:14px 36px;background:var(--igs-battle-bg);border-top:2px solid var(--igs-battle-accent);border-bottom:2px solid var(--igs-battle-accent);border-radius:var(--igs-battle-radius);box-shadow:var(--igs-battle-shadow);color:var(--igs-battle-ink);text-align:center;animation:igs-battle-ribbon var(--igs-battle-life,3s) cubic-bezier(.2,1,.3,1) both;}
+.igs-fx-battle-ribbon-title{font-size:clamp(30px,7vw,54px);font-weight:900;font-style:italic;letter-spacing:.14em;color:var(--igs-battle-accent);text-shadow:0 2px 0 var(--igs-battle-stroke);}
+.igs-fx-battle-ribbon-text{font-size:15px;letter-spacing:.4em;}
 .igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-ribbon{border-color:#b3262e;}
-.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-ribbon-title{color:#ff5a5a;text-shadow:3px 3px 0 #000,0 0 22px rgba(200,20,30,.6);}
+.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-ribbon-title{color:#e5484d;}
 .igs-fx-battle-result[data-igs-battle-result="escape"] .igs-fx-battle-ribbon{border-color:#8fb4d8;}
-.igs-fx-battle-result[data-igs-battle-result="escape"] .igs-fx-battle-ribbon-title{color:#cfe3f5;text-shadow:3px 3px 0 #000;}
+.igs-fx-battle-result[data-igs-battle-result="escape"] .igs-fx-battle-ribbon-title{color:#8fb4d8;}
 .igs-fx-battle-vignette.is-fantasy{background:radial-gradient(ellipse at center,transparent 50%,rgba(40,24,8,.45) 100%);}
 .igs-fx-battle-vignette.is-scifi{background:radial-gradient(ellipse at center,transparent 50%,rgba(4,30,46,.5) 100%);}
 .igs-fx-battle-vignette.is-apocalypse{background:radial-gradient(ellipse at center,transparent 45%,rgba(30,24,16,.55) 100%);}
-.igs-fx-battle-plate.is-fantasy{border:1px solid #9c7a46;background:linear-gradient(180deg,#efe2c2,#e2d0a6);color:#3a2614;font-family:Georgia,"Times New Roman",serif;}
-.igs-fx-battle-plate.is-scifi{border:1px solid rgba(80,220,255,.7);background:rgba(8,24,36,.9);color:#d8fbff;box-shadow:0 0 12px rgba(60,200,255,.45);}
-.igs-fx-battle-plate.is-apocalypse{border:1px dashed rgba(200,150,80,.6);background:rgba(48,40,32,.93);color:#e8dfcf;font-family:"Courier New",monospace;}
+.igs-fx-battle-encounter.is-fantasy,.igs-fx-battle-hit.is-fantasy,.igs-fx-battle-result.is-fantasy,.igs-fx-battle-plate.is-fantasy{--igs-battle-bg:linear-gradient(180deg,#efe2c2,#e2d0a6);--igs-battle-ink:#3a2614;--igs-battle-line:#9c7a46;--igs-battle-accent:#a8652a;--igs-battle-on-accent:#f6ecd4;--igs-battle-stroke:#3a2614;}
+.igs-fx-battle-plate.is-fantasy{font-family:Georgia,"Times New Roman",serif;}
+.igs-fx-battle-encounter.is-scifi,.igs-fx-battle-hit.is-scifi,.igs-fx-battle-result.is-scifi,.igs-fx-battle-plate.is-scifi{--igs-battle-bg:rgba(8,24,36,.9);--igs-battle-ink:#d8fbff;--igs-battle-line:rgba(80,220,255,.7);--igs-battle-accent:#5fe0ff;--igs-battle-shadow:0 0 12px rgba(60,200,255,.45);}
+.igs-fx-battle-encounter.is-apocalypse,.igs-fx-battle-hit.is-apocalypse,.igs-fx-battle-result.is-apocalypse,.igs-fx-battle-plate.is-apocalypse{--igs-battle-bg:rgba(48,40,32,.93);--igs-battle-ink:#e8dfcf;--igs-battle-line:rgba(200,150,80,.6);--igs-battle-accent:#d79a4a;--igs-battle-radius:2px;}
+.igs-fx-battle-plate.is-apocalypse{font-family:"Courier New",monospace;}
 .igs-fx-battle-encounter.is-fantasy .igs-fx-battle-vs,.igs-fx-battle-hit.is-fantasy .igs-fx-battle-skill,.igs-fx-battle-result.is-fantasy .igs-fx-battle-ribbon{font-family:Georgia,"Times New Roman",serif;}
-.igs-fx-battle-encounter.is-scifi .igs-fx-battle-vs,.igs-fx-battle-hit.is-scifi .igs-fx-battle-skill,.igs-fx-battle-result.is-scifi .igs-fx-battle-ribbon{letter-spacing:.08em;filter:drop-shadow(0 0 8px rgba(60,200,255,.7));}
-.igs-fx-battle-encounter.is-apocalypse .igs-fx-battle-vs,.igs-fx-battle-hit.is-apocalypse .igs-fx-battle-skill,.igs-fx-battle-result.is-apocalypse .igs-fx-battle-ribbon{font-family:"Courier New",monospace;filter:sepia(.35) saturate(.8);}
+.igs-fx-battle-encounter.is-scifi .igs-fx-battle-vs,.igs-fx-battle-hit.is-scifi .igs-fx-battle-skill,.igs-fx-battle-result.is-scifi .igs-fx-battle-ribbon{letter-spacing:.08em;}
+.igs-fx-battle-encounter.is-apocalypse .igs-fx-battle-vs,.igs-fx-battle-hit.is-apocalypse .igs-fx-battle-skill,.igs-fx-battle-result.is-apocalypse .igs-fx-battle-ribbon{font-family:"Courier New",monospace;}
 .igs-fx-battle-vignette.is-taisho{background:radial-gradient(ellipse at center,transparent 50%,rgba(50,16,12,.45) 100%);}
-.igs-fx-battle-plate.is-taisho{border:1px solid #7b2e2a;background:linear-gradient(180deg,#f4ead6,#e8dabb);color:#2a1c18;font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;}
-.igs-fx-battle-encounter.is-taisho .igs-fx-battle-vs,.igs-fx-battle-hit.is-taisho .igs-fx-battle-skill,.igs-fx-battle-result.is-taisho .igs-fx-battle-ribbon{font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;filter:sepia(.25);}
+.igs-fx-battle-encounter.is-taisho,.igs-fx-battle-hit.is-taisho,.igs-fx-battle-result.is-taisho,.igs-fx-battle-plate.is-taisho{--igs-battle-bg:linear-gradient(180deg,#f4ead6,#e8dabb);--igs-battle-ink:#2a1c18;--igs-battle-line:#7b2e2a;--igs-battle-accent:#a83a32;--igs-battle-on-accent:#f4ead6;--igs-battle-stroke:#2a1c18;}
+.igs-fx-battle-plate.is-taisho{font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;}
+.igs-fx-battle-encounter.is-taisho .igs-fx-battle-vs,.igs-fx-battle-hit.is-taisho .igs-fx-battle-skill,.igs-fx-battle-result.is-taisho .igs-fx-battle-ribbon{font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;}
+.igs-fx-battle-vignette.is-magic{background:radial-gradient(ellipse at center,transparent 48%,rgba(34,12,44,.5) 100%);}
+.igs-fx-battle-encounter.is-magic,.igs-fx-battle-hit.is-magic,.igs-fx-battle-result.is-magic,.igs-fx-battle-plate.is-magic{--igs-battle-bg:linear-gradient(180deg,#2c1624,#160b14);--igs-battle-ink:#f3e6c4;--igs-battle-line:#c9a24a;--igs-battle-accent:#ffd27a;--igs-battle-on-accent:#2c1624;--igs-battle-radius:4px;--igs-battle-shadow:0 0 0 1px rgba(201,162,74,.35),0 6px 22px rgba(0,0,0,.45);--igs-battle-stroke:#1a0c12;font-family:"IM Fell English",Georgia,"Times New Roman",serif;}
+.igs-fx-battle-encounter.is-magic .igs-fx-battle-wipe{background:radial-gradient(rgba(255,226,160,.45) 1px,transparent 1.6px) 0 0/22px 22px,var(--igs-battle-bg);}
+.igs-fx-battle-encounter.is-magic .igs-fx-battle-vs-cap,.igs-fx-battle-result.is-magic .igs-fx-battle-ribbon-title,.igs-fx-battle-hit.is-magic .igs-fx-battle-skill-name,.igs-fx-battle-hit.is-magic .igs-fx-battle-pop-label{font-style:italic;}
+.igs-fx-battle-hit.is-magic .igs-fx-battle-skill-name{color:var(--igs-battle-accent);text-shadow:0 0 6px rgba(255,200,110,.55);}
+.igs-fx-battle-hit.is-magic .igs-fx-battle-slash{height:6px;margin-top:-3px;border-radius:3px;transform-origin:0 50%;background:linear-gradient(90deg,transparent,#ffd27a 35%,#fff 62%,#ffd27a 80%,transparent);box-shadow:0 0 10px 3px rgba(255,190,90,.75);}
+.igs-fx-battle-hit.is-magic .igs-fx-battle-slash.is-cross,.igs-fx-battle-hit.is-magic[data-igs-battle-result="ko"] .igs-fx-battle-slash{background:linear-gradient(90deg,transparent,#ff6a4a 35%,#ffe0d0 62%,#ff6a4a 80%,transparent);box-shadow:0 0 12px 4px rgba(230,50,40,.75);}
+.igs-fx-battle-hit.is-magic .igs-fx-battle-flash{background:radial-gradient(circle at 50% 40%,rgba(255,250,230,.9),rgba(255,210,122,.45) 45%,transparent 75%);}
+.igs-fx-battle-hit.is-magic .igs-fx-battle-shield{color:#ffe6a8;filter:drop-shadow(0 0 8px rgba(255,214,130,.85));}
+.igs-fx-battle-hit.is-magic .igs-fx-battle-spark{background:radial-gradient(circle,#fff,#ffe08a 45%,transparent 70%);}
+.igs-fx-battle-result.is-magic .igs-fx-battle-ribbon::after{content:"";position:absolute;right:14px;top:50%;width:28px;height:28px;margin-top:-14px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#c9363d,#7a1218 70%);box-shadow:0 0 0 2px rgba(122,18,24,.45),0 2px 4px rgba(0,0,0,.4);}
 .igs-fx-battle-vignette.is-ancient{background:radial-gradient(ellipse at center,transparent 50%,rgba(26,18,12,.42) 100%);}
 .igs-fx-battle-plate.is-ancient{padding:4px 16px 4px 5px;border:1px solid rgba(43,29,18,.8);border-radius:2px;background:linear-gradient(180deg,#f6ecd4,#e9dab4);color:#1a120c;box-shadow:0 3px 12px rgba(26,18,12,.35);font-family:"STKaiti","KaiTi","Kaiti SC","楷体",serif;font-size:16px;letter-spacing:.12em;}
 .igs-fx-battle-plate.is-ancient .igs-fx-battle-plate-mark{padding:1px 4px;border-radius:2px;background:#b8452f;color:#f6ecd4;font-size:13px;font-weight:400;font-style:normal;box-shadow:inset 0 0 0 1px rgba(246,236,212,.7);}
@@ -37448,7 +37480,7 @@ const BATTLE_FX_STYLE_TEXT = `
 #igs-stage-motion[data-igs-fx-battle-motion="snappy"][data-igs-fx-battle-shake]{animation-timing-function:steps(3,end);}
 [data-igs-fx-static] .igs-fx-battle-wipe,[data-igs-fx-static] .igs-fx-battle-slash,[data-igs-fx-static] .igs-fx-battle-spark,[data-igs-fx-static] .igs-fx-battle-hurt,[data-igs-fx-static] .igs-fx-battle-flash{display:none;}
 [data-igs-fx-static] *{animation:none!important;}
-@keyframes igs-battle-portrait-in{0%{opacity:0;transform:translateX(24%);filter:brightness(0)}22%{opacity:1;transform:none;filter:brightness(0) drop-shadow(0 0 14px rgba(255,60,60,.85))}46%{filter:brightness(1) drop-shadow(0 0 16px rgba(255,60,60,.55))}82%{opacity:1}100%{opacity:0}}
+@keyframes igs-battle-portrait-in{0%{opacity:0;transform:translateX(24%);filter:brightness(0)}22%{opacity:1;transform:none;filter:brightness(0)}46%{filter:brightness(1)}82%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-foe-life{0%{opacity:0;transform:translateX(-46%)}14%{opacity:1;transform:translateX(-50%)}84%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-foe-hit{0%{transform:none;filter:none}35%{transform:translateX(3%) rotate(1.5deg);filter:brightness(2)}100%{transform:none;filter:none}}
 @keyframes igs-battle-foe-crit{0%{transform:none;filter:none}30%{transform:translateX(6%) rotate(3deg);filter:brightness(2.8)}60%{transform:translateX(-1%)}100%{transform:none;filter:none}}
@@ -37472,7 +37504,7 @@ const BATTLE_FX_STYLE_TEXT = `
 @keyframes igs-battle-pop{0%{opacity:0;transform:translate(-50%,16px) scale(.6)}25%{opacity:1;transform:translate(-50%,0) scale(1.08)}35%{transform:translate(-50%,0) scale(1)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-12px)}}
 @keyframes igs-battle-veil{0%{opacity:0}12%,85%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-ribbon{0%{opacity:0;transform:scaleX(.1)}14%{opacity:1;transform:scaleX(1)}86%{opacity:1;transform:scaleX(1)}100%{opacity:0;transform:scaleX(1.05)}}
-@keyframes igs-battle-portrait-ink{0%{opacity:0;transform:translateX(24%);filter:grayscale(1) brightness(.12)}22%{opacity:1;transform:none;filter:grayscale(1) brightness(.12) drop-shadow(0 0 12px rgba(26,18,12,.7))}46%{filter:sepia(.3) drop-shadow(0 0 10px rgba(26,18,12,.45))}82%{opacity:1}100%{opacity:0}}
+@keyframes igs-battle-portrait-ink{0%{opacity:0;transform:translateX(24%);filter:grayscale(1) brightness(.12)}22%{opacity:1;transform:none;filter:grayscale(1) brightness(.12)}46%{filter:sepia(.3)}82%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-brush{0%{opacity:0;transform:translateX(-50%) rotate(-5deg) scale(1.2);clip-path:inset(-20% 100% -20% -20%);filter:blur(2px)}16%{opacity:1;transform:translateX(-50%) rotate(-5deg) scale(1);clip-path:inset(-20% -20% -20% -20%);filter:none}80%{opacity:1}100%{opacity:0;transform:translateX(-50%) rotate(-5deg) scale(1.03);clip-path:inset(-20% -20% -20% -20%)}}
 @keyframes igs-battle-ink-slash{0%,55%{opacity:1;transform:rotate(var(--igs-slash-rot,28deg)) translateY(var(--igs-slash-shift,0px))}100%{opacity:0;transform:rotate(var(--igs-slash-rot,28deg)) translateY(var(--igs-slash-shift,0px)) translateX(3%) scaleY(.35)}}
 @keyframes igs-battle-ink-sweep{from{transform:scaleX(0)}to{transform:scaleX(1)}}
@@ -38291,7 +38323,7 @@ __igsDefine(exports, "applyHtmlCardToDom", () => applyHtmlCardToDom);
 __igsDefine(exports, "HTML_CARD_LAYER_STYLE_TEXT", () => HTML_CARD_LAYER_STYLE_TEXT);
 });
 __igsRegister("src/visual/igs-ui/chat-layer.js", function(module, exports, require) {
-const { worldSkinOf } = require("src/scene/worldview.js");const { prefersReducedMotion } = require("src/visual/igs-ui/reduced-motion.js");
+const { withMagicSkin, worldSkinOf } = require("src/scene/worldview.js");const { prefersReducedMotion } = require("src/visual/igs-ui/reduced-motion.js");
 const { chatRevealDelayMs, normalizeChatShowSettings } = require("src/visual/igs-ui/chat-show-runtime.js");
 const { chatSfxKindForSide, playChatSfx } = require("src/visual/igs-ui/chat-sfx.js");
 const FIRST_AUTO_DELAY_MS = 250;
@@ -38653,7 +38685,7 @@ function getChatRevealState(root) {
     const state = layer && states.get(layer);
     return state ? { revealed: state.revealed, total: state.rows.length, pending: state.timer != null, typing: Boolean(state.typingRow) } : null;
 }
-const CHAT_LAYER_STYLE_TEXT = `
+const CHAT_LAYER_STYLE_TEXT = withMagicSkin(`
 #igs-chat-layer{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;padding:clamp(52px,9%,72px) clamp(10px,4%,32px) clamp(16px,5%,40px);box-sizing:border-box;background:rgba(0,0,0,var(--igs-chat-dim,.45));cursor:pointer;font-family:var(--igs-chat-font,inherit);}
 #igs-chat-layer[hidden]{display:none;}
 #igs-overlay.igs-options-visible #igs-chat-layer{display:none;}
@@ -38748,7 +38780,7 @@ const CHAT_LAYER_STYLE_TEXT = `
 #igs-overlay.igs-chat-page #igs-dialog-layer{visibility:hidden;}
 #igs-overlay.igs-record-screen-open #igs-chat-layer{display:none!important;}
 @media (prefers-reduced-motion: reduce){#igs-chat-layer .igs-chat-row.igs-chat-pop,#igs-chat-layer .igs-chat-dot{animation:none!important;}}
-`.trim();
+`.trim());
 
 __igsDefine(exports, "ensureChatLayer", () => ensureChatLayer);
 __igsDefine(exports, "cancelChatShow", () => cancelChatShow);
@@ -41917,7 +41949,7 @@ function applyReaderModeRuntime(root, snapshot, current, ctx = {}) {
     current.runtime = runtime;
 
     if (isEmbeddedReaderMode(snapshot.mode)) {
-        applyEmbeddedReaderRuntime(root, runtime);
+        applyEmbeddedReaderRuntime(root, runtime, ctx);
         return;
     }
     if (snapshot.mode === 'pc' || snapshot.mode === 'mobile') {
@@ -41936,7 +41968,7 @@ function applyReaderModeRuntime(root, snapshot, current, ctx = {}) {
 // 楼层内嵌：阅读器完全受宿主楼层容器约束，不做 fixed、不锁滚动、不请求全屏、不可拖动。
 // 尺寸交给 .igs-mode-embedded 的 CSS（固定高度、16:9 上限、移动端 dVH 上限）统一控制，
 // 这里只清掉可能从上一次内联模式残留下来的几何属性。
-function applyEmbeddedReaderRuntime(root, runtime) {
+function applyEmbeddedReaderRuntime(root, runtime, ctx = {}) {
     if (!root || !root.style) return;
     for (const prop of [
         'top', 'right', 'bottom', 'left', 'width', 'height',
@@ -41950,6 +41982,12 @@ function applyEmbeddedReaderRuntime(root, runtime) {
         runtime.cleanup.push(() => {
             if (root.classList) root.classList.remove('igs-mode-embedded');
         });
+    }
+    // 横竖恢复监听由渲染层注入并挂进同一 runtime，切模式/关闭时随 cleanup 解绑。
+    const watchEmbeddedFrame = ctx && typeof ctx.watchEmbeddedFrame === 'function' ? ctx.watchEmbeddedFrame : null;
+    if (runtime && watchEmbeddedFrame) {
+        const unwatch = watchEmbeddedFrame(runtime);
+        if (typeof unwatch === 'function') addRuntimeCleanup(runtime, unwatch);
     }
 }
 function clearReaderModeRuntime(current) {
@@ -54971,7 +55009,7 @@ const { applySceneAudio } = require("src/visual/igs-ui/scene-audio.js");
 const { applyTextFxMarkup, armTextFx, disarmTextFx } = require("src/visual/igs-ui/text-fx.js");
 const { preloadDialogFonts, resolveDialogFontMetrics } = require("src/visual/igs-ui/dialog-theme-typography.js");
 const { clearSpriteOutfitSwap, spriteLookOf } = require("src/visual/igs-ui/sprite-outfit-swap.js");
-const { cgSizeForMode } = require("src/generated-images/illustration/auto-illustration-service.js");
+const { cgSizeForMode, EMBEDDED_PHONE_MAX_WIDTH } = require("src/generated-images/illustration/auto-illustration-service.js");
 const { applyClickWaitMark } = require("src/visual/igs-ui/click-wait-mark.js");
 const { applyHtmlCardToDom } = require("src/visual/igs-ui/html-card-layer.js");
 const { applyChatToDom } = require("src/visual/igs-ui/chat-layer.js");
@@ -55917,6 +55955,43 @@ function syncEmbeddedHostFrame(root, sizeText) {
     if (typeof host.setAttribute === 'function') host.setAttribute('data-igs-frame', 'size');
 }
 
+// 内嵌框横竖恢复：旋转屏幕只改宿主栏宽，渲染快照不会自动重跑，钉错的 aspect-ratio 会一直残留。
+// 观察宿主宽度跨过手机阈值（EMBEDDED_PHONE_MAX_WIDTH）时按同一 cgSizeForMode 规则重钉一次，
+// 只写宿主 aspect-ratio，不重绘阅读器。宿主断开或阅读器退出内嵌时解绑。
+function watchEmbeddedFrameResize(overlay, frameState) {
+    if (!overlay || !frameState) return null;
+    const host = typeof overlay.closest === 'function' ? overlay.closest('.igs-embedded-host') : null;
+    const doc = overlay.ownerDocument || null;
+    const win = (doc && doc.defaultView) || null;
+    if (!host || !win || typeof win.ResizeObserver !== 'function') return null;
+    const measure = () => {
+        const rect = typeof host.getBoundingClientRect === 'function' ? host.getBoundingClientRect() : null;
+        return rect ? Number(rect.width) || 0 : 0;
+    };
+    const isPhoneWidth = (width) => width > 0 && width <= EMBEDDED_PHONE_MAX_WIDTH;
+    let lastPhone = isPhoneWidth(measure());
+    let observer = null;
+    const unobserve = () => {
+        if (!observer) return;
+        try { observer.disconnect(); } catch (error) { /* best-effort */ }
+        observer = null;
+    };
+    observer = new win.ResizeObserver(() => {
+        if (host.isConnected === false) { unobserve(); return; }
+        const width = measure();
+        const phone = isPhoneWidth(width);
+        if (phone === lastPhone) return;
+        lastPhone = phone;
+        const sizeText = cgSizeForMode(frameState.backgroundSize, frameState.mode, { width, height: 0 });
+        const match = String(sizeText || '').match(/^(\d+)\s*[xX×]\s*(\d+)$/);
+        if (!match) return;
+        if (host.style && host.style.aspectRatio === `${match[1]} / ${match[2]}`) return;
+        syncEmbeddedHostFrame(overlay, sizeText);
+    });
+    observer.observe(host);
+    return unobserve;
+}
+
 function writeBackgroundImage(element, url) {
     const value = url ? `url("${url.replace(/"/g, '&quot;')}")` : '';
     if (backgroundImageKeys.get(element) === value) return;
@@ -55980,6 +56055,12 @@ function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const frameViewport = frameRect && frameRect.width > 0
         ? { width: frameRect.width, height: frameRect.height }
         : null;
+    if (current && typeof current === 'object') {
+        // 渲染主路径每张快照刷新钉尺寸输入；宽度观察器跨阈值时按同一份输入重算。
+        const frameState = current.embeddedFrame || (current.embeddedFrame = {});
+        frameState.backgroundSize = snapshot.readerSettings ? snapshot.readerSettings._cgBackgroundSize : '';
+        frameState.mode = snapshot.mode;
+    }
     syncEmbeddedHostFrame(root, cgSizeForMode(
         snapshot.readerSettings && snapshot.readerSettings._cgBackgroundSize,
         snapshot.mode,
@@ -56498,6 +56579,7 @@ function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     applyReaderModeRuntime(root, snapshot, current, {
         isActiveReader: (reader) => (typeof ctx.isActiveReader === 'function' ? ctx.isActiveReader(reader) : true),
         requestClose: () => { if (typeof ctx.closeReader === 'function') ctx.closeReader(); },
+        watchEmbeddedFrame: () => watchEmbeddedFrameResize(root, current && current.embeddedFrame),
     });
     if (textEl && typewriterRenderKey) {
         const typewriterSettings = snapshot.readerSettings.typewriter || {};
@@ -56536,6 +56618,7 @@ __igsDefine(exports, "applyAlignStyle", () => applyAlignStyle);
 __igsDefine(exports, "applyStatusHudToDom", () => applyStatusHudToDom);
 __igsDefine(exports, "applyStatusHudScale", () => applyStatusHudScale);
 __igsDefine(exports, "syncEmbeddedHostFrame", () => syncEmbeddedHostFrame);
+__igsDefine(exports, "watchEmbeddedFrameResize", () => watchEmbeddedFrameResize);
 __igsDefine(exports, "applyReaderSnapshotToDom", () => applyReaderSnapshotToDom);
 });
 __igsRegister("src/visual/igs-ui/fx-item-render.js", function(module, exports, require) {
@@ -57483,6 +57566,7 @@ __igsDefine(exports, "bindCharacterDnaToCaption", () => bindCharacterDnaToCaptio
 __igsDefine(exports, "createAutoIllustrationService", () => createAutoIllustrationService);
 __igsDefine(exports, "ILLUSTRATION_UPDATED_EVENT", () => ILLUSTRATION_UPDATED_EVENT);
 __igsDefine(exports, "ILLUSTRATION_PROGRESS_EVENT", () => ILLUSTRATION_PROGRESS_EVENT);
+__igsDefine(exports, "EMBEDDED_PHONE_MAX_WIDTH", () => EMBEDDED_PHONE_MAX_WIDTH);
 });
 __igsRegister("src/generated-images/illustration/marker-placer.js", function(module, exports, require) {
 const { stripOutfitFields } = require("src/scene/directive-tags.js");
@@ -57783,7 +57867,7 @@ __igsDefine(exports, "parseIllustrationPlan", () => parseIllustrationPlan);
 __igsRegister("src/visual/igs-ui/dialog-skin-style.js", function(module, exports, require) {
 const { CLASSIC_DIALOG_STYLE_TEXT, DIALOG_SKIN_WESTERN_CLASSIC, normalizeDialogSkin } = require("src/visual/igs-ui/classic-dialog-skin.js");
 const { DIALOG_THEME_CHOICE_STYLE_BY_SKIN } = require("src/visual/igs-ui/dialog-theme-choices.js");
-const { getDialogThemeHudStyleText, getDialogThemeItemFxStyleText, getDialogThemeToastStyleText } = require("src/visual/igs-ui/dialog-theme-hud.js");
+const { getDialogThemeBattleFxStyleText, getDialogThemeHudStyleText, getDialogThemeItemFxStyleText, getDialogThemeToastStyleText } = require("src/visual/igs-ui/dialog-theme-hud.js");
 const { ILLUSTRATED_DIALOG_STYLE_BY_SKIN } = require("src/visual/igs-ui/dialog-theme-skins.js");
 const DIALOG_SKIN_STYLE_ID = 'igs-dialog-skin-style';
 const DIALOG_SKIN_FALLBACK_ATTR = 'data-igs-skin-fallback';
@@ -57834,6 +57918,7 @@ function getDialogSkinStyleText(value, { base } = {}) {
         DIALOG_THEME_CHOICE_STYLE_BY_SKIN[skin],
         getDialogThemeHudStyleText(skin),
         getDialogThemeItemFxStyleText(skin),
+        getDialogThemeBattleFxStyleText(skin),
         getDialogThemeToastStyleText(skin),
         fallbackCss(skin),
     ].filter(Boolean);
@@ -58153,6 +58238,27 @@ function getDialogThemeHudStyleText(skin) {
     const theme = HUD_THEMES[skin];
     return theme ? hudThemeRules(skin, theme) : '';
 }
+
+// 战斗演出（名牌 / 招式条 / 遭遇横幅 / 结算）只换配色变量：底、墨、描边、强调、圆角、投影；样式结构仍由 fx-battle 决定。
+// 选择器带 #igs-overlay 皮肤前缀，优先于世界观换皮；古代水墨样式写死颜色，不受影响。
+const BATTLE_FX_VARS = Object.freeze({
+    [DIALOG_SKIN_CUTE_PINK]: ['#fff', '#6b4454', '#5e5356', '#e5779a', '#fff', '16px', '0 4px 0 #d9416f', '#5e5356'],
+    [DIALOG_SKIN_RETRO_JAPANESE]: ['#f3e7cf', '#4a3527', '#6b4a36', '#a8553a', '#f6e6c4', '3px', 'inset 0 0 0 3px #f3e7cf,inset 0 0 0 4px #b98c5d,0 2px 6px rgba(0,0,0,.28)', '#4a3527'],
+    [DIALOG_SKIN_BLACK_WHITE_MANGA]: ['radial-gradient(rgba(23,20,18,.1) 1px,transparent 1.3px) 0 0/5px 5px,#f3eee4', '#171412', '#171412', '#171412', '#fff', '2px', '4px 4px 0 #171412', '#171412'],
+    [DIALOG_SKIN_ADVENTURE_JOURNEY]: ['linear-gradient(180deg,#4d3c32,#3a2d26)', '#ecdcbc', '#b98a5a', '#d9aa6e', '#2a201b', '6px', 'inset 0 0 0 1px #b98a5a,0 3px 8px rgba(0,0,0,.35)', '#2a201b'],
+    [DIALOG_SKIN_DAY_MINIMAL]: ['rgba(255,255,255,.9)', '#3a3935', 'rgba(58,57,53,.25)', '#e0826c', '#fff', '0', '0 1px 0 rgba(120,118,104,.35)', '#3a3935'],
+    [DIALOG_SKIN_WARM_PICTUREBOOK]: ['#f1ede9', '#4f4a45', '#4f4a45', '#5aa79b', '#fff', '14px', '0 3px 0 rgba(79,74,69,.25)', '#4f4a45'],
+    [CLASSIC]: ['linear-gradient(180deg,rgba(63,67,50,.95),rgba(42,45,33,.95))', '#eadfbf', '#b8903f', '#d9b061', '#2a241a', '5px', 'inset 0 0 0 2px rgba(38,31,23,.92),0 3px 10px rgba(0,0,0,.35)', '#1e1a12'],
+    [DIALOG_SKIN_ELEGANT_EUROPEAN]: ['rgba(6,6,12,.82)', '#eeeaf3', 'rgba(196,176,255,.65)', '#c4b0ff', '#14101f', '0', '0 0 12px rgba(150,120,255,.3)', '#0a0812'],
+    [DIALOG_SKIN_PLANT_COFFEE]: ['#f6f1eb', '#5b4643', '#5c4949', '#7f9e48', '#fff', '18px', '0 3px 0 rgba(92,73,73,.2)', '#5c4949'],
+    [DIALOG_SKIN_GRADIENT_VEIL]: ['rgba(0,0,0,.55)', '#fff', 'rgba(255,238,184,.7)', '#ffeeb8', '#1a1a1a', '0', 'none', 'rgba(0,0,0,.85)'],
+});
+function getDialogThemeBattleFxStyleText(skin) {
+    const v = BATTLE_FX_VARS[skin];
+    if (!v) return '';
+    const [bg, ink, line, accent, onAccent, radius, shadow, stroke] = v;
+    return `#igs-overlay[data-igs-dialog-skin="${skin}"] :is(.igs-fx-battle-plate,.igs-fx-battle-encounter,.igs-fx-battle-hit,.igs-fx-battle-result){--igs-battle-bg:${bg};--igs-battle-ink:${ink};--igs-battle-line:${line};--igs-battle-accent:${accent};--igs-battle-on-accent:${onAccent};--igs-battle-radius:${radius};--igs-battle-shadow:${shadow};--igs-battle-stroke:${stroke};}`;
+}
 function getDialogThemeItemFxStyleText(skin) {
     const theme = HUD_THEMES[skin];
     return theme ? itemFxThemeRules(skin, theme) : '';
@@ -58160,6 +58266,7 @@ function getDialogThemeItemFxStyleText(skin) {
 
 __igsDefine(exports, "getDialogThemeToastStyleText", () => getDialogThemeToastStyleText);
 __igsDefine(exports, "getDialogThemeHudStyleText", () => getDialogThemeHudStyleText);
+__igsDefine(exports, "getDialogThemeBattleFxStyleText", () => getDialogThemeBattleFxStyleText);
 __igsDefine(exports, "getDialogThemeItemFxStyleText", () => getDialogThemeItemFxStyleText);
 __igsDefine(exports, "DIALOG_THEME_HUD_STYLE_TEXT", () => DIALOG_THEME_HUD_STYLE_TEXT);
 __igsDefine(exports, "DIALOG_THEME_ITEM_FX_STYLE_TEXT", () => DIALOG_THEME_ITEM_FX_STYLE_TEXT);

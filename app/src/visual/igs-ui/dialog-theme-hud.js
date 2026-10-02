@@ -225,6 +225,28 @@ export function getDialogThemeHudStyleText(skin) {
     return theme ? hudThemeRules(skin, theme) : '';
 }
 
+// 战斗演出（名牌 / 招式条 / 遭遇横幅 / 结算）只换配色变量：底、墨、描边、强调、圆角、投影；样式结构仍由 fx-battle 决定。
+// 选择器带 #igs-overlay 皮肤前缀，优先于世界观换皮；古代水墨样式写死颜色，不受影响。
+const BATTLE_FX_VARS = Object.freeze({
+    [DIALOG_SKIN_CUTE_PINK]: ['#fff', '#6b4454', '#5e5356', '#e5779a', '#fff', '16px', '0 4px 0 #d9416f', '#5e5356'],
+    [DIALOG_SKIN_RETRO_JAPANESE]: ['#f3e7cf', '#4a3527', '#6b4a36', '#a8553a', '#f6e6c4', '3px', 'inset 0 0 0 3px #f3e7cf,inset 0 0 0 4px #b98c5d,0 2px 6px rgba(0,0,0,.28)', '#4a3527'],
+    [DIALOG_SKIN_BLACK_WHITE_MANGA]: ['radial-gradient(rgba(23,20,18,.1) 1px,transparent 1.3px) 0 0/5px 5px,#f3eee4', '#171412', '#171412', '#171412', '#fff', '2px', '4px 4px 0 #171412', '#171412'],
+    [DIALOG_SKIN_ADVENTURE_JOURNEY]: ['linear-gradient(180deg,#4d3c32,#3a2d26)', '#ecdcbc', '#b98a5a', '#d9aa6e', '#2a201b', '6px', 'inset 0 0 0 1px #b98a5a,0 3px 8px rgba(0,0,0,.35)', '#2a201b'],
+    [DIALOG_SKIN_DAY_MINIMAL]: ['rgba(255,255,255,.9)', '#3a3935', 'rgba(58,57,53,.25)', '#e0826c', '#fff', '0', '0 1px 0 rgba(120,118,104,.35)', '#3a3935'],
+    [DIALOG_SKIN_WARM_PICTUREBOOK]: ['#f1ede9', '#4f4a45', '#4f4a45', '#5aa79b', '#fff', '14px', '0 3px 0 rgba(79,74,69,.25)', '#4f4a45'],
+    [CLASSIC]: ['linear-gradient(180deg,rgba(63,67,50,.95),rgba(42,45,33,.95))', '#eadfbf', '#b8903f', '#d9b061', '#2a241a', '5px', 'inset 0 0 0 2px rgba(38,31,23,.92),0 3px 10px rgba(0,0,0,.35)', '#1e1a12'],
+    [DIALOG_SKIN_ELEGANT_EUROPEAN]: ['rgba(6,6,12,.82)', '#eeeaf3', 'rgba(196,176,255,.65)', '#c4b0ff', '#14101f', '0', '0 0 12px rgba(150,120,255,.3)', '#0a0812'],
+    [DIALOG_SKIN_PLANT_COFFEE]: ['#f6f1eb', '#5b4643', '#5c4949', '#7f9e48', '#fff', '18px', '0 3px 0 rgba(92,73,73,.2)', '#5c4949'],
+    [DIALOG_SKIN_GRADIENT_VEIL]: ['rgba(0,0,0,.55)', '#fff', 'rgba(255,238,184,.7)', '#ffeeb8', '#1a1a1a', '0', 'none', 'rgba(0,0,0,.85)'],
+});
+
+export function getDialogThemeBattleFxStyleText(skin) {
+    const v = BATTLE_FX_VARS[skin];
+    if (!v) return '';
+    const [bg, ink, line, accent, onAccent, radius, shadow, stroke] = v;
+    return `#igs-overlay[data-igs-dialog-skin="${skin}"] :is(.igs-fx-battle-plate,.igs-fx-battle-encounter,.igs-fx-battle-hit,.igs-fx-battle-result){--igs-battle-bg:${bg};--igs-battle-ink:${ink};--igs-battle-line:${line};--igs-battle-accent:${accent};--igs-battle-on-accent:${onAccent};--igs-battle-radius:${radius};--igs-battle-shadow:${shadow};--igs-battle-stroke:${stroke};}`;
+}
+
 export function getDialogThemeItemFxStyleText(skin) {
     const theme = HUD_THEMES[skin];
     return theme ? itemFxThemeRules(skin, theme) : '';

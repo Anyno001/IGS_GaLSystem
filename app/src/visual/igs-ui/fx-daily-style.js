@@ -1,6 +1,7 @@
+import { withMagicSkin } from '../../scene/worldview.js';
 // 日常演出样式。所有卡片的寿命由 --igs-dfx-life 驱动，进出场用百分比关键帧跟随寿命伸缩。
 const RED = '#c8392b';
-export const DAILY_FX_STYLE_TEXT = `
+export const DAILY_FX_STYLE_TEXT = withMagicSkin(`
 #igs-overlay .igs-dfx{position:absolute;inset:0;pointer-events:none;--igs-dfx-life:3000ms;}
 #igs-overlay .igs-dfx-sky{position:absolute;inset:0;pointer-events:none;overflow:hidden;}
 #igs-overlay .igs-dfx-sky canvas,#igs-overlay .igs-dfx-petals canvas{position:absolute;inset:0;width:100%;height:100%;}
@@ -306,4 +307,4 @@ export const DAILY_FX_STYLE_TEXT = `
 #igs-overlay .igs-dfx-tea-steam i:nth-child(3){animation-delay:.8s;}
 #igs-overlay .igs-dfx-bow{display:none;}
 
-`;
+`);

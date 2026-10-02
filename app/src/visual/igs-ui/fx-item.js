@@ -1,4 +1,4 @@
-import { worldSkinOf } from '../../scene/worldview.js';
+import { withMagicSkin, worldSkinOf } from '../../scene/worldview.js';
 
 // 获得物品演出 DOM 层：挂在 fx 前层（立绘之上、对话层之下）。
 // 同一身份（消息|swipe|页）重绘不重播；图片后到只在身份仍一致时淡入替换占位；计时器统一回收。
@@ -413,7 +413,7 @@ export function cancelItemFx(root) {
 }
 
 // 颜色走变量：--igs-item-bg / --igs-item-ink / --igs-item-accent，对话框皮肤在 dialog-theme-hud 里按 HUD 面板换装。
-export const ITEM_FX_STYLE_TEXT = `
+export const ITEM_FX_STYLE_TEXT = withMagicSkin(`
 .igs-fx-item-stack{--igs-item-accent-c:var(--igs-item-accent,#ffcf5a);position:absolute;right:clamp(12px,4%,36px);top:clamp(56px,12%,96px);display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;z-index:3;}
 .igs-fx-item-card{position:relative;display:flex;align-items:center;gap:10px;max-width:min(320px,70vw);padding:8px 14px 8px 12px;border-radius:12px;background:var(--igs-item-bg,rgba(18,18,22,.8));color:var(--igs-item-ink,#fff);box-shadow:0 4px 16px rgba(0,0,0,.35);overflow:hidden;pointer-events:auto;cursor:pointer;animation:igs-fx-item-in .36s cubic-bezier(.2,.9,.3,1.2) both;}
 .igs-fx-item-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--igs-item-accent-c);}
@@ -538,4 +538,4 @@ export const ITEM_FX_STYLE_TEXT = `
 @keyframes igs-fx-item-plate{0%{opacity:0;transform:translateY(24px) scale(.8);}100%{opacity:1;transform:none;}}
 @keyframes igs-fx-item-rays{to{transform:rotate(360deg);}}
 @media (prefers-reduced-motion: reduce){.igs-fx-item-card,.igs-fx-item-card *,.igs-fx-item-card *::after,.igs-fx-item-showcase,.igs-fx-item-showcase *,.igs-fx-item-flyer{animation:none!important;}}
-`;
+`);

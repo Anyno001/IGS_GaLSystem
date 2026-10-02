@@ -1,3 +1,4 @@
+import { withMagicSkin } from '../../scene/worldview.js';
 // 演出样式：#igs-fx-stage 在立绘之上、对话层之下；#igs-fx-front 在对话层与选项之上、工具栏之下。
 // 区间演出由 #igs-stage-motion 上的 data-igs-fx-* 属性驱动，皮肤可覆写。
 // 瞬时演出时长读 --igs-fx-life（运行时按停留档位写入）；data-igs-fx-motion="snappy" 为灵动演出：
@@ -6,7 +7,7 @@ const HANDSET_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
 const HANDSET = `url("data:image/svg+xml,${encodeURIComponent(HANDSET_SVG)}")`;
 // 通话计时：注册成整数的自定义属性由动画逐秒步进，再经 counter 显示成 mm:ss，全程不需要脚本每秒改 DOM。
 const CALL_TIMER_ANIMATION = 'igs-fx-mm 3600s steps(60,end) infinite,igs-fx-ss 60s steps(60,end) infinite';
-export const FX_STYLE_TEXT = `
+export const FX_STYLE_TEXT = withMagicSkin(`
 @property --igs-fx-mm{syntax:"<integer>";inherits:false;initial-value:0;}
 @property --igs-fx-ss{syntax:"<integer>";inherits:false;initial-value:0;}
 .igs-fx-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;contain:layout paint style;}
@@ -352,4 +353,4 @@ export const FX_STYLE_TEXT = `
 .igs-fx-notify.is-ancient{transform:none;}
 .igs-fx-symbol{transform:none;}
 }
-`.trim();
+`.trim());
