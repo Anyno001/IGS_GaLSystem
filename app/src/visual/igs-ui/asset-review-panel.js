@@ -6,9 +6,11 @@ export const ASSET_REVIEW_STYLE_TEXT = `
 .igs-asset-review-thumb{width:72px;height:72px;flex:none;border-radius:8px;background:rgba(255,255,255,.08);object-fit:contain;}
 .igs-asset-review-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;}
 .igs-asset-review-body input{width:100%;box-sizing:border-box;padding:4px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.25);background:rgba(0,0,0,.25);color:inherit;}
-.igs-asset-review-actions{display:flex;gap:6px;flex-wrap:wrap;}
-.igs-asset-review-actions button,.igs-asset-review-later{padding:3px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:transparent;color:inherit;cursor:pointer;font-size:12px;}
-.igs-asset-review-later{margin-top:8px;}
+.igs-asset-review-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;}
+.igs-asset-review-actions button{min-height:28px;padding:4px 8px;border-radius:6px;border:0;background:rgba(255,255,255,.1);color:inherit;cursor:pointer;font-size:12px;line-height:18px;text-align:center;}
+.igs-asset-review-actions button.is-primary{grid-column:1/-1;background:rgba(255,255,255,.2);font-weight:600;}
+.igs-asset-review-actions button:hover{background:rgba(255,255,255,.26);}
+.igs-asset-review-actions button:focus-visible{outline:2px solid rgba(255,255,255,.6);outline-offset:1px;}
 `;
 
 const TYPE_LABEL = { sprite: '立绘', background: '背景' };
@@ -43,10 +45,16 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
         input.addEventListener('keydown', (event) => event.stopPropagation());
         const actions = doc.createElement('div');
         actions.className = 'igs-asset-review-actions';
-        for (const [act, text] of [['library', '加入素材库'], ['chat', '仅本聊天'], ['discarded', '丢弃']]) {
+        // 立绘额外提供「加入素材库并编辑 DNA」：先完成入库，再把 tags 作为 DNA 候选交给设置页，由用户确认后才写入。
+        const acts = [['library', '加入素材库'], ['chat', '仅本聊天'], ['discarded', '丢弃']];
+        if (item.type === 'sprite') acts.splice(1, 0, ['library-dna', '加入素材库并编辑 DNA']);
+        for (const [act, text] of acts) {
             const button = doc.createElement('button');
             button.type = 'button';
             button.textContent = text;
+            // 入库类为主操作，各占一整行；「仅本聊天 / 丢弃」两列并排，保证按钮对齐。
+            if (act === 'library' || act === 'library-dna') button.className = 'is-primary';
+            button.setAttribute('data-asset-review-act', act);
             button.addEventListener('click', (event) => {
                 event.stopPropagation();
                 if (typeof handlers.onResolve === 'function') handlers.onResolve(item, act, input.value.trim());
@@ -57,14 +65,5 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
         row.append(thumb, body);
         container.appendChild(row);
     }
-    const later = doc.createElement('button');
-    later.type = 'button';
-    later.className = 'igs-asset-review-later';
-    later.textContent = '稍后再说';
-    later.addEventListener('click', (event) => {
-        event.stopPropagation();
-        if (typeof handlers.onLater === 'function') handlers.onLater();
-    });
-    container.appendChild(later);
     container.removeAttribute('hidden');
 }

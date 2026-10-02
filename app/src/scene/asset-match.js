@@ -1,4 +1,5 @@
-import { lookupSceneBackground, lookupSceneAssetUrls, resolveCharacterKey } from './scene-directives.js';
+import { lookupSceneBackground, lookupSceneAssetUrls, resolveCharacterKey, lookupAssetValue } from './scene-directives.js';
+import { OUTFIT_RESET, outfitsOfCharacter } from './character-outfits.js';
 
 export const GENERATED_ASSET_URL_PREFIX = 'igs-gen:';
 
@@ -19,13 +20,90 @@ const plainObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v 
 
 // 生成区与用户上传区分开存放：bridge.sceneAssets.generated = { scenes, characters, characterAliases }，
 // 结构与用户区一致，图片地址统一是 igs-gen:<imageId>，图片本体在 IndexedDB。
+function normalizeExpressionNotes(value) {
+    const src = plainObject(value);
+    const out = {};
+    for (const [name, moods] of Object.entries(src)) {
+        const bucket = {};
+        for (const [mood, note] of Object.entries(plainObject(moods))) {
+            const item = plainObject(note);
+            const positive = typeof item.positive === 'string' ? item.positive : '';
+            const negative = typeof item.negative === 'string' ? item.negative : '';
+            const error = typeof item.error === 'string' ? item.error : '';
+            const caption = item.caption && typeof item.caption === 'object' && !Array.isArray(item.caption)
+                ? item.caption : null;
+            if (!String(mood || '').trim() || (!positive && !negative && !error && !caption)) continue;
+            bucket[String(mood).trim()] = { positive, negative, error, ...(caption ? { caption } : {}) };
+        }
+        if (Object.keys(bucket).length) out[name] = bucket;
+    }
+    return out;
+}
+
 export function normalizeGeneratedLibrary(value) {
     const src = plainObject(value);
     return {
         scenes: plainObject(src.scenes),
         characters: plainObject(src.characters),
         characterAliases: plainObject(src.characterAliases),
+        expressionNotes: normalizeExpressionNotes(src.expressionNotes),
     };
+}
+
+export function setGeneratedExpressionImage(library, name, mood, imageId) {
+    const next = JSON.parse(JSON.stringify(normalizeGeneratedLibrary(library)));
+    const character = String(name || '').trim();
+    const label = String(mood || '').trim();
+    const id = String(imageId || '').trim();
+    if (!character || !label || !id || !next.characters[character]) return { ok: false, reason: 'not-found', library: next };
+    next.characters[character] = { ...plainObject(next.characters[character]), [label]: `${GENERATED_ASSET_URL_PREFIX}${id}` };
+    if (next.expressionNotes[character]) {
+        const notes = { ...next.expressionNotes[character] };
+        delete notes[label];
+        if (Object.keys(notes).length) next.expressionNotes[character] = notes;
+        else delete next.expressionNotes[character];
+    }
+    return { ok: true, library: next };
+}
+
+export function setGeneratedExpressionNote(library, name, mood, note = {}) {
+    const next = JSON.parse(JSON.stringify(normalizeGeneratedLibrary(library)));
+    const character = String(name || '').trim();
+    const label = String(mood || '').trim();
+    if (!character || !label) return { ok: false, reason: 'not-found', library: next };
+    const item = plainObject(note);
+    next.expressionNotes[character] = {
+        ...plainObject(next.expressionNotes[character]),
+        [label]: {
+            positive: typeof item.positive === 'string' ? item.positive : '',
+            negative: typeof item.negative === 'string' ? item.negative : '',
+            error: typeof item.error === 'string' ? item.error : '',
+            ...(item.caption && typeof item.caption === 'object' ? { caption: item.caption } : {}),
+        },
+    };
+    return { ok: true, library: next };
+}
+
+// 把一张生成立绘绑到角色立绘的「默认」。角色库没有这个名字就新建。已有的非生成默认图不覆盖。
+export function bindGeneratedSprite(sceneAssets, assetName, imageUrl, { replace = false } = {}) {
+    const requested = String(assetName || '').trim();
+    const url = String(imageUrl || '').trim();
+    const assets = sceneAssets && typeof sceneAssets === 'object' ? sceneAssets : {};
+    const characters = { ...plainObject(assets.characters) };
+    const aliases = { ...plainObject(assets.characterAliases) };
+    if (!requested || !isGeneratedAssetUrl(url)) {
+        return { ok: false, reason: 'no-image', created: false, name: '', characters, characterAliases: aliases };
+    }
+    let key = resolveCharacterKey(characters, aliases, requested);
+    const created = !key;
+    if (!key) key = requested;
+    const current = { ...plainObject(characters[key]) };
+    const existing = String(current['默认'] || '').trim();
+    if (replace || !existing || isGeneratedAssetUrl(existing)) current['默认'] = url;
+    characters[key] = current;
+    if (!Array.isArray(aliases[key])) aliases[key] = [];
+    if (requested !== key && !aliases[key].includes(requested)) aliases[key].push(requested);
+    return { ok: true, created, name: key, characters, characterAliases: aliases };
 }
 
 export function addGeneratedAssetToLibrary(library, record, name) {
@@ -69,6 +147,10 @@ export function renameGeneratedLibraryEntry(library, type, oldName, newName) {
         const aliases = Array.isArray(next.characterAliases[oldName]) ? next.characterAliases[oldName] : [];
         delete next.characterAliases[oldName];
         next.characterAliases[target] = aliases.filter((a) => a !== target).concat(aliases.includes(oldName) ? [] : [oldName]);
+        if (next.expressionNotes[oldName]) {
+            next.expressionNotes[target] = next.expressionNotes[oldName];
+            delete next.expressionNotes[oldName];
+        }
     }
     return { ok: true, library: next };
 }
@@ -78,7 +160,10 @@ export function removeGeneratedLibraryEntry(library, type, name) {
     const bucket = type === 'background' ? next.scenes : next.characters;
     const entry = bucket[name];
     delete bucket[name];
-    if (type !== 'background') delete next.characterAliases[name];
+    if (type !== 'background') {
+        delete next.characterAliases[name];
+        delete next.expressionNotes[name];
+    }
     return { library: next, imageIds: collectGeneratedImageIds(entry) };
 }
 
@@ -89,6 +174,30 @@ export function collectGeneratedImageIds(value, out = []) {
         for (const item of Object.values(value)) collectGeneratedImageIds(item, out);
     }
     return Array.from(new Set(out));
+}
+
+// 把一条生成素材从 source 库移到 / 复制到 target 库（角色连同别名）。只改库记录，不碰 IndexedDB 图片；
+// target 已有同名条目时阻止，避免静默覆盖。move=false 为复制，source 原样返回。
+export function transferGeneratedLibraryEntry(source, target, type, name, { move = false } = {}) {
+    const src = JSON.parse(JSON.stringify(normalizeGeneratedLibrary(source)));
+    const dst = JSON.parse(JSON.stringify(normalizeGeneratedLibrary(target)));
+    const bucket = type === 'background' ? 'scenes' : 'characters';
+    const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    if (!name || !own(src[bucket], name)) return { ok: false, reason: 'not-found', source: src, target: dst };
+    if (own(dst[bucket], name)) return { ok: false, reason: 'name-exists', source: src, target: dst };
+    dst[bucket][name] = JSON.parse(JSON.stringify(src[bucket][name]));
+    if (bucket === 'characters') {
+        dst.characterAliases[name] = Array.isArray(src.characterAliases[name]) ? src.characterAliases[name].slice() : [];
+        if (src.expressionNotes[name]) dst.expressionNotes[name] = JSON.parse(JSON.stringify(src.expressionNotes[name]));
+    }
+    if (move) {
+        delete src[bucket][name];
+        if (bucket === 'characters') {
+            delete src.characterAliases[name];
+            delete src.expressionNotes[name];
+        }
+    }
+    return { ok: true, source: src, target: dst };
 }
 
 // 用户素材命中是否可信：普通模式下除「默认」兜底外的命中（含弱模糊）都算；
@@ -103,26 +212,37 @@ export function resolveBackgroundAsset(sceneState, ctx = {}) {
     if (!state.scene) return { url: '', source: 'none', needsGeneration: false };
     const user = ctx.sceneAssets ? lookupSceneBackground(state, ctx.sceneAssets) : { url: null, quality: 'none' };
     if (user.url && isTrustedUserMatch(user.quality, ctx.strict === true)) {
-        return { url: user.url, source: 'user', quality: user.quality, needsGeneration: false };
+        return { url: user.url, source: 'user', quality: user.quality, timed: user.timed === true, needsGeneration: false };
     }
     // 用户已登记的场景（精确/别名/强模糊命中）哪怕该时段没图，也不替用户生成。
     if (TRUSTED.has(user.quality)) {
-        return { url: user.url || '', source: user.url ? 'user' : 'none', quality: user.quality, needsGeneration: false };
+        return { url: user.url || '', source: user.url ? 'user' : 'none', quality: user.quality, timed: Boolean(user.url) && user.timed === true, needsGeneration: false };
     }
     const library = normalizeGeneratedLibrary(ctx.generatedAssets);
     const generated = lookupSceneBackground(state, { ...ctx.sceneAssets, scenes: library.scenes });
     if (generated.url && TRUSTED.has(generated.quality)) {
-        return { url: generated.url, source: 'library', quality: generated.quality, needsGeneration: false };
+        return { url: generated.url, source: 'library', quality: generated.quality, timed: generated.timed === true, needsGeneration: false };
     }
     const temp = typeof ctx.tempBackground === 'function' ? ctx.tempBackground(state.scene, state.time || '') : '';
     if (temp) return { url: temp, source: 'temp', needsGeneration: false };
     return { url: user.url || '', source: user.url ? 'placeholder' : 'none', quality: user.quality, needsGeneration: true };
 }
 
-export function resolveSpriteAsset(character, mood, ctx = {}) {
+export function resolveSpriteAsset(character, mood, ctx = {}, outfit = '') {
     const name = String(character || '').trim();
     if (!name) return { url: '', slot: '', character: '', source: 'none', needsGeneration: false };
     const userAssets = ctx.sceneAssets || {};
+    const outfitName = String(outfit || '').trim();
+    // 服装内按当条表情找（精确 → 情绪组 → 模糊）。没命中就用这一套的「平和」，不退回原装。
+    if (outfitName && outfitName !== OUTFIT_RESET) {
+        const found = outfitsOfCharacter(userAssets.characterOutfits, userAssets.characterAliases, name);
+        const entry = found.outfits[outfitName];
+        if (entry && entry.moods) {
+            const hit = lookupAssetValue(entry.moods, mood, userAssets.moodGroups, userAssets.moodFuzzyMatch === true, false);
+            const calm = hit.url ? hit : lookupAssetValue(entry.moods, '平和', userAssets.moodGroups, false, false);
+            if (calm.url) return { url: calm.url, slot: calm.slot, outfit: outfitName, character: found.key || name, source: 'user-outfit', quality: hit.url ? hit.quality : 'group', needsGeneration: false };
+        }
+    }
     const user = lookupSceneAssetUrls({ character: name, mood }, userAssets);
     if (user.spriteUrl) {
         return { url: user.spriteUrl, slot: user.spriteSlot, character: user.spriteCharacter || name, source: 'user', quality: user.spriteQuality, needsGeneration: false };
@@ -153,7 +273,7 @@ function isKnownCharacterName(name, userAssets, knownCharacters) {
     return candidates.some((c) => c === name || c.includes(name) || name.includes(c));
 }
 
-function isNonSpriteSpeaker(name, userName) {
+export function isNonSpriteSpeaker(name, userName) {
     const lower = name.toLowerCase();
     if (NON_SPRITE_SPEAKERS.has(name) || NON_SPRITE_SPEAKERS.has(lower)) return true;
     if (userName && name === String(userName).trim()) return true;

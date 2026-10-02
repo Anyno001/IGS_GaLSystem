@@ -138,6 +138,7 @@ export const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.toolbarDock',
     'readerSettings.imgMode',
     'readerSettings.imgBrightness',
+    'readerSettings.cgHoldPages',
     'readerSettings.showStatusLine',
     'readerSettings.typewriter.enabled',
     'readerSettings.typewriter.speed',
@@ -146,6 +147,10 @@ export const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.typewriter.sound.volume',
     'readerSettings.typewriter.sound.dialogueVolume',
     'readerSettings.typewriter.sound.narrationVolume',
+    'readerSettings.typewriter.sound.dialoguePreset',
+    'readerSettings.typewriter.sound.thoughtPreset',
+    'readerSettings.typewriter.sound.narrationPreset',
+    'readerSettings.typewriter.sound.speakerPitch',
     'readerSettings.pinnedBtns',
     'readerSettings.hiddenBtns',
     'readerSettings.btnOrder',
@@ -185,10 +190,13 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.virtualRegex.pattern',
             'bridge.virtualRegex.flags',
             'bridge.virtualRegex.replacement',
+            'bridge.virtualRegex.rules',
         ]),
         requiredActions: Object.freeze([
             'reset-virtual-regex',
             'test-virtual-regex',
+            'add-virtual-regex',
+            'remove-virtual-regex:',
         ]),
     }),
     image: Object.freeze({
@@ -208,6 +216,8 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.autoIllustration.assets.strictMatch',
             'bridge.autoIllustration.assets.maxPerFloor',
             'bridge.autoIllustration.assets.spriteSize',
+            'bridge.itemImages.enabled',
+            'bridge.itemImages.inventoryIcon',
             'bridge.autoIllustration.assets.backgroundSize',
             'bridge.autoIllustration.assets.templates.background',
             'bridge.autoIllustration.assets.templates.backgroundNegative',
@@ -271,9 +281,14 @@ export const TOOLBAR_ACTIONS = Object.freeze([
     ['next', '下一页'],
     ['last-page', '最后一页'],
     ['next-turn', '下一轮'],
-    ['regen', '画 CG'],
+    ['auto-play', '自动播放'],
+    ['regen', '绘制 CG'],
+    ['reroll-cg', '重画这张'],
     ['clear-cg', '清扫当前 CG'],
-    ['generate-assets', '补全素材'],
+    ['clear-floor-cg', '清扫本楼'],
+    ['generate-assets', '补全立绘与背景'],
+    ['cg-gallery', 'CG 库'],
+    ['fill-item-images', '补全物品图'],
     ['save', '保存图片'],
     ['hide', '隐藏对话框'],
     ['sprite-edit', '调整立绘'],
@@ -286,13 +301,32 @@ export const READER_SETTINGS_SCHEMA_VERSION = '0.5.6';
 export const INITIAL_IMAGE_POLL_ATTEMPTS = 8;
 export const INITIAL_IMAGE_POLL_INTERVAL_MS = 250;
 
-export const DEFAULT_SCENE_PROMPT_RULE = `[igs标签语法]
+// 通用规则（每行一条、| 分隔、不发明新标签等）由 tag-grammar 统一写在最前，这里只写场景与台词本身。
+export const DEFAULT_SCENE_PROMPT_RULE = `【场景与台词】
+[igs-scene:场景名|时间|天气]：本轮开头输出一次（即使与上轮相同），换场景时再输出；NSFW场景加第4栏大写NSFW，其他场景不写第4栏
+[igs-char:角色名|表情|服装|对白]：角色开口时使用
+[igs-thought:角色名|表情|服装|心里话]：角色内心独白
+角色名写完整全名；不知名角色写「？？？」，路人写「男路人A」「女同学B」；场景名写空间概念（教室、走廊），不写家具摆设。
+表情：角色外在可见的神态，不是语气；只从下列词中选，不自造：
+{{mood_groups}}
+服装：角色每次开口都写此刻穿的哪套，不能省，也不要照抄上一句。看这个角色现在在什么地方、正在做什么，去对下面括号里的说明：对上哪套就写哪套的名字；一套都对不上，就新起一个1至12字的短名，不要空格和标点。剧情里写明这个角色换了衣服、穿上另一套、脱了或披上，服装栏必须改成换上的那套，不许再写原来那套。
+{{outfit_groups}}
+换衣服示例：上一句 [igs-char:林小雨|平和|校服|走吧。] 回到家换上睡衣，写成 [igs-char:林小雨|平和|睡衣|我回来了。]
+新衣服示例：去宴会，上面没有能对上的说明，新起短名，写成 [igs-char:林小雨|喜悦|晚礼服|到了。]
+时间：只用笼统时间段 早晨/上午/中午/下午/傍晚/晚上/深夜
+{{time_groups}}
+天气：只用天气类型词 晴天/多云/小雨/大雨/雷雨/小雪/大雪等
+{{weather_groups}}
+{{scene_groups}}`.trim();
+
+// 关闭精简注入时使用的长版原文。已保存的提示词不在这里被替换，要换新规则用「恢复默认提示词」。
+export const LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3 = `[igs标签语法]
 以下标签供前端渲染系统读取，是附加在正文上的元数据注释，不改变正文本身的写法。
 
 [igs-scene:场景名|时间|天气]
 [igs-scene:场景名|时间|天气|NSFW]（仅NSFW场景使用）
-[igs-char:角色名|表情|对白]
-[igs-thought:角色名|表情|心里话]
+[igs-char:角色名|表情|服装|对白]
+[igs-thought:角色名|表情|服装|心里话]
 
 语法要求：
 1. 每条标签独立成行，头尾用方括号包裹
@@ -310,6 +344,12 @@ export const DEFAULT_SCENE_PROMPT_RULE = `[igs标签语法]
 表情字段从固定池选取（2-3字词），禁止自造：
 {{mood_groups}}
 
+[服装字段约束]
+角色每次开口都写此刻穿的哪套，不能省，也不要照抄上一句。看这个角色现在在什么地方、正在做什么，去对下面括号里的说明：对上哪套就写哪套的名字；一套都对不上，就新起一个1至12字的短名，不要空格和标点。剧情里写明这个角色换了衣服、穿上另一套、脱了或披上，服装栏必须改成换上的那套，不许再写原来那套。
+{{outfit_groups}}
+换衣服示例：上一句 [igs-char:林小雨|平和|校服|走吧。] 回到家换上睡衣，写成 [igs-char:林小雨|平和|睡衣|我回来了。]
+新衣服示例：去宴会，上面没有能对上的说明，新起短名，写成 [igs-char:林小雨|喜悦|晚礼服|到了。]
+
 [时间字段约束]
 仅使用笼统时间段：早晨/上午/中午/下午/傍晚/晚上/深夜
 {{time_groups}}
@@ -325,46 +365,15 @@ export const DEFAULT_SCENE_PROMPT_RULE = `[igs标签语法]
 [核心原则]
 igs标签是透明的元数据层。正文的文风、叙事密度、修辞手法、段落节奏完全由其他文风指令决定，不受标签存在的影响。标签插在段落之间，读者略去所有标签后，剩余正文应当是一篇完整的、符合当前文风要求的文章。其中，表情字段为角色可外在观察的神态表情，禁止理解成语气或说话方式。`.trim();
 
-export const LEGACY_DEFAULT_SCENE_PROMPT_RULE = `[igs标签语法]
-以下三种标签供前端渲染系统读取，是附加在正文上的元数据注释，不改变正文本身的写法。
-
-[igs-scene:场景名|时间|天气]
-[igs-char:角色名|情绪|对白]
-[igs-thought:角色名|情绪|心里话]
-
-语法要求：
-1. 每条标签独占一行，方括号为固定边界，不可拆行
-2. 字段之间用 | 分隔，字段内不得含 | 或 ]
-3. [igs-scene] 在场景首次出现和换场景时各出现一次
-4. [igs-char] 在角色开口时使用
-5. [igs-thought] 在需要表现角色内心声音时使用
-6. 角色名必须输出完整全名，每次一致（立绘索引标识）
-7. 场景名必须定位到空间概念（如教室、走廊），每次一致（背景图索引标识）
-8. 不知名角色用「？？？」；路人用「男路人A」「女同学B」等
-9. 仅有以上三种标签，不要发明新标签
-
-[情绪词约束]
-情绪字段从固定池选取（2-3字词），仅用于前端索引立绘，禁止自造：
-{{mood_groups}}
-
-[时间字段约束]
-仅使用笼统时间段：早晨/上午/中午/下午/傍晚/晚上/深夜
-{{time_groups}}
-
-[天气字段约束]
-仅使用天气类型词：晴天/多云/小雨/大雨/雷雨/小雪/大雪等
-{{weather_groups}}
-
-[场景字段约束]
-仅定位空间概念，禁止定位家具摆设。
-{{scene_groups}}
-
-[核心原则]
-igs标签是透明的元数据层。正文的文风、叙事密度、修辞手法、段落节奏完全由其他文风指令决定，不受标签存在的影响。标签插在段落之间，如同脚注——读者略去所有标签后，剩余正文应当是一篇完整的、符合当前文风要求的文章。情绪字段是机械索引值，不替代也不影响正文中的情感表达。`.trim();
-
+// 只有没存过提示词时用当前默认。已存的内容保持原样，换新规则走「恢复默认提示词」。
 export function normalizeScenePromptRule(value) {
     const rule = String(value || '');
-    return !rule || rule === LEGACY_DEFAULT_SCENE_PROMPT_RULE
-        ? DEFAULT_SCENE_PROMPT_RULE
-        : rule;
+    return rule ? rule : DEFAULT_SCENE_PROMPT_RULE;
+}
+
+// 自定义规则缺服装占位符时 AI 不会写服装栏；只提示，不改写用户规则。
+export const PROMPT_RULE_OUTFIT_HINT = '当前为自定义规则，未包含服装栏说明；如需服装差分可恢复默认或手动添加 {{outfit_groups}}';
+
+export function scenePromptRuleOutfitHint(rule) {
+    return String(rule || '').includes('{{outfit_groups}}') ? '' : PROMPT_RULE_OUTFIT_HINT;
 }

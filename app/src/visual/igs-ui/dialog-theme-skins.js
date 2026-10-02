@@ -1,6 +1,6 @@
 import {
     CSS_DIALOG_SKINS,
-    CSS_DIALOG_STYLE_TEXT,
+    CSS_DIALOG_STYLE_BY_SKIN,
     DIALOG_SKIN_DAY_MINIMAL,
     DIALOG_SKIN_ELEGANT_EUROPEAN,
     DIALOG_SKIN_WARM_PICTUREBOOK,
@@ -30,7 +30,7 @@ export function isIllustratedDialogSkin(value) {
     return ILLUSTRATED_DIALOG_SKINS.includes(skin);
 }
 
-// 构建脚本按字面占位符内联 PNG，这里必须保留完整字面量。
+// 构建脚本按字面占位符把素材外置到 dist/skins/，这里必须保留完整字面量。
 const DIALOG_THEME_ASSETS = Object.freeze({
     [DIALOG_SKIN_PLANT_COFFEE]: Object.freeze({
         dialog: '__IGS_ASSET__plant-coffee/dialog.png__',
@@ -62,8 +62,8 @@ export const ILLUSTRATED_DIALOG_SPECS = Object.freeze({
         dialog: { height: 177, left: 130, right: 130, slice: [130, 130] },
         text: { top: 24, speakerTop: 34, right: 44, bottom: 20, left: 42 },
         plate: { height: 42, left: 31, right: 31, slice: [35, 35], x: 62, rise: 12, lineHeight: 42, padding: '0 30px', minWidth: 124 },
-        nameCss: 'font-size:15px;font-weight:600;letter-spacing:.2em;text-indent:.2em;text-shadow:0 1px 0 rgba(58,40,34,.55),0 0 3px rgba(58,40,34,.35);',
-        textCss: 'letter-spacing:.06em;text-shadow:0 1px 0 rgba(255,255,255,.75),0 0 2px rgba(246,241,235,.9);',
+        nameCss: 'font-size:15px;font-weight:600;letter-spacing:.2em;text-indent:.2em;text-shadow:0 1px 0 rgba(58,40,34,.55);',
+        textCss: `letter-spacing:.06em;${halo('#f6f1eb')}`,
     }),
     [DIALOG_SKIN_BLACK_WHITE_MANGA]: Object.freeze({
         dialog: { height: 191, left: 90, right: 89, slice: [90, 89] },
@@ -85,22 +85,22 @@ export const ILLUSTRATED_DIALOG_SPECS = Object.freeze({
         dialog: { height: 212, left: 180, right: 171, slice: [200, 190] },
         text: { top: 44, speakerTop: 48, right: 64, bottom: 30, left: 58 },
         plate: { height: 42, left: 21, right: 21, slice: [20, 20], x: 150, rise: 14, lineHeight: 42, padding: '0 36px', minWidth: 150 },
-        nameCss: 'font-size:16px;font-weight:600;letter-spacing:.24em;text-indent:.24em;text-shadow:0 1px 0 rgba(30,18,12,.7),0 0 4px rgba(30,18,12,.45);',
-        textCss: `letter-spacing:.06em;${halo('#f5ead3', 5)}`,
+        nameCss: 'font-size:16px;font-weight:600;letter-spacing:.24em;text-indent:.24em;text-shadow:0 1px 0 rgba(30,18,12,.7);',
+        textCss: `letter-spacing:.06em;${halo('#f5ead3')}`,
         compact: Object.freeze({
             dialog: { height: 156, left: 132, right: 125, slice: [200, 190] },
             text: { top: 32, speakerTop: 36, right: 40, bottom: 20, left: 36 },
             plate: { height: 34, left: 17, right: 17, slice: [20, 20], x: 104, rise: 11, lineHeight: 34, padding: '0 26px', minWidth: 112 },
-            nameCss: 'font-size:14px;font-weight:600;letter-spacing:.2em;text-indent:.2em;text-shadow:0 1px 0 rgba(30,18,12,.7),0 0 3px rgba(30,18,12,.45);',
-            textCss: `letter-spacing:.04em;${halo('#f5ead3', 4)}`,
+            nameCss: 'font-size:14px;font-weight:600;letter-spacing:.2em;text-indent:.2em;text-shadow:0 1px 0 rgba(30,18,12,.7);',
+            textCss: `letter-spacing:.04em;${halo('#f5ead3')}`,
         }),
     }),
     [DIALOG_SKIN_ADVENTURE_JOURNEY]: Object.freeze({
         dialog: { height: 170, left: 48, right: 48, slice: [48, 48] },
         text: { top: 26, speakerTop: 34, right: 44, bottom: 20, left: 44 },
         plate: { height: 50, left: 41, right: 41, slice: [56, 56], x: 34, rise: 26, lineHeight: 50, padding: '0 50px', minWidth: 176 },
-        nameCss: 'font-size:16px;font-weight:600;letter-spacing:.2em;text-indent:.2em;text-shadow:0 1px 0 rgba(20,12,6,.75),0 0 5px rgba(240,200,130,.28);',
-        textCss: 'letter-spacing:.05em;text-shadow:0 1px 0 rgba(255,250,238,.7),0 0 2px rgba(230,220,203,.9);',
+        nameCss: 'font-size:16px;font-weight:600;letter-spacing:.2em;text-indent:.2em;text-shadow:0 1px 0 rgba(20,12,6,.75);',
+        textCss: `letter-spacing:.05em;${halo('#e6dccb')}`,
     }),
 });
 
@@ -120,12 +120,18 @@ export function buildSlicedDialogSkinCss(skin, spec, assets) {
     });
 }
 
-export const ILLUSTRATED_DIALOG_STYLE_TEXT = SLICED_DIALOG_SKINS
-    .map((skin) => {
-        const spec = ILLUSTRATED_DIALOG_SPECS[skin];
-        const css = buildSlicedDialogSkinCss(skin, spec, DIALOG_THEME_ASSETS[skin]);
-        if (!spec.compact) return css;
-        return `${css}\n@media (max-width:640px){\n${buildSlicedDialogSkinCss(skin, spec.compact, DIALOG_THEME_ASSETS[skin])}\n}`;
-    })
-    .concat(CSS_DIALOG_STYLE_TEXT)
+function slicedSkinCss(skin) {
+    const spec = ILLUSTRATED_DIALOG_SPECS[skin];
+    const css = buildSlicedDialogSkinCss(skin, spec, DIALOG_THEME_ASSETS[skin]);
+    if (!spec.compact) return css;
+    return `${css}\n@media (max-width:640px){\n${buildSlicedDialogSkinCss(skin, spec.compact, DIALOG_THEME_ASSETS[skin])}\n}`;
+}
+
+export const ILLUSTRATED_DIALOG_STYLE_BY_SKIN = Object.freeze({
+    ...Object.fromEntries(SLICED_DIALOG_SKINS.map((skin) => [skin, slicedSkinCss(skin)])),
+    ...CSS_DIALOG_STYLE_BY_SKIN,
+});
+
+export const ILLUSTRATED_DIALOG_STYLE_TEXT = ILLUSTRATED_DIALOG_SKINS
+    .map((skin) => ILLUSTRATED_DIALOG_STYLE_BY_SKIN[skin])
     .join('\n');

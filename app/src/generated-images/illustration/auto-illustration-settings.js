@@ -11,6 +11,8 @@ export const DEFAULT_LLM_PROMPTS = Object.freeze({
     assetSoft: ASSET_PLANNER_SOFT_SYSTEM_PROMPT,
 });
 
+export const NSFW_COUNT_MAX = 16;
+
 const clampInt = (v, min, max, d) => {
     const n = Math.round(Number(v));
     return v == null || v === '' || !Number.isFinite(n) ? d : Math.min(max, Math.max(min, n));
@@ -51,15 +53,15 @@ export function normalizeAutoIllustrationSettings(value) {
     const assets = src.assets && typeof src.assets === 'object' ? src.assets : {};
     return {
         nsfwEnabled: bool(src.nsfwEnabled),
-        nsfwCount: clampInt(src.nsfwCount, 1, 4, 1),
+        nsfwCount: clampInt(src.nsfwCount, 1, NSFW_COUNT_MAX, 1),
         interludeEnabled: bool(src.interludeEnabled),
         interludeProbability: clampInt(src.interludeProbability, 0, 100, 30),
-        interludeMaxCount: clampInt(src.interludeMaxCount, 1, 4, 1),
+        interludeMaxCount: clampInt(src.interludeMaxCount, 1, 16, 1),
         assets: {
             spriteEnabled: bool(assets.spriteEnabled),
             backgroundEnabled: bool(assets.backgroundEnabled),
             strictMatch: bool(assets.strictMatch),
-            maxPerFloor: clampInt(assets.maxPerFloor, 1, 4, 2),
+            maxPerFloor: clampInt(assets.maxPerFloor, 1, 16, 2),
             spriteSize: str(assets.spriteSize, '832x1216') || '832x1216',
             backgroundSize: str(assets.backgroundSize, '1216x832') || '1216x832',
             templates: normalizeTemplates(assets.templates),
@@ -88,16 +90,6 @@ export function normalizeAutoIllustrationSettings(value) {
             timeoutMs: clampInt(nai.timeoutMs, 10000, 300000, NAI_DEFAULT_SETTINGS.timeoutMs),
         },
     };
-}
-
-export function isAutoIllustrationEnabled(settings) {
-    const s = normalizeAutoIllustrationSettings(settings);
-    return s.nsfwEnabled || s.interludeEnabled;
-}
-
-export function isAssetGenerationEnabled(settings) {
-    const s = normalizeAutoIllustrationSettings(settings);
-    return s.assets.spriteEnabled || s.assets.backgroundEnabled;
 }
 
 // 精准生图优先只在开启背景生成时生效：没有生成兜底时收紧匹配只会让背景变空。

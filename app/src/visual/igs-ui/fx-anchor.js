@@ -1,4 +1,7 @@
-// 漫画符号定位：按立绘在舞台里的实际绘制矩形（background-size 宽度百分比 + background-position）
+import { spriteIdentity } from '../../scene/character-outfits.js';
+
+
+// 漫画符号定位：按立绘在舞台里的实际绘制矩形（background-size 高度百分比 + background-position）
 // 与立绘透明通道探测出的头部位置换算落点，电脑/窄屏/全屏/内嵌各模式统一按真实像素计算。
 const HEAD_CACHE_LIMIT = 48;
 const PROBE_W = 48;
@@ -16,6 +19,16 @@ export const SYMBOL_OFFSETS = Object.freeze({
     silence: { dx: 0.7, dy: -0.05, size: 0.4 },
     gloom: { dx: 0, dy: 0.4, size: 0.8 },
     sparkle: { dx: 0.62, dy: 0.32, size: 0.38 },
+    bulb: { dx: 0, dy: -0.4, size: 0.46 },
+    note: { dx: 0.6, dy: 0.05, size: 0.38 },
+    zzz: { dx: 0.6, dy: -0.12, size: 0.44 },
+    heartbreak: { dx: 0.55, dy: 0.1, size: 0.4 },
+    sigh: { dx: 0.62, dy: 0.72, size: 0.42 },
+    dizzy: { dx: 0, dy: -0.28, size: 0.5 },
+    fire: { dx: 0.58, dy: 0.12, size: 0.44 },
+    frost: { dx: 0.6, dy: 0.22, size: 0.4 },
+    // 古代背景的鼻涕泡：贴在鼻尖一侧。
+    snot: { dx: 0.2, dy: 0.62, size: 0.36 },
 });
 
 const headCache = new Map();
@@ -32,13 +45,25 @@ function clamp(value, min, max) {
     return max < min ? (min + max) / 2 : Math.max(min, Math.min(max, value));
 }
 
-// 立绘在舞台里的绘制矩形：background-size 单值百分比只定宽度，高度按原图比例。
+// 比例 100：图高等于舞台高，宽度按原图比例。不同宽高比的立绘不用各自改比例。
+export function spriteBackgroundSize(scale) {
+    return `auto ${finite(scale, 100)}%`;
+}
+
+// 立绘在舞台里的绘制矩形：background-size 的高度百分比，宽度按原图比例。
 export function spriteDrawRect(stageW, stageH, sprite) {
     if (!sprite || !(sprite.naturalW > 0) || !(sprite.naturalH > 0)) return null;
-    const w = stageW * finite(sprite.scale, 100) / 100;
-    if (!(w > 0)) return null;
-    const h = w * sprite.naturalH / sprite.naturalW;
+    const h = stageH * finite(sprite.scale, 100) / 100;
+    if (!(h > 0)) return null;
+    const w = h * sprite.naturalW / sprite.naturalH;
     return { left: (stageW - w) * finite(sprite.posX, 50) / 100, top: (stageH - h) * finite(sprite.posY, 100) / 100, w, h };
+}
+
+// 翻转原点要用图的实际宽度百分比。读不到原图时退回比例值本身。
+export function spriteWidthPercent(stageW, stageH, sprite) {
+    const rect = spriteDrawRect(stageW, stageH, sprite);
+    if (!rect || !(stageW > 0)) return finite(sprite && sprite.scale, 100);
+    return rect.w / stageW * 100;
 }
 
 // 头部标定：{ x, top, w } 均相对立绘原图（x 为头部中心、top 为头顶、w 为头宽），与阅读模式无关；aspect 为原图高宽比。
@@ -77,13 +102,18 @@ export function normalizeSpriteHeads(value) {
     return out;
 }
 
-export function spriteHeadKey(character, mood) {
-    return mood ? `${character}::${mood}` : String(character || '');
+export function spriteHeadKey(character, mood, outfit = '') {
+    const identity = spriteIdentity(character, outfit);
+    return mood ? `${identity}::${mood}` : identity;
 }
 
-// 表情单独标定优先，其次角色标定；都没有返回 null 走自动识别。
-export function resolveSpriteHead(heads, character, mood) {
+// 表情单独标定优先，其次角色（或「角色|服装」）标定；服装未标定时回落到角色标定；都没有返回 null 走自动识别。
+export function resolveSpriteHead(heads, character, mood, outfit = '') {
     if (!heads || !character) return null;
+    const identity = spriteIdentity(character, outfit);
+    if (identity !== character) {
+        return (mood && heads[spriteHeadKey(character, mood, outfit)]) || heads[identity] || heads[character] || null;
+    }
     return (mood && heads[spriteHeadKey(character, mood)]) || heads[character] || null;
 }
 

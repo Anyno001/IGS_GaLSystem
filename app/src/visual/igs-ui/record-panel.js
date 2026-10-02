@@ -1,15 +1,18 @@
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { buildRecordModel, buildRelationshipModel, parseLooseDate } from '../../data/shujuku/record-model.js';
+import { buildFavorOverviewModel } from '../../data/shujuku/favor-overview-model.js';
 import { createCharacterMetricsLookup } from '../../data/shujuku/character-metrics.js';
 import { applyTransparentGlassMaterial } from '../../styles/glass-material.js';
 import { INVENTORY_GROUP_ORDER, RECORD_ICONS, inventoryGroupLabel, inventoryIconKey } from './record-icons.js';
 import { recordPageHeadHtml, watchRecordPageLayout } from './record-page-shell.js';
+import { setStagePauseReason } from './stage-pause.js';
 import { DIALOG_FONT_OPTIONS } from './reader-host-constants.js';
 import { normalizeSettingsTheme, renderSettingsThemeSwitch } from './settings-theme.js';
 import { applyTypewriterEffect, cancelTypewriter } from './typewriter-runtime.js';
+import { inventoryIconHtml } from './inventory-slot-image.js';
 
-const labels = Object.freeze({ diary: '日记', inventory: '物品', relationships: '人际关系' });
-const pageTitles = Object.freeze({ diary: '珍藏心事', inventory: '你的背包', relationships: '人际关系' });
+const labels = Object.freeze({ diary: '日记', inventory: '物品', relationships: '人际关系', favor: '好感度' });
+const pageTitles = Object.freeze({ diary: '珍藏心事', inventory: '你的背包', relationships: '人际关系', favor: '好感总览' });
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const cellsHtml = cells => cells.length ? `<dl class="igs-record-fields">${cells.map(cell => `<div><dt>${escapeHtml(cell.label)}</dt><dd>${escapeHtml(cell.value)}</dd></div>`).join('')}</dl>` : '';
 const personInitial = value => escapeHtml(String(value ?? '').trim().charAt(0) || '·');
@@ -108,6 +111,21 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
     let font = RECORD_FONT_DEFAULT;
     const table = () => model?.tables?.find(item => item.uid === activeUid);
     const relationshipPeople = () => model?.people?.filter(item => item.uid === activeUid) || [];
+    // 背包格位与详情头图标：设置为「生图」且本聊天已有物品图时显示图片，否则保留 SVG。
+    let unsubscribeItemImages = null;
+    const readItemIconMode = () => { try { return options.getItemIconMode?.() || 'image'; } catch (_) { return 'image'; } };
+    const itemIcon = name => inventoryIconHtml(name, RECORD_ICONS[inventoryIconKey(name)], options.resolveItemImage, readItemIconMode());
+    const onItemImagesChanged = () => {
+        if (!root || category !== 'inventory') return;
+        // 正在输入搜索词时不重绘，避免打断输入；图片在下一次渲染时出现。
+        const active = doc.activeElement;
+        if (active && String(active.tagName || '').toUpperCase() === 'INPUT' && root.contains?.(active)) return;
+        const scroller = root.querySelector?.('.igs-record-scroll');
+        const top = scroller ? scroller.scrollTop : 0;
+        render();
+        const next = root.querySelector?.('.igs-record-scroll');
+        if (next) next.scrollTop = top;
+    };
     const relationshipEdges = () => model?.edges?.filter(item => item.uid === activeUid) || [];
     const entries = () => category === 'diary' || category === 'inventory'
         ? (model?.entries || [])
@@ -184,6 +202,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
         root.addEventListener('input', onInput);
         root.addEventListener('change', onChange);
         overlay.classList?.toggle('igs-record-screen-open', true);
+        setStagePauseReason(overlay, 'panel:record', true);
         (overlay.querySelector?.('#igs-db-layer') || overlay).appendChild(root);
         unwatchLayout = watchRecordPageLayout(root, doc);
         applyDiaryFontSize();
@@ -191,6 +210,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
         applyTransparentGlassMaterial(root, settings?.glassOpacity, { backdropFilter: settings?.glassBackdropFilter });
         client = createShujukuClient((global || globalThis).AutoCardUpdaterAPI || null);
         try { client.registerCallback(callback); } catch (_) { /* Optional subscription. */ }
+        try { unsubscribeItemImages = options.subscribeItemImages?.(onItemImagesChanged) || null; } catch (_) { unsubscribeItemImages = null; }
         reload();
         root.querySelector?.('[data-record-act="close"]')?.focus?.();
         return { ok: true };
@@ -205,9 +225,12 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
         root.removeEventListener('click', onClick);
         root.removeEventListener('input', onInput);
         root.removeEventListener('change', onChange);
+        unsubscribeItemImages?.();
+        unsubscribeItemImages = null;
         root.remove();
         root = null;
         pageOverlay?.classList?.remove('igs-record-screen-open');
+        setStagePauseReason(pageOverlay, 'panel:record', false);
         pageOverlay = null;
         try { client?.unregisterCallback(callback); } catch (_) { /* Host may have disappeared. */ }
         client = null;
@@ -221,9 +244,11 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
         let readResult = null;
         try {
             readResult = client.readTables();
-            model = category === 'relationships' ? buildRelationshipModel(readResult) : buildRecordModel(readResult, category);
+            model = category === 'relationships' ? buildRelationshipModel(readResult)
+                : category === 'favor' ? buildFavorOverviewModel(readResult, settings?.statusHud?.tables)
+                    : buildRecordModel(readResult, category);
         } catch (error) {
-            model = category === 'relationships'
+            model = category === 'relationships' || category === 'favor'
                 ? { status: 'read-error', reason: String(error?.message || '读取失败'), tables: [], people: [], edges: [] }
                 : { status: 'read-error', reason: String(error?.message || '读取失败'), tables: [], entries: [] };
         }
@@ -394,7 +419,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
             const quantity = String(item.quantity ?? '').trim();
             const badge = quantity && quantity !== '1';
             const selected = item.id === selectedId;
-            return `<button type="button" data-record-act="select" data-record-id="${escapeHtml(item.id)}" aria-label="查看${escapeHtml(item.title)}" ${selected ? 'aria-current="true"' : ''}><span class="igs-record-slot-icon" aria-hidden="true">${RECORD_ICONS[inventoryIconKey(item.title)]}</span><span class="igs-record-slot-name">${escapeHtml(item.title || '未命名')}</span>${badge ? `<small class="igs-record-slot-quantity">×${escapeHtml(quantity)}</small>` : ''}</button>`;
+            return `<button type="button" data-record-act="select" data-record-id="${escapeHtml(item.id)}" aria-label="查看${escapeHtml(item.title)}" ${selected ? 'aria-current="true"' : ''}><span class="igs-record-slot-icon" aria-hidden="true">${itemIcon(item.title)}</span><span class="igs-record-slot-name">${escapeHtml(item.title || '未命名')}</span>${badge ? `<small class="igs-record-slot-quantity">×${escapeHtml(quantity)}</small>` : ''}</button>`;
         }).join('');
     }
 
@@ -414,7 +439,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
             const quantity = String(chosen.quantity ?? '').trim();
             const useButton = typeof fillDraft === 'function' && quantity !== '0'
                 ? `<div class="igs-record-item-actions"><button type="button" class="igs-rp-btn" data-record-act="use">使用</button><small>把「使用${escapeHtml(chosen.title || '')}」填入输入框，不会自动发送</small></div>` : '';
-            detail = `<section class="igs-record-item-detail"><header class="igs-record-item-head"><div class="igs-record-item-detail-icon" aria-hidden="true">${RECORD_ICONS[inventoryIconKey(chosen.title)]}</div><div class="igs-record-item-title"><p class="igs-record-item-kicker">${escapeHtml(itemGroup(chosen))}</p><h3>${escapeHtml(chosen.title || '未命名')}</h3><p class="igs-record-item-quantity"><span>${quantity ? `数量：×${escapeHtml(quantity)}` : '数量未记录'}</span>${chosen.status ? `<span class="igs-record-tag">${escapeHtml(chosen.status)}</span>` : ''}</p></div></header><div class="igs-record-item-detail-copy">${descriptionCell ? `<p class="igs-record-item-description">${escapeHtml(descriptionCell.value)}</p>` : ''}${cellsHtml(extraCells)}${useButton}<p class="igs-record-feedback" role="status" aria-live="polite">${escapeHtml(message)}</p></div></section>`;
+            detail = `<section class="igs-record-item-detail"><header class="igs-record-item-head"><div class="igs-record-item-detail-icon" aria-hidden="true">${itemIcon(chosen.title)}</div><div class="igs-record-item-title"><p class="igs-record-item-kicker">${escapeHtml(itemGroup(chosen))}</p><h3>${escapeHtml(chosen.title || '未命名')}</h3><p class="igs-record-item-quantity"><span>${quantity ? `数量：×${escapeHtml(quantity)}` : '数量未记录'}</span>${chosen.status ? `<span class="igs-record-tag">${escapeHtml(chosen.status)}</span>` : ''}</p></div></header><div class="igs-record-item-detail-copy">${descriptionCell ? `<p class="igs-record-item-description">${escapeHtml(descriptionCell.value)}</p>` : ''}${cellsHtml(extraCells)}${useButton}<p class="igs-record-feedback" role="status" aria-live="polite">${escapeHtml(message)}</p></div></section>`;
         }
         return `<div class="igs-record-inventory"><section class="igs-record-inventory-main">${tools}<div class="igs-record-slots" aria-label="物品栏">${slotsHtml(items)}</div></section><aside class="igs-record-item-pane">${detail}</aside></div>`;
     }
@@ -525,6 +550,21 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
             `<article class="igs-record-relationship-detail">${chosen ? `${headHtml}${metricsHtml}<section class="igs-record-relationship-section">${profileHtml}</section>` : '<p>请选择人物。</p>'}</article></div>`;
     }
 
+    // 好感总览：按状态栏所选表的顺序分组，组内按好感从高到低；数值只来自表格，不推断、不写回。
+    function renderFavor() {
+        const people = model?.people || [];
+        const sources = model?.tables || [];
+        const ordered = sources.flatMap(source => people.filter(person => person.uid === source.uid)
+            .sort((a, b) => (Number(b.metrics[0]?.percent) || 0) - (Number(a.metrics[0]?.percent) || 0)));
+        if (!ordered.length) return '';
+        const showSource = sources.length > 1;
+        return `<div class="igs-record-favor" role="list" aria-label="全部角色好感度">${ordered.map(person =>
+            `<div class="igs-record-favor-row" role="listitem"><span class="igs-record-favor-avatar" aria-hidden="true">${personInitial(person.name)}</span>` +
+            `<span class="igs-record-favor-who"><strong>${escapeHtml(person.name)}</strong>${showSource ? `<small>${escapeHtml(person.source)}</small>` : ''}</span>` +
+            `<div class="igs-record-favor-bars">${person.metrics.map(metric =>
+                `<div class="igs-record-metric"><span>${escapeHtml(metric.label)}</span><i role="img" aria-label="${escapeHtml(metric.label)} ${escapeHtml(metric.display)}"><b style="width:${Math.max(0, Math.min(100, Number(metric.percent) || 0))}%"></b></i><em>${escapeHtml(metric.display)}</em></div>`).join('')}</div></div>`).join('')}</div>`;
+    }
+
     function render() {
         if (!root) return;
         const current = table();
@@ -532,6 +572,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
         const tabs = category === 'relationships' && model.tables.length > 1 ? `<nav class="igs-record-tabs" aria-label="选择资料来源">${model.tables.map(item =>
             `<button type="button" class="igs-rp-chip" data-record-act="table" data-record-id="${escapeHtml(item.uid)}" aria-pressed="${item.uid === activeUid ? 'true' : 'false'}" ${item.uid === activeUid ? 'aria-current="true"' : ''}>${escapeHtml(item.name)}</button>`).join('')}</nav>` : '';
         const error = model.status === 'read-error' ? `${labels[category]}读取失败：${model.reason}`
+            : model.status === 'no-selection' ? '状态栏还没有选择读取表格，请在「阅读器 → 界面 → 状态栏」里选择含好感度的表'
             : model.status === 'no-tables' ? `未找到匹配的${labels[category]}表`
                 : model.status === 'empty' ? '匹配表没有可阅读的记录' : '';
         const diagnostics = category === 'relationships'
@@ -541,6 +582,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
         if (category === 'diary') content = renderDiary();
         else if (category === 'inventory') content = renderInventory();
         else if (category === 'relationships') content = renderRelationships();
+        else if (category === 'favor') content = renderFavor();
         else if (current && items.length) {
             content = `<div class="igs-record-table-scroll"><table><caption>${escapeHtml(current.name)}</caption><thead><tr>${current.columns.map((column, index) => `<th scope="col">${escapeHtml(column || `第${index + 1}列`)}</th>`).join('')}</tr></thead><tbody>${items.map(item => `<tr>${current.columns.map((_, index) => `<td>${escapeHtml(current.rows[item.rowIndex]?.[index])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
         }

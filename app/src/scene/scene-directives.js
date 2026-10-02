@@ -1,6 +1,6 @@
 import { resolveMoodGroup, fuzzyResolveMoodGroup } from './mood-groups.js';
 import { resolveSceneTimeAsset } from './scene-time.js';
-import { IGS_DIRECTIVE_START_RE } from './directive-tags.js';
+import { IGS_DIRECTIVE_START_RE, matchOutfitDirectiveAt } from './directive-tags.js';
 
 // 指令可独占整行，也可紧跟在正文之后（同一行内混排），因此不做行首锚定。
 const SCENE_RE = /\[igs-scene:([^|\]]+)\|([^|\]]+)\|([^|\]]+)(?:\|([^\]]*))?\]/;
@@ -11,23 +11,37 @@ const SCENE_AT_RE = /^\[igs-scene:([^|\]]+)\|([^|\]]+)\|([^|\]]+)(?:\|([^\]]*))?
 // 台词/心里话漏写 "]" 时以行尾收口，与正文格式化规则一致；表情栏可省略（两栏写法视为没写表情）。
 const CHAR_AT_RE = /^\[igs-char:([^|\]]+)\|(?:([^|\]]*)\|)?([^|\]]+)(?:\]|$)/;
 const THOUGHT_AT_RE = /^\[igs-thought:([^|\]]+)\|(?:([^|\]]*)\|)?([^|\]]+)(?:\]|$)/;
-const IMG_AT_RE = /^\[igs-img:\s*(\d+)\s*\]/;
+const IMG_AT_RE = /^(?:\[igs-img:\s*(\d+)\s*\]|<IMG>\s*(\d+)\s*<\/IMG>)/i;
 const FX_AT_RE = /^\[igs-fx:[^\]\n]*(?:\]|$)/;
-export const IGS_IMG_MARKER_SOURCE = '\\[igs-img:\\s*(\\d+)\\s*\\]';
+export const IGS_IMG_MARKER_SOURCE = '(?:\\[igs-img:\\s*|<IMG>\\s*)(\\d+)(?:\\s*\\]|\\s*<\\/IMG>)';
 
 export function stripIllustrationMarkers(text) {
     return String(text || '')
-        .replace(/^[ \t]*\[igs-img:\s*\d+\s*\][ \t]*(?:\r?\n|$)/gm, '')
-        .replace(/\[igs-img:\s*\d+\s*\]/g, '');
+        .replace(/^[ \t]*(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)[ \t]*(?:\r?\n|$)/gim, '')
+        .replace(/(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi, '');
+}
+
+export function stripIllustrationMarker(text, slot) {
+    const n = Number(slot);
+    if (!Number.isInteger(n) || n < 1) return String(text || '');
+    const token = String(n);
+    return String(text || '')
+        .replace(new RegExp(`^[ \\t]*(?:\\[igs-img:\\s*${token}\\s*\\]|<IMG>\\s*${token}\\s*<\\/IMG>)[ \\t]*(?:\\r?\\n|$)`, 'gim'), '')
+        .replace(new RegExp(`(?:\\[igs-img:\\s*${token}\\s*\\]|<IMG>\\s*${token}\\s*<\\/IMG>)`, 'gi'), '');
 }
 // 找出当前位置之后最近一条 igs 指令的起始下标；没有则返回 -1。
 function nextDirectiveIndex(text) {
-    const m = String(text || '').match(IGS_DIRECTIVE_START_RE);
-    return m ? m.index : -1;
+    const source = String(text || '');
+    const directive = source.match(IGS_DIRECTIVE_START_RE);
+    const illustration = source.match(/(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/i);
+    const indexes = [directive && directive.index, illustration && illustration.index]
+        .filter((index) => Number.isInteger(index));
+    return indexes.length ? Math.min(...indexes) : -1;
 }
 
-export function extractSceneDirectives(text) {
+export function extractSceneDirectives(text, options = {}) {
     const source = String(text || '');
+    const outfitResolver = options && typeof options.outfitResolver === 'function' ? options.outfitResolver : null;
     if (!source.trim()) return { directives: [], illustrationMarkers: [], strippedText: source };
 
     const directives = [];
@@ -66,6 +80,13 @@ export function extractSceneDirectives(text) {
                     lineIndex: i,
                     offset: cursor,
                 });
+            } else if ((m = matchOutfitDirectiveAt(rest, outfitResolver))) {
+                if (pending.trim()) { segmentCount += 1; pending = ''; }
+                const textKey = m.type === 'thought' ? 'thought' : 'dialogue';
+                directives.push({ type: m.type, character: m.character, mood: m.mood, outfit: m.outfit, ...(m.unknownOutfit ? { unknownOutfit: m.unknownOutfit } : {}), [textKey]: m.text, segmentIndex: segmentCount, lineIndex: i, offset: cursor });
+                rest = rest.slice(m.raw.length);
+                cursor += m.raw.length;
+                continue;
             } else if ((m = rest.match(CHAR_AT_RE))) {
                 if (pending.trim()) { segmentCount += 1; pending = ''; }
                 directives.push({ type: 'char', character: m[1].trim(), mood: String(m[2] || '').trim(), dialogue: m[3].trim(), segmentIndex: segmentCount, lineIndex: i, offset: cursor });
@@ -73,7 +94,7 @@ export function extractSceneDirectives(text) {
                 if (pending.trim()) { segmentCount += 1; pending = ''; }
                 directives.push({ type: 'thought', character: m[1].trim(), mood: String(m[2] || '').trim(), thought: m[3].trim(),segmentIndex: segmentCount, lineIndex: i, offset: cursor });
             } else if ((m = rest.match(IMG_AT_RE))) {
-                illustrationMarkers.push({ slot: Number(m[1]), lineIndex: i, offset: cursor });
+                illustrationMarkers.push({ slot: Number(m[1] || m[2]), lineIndex: i, offset: cursor });
             } else if ((m = rest.match(FX_AT_RE))) {
                 // igs-fx 由 fx-directives 单独解析，这里只跳过、不计入正文。
             } else {
@@ -136,17 +157,133 @@ export function resolveSceneAtSourceOffset(source, position) {
     };
 }
 
-// 新场景标签终止此前的 CG；图像标记只作偏移定位，不改变场景指令段索引。
+// 正文范围。同一句若在提示词里再出现一次，不拿那一次当阅读位置。
+export function narrativeRanges(source) {
+    const src = String(source || '');
+    const ranges = [];
+    for (const match of src.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content>/gi)) {
+        const body = match[1];
+        const start = match.index + match[0].length - body.length - '</content>'.length;
+        if (body.length) ranges.push([start, start + body.length]);
+    }
+    return ranges;
+}
+
+// 从上一页之后接着找当前这句，只在正文里找。
+export function locateNarrativeOffset(source, needle, from, locate) {
+    const src = String(source || '');
+    const ranges = narrativeRanges(src);
+    const zones = ranges.length ? ranges : [[0, src.length]];
+    const find = typeof locate === 'function'
+        ? locate
+        : (text, start) => String(text || '').indexOf(String(needle || '').trim(), Math.max(0, Number(start) || 0));
+    const origin = Math.max(0, Number(from) || 0);
+    for (const [start, end] of zones) {
+        if (end <= origin) continue;
+        const hit = Number(find(src.slice(start, end), Math.max(0, origin - start)));
+        if (Number.isFinite(hit) && hit >= 0) return start + hit;
+    }
+    return -1;
+}
+
+// 从第一页往后定位。当前页对不上原文时，沿用前面已经对上的位置，避免翻一页就退回标记前。
+export function resolveHeldSourceOffset(source, segments, index, locate) {
+    const list = Array.isArray(segments) ? segments : [];
+    if (!list.length) return -1;
+    const at = Math.min(list.length - 1, Math.max(0, Number(index) || 0));
+    const find = typeof locate === 'function' ? locate : (text, from) => String(source || '').indexOf(String(text || ''), Math.max(0, Number(from) || 0));
+    let last = -1;
+    for (let i = 0; i <= at; i += 1) {
+        const hit = Number(find(list[i], last >= 0 ? last + 1 : 0));
+        if (Number.isFinite(hit) && hit >= 0) last = hit;
+    }
+    return last;
+}
+
+// 从当前这句往后找下一张 CG。这句在标记前面就显示这张；翻过最后一张后仍保持最后一张。
 export function resolveIllustrationAtSourceOffset(source, position) {
     const src = String(source || '');
     const limit = Math.max(0, Math.min(src.length, Number(position) || 0));
-    const head = src.slice(0, limit);
-    const imgAt = head.lastIndexOf('[igs-img:');
-    if (imgAt < 0) return null;
-    const m = src.slice(imgAt).match(IMG_AT_RE);
-    if (!m) return null;
-    if (head.lastIndexOf('[igs-scene:') > imgAt) return null;
-    return { slot: Number(m[1]), offset: imgAt };
+    const markerRe = /\[igs-img:\s*(\d+)\s*\]|<IMG>\s*(\d+)\s*<\/IMG>/gi;
+    let last = null;
+    for (const match of src.matchAll(markerRe)) {
+        const slot = Number(match[1] || match[2]);
+        if (!Number.isInteger(slot) || slot < 1) continue;
+        if (match.index >= limit) return { slot, offset: match.index };
+        last = { slot, offset: match.index };
+    }
+    return last;
+}
+
+// 每一页的阅读位置，规则同 resolveHeldSourceOffset：对不上原文的页沿用前一页的位置。
+export function resolveHeldSourceOffsets(source, segments, locate) {
+    const list = Array.isArray(segments) ? segments : [];
+    const find = typeof locate === 'function' ? locate : (text, from) => String(source || '').indexOf(String(text || ''), Math.max(0, Number(from) || 0));
+    const out = [];
+    let last = -1;
+    for (let i = 0; i < list.length; i += 1) {
+        const hit = Number(find(list[i], last >= 0 ? last + 1 : 0));
+        if (Number.isFinite(hit) && hit >= 0) last = hit;
+        out.push(last);
+    }
+    return out;
+}
+
+const PAGE_SPEAKER_RE = /^\s*\*?\s*\[([^\]\n]+)\]\s*[:：]/;
+
+/**
+ * 当前页该显示哪张 CG。
+ * NSFW 页沿用 resolveIllustrationAtSourceOffset：整楼有图就一直挂着，只被下一张替换；翻过的 NSFW 图转到 SFW 场景也不撤。
+ * SFW 页按 GAL 的事件 CG 处理：从标记前一页（锚句所在页）切入，至少保持 holdPages 页；
+ * 之后有本段没开口过的角色说话就退场，最长 holdPages*2 页；换地点或时段、下一张 CG 也会结束这一张。
+ * @returns {{ slot: number, offset: number } | null}
+ */
+export function resolveIllustrationForPage({ source, offsets, segments, index, holdPages = 4, inheritedNsfw = false } = {}) {
+    const src = String(source || '');
+    const pages = Array.isArray(offsets) ? offsets : [];
+    const at = Math.min(pages.length - 1, Math.max(0, Number(index) || 0));
+    if (!pages.length || pages[at] < 0) return null;
+    const sceneAt = (position) => {
+        const state = resolveSceneAtSourceOffset(src, position);
+        return state.scene ? state : { ...state, nsfw: inheritedNsfw === true };
+    };
+    if (sceneAt(pages[at]).nsfw) return resolveIllustrationAtSourceOffset(src, pages[at]);
+    const markers = [];
+    for (const match of src.matchAll(/\[igs-img:\s*(\d+)\s*\]|<IMG>\s*(\d+)\s*<\/IMG>/gi)) {
+        const slot = Number(match[1] || match[2]);
+        if (Number.isInteger(slot) && slot >= 1) markers.push({ slot, offset: match.index });
+    }
+    // NSFW 图翻过后，即使转到 SFW 场景也保持到下一张。
+    const passed = markers.filter((marker) => marker.offset < pages[at]).pop();
+    if (passed && sceneAt(passed.offset).nsfw) return passed;
+    let current = null;
+    let start = -1;
+    for (const marker of markers) {
+        let page = -1;
+        for (let i = 0; i < pages.length; i += 1) {
+            if (pages[i] >= 0 && pages[i] < marker.offset) page = i;
+        }
+        if (page < 0) page = pages.findIndex((offset) => offset > marker.offset);
+        if (page >= 0 && page <= at && page >= start) {
+            current = marker;
+            start = page;
+        }
+    }
+    if (!current) return null;
+    const hold = Math.max(1, Number(holdPages) || 4);
+    if (at - start >= hold * 2) return null;
+    const opening = sceneAt(pages[start]);
+    const here = sceneAt(pages[at]);
+    if (here.scene !== opening.scene || here.time !== opening.time) return null;
+    const list = Array.isArray(segments) ? segments : [];
+    const spoken = new Set();
+    for (let i = start; i <= at; i += 1) {
+        const match = String(list[i] || '').match(PAGE_SPEAKER_RE);
+        const speaker = match ? match[1].trim() : '';
+        if (speaker && i - start >= hold && !spoken.has(speaker)) return null;
+        if (speaker) spoken.add(speaker);
+    }
+    return current;
 }
 
 // 从已提取的指令中取最后一条 [igs-scene]：供跨楼层场景追溯使用，
@@ -319,11 +456,14 @@ export function lookupSceneBackground(sceneState, sceneAssets) {
     const raw = match.key != null ? scenes[match.key] : (useDefault ? scenes['默认'] : null);
     const quality = useDefault ? 'default' : match.quality;
     const key = match.key != null ? match.key : (useDefault ? '默认' : null);
-    if (!raw) return { url: null, key, quality };
-    return { url: resolveSceneEntryUrl(raw, state.time, state.weather, sceneAssets) || null, key, quality };
+    if (!raw) return { url: null, key, quality, timed: false };
+    const resolved = resolveSceneEntry(raw, state.time, state.weather, sceneAssets);
+    return { url: resolved.url || null, key, quality, timed: Boolean(resolved.url) && resolved.timed };
 }
 
-function resolveSceneEntryUrl(raw, time, weather, sceneAssets) {
+// timed：命中了素材自带的时段变体（times 层或内置示例图的时段替换），说明画面本身已有该时段光照，
+// 渲染层据此跳过时段调色，避免夜景素材再被压暗一次。
+function resolveSceneEntry(raw, time, weather, sceneAssets) {
     const entry = typeof raw === 'string' ? { url: raw } : raw;
     const timeGroups = sceneAssets && sceneAssets.timeGroups;
     const weatherGroups = sceneAssets && sceneAssets.weatherGroups;
@@ -335,15 +475,17 @@ function resolveSceneEntryUrl(raw, time, weather, sceneAssets) {
         if (weatherKey != null) {
             const weatherRaw = timeEntry.weathers[weatherKey];
             const weatherEntry = typeof weatherRaw === 'string' ? { url: weatherRaw } : weatherRaw;
-            return (weatherEntry && weatherEntry.url) || (typeof weatherRaw === 'string' ? weatherRaw : null) || null;
+            return { url: (weatherEntry && weatherEntry.url) || (typeof weatherRaw === 'string' ? weatherRaw : null) || null, timed: true };
         }
-        return resolveSceneTimeAsset(timeEntry.url || '', time);
+        return { url: resolveSceneTimeAsset(timeEntry.url || '', time), timed: true };
     }
-    return resolveSceneTimeAsset(entry.url || '', time);
+    const base = entry.url || '';
+    const url = resolveSceneTimeAsset(base, time);
+    return { url, timed: Boolean(base) && url !== base };
 }
 
 // quality：exact（槽位名）/ group（组词）/ fuzzy（模糊兜底，可能错配）/ default / none。
-function lookupAssetValue(record, requestedKey, moodGroups, fuzzy = false) {
+export function lookupAssetValue(record, requestedKey, moodGroups, fuzzy = false, allowDefault = true) {
     if (!record || typeof record !== 'object') return { url: null, slot: '', quality: 'none' };
     if (requestedKey && record[requestedKey]) return { url: record[requestedKey], slot: requestedKey, quality: 'exact' };
     const groupLabel = resolveMoodGroup(requestedKey, moodGroups);
@@ -352,7 +494,7 @@ function lookupAssetValue(record, requestedKey, moodGroups, fuzzy = false) {
         const fuzzyLabel = fuzzyResolveMoodGroup(requestedKey, moodGroups);
         if (fuzzyLabel && record[fuzzyLabel]) return { url: record[fuzzyLabel], slot: fuzzyLabel, quality: 'fuzzy' };
     }
-    if (record['默认']) return { url: record['默认'], slot: '默认', quality: 'default' };
+    if (allowDefault && record['默认']) return { url: record['默认'], slot: '默认', quality: 'default' };
     return { url: null, slot: '', quality: 'none' };
 }
 

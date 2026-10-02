@@ -470,7 +470,12 @@ function resolveActiveProviders(explicitProviders, builtinProviders, imageApi = 
     return sourceProviders.filter((provider) => {
         if (!provider || typeof provider !== 'object') return false;
         if (mode === 'nai' || mode === 'dbgen') {
-            return String(provider.providerType || '').trim() === 'nai';
+            const providerType = String(provider.providerType || '').trim();
+            // 数据库插件的 <IMG>n</IMG> 标记对应插件渲染到楼层 DOM 的图片；
+            // dbgen 模式仍须收集这些 DOM provider，才能按标记顺序读取图片。
+            return mode === 'nai'
+                ? providerType === 'nai'
+                : providerType === 'nai' || providerType === 'extension-dom';
         }
         if (String(provider.providerType || '').trim() === 'nai') {
             return false;
@@ -666,6 +671,7 @@ function uniqueImages(images) {
             source: String(image.source || '').trim(),
             filename: String(image.filename || '').trim(),
             imageId: String(image.imageId || '').trim(),
+            requestId: String(image.requestId || '').trim(),
             locationHash: String(image.locationHash || '').trim(),
             slotIndex: normalizeOptionalIndex(image.slotIndex),
             buttonIndex: normalizeOptionalIndex(image.buttonIndex),
@@ -864,6 +870,7 @@ function normalizeImageSlots(imageSlots) {
         providerId: String(slot && slot.providerId || '').trim(),
         filename: String(slot && slot.filename || '').trim(),
         imageId: String(slot && slot.imageId || '').trim(),
+        requestId: String(slot && slot.requestId || '').trim(),
         buttonIndex: normalizeOptionalIndex(slot && slot.buttonIndex),
         order: normalizeOptionalIndex(slot && slot.order),
     })).sort((left, right) => left.slotIndex - right.slotIndex);
@@ -1055,6 +1062,7 @@ function extractStoredSlotImages(slots) {
             source: String(slot.source || '').trim(),
             filename: String(slot.filename || '').trim(),
             imageId: String(slot.imageId || '').trim(),
+            requestId: String(slot.requestId || '').trim(),
             locationHash: String(slot.locationHash || '').trim(),
             slotIndex: normalizeOptionalIndex(slot.slotIndex),
             buttonIndex: normalizeOptionalIndex(slot.buttonIndex),
@@ -1113,6 +1121,10 @@ function matchRegenerateButtonCandidate(candidates, imageIndex, imageState) {
         && imageState.slots[clampSlotIndex(imageIndex, imageState.slots.length)]
         ? imageState.slots[clampSlotIndex(imageIndex, imageState.slots.length)]
         : null;
+    if (currentSlot && currentSlot.requestId) {
+        const exact = buttonCandidates.find((candidate) => candidate.requestId && candidate.requestId === currentSlot.requestId);
+        if (exact) return exact;
+    }
     if (currentSlot && currentSlot.locationHash) {
         const exact = buttonCandidates.find((candidate) => candidate.locationHash && candidate.locationHash === currentSlot.locationHash);
         if (exact) return exact;

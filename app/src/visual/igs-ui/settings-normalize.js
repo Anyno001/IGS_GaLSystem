@@ -6,6 +6,9 @@ import { esc, normalizeFiniteNumber } from './reader-value-utils.js';
 import { CLASSIC_DIALOG_THEME_DEFAULTS, isClassicDialogSkin, normalizeDialogSkin } from './classic-dialog-skin.js';
 import { getReferenceDialogTypography } from './dialog-theme-typography.js';
 import { normalizeStageShakeSettings } from './stage-shake-runtime.js';
+import { normalizeRenderQualitySetting } from './render-quality.js';
+import { spriteIdentity } from '../../scene/character-outfits.js';
+
 
 export function normalizeReaderMode(mode, bridge) {
     if (mode === 'default') return 'default';
@@ -19,11 +22,17 @@ export function normalizeSettingsTab(tab) {
     return SETTINGS_TAB_DEFS.some(([id]) => id === normalized) ? normalized : 'basic';
 }
 
+export function normalizePerformanceSettings(value) {
+    const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return { ...src, quality: normalizeRenderQualitySetting(src.quality) };
+}
+
 export function normalizeSettingsValue(path, value) {
     if (path === 'readerMode' || path === 'bridge.openMode' || path === 'bridge.imageApi.mode' || path === 'bridge.imageApi.externalAdapter' || path === 'readerSettings.imgMode') {
         return String(value || '');
     }
     if (path.startsWith('readerSettings.')) {
+        if (path === 'readerSettings.performance.quality') return normalizeRenderQualitySetting(value);
         if (value === null || value === 'null') return null;
         if (path === 'readerSettings.typewriter.mode') return value === 'classic' ? 'classic' : 'soft';
         if (/^readerSettings\.typewriter\.sound\.(volume|dialogueVolume|narrationVolume)$/.test(path)) {
@@ -34,24 +43,36 @@ export function normalizeSettingsValue(path, value) {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
         if (/^readerSettings\.chatShow\.(dim|sound\.volume)$/.test(path)) return Number(value);
-        if (/^readerSettings\.(titleCard|mangaFx|heartbeatFx|flashFx|favorToast|fxTags|fxSound)\.(enabled|onLocation|onTime|call|notify|flashback|letterbox|sfx|eye)$/.test(path)) {
+        if (/^readerSettings\.(titleCard|mangaFx|heartbeatFx|flashFx|favorToast|fxTags|fxSound)\.(enabled|onLocation|onTime|call|notify|flashback|dream|letterbox|sfx|eye)$/.test(path)) {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
-        if (path === 'readerSettings.fxSound.volume') {
+        if (/^readerSettings\.(sceneTransition|timeTint|spriteMotion|spriteActions|camera|stageCast|textFx|clickWaitMark|bgm|ambientSound|uiSound)\.(enabled|night|alignHeads|romanceDuo|castReact|castStage|breathing|castBreathing|castLean|speakBounce|enterExit|emotionFade|kenBurns|parallax|closeUp|birds|rain|wind|insects|waves|crowd|thunder|stream|fire|snow|cicadas|frogs|chimes|bell|clock|drip|train|tavern|ship|traffic)$/.test(path)
+            || /^readerSettings\.dailyFx\.(enabled|petals|photoAlbum|timeskip|photo|letter|note|bell|broadcast|fireworks|touch|alarm|omikuji|receipt|tv)$/.test(path)
+            || /^readerSettings\.(liveFx|audienceFx|innerFx)\.(enabled|muteOnNsfw|ambient|useThought)$/.test(path)
+            || path === 'readerSettings.typewriter.punctuationPause'
+            || path === 'readerSettings.typewriter.prosody') {
+            return value === true || value === 'true' || value === 1 || value === '1';
+        }
+        if (path === 'readerSettings.fxSound.volume' || path === 'readerSettings.bgm.volume' || path === 'readerSettings.ambientSound.volume' || path === 'readerSettings.uiSound.volume' || path === 'readerSettings.audioMaster.volume') {
             const volume = Number(value);
             return Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.5;
         }
+        if (/^readerSettings\.metaFx\.(enabled|poke|hover|reading|clock|festivals|digest)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
+        if (path === 'readerSettings.metaFx.cooldownSec') return Number(value);
+        if (path === 'readerSettings.metaFx.birthday') return String(value || '').trim();
         if (path === 'readerSettings.dialogFontWeight') return [300, 400, 500, 700].includes(Number(value)) ? Number(value) : null;
-        if (/fontSize|optionFontSize|dialogWidth|dialogHeight|classicDialogWidthPercent|skinDialogScale|toolbarScale|inputScale|imageCountOverride|imgBrightness|gradientVeil\.(heightPercent|opacity)/.test(path)) {
+        if (/fontSize|optionFontSize|dialogWidth|dialogHeight|classicDialogWidthPercent|skinDialogScale|toolbarScale|inputScale|imageCountOverride|imgBrightness|cgHoldPages|gradientVeil\.(heightPercent|opacity)/.test(path)) {
             return Number(value);
         }
         if (/glassOpacity/.test(path)) {
             return Number(value);
         }
-        if (/^readerSettings\.typewriter\.(enabled|sound\.enabled)$/.test(path) || /^readerSettings\.stageShake\.enabled$/.test(path) || /^readerSettings\.weatherFx\.enabled$/.test(path) || /^readerSettings\.statusHud\.enabled$/.test(path) || /^readerSettings\.statusHud\.showEmotion$/.test(path) || /^readerSettings\.statusHud\.showLocation$/.test(path) || /^readerSettings\.statusHud\.showLocationDetails$/.test(path) || /^readerSettings\.statusHud\.showSpriteOnNsfw$/.test(path) || /^readerSettings\.statusHud\.dimSpriteOnNarration$/.test(path)) {
+        if (/^readerSettings\.typewriter\.(enabled|sound\.enabled|sound\.speakerPitch)$/.test(path) || /^readerSettings\.stageShake\.enabled$/.test(path) || /^readerSettings\.weatherFx\.enabled$/.test(path) || /^readerSettings\.statusHud\.enabled$/.test(path) || /^readerSettings\.statusHud\.showEmotion$/.test(path) || /^readerSettings\.statusHud\.showLocation$/.test(path) || /^readerSettings\.statusHud\.showLocationDetails$/.test(path) || /^readerSettings\.statusHud\.showSpriteOnNsfw$/.test(path) || /^readerSettings\.statusHud\.dimSpriteOnNarration$/.test(path)) {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
     }
+    if (path === 'bridge.sceneAssets.promptPlacement') return value === 'depth0' ? 'depth0' : 'system';
+    if (path === 'bridge.sceneAssets.promptAdaptive') return !(value === false || value === 'false' || value === 0 || value === '0');
     if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
         return value === true || value === 'true' || value === 1 || value === '1';
     }
@@ -79,7 +100,8 @@ export function setPath(target, path, value) {
     let cursor = target;
     for (let index = 0; index < parts.length - 1; index += 1) {
         const key = parts[index];
-        if (!cursor[key] || typeof cursor[key] !== 'object' || Array.isArray(cursor[key])) {
+        const nextKey = parts[index + 1];
+        if (!cursor[key] || typeof cursor[key] !== 'object' || (Array.isArray(cursor[key]) && !/^\d+$/.test(nextKey))) {
             cursor[key] = {};
         }
         cursor = cursor[key];
@@ -144,19 +166,27 @@ export function normalizeSpriteLayouts(value) {
     return out;
 }
 
-export function resolveSpriteLayout(layouts, mode, character, mood) {
+export function resolveSpriteLayout(layouts, mode, character, mood, outfit = '') {
     const def = { posX: 50, posY: 100, scale: 100 };
+    const modeLayout = layouts && layouts[mode];
+    const scale = modeLayout && Number.isFinite(Number(modeLayout.scale)) ? Number(modeLayout.scale) : def.scale;
+    const placed = (layout) => ({ posX: layout.posX, posY: layout.posY, scale });
     if (!layouts) return def;
     if (character) {
-        if (mood) {
+        const identity = spriteIdentity(character, outfit);
+        // 服装先查自身位置；未调过时回落到角色整体位置，不借用原有立绘的单表情位置。比例只认当前模式的那一个。
+        if (identity !== character) {
+            if (mood && layouts[`${mode}::${identity}::${mood}`]) return placed(layouts[`${mode}::${identity}::${mood}`]);
+            if (layouts[`${mode}::${identity}`]) return placed(layouts[`${mode}::${identity}`]);
+        } else if (mood) {
             const moodKey = `${mode}::${character}::${mood}`;
-            if (layouts[moodKey]) return layouts[moodKey];
+            if (layouts[moodKey]) return placed(layouts[moodKey]);
         }
         const charKey = `${mode}::${character}`;
-        if (layouts[charKey]) return layouts[charKey];
+        if (layouts[charKey]) return placed(layouts[charKey]);
     }
-    if (layouts[mode]) return layouts[mode];
-    return def;
+    if (modeLayout) return placed(modeLayout);
+    return { ...def, scale };
 }
 
 export function resolveActiveTheme(snapshot) {

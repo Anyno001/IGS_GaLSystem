@@ -1,11 +1,17 @@
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     extractSceneDirectives,
     stripIllustrationMarkers,
     resolveIllustrationAtSourceOffset,
+    resolveHeldSourceOffset,
+    locateNarrativeOffset,
+    resolveHeldSourceOffsets,
+    resolveIllustrationForPage,
 } from '../src/scene/scene-directives.js';
 import { buildIgsTextPayload } from '../src/scene/message-source.js';
+import { bindCharacterDnaToCaption } from '../src/generated-images/illustration/auto-illustration-service.js';
 
 test('gate:illustration:marker-does-not-shift-scene-directives', () => {
     const plain = '[igs-scene:卧室|夜晚|晴]\n[igs-char:小雪|开心|你好]\n一\n二';
@@ -17,6 +23,14 @@ test('gate:illustration:marker-does-not-shift-scene-directives', () => {
     assert.equal(after.illustrationMarkers[0].slot, 1);
 });
 
+test('gate:illustration:database-img-marker-is-compatible-with-igs-marker', () => {
+    const source = '[igs-scene:卧室|夜晚|晴]\n第一段。<IMG>1</IMG>\n第二段。';
+    const extracted = extractSceneDirectives(source);
+    assert.deepEqual(extracted.illustrationMarkers.map((marker) => marker.slot), [1]);
+    assert.equal(stripIllustrationMarkers(source).includes('<IMG>'), false);
+    assert.deepEqual(resolveIllustrationAtSourceOffset(source, source.indexOf('第二段')), { slot: 1, offset: source.indexOf('<IMG>') });
+});
+
 test('gate:illustration:broken-marker-does-not-hang', () => {
     assert.deepEqual(extractSceneDirectives('正文[igs-img:\n下一行[igs-img:x]').illustrationMarkers, []);
 });
@@ -25,11 +39,55 @@ test('gate:illustration:strip-removes-own-line-and-inline', () => {
     assert.equal(stripIllustrationMarkers('a\n[igs-img:1]\nb[igs-img:2]c'), 'a\nbc');
 });
 
-test('gate:illustration:resolve-stops-at-next-scene', () => {
-    const src = '[igs-scene:A|夜|晴]\n一\n[igs-img:1]\n二\n[igs-scene:B|夜|晴]\n三';
-    assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf('二')).slot, 1);
-    assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf('三')), null);
-    assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf('一')), null);
+test('gate:illustration:cg-is-the-marker-after-the-current-line', () => {
+    const src = '对白1。\n对白2。\n对白3。\n[igs-img:1]\n对白4。\n对白5。\n对白6。\n[igs-img:2]\n对白7。\n对白8。\n对白9。\n[igs-img:3]';
+    for (const line of ['对白1。', '对白2。', '对白3。']) {
+        assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf(line)).slot, 1);
+    }
+    for (const line of ['对白4。', '对白5。', '对白6。']) {
+        assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf(line)).slot, 2);
+    }
+    for (const line of ['对白7。', '对白8。', '对白9。']) {
+        assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf(line)).slot, 3);
+    }
+});
+
+test('gate:illustration:current-line-stays-in-the-story-copy', () => {
+    const src = '<content>室内。\n[igs-char:星见|高潮|冬装|出してっ！全部。]\n[igs-img:1]\n下一句。</content>\n{"image_guidance":"出してっ！ 全部。"}';
+    const segments = ['室内。', '出してっ！ 全部。', '下一句。'];
+    const locate = (segment, from) => locateNarrativeOffset(src, segment, from, (slice, start) => {
+        const needle = String(segment || '').trim();
+        const exact = slice.indexOf(needle, Math.max(0, Number(start) || 0));
+        if (exact >= 0) return exact;
+        const loose = needle.replace(/[\s*（）\[\]]+/g, '');
+        const flat = slice.slice(Math.max(0, Number(start) || 0)).replace(/[\s*（）\[\]]+/g, '');
+        const hit = flat.indexOf(loose);
+        if (hit < 0) return -1;
+        return slice.indexOf('出してっ！', Math.max(0, Number(start) || 0));
+    });
+    const at = resolveHeldSourceOffset(src, segments, 1, locate);
+    assert.ok(at >= 0 && at < src.indexOf('image_guidance'));
+    assert.equal(resolveIllustrationAtSourceOffset(src, at).slot, 1);
+    assert.equal(resolveIllustrationAtSourceOffset(src, resolveHeldSourceOffset(src, segments, 2, locate)).slot, 1);
+});
+
+test('gate:illustration:cg-stays-when-the-next-page-cannot-be-located', () => {
+    const src = '前。\n[igs-img:1]\n灯还亮着。\n[igs-char:林小雨|平和|校服|你回来了。]\n她点头。\n[igs-img:2]\n雨停了。';
+    const segments = ['前。', '灯还亮着。', '[林小雨]：你回来了。', '她点头。', '雨停了。'];
+    const locate = (segment, from) => src.indexOf(String(segment || ''), Math.max(0, Number(from) || 0));
+    assert.equal(resolveIllustrationAtSourceOffset(src, resolveHeldSourceOffset(src, segments, 0, locate)).slot, 1);
+    assert.equal(resolveIllustrationAtSourceOffset(src, resolveHeldSourceOffset(src, segments, 1, locate)).slot, 2);
+    assert.equal(resolveIllustrationAtSourceOffset(src, resolveHeldSourceOffset(src, segments, 2, locate)).slot, 2);
+    assert.equal(resolveIllustrationAtSourceOffset(src, resolveHeldSourceOffset(src, segments, 3, locate)).slot, 2);
+    assert.equal(resolveIllustrationAtSourceOffset(src, resolveHeldSourceOffset(src, segments, 4, locate)).slot, 2);
+});
+
+test('gate:illustration:cg-holds-until-the-next-cg', () => {
+    const src = '[igs-scene:A|夜|晴]\n一\n[igs-img:1]\n二\n[igs-scene:B|夜|晴]\n三\n[igs-img:2]\n四';
+    assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf('一')).slot, 1);
+    assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf('二')).slot, 2);
+    assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf('三')).slot, 2);
+    assert.equal(resolveIllustrationAtSourceOffset(src, src.indexOf('四')).slot, 2);
 });
 
 test('gate:illustration:payload-keeps-raw-marker-but-hides-from-segments', () => {
@@ -113,6 +171,59 @@ test('gate:illustration:number-paragraphs-reads-directives', async () => {
     assert.ok(result.characters.includes('小雪'));
 });
 
+test('gate:illustration:later-scene-nsfw-still-triggers', async () => {
+    const { numberParagraphs } = await import('../src/generated-images/illustration/marker-placer.js');
+    const split = [
+        '<content>',
+        '[igs-scene:教室|白天|晴]',
+        '上课。',
+        '</content>',
+        '<content>',
+        '[igs-scene:卧室|夜晚|晴|NSFW]',
+        '她关上门。',
+        '</content>',
+    ].join('\n');
+    const afterClose = '<content>\n[igs-scene:教室|白天|晴]\n上课。\n</content>\n[igs-scene:卧室|夜晚|晴|NSFW]\n她关上门。';
+    for (const text of [split, afterClose]) {
+        const result = numberParagraphs(text);
+        assert.equal(result.isNsfw, true);
+        assert.deepEqual(result.scenes.map((scene) => scene.scene), ['教室', '卧室']);
+    }
+});
+
+test('gate:illustration:anchor-uses-the-same-match-as-dbgen', async () => {
+    const { numberParagraphs, paragraphNoForAnchor } = await import('../src/generated-images/illustration/marker-placer.js');
+    const raw = [
+        '[igs-scene:卧室|夜晚|晴|NSFW]',
+        '她推开门，看见灯还亮着。',
+        '[igs-char:林小雨|平和|校服|你回来了。]',
+        '林小雨把外套脱在椅背上，换上了睡衣。',
+        '窗外的雨忽然大了。',
+    ].join('\n');
+    const numbered = numberParagraphs(raw);
+    assert.equal(paragraphNoForAnchor(raw, numbered.paragraphs, '她推开门，看见灯还亮着。'), 1);
+    assert.equal(paragraphNoForAnchor(raw, numbered.paragraphs, '你回来了'), 2);
+    assert.equal(paragraphNoForAnchor(raw, numbered.paragraphs, '“换上了睡衣”'), 3);
+    assert.equal(paragraphNoForAnchor(raw, numbered.paragraphs, '结尾改写了，窗外的雨忽然大了，前面也改了'), 4);
+    assert.equal(paragraphNoForAnchor(raw, numbered.paragraphs, '完全对不上的另一段话'), 0);
+});
+
+test('gate:illustration:anchors-in-one-paragraph-stay-on-their-own-sentences', async () => {
+    const { insertMarkersAtAnchors } = await import('../src/generated-images/illustration/marker-placer.js');
+    const raw = '前文。黒いエナメルの長い耳が、彼女の頭上でピンと立っている。中文。親指の腹で、張り詰めた乳頭をそっと転がす。后文。';
+    const result = insertMarkersAtAnchors(raw, [
+        { slot: 4, anchorSentence: '黒いエナメルの長い耳が、彼女の頭上でピンと立っている。' },
+        { slot: 3, anchorSentence: '親指の腹で、張り詰めた乳頭をそっと転がす。' },
+    ]);
+    const ear = result.indexOf('立っている。');
+    const thumb = result.indexOf('転がす。');
+    assert.ok(ear >= 0 && thumb > ear);
+    assert.ok(result.indexOf('[igs-img:4]') > ear);
+    assert.ok(result.indexOf('[igs-img:4]') < thumb);
+    assert.ok(result.indexOf('[igs-img:3]') > thumb);
+    assert.equal(result.includes('[igs-img:4]\n[igs-img:3]'), false);
+});
+
 test('gate:illustration:insert-marker-before-paragraph', async () => {
     const { numberParagraphs, insertMarkers } = await import('../src/generated-images/illustration/marker-placer.js');
     const raw = '[igs-scene:A|夜|晴]\n一\n二\n三';
@@ -152,6 +263,7 @@ test('gate:illustration:parse-empty-fails', async () => {
 test('gate:illustration:planner-prompt-count-wording', async () => {
     const { buildPlannerUserPrompt } = await import('../src/generated-images/illustration/planner-prompt.js');
     assert.ok(buildPlannerUserPrompt({ want: 2, exact: true }).includes('恰好 2 张'));
+    assert.ok(buildPlannerUserPrompt({ want: 1, exact: true, frame: '画面是竖的，宽832，高1216。构图按竖屏写，不要写成横屏。' }).includes('【画面】画面是竖的，宽832，高1216。'));
     assert.ok(buildPlannerUserPrompt({ want: 3, exact: false }).includes('1 到 3 张'));
 });
 
@@ -256,15 +368,23 @@ test('gate:illustration:message-host-rejects-stale-floor-before-helper-write', a
     assert.equal(ctx.chat[0].mes, 'original');
 });
 
+const NSFW_TEXT = '[igs-scene:卧室|夜晚|晴|NSFW]\n一段。\n二段。\n三段。';
+const SFW_TEXT = '[igs-scene:街道|白天|晴]\n一段。\n二段。';
+const REPLY = 'slot: 1\nat: 2\nscene: 1girl, bedroom\nchar: 0.5,0.5 | 1girl, black hair';
+
 test('gate:illustration:prompt-ready-strips-markers', async () => {
     const { createIllustrationMessageHost } = await import('../src/host/illustration-message-host.js');
     const handlers = new Map();
+
     const ctx = { eventTypes: { CHAT_COMPLETION_PROMPT_READY: 'ready' }, eventSource: { on: (key, fn) => handlers.set(key, fn), off: (key) => handlers.delete(key) } };
     const host = createIllustrationMessageHost({ SillyTavern: { getContext: () => ctx } });
     host.attachPromptStrip();
     const payload = { chat: [{ role: 'assistant', content: 'a\n[igs-img:1]\nb' }] };
     handlers.get('ready')(payload);
     assert.equal(payload.chat[0].content, 'a\nb');
+    const databasePayload = { chat: [{ role: 'assistant', content: 'a\n<IMG>1</IMG>\nb' }] };
+    handlers.get('ready')(databasePayload);
+    assert.equal(databasePayload.chat[0].content, 'a\nb');
     host.destroy();
 });
 
@@ -275,17 +395,14 @@ test('gate:illustration:regex-install-idempotent', async () => {
         getTavernRegexes: () => scripts,
         replaceTavernRegexes: async (next) => { scripts = next; },
     };
-    const host = createIllustrationMessageHost({ TavernHelper: helper });
-    assert.equal((await host.ensureMarkerRegexes()).ok, true);
-    assert.equal((await host.ensureMarkerRegexes()).ok, true);
+    const regexHost = createIllustrationMessageHost({ TavernHelper: helper });
+    assert.equal((await regexHost.ensureMarkerRegexes()).ok, true);
+    assert.equal((await regexHost.ensureMarkerRegexes()).ok, true);
     assert.equal(scripts.length, 3);
     assert.ok(scripts.some(({ id }) => id === 'user'));
     assert.equal(scripts.some(({ destination }) => !destination.display && !destination.prompt), false);
+    assert.ok(scripts.find(({ id }) => id === 'igs-illustration-marker-display').find_regex.includes('<IMG>'));
 });
-
-const NSFW_TEXT = '[igs-scene:卧室|夜晚|晴|NSFW]\n一段。\n二段。\n三段。';
-const SFW_TEXT = '[igs-scene:街道|白天|晴]\n一段。\n二段。';
-const REPLY = 'slot: 1\nat: 2\nscene: 1girl, bedroom\nchar: 0.5,0.5 | 1girl, black hair';
 
 function makeFakes({ text, isLatest = true, llmReply = REPLY, naiResult, settings = {} }) {
     const calls = { llm: 0, nai: 0, writes: [], events: [] };
@@ -340,6 +457,81 @@ test('gate:illustration:service-nsfw-generates-and-writes-marker', async () => {
     assert.equal((await store.getSlots('c1|5|0'))[0].status, 'done');
     assert.ok(fake.calls.events.some(({ type }) => type === ILLUSTRATION_UPDATED_EVENT));
     assert.equal(service.getIllustrationUrl({ messageId: 5, slot: 1 }), 'data:image/png;base64,AAAA');
+});
+
+test('gate:illustration:embedded-cg-uses-host-box-not-window', async () => {
+    const { readCgViewport, cgSizeForMode } = await import('../src/generated-images/illustration/auto-illustration-service.js');
+    const host = { getBoundingClientRect: () => ({ width: 818, height: 511 }) };
+    const globalObject = {
+        innerWidth: 865,
+        innerHeight: 962,
+        document: { querySelector: (selector) => (selector === '.igs-embedded-host' ? host : null) },
+    };
+    const viewport = readCgViewport(globalObject);
+    assert.deepEqual(viewport, { width: 818, height: 511 });
+    assert.equal(cgSizeForMode('1216x832', 'embedded', viewport), '1216x832');
+    assert.deepEqual(readCgViewport({ innerWidth: 865, innerHeight: 962, document: { querySelector: () => null } }), { width: 865, height: 962 });
+});
+
+test('gate:illustration:cg-size-swaps-on-mobile', async () => {
+    const { cgSizeForMode, cgFramePrompt } = await import('../src/generated-images/illustration/auto-illustration-service.js');
+    assert.equal(cgFramePrompt('1216x832'), '画面是横的，宽1216，高832。构图按横屏写，不要写成竖屏。');
+    assert.equal(cgFramePrompt('832x1216'), '画面是竖的，宽832，高1216。构图按竖屏写，不要写成横屏。');
+    assert.equal(cgSizeForMode('1216x832', 'pc'), '1216x832');
+    assert.equal(cgSizeForMode('1216x832', 'fullscreen'), '1216x832');
+    assert.equal(cgSizeForMode('1216x832', 'web'), '1216x832');
+    assert.equal(cgSizeForMode('1216x832', 'mobile'), '832x1216');
+    assert.equal(cgSizeForMode('', 'mobile'), '832x1216');
+    assert.equal(cgSizeForMode('1216x832', 'embedded', { width: 390, height: 844 }), '832x1216');
+    assert.equal(cgSizeForMode('1216x832', 'embedded', { width: 390, height: 220 }), '832x1216');
+    assert.equal(cgSizeForMode('1216x832', 'embedded', { width: 1280, height: 720 }), '1216x832');
+    assert.equal(cgSizeForMode('1216x832', 'embedded', { width: 818, height: 511 }), '1216x832');
+});
+
+test('gate:illustration:dbgen-cg-calls-only-the-plugin-prompt-and-generate-apis', async () => {
+    const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
+    const { createMemoryIllustrationStore } = await import('../src/media/illustration-store.js');
+    const calls = { llm: 0, generate: 0, floor: [], paint: [] };
+    let current = NSFW_TEXT;
+    const caption = { v4_prompt: { caption: { base_caption: 'cg', char_captions: [] } }, v4_negative_prompt: { caption: { base_caption: '', char_captions: [] } } };
+    const messageHost = {
+        getChatId: () => 'c1',
+        readFloor: () => ({ chatId: 'c1', messageId: 5, swipeId: 0, isAi: true, isLatest: true, text: current }),
+        readPreviousAiTexts: () => [],
+        writeFloor: async (_id, next) => { current = next; return { ok: true }; },
+        on: () => () => {}, attachPromptStrip: () => {},
+        ensureMarkerRegexes: async () => ({ ok: true }), destroy: () => {},
+    };
+    const nai = {
+        describe: () => ({ via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
+        generate: async () => { calls.generate += 1; return { ok: true }; },
+        writeDbgenFloorPrompts: async (req) => {
+            calls.floor.push(req);
+            return { ok: true, captions: [{ slotId: 1, caption, anchorSentence: '二段。' }, { slotId: 2, caption, anchorSentence: '三段。' }] };
+        },
+        generateDbgenCaption: async (req) => { calls.paint.push(req); return { ok: true, dataUrl: 'data:image/png;base64,Q0c=' }; },
+    };
+    const llm = { request: async () => { calls.llm += 1; return REPLY; } };
+    const service = createAutoIllustrationService({
+        messageHost, llm, nai, events: { emit() {} },
+        store: createMemoryIllustrationStore(),
+        getSettings: () => ({ nsfwEnabled: true, nsfwCount: 1 }),
+    });
+    const result = await service.processMessage(5);
+    assert.equal(result.reason, 'done');
+    assert.equal(calls.llm, 0);
+    assert.equal(calls.generate, 0);
+    assert.equal(calls.floor.length, 1);
+    assert.equal(calls.floor[0].messageId, 5);
+    assert.equal(calls.floor[0].description, '为本楼生成1张CG，CG点自行选择。slotid从1开始数。挂载点只从剧情正文里逐字摘原句，提示词、出图指导、标签和正文以外的内容不要拿来当挂载点，也不要画进CG。\n画面是横的，宽1216，高832。构图按横屏写，不要写成竖屏。');
+    assert.equal(calls.floor[0].skipRecall, undefined);
+    assert.equal(calls.paint.length, 1);
+    assert.equal(calls.paint[0].caption, caption);
+    assert.equal(calls.paint[0].size, '1216x832');
+    assert.ok(current.includes('[igs-img:1]'));
+    assert.ok(current.indexOf('二段。') < current.indexOf('[igs-img:1]'));
+    assert.ok(current.indexOf('[igs-img:1]') < current.indexOf('三段。'));
+    assert.equal(service.getIllustrationUrl({ messageId: 5, slot: 1 }), 'data:image/png;base64,Q0c=');
 });
 
 test('gate:illustration:service-nsfw-off-never-rolls-interlude', async () => {
@@ -474,9 +666,17 @@ test('gate:illustration:get-url-hydrates-from-store', async () => {
 
 test('gate:illustration:settings-normalize-clamps', async () => {
     const { normalizeAutoIllustrationSettings } = await import('../src/generated-images/illustration/auto-illustration-settings.js');
-    const settings = normalizeAutoIllustrationSettings({ nsfwEnabled: 'true', nsfwCount: 9, interludeProbability: -5, llm: { source: 'x' } });
+    const settings = normalizeAutoIllustrationSettings({ nsfwEnabled: 'true', nsfwCount: 9, interludeProbability: -5, interludeMaxCount: '16', assets: { maxPerFloor: '16' }, llm: { source: 'x' } });
     assert.equal(settings.nsfwEnabled, true);
-    assert.equal(settings.nsfwCount, 4);
+    assert.equal(settings.nsfwCount, 9);
+    assert.equal(normalizeAutoIllustrationSettings({ nsfwCount: 2 }).nsfwCount, 2);
+    assert.equal(normalizeAutoIllustrationSettings({ nsfwCount: 99 }).nsfwCount, 16);
+    assert.equal(settings.interludeMaxCount, 16);
+    assert.equal(settings.assets.maxPerFloor, 16);
+    const capped = normalizeAutoIllustrationSettings({ interludeMaxCount: 99, assets: { maxPerFloor: 99 } });
+    assert.deepEqual([capped.interludeMaxCount, capped.assets.maxPerFloor], [16, 16]);
+    const defaults = normalizeAutoIllustrationSettings({});
+    assert.deepEqual([defaults.interludeMaxCount, defaults.assets.maxPerFloor], [1, 2]);
     assert.equal(settings.interludeProbability, 0);
     assert.equal(settings.llm.source, 'tavern');
     assert.equal(normalizeAutoIllustrationSettings({}).nsfwEnabled, false);
@@ -581,6 +781,26 @@ test('gate:illustration:nai-client-uses-custom-endpoint-or-official', async () =
     assert.deepEqual(urls, [NAI_OFFICIAL_ENDPOINT, 'https://nai.example.com/custom/generate', '/proxy/https://nai.example.com/x']);
 });
 
+test('gate:illustration:service-retries-database-img-marker-without-replanning', async () => {
+    const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
+    const { createMemoryIllustrationStore } = await import('../src/media/illustration-store.js');
+    const fake = makeFakes({
+        text: NSFW_TEXT.replace('[igs-scene:卧室|夜晚|晴|NSFW]\n', '[igs-scene:卧室|夜晚|晴|NSFW]\n<IMG>1</IMG>\n'),
+        settings: { nsfwEnabled: true, nsfwCount: 1 },
+    });
+    const store = createMemoryIllustrationStore();
+    await store.putFloor('c1|5|0', { kind: 'nsfw', want: 1, status: 'failed' });
+    await store.putSlot('c1|5|0', { slot: 1, scene: 'room', status: 'failed' });
+    const service = createAutoIllustrationService({ ...fake, store });
+    const result = await service.processMessage(5);
+    assert.equal(result.reason, 'done');
+    assert.equal(fake.calls.llm, 0);
+    assert.equal(fake.calls.writes.length, 0);
+    assert.equal(fake.calls.nai, 1);
+    assert.equal(service.getIllustrationUrl({ messageId: 5, slot: 1 }), 'data:image/png;base64,AAAA');
+});
+
+
 test('gate:illustration:failed-slot-retries-without-replanning', async () => {
     const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
     const { createMemoryIllustrationStore } = await import('../src/media/illustration-store.js');
@@ -616,4 +836,54 @@ test('gate:illustration:slot-count-mismatch-still-generates', async () => {
     const result = await createAutoIllustrationService({ ...fake, store: createMemoryIllustrationStore() }).processMessage(5);
     assert.equal(result.reason, 'done');
     assert.equal(fake.calls.nai, 1);
+});
+
+function cgSlots(src, segments, opts = {}) {
+    const offsets = resolveHeldSourceOffsets(src, segments);
+    return segments.map((_, index) => {
+        const hit = resolveIllustrationForPage({ source: src, offsets, segments, index, holdPages: 2, ...opts });
+        return hit ? hit.slot : 0;
+    });
+}
+
+test('gate:illustration:sfw-cg-enters-at-anchor-and-leaves-after-hold', () => {
+    const segments = ['甲。', '乙。', '丙。', '丁。', '戊。', '己。', '庚。'];
+    const src = '[igs-scene:教室|午后|晴]\n甲。\n乙。\n[igs-img:1]\n丙。\n丁。\n戊。\n己。\n庚。';
+    // 锚句「乙」所在页切入，不提前；无人开口时最长保持 holdPages*2 页。
+    assert.deepEqual(cgSlots(src, segments), [0, 1, 1, 1, 1, 0, 0]);
+});
+
+test('gate:illustration:sfw-cg-leaves-when-a-new-speaker-talks', () => {
+    const segments = ['甲。', '[小雪]：嗯。', '丙。', '[小雪]：好。', '[林]：喂。', '丁。'];
+    const src = '[igs-scene:教室|午后|晴]\n甲。\n[igs-char:小雪|开心|嗯。]\n[igs-img:1]\n丙。\n[igs-char:小雪|开心|好。]\n[igs-char:林|平和|喂。]\n丁。';
+    assert.deepEqual(cgSlots(src, segments), [0, 1, 1, 1, 0, 0]);
+});
+
+test('gate:illustration:sfw-cg-leaves-on-scene-change-and-next-cg-takes-over', () => {
+    const segments = ['甲。', '乙。', '丙。', '丁。', '戊。'];
+    const src = '[igs-scene:教室|午后|晴]\n甲。\n[igs-img:1]\n[igs-scene:走廊|午后|晴]\n乙。\n丙。\n[igs-img:2]\n丁。\n戊。';
+    assert.deepEqual(cgSlots(src, segments), [1, 0, 2, 2, 2]);
+});
+
+test('gate:illustration:nsfw-cg-keeps-floor-wide-behaviour', () => {
+    const segments = ['甲。', '乙。', '丙。', '丁。', '戊。', '己。', '庚。'];
+    const src = '[igs-scene:卧室|夜晚|晴|NSFW]\n甲。\n乙。\n[igs-img:1]\n丙。\n丁。\n戊。\n己。\n庚。';
+    assert.deepEqual(cgSlots(src, segments), [1, 1, 1, 1, 1, 1, 1]);
+    // 本楼没写场景时沿用上一楼的 NSFW 状态。
+    assert.deepEqual(cgSlots(src.replace(/^.*\n/, ''), segments, { inheritedNsfw: true }), [1, 1, 1, 1, 1, 1, 1]);
+});
+
+test('数据库生图 CG：单人且上下文唯一角色时 DNA 并进 char caption，多人不注入', () => {
+    const assets = { characters: { 小雪: {} }, characterAliases: {}, characterDna: { 小雪: { triggerWords: 'xiaoxue', identity: '1girl, white hair', negative: 'short hair' } } };
+    const caption = (n) => ({
+        v4_prompt: { caption: { base_caption: 'room', char_captions: Array.from({ length: n }, () => ({ char_caption: 'smile', centers: [{ x: 0.5, y: 0.5 }] })) } },
+        v4_negative_prompt: { caption: { base_caption: 'bad', char_captions: [] } },
+    });
+    const single = bindCharacterDnaToCaption(caption(1), assets, ['小雪'], 1);
+    assert.equal(single.caption.v4_prompt.caption.char_captions[0].char_caption, 'xiaoxue, 1girl, white hair, smile');
+    assert.equal(single.caption.v4_negative_prompt.caption.char_captions[0].char_caption, 'short hair');
+    assert.deepEqual(single.caption.v4_negative_prompt.caption.char_captions[0].centers, [{ x: 0.5, y: 0.5 }]);
+    const pair = bindCharacterDnaToCaption(caption(2), assets, ['小雪'], 2);
+    assert.equal(pair.caption.v4_prompt.caption.char_captions[0].char_caption, 'smile');
+    assert.equal(pair.warnings.length, 1);
 });

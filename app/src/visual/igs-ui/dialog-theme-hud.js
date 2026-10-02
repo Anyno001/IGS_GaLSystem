@@ -12,7 +12,7 @@ import {
 
 const CLASSIC = 'western-classic';
 
-// 构建脚本按字面占位符内联 PNG，这里必须保留完整字面量。
+// 构建脚本按字面占位符把素材外置到 dist/skins/，这里必须保留完整字面量。
 const RETRO_TAG = '__IGS_ASSET__retro-japanese/tag.png__';
 const ADVENTURE_TAG = '__IGS_ASSET__adventure-journey/tag.png__';
 
@@ -122,6 +122,7 @@ const HUD_THEMES = Object.freeze({
     },
     [DIALOG_SKIN_ELEGANT_EUROPEAN]: {
         neutral: '#d4cfdc',
+        toast: 'background:rgba(6,6,12,.82);border:0;border-bottom:1px solid rgba(196,176,255,.65);border-radius:0;box-shadow:0 0 12px rgba(150,120,255,.35);color:#eeeaf3;',
         panel: `background:linear-gradient(90deg,rgba(236,232,244,.5),rgba(236,232,244,0)) left top/100% 1px no-repeat,linear-gradient(90deg,rgba(236,232,244,.5),rgba(236,232,244,0)) left bottom/100% 1px no-repeat,linear-gradient(90deg,rgba(6,6,12,.72),rgba(6,6,12,.5) 70%,rgba(6,6,12,0));border:0;border-radius:0;box-shadow:none;`,
         ink: '#e4dfeb',
         emotion: `padding:${s(1)} ${s(4)} ${s(1)} ${s(14)};border:0;border-bottom:1px solid rgba(196,176,255,.65);border-radius:0;background:transparent;color:#eeeaf3;letter-spacing:.14em;text-shadow:0 0 8px rgba(160,136,255,.7),0 1px 3px rgba(0,0,0,.9);position:relative;`,
@@ -148,6 +149,7 @@ const HUD_THEMES = Object.freeze({
     },
     [DIALOG_SKIN_GRADIENT_VEIL]: {
         neutral: 'rgba(255,255,255,.8)',
+        toast: 'background:rgba(0,0,0,.62);border:0;border-radius:0;box-shadow:none;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.9);',
         panel: 'background:linear-gradient(90deg,rgba(0,0,0,.125),rgba(0,0,0,.072) 75%,transparent);border-radius:0;-webkit-backdrop-filter:none;backdrop-filter:none;',
         emotion: `padding:0 ${s(2)};border:0;border-bottom:1px solid rgba(255,238,184,.7);border-radius:0;background:transparent;color:#fff;letter-spacing:.12em;text-shadow:0 1px 3px rgba(0,0,0,.9);`,
         avatar: 'filter:drop-shadow(0 2px 6px rgba(0,0,0,.6));',
@@ -186,3 +188,44 @@ function hudThemeRules(skin, theme) {
 export const DIALOG_THEME_HUD_STYLE_TEXT = Object.entries(HUD_THEMES)
     .map(([skin, theme]) => hudThemeRules(skin, theme))
     .join('\n');
+
+// 物品演出卡片与重要物品大演出沿用同一主题的 HUD 面板、墨色与占位底；间距与动画仍由 fx-item 决定。
+// 主题面板会盖掉卡片自带的稀有光晕，这里改用描边强调。
+function itemFxThemeRules(skin, theme) {
+    const scope = `#igs-overlay[data-igs-dialog-skin="${skin}"]`;
+    const ink = theme.ink ? `color:${theme.ink};text-shadow:none;` : '';
+    const rules = [
+        `${scope} .igs-fx-item-card{${theme.panel}${ink}padding:8px 14px 8px 12px;}`,
+        `${scope} .igs-fx-item-card[data-igs-item-rare]{outline:1.5px solid var(--igs-item-accent-c);outline-offset:2px;}`,
+        `${scope} .igs-fx-item-showcase-plate{${theme.panel}${ink}padding:18px 26px 16px;outline:2px solid var(--igs-item-accent-c);outline-offset:4px;}`,
+        `${scope} .igs-fx-item-icon[data-igs-item-placeholder]{${theme.placeholder}}`,
+    ];
+    if (theme.ink) rules.push(`${scope} .igs-fx-item-more,${scope} .igs-fx-item-flyer{color:${theme.ink};}`);
+    return rules.join('\n');
+}
+
+export const DIALOG_THEME_ITEM_FX_STYLE_TEXT = Object.entries(HUD_THEMES)
+    .map(([skin, theme]) => itemFxThemeRules(skin, theme))
+    .join('\n');
+
+// 提示弹窗跟随对话框皮肤：默认取主题 HUD 面板与墨色；面板为半透明渐变的主题用 toast 字段给实底，保证文字可读。
+// 选择器带 #igs-overlay 皮肤前缀，优先于按设置器主题生成的 #igs-toast[data-igs-toast-theme] 规则。
+function toastThemeRules(skin, theme) {
+    const body = theme.toast || `${theme.panel}${theme.ink ? `color:${theme.ink};text-shadow:none;` : ''}`;
+    return `#igs-overlay[data-igs-dialog-skin="${skin}"] #igs-toast{${body}}`;
+}
+
+export function getDialogThemeToastStyleText(skin) {
+    const theme = HUD_THEMES[skin];
+    return theme ? toastThemeRules(skin, theme) : '';
+}
+
+export function getDialogThemeHudStyleText(skin) {
+    const theme = HUD_THEMES[skin];
+    return theme ? hudThemeRules(skin, theme) : '';
+}
+
+export function getDialogThemeItemFxStyleText(skin) {
+    const theme = HUD_THEMES[skin];
+    return theme ? itemFxThemeRules(skin, theme) : '';
+}

@@ -1,3 +1,5 @@
+import { worldSkinOf } from '../../scene/worldview.js';
+
 import { prefersReducedMotion } from './reduced-motion.js';
 import { chatRevealDelayMs, normalizeChatShowSettings } from './chat-show-runtime.js';
 import { chatSfxKindForSide, playChatSfx } from './chat-sfx.js';
@@ -77,7 +79,22 @@ function renderBubble(doc, m) {
     return bubble;
 }
 
-function renderRow(doc, m) {
+// 古代背景的书信往来：每条消息是一张竖排信笺，正文之后落款写信人；没有头像，
+// 图片、语音、表情包都按文字写进信里。
+const LETTER_TYPE_PREFIX = Object.freeze({ image: '〔附画〕' });
+
+function renderLetterRow(doc, m) {
+    const side = m.side === 'right' ? 'right' : 'left';
+    const row = el(doc, 'div', `igs-chat-row is-${side} is-letter`);
+    const letter = el(doc, 'div', 'igs-chat-letter');
+    letter.appendChild(el(doc, 'div', 'igs-chat-letter-text', `${LETTER_TYPE_PREFIX[m.type] || ''}${m.text || ''}`));
+    if (m.displayName) letter.appendChild(el(doc, 'div', 'igs-chat-letter-sign', m.displayName));
+    row.appendChild(letter);
+    return row;
+}
+
+function renderRow(doc, m, ancient = false) {
+    if (ancient && m.kind === 'msg') return renderLetterRow(doc, m);
     if (m.kind === 'time') {
         const row = el(doc, 'div', 'igs-chat-row is-time');
         row.appendChild(el(doc, 'span', 'igs-chat-time', m.text));
@@ -115,7 +132,7 @@ function applyTheme(layer, theme) {
     else layer.style.removeProperty('--igs-chat-font');
 }
 
-function renderRows(layer, chat) {
+function renderRows(layer, chat, ancient = false) {
     const doc = layer.ownerDocument;
     const head = layer.querySelector('.igs-chat-head');
     const list = layer.querySelector('.igs-chat-list');
@@ -124,7 +141,7 @@ function renderRows(layer, chat) {
     clearChildren(list);
     applyTheme(layer, chat.theme || null);
     return chat.messages.map((m) => {
-        const row = renderRow(doc, m);
+        const row = renderRow(doc, m, ancient);
         row.hidden = true;
         list.appendChild(row);
         return row;
@@ -158,6 +175,14 @@ function showTyping(state, message) {
     const doc = state.layer.ownerDocument;
     const list = state.layer.querySelector('.igs-chat-list');
     if (!doc || !list) return;
+    if (state.ancient) {
+        const row = el(doc, 'div', 'igs-chat-row is-left is-letter is-typing');
+        row.appendChild(el(doc, 'div', 'igs-chat-letter is-typing', '提笔中……'));
+        list.appendChild(row);
+        state.typingRow = row;
+        list.scrollTop = list.scrollHeight || 0;
+        return;
+    }
     const row = el(doc, 'div', `igs-chat-row is-left is-typing${message.initial ? ' has-avatar' : ''}`);
     if (message.initial) row.appendChild(renderAvatar(doc, message));
     const body = el(doc, 'div', 'igs-chat-body');
@@ -188,7 +213,7 @@ function revealTo(state, count, { animate = true, sound = true } = {}) {
     const settings = state.settings;
     if (sound && settings.sound.enabled) {
         const last = state.chat.messages.slice(from, target).reverse().find((m) => m.kind === 'msg');
-        if (last) playChatSfx(chatSfxKindForSide(last.side), { volume: settings.sound.volume, preset: settings.sound.preset });
+        if (last) playChatSfx(chatSfxKindForSide(last.side), { volume: settings.sound.volume, preset: state.ancient ? 'paper' : settings.sound.preset });
     }
     if (target >= state.rows.length) markSeen(state.root, state.key);
     return true;
@@ -260,21 +285,32 @@ export function applyChatToDom(root, snapshot, ctx = {}) {
     }
     const settings = normalizeChatShowSettings(snapshot.readerSettings && snapshot.readerSettings.chatShow);
     const chat = content.chat;
-    layer.setAttribute('data-igs-chat-frame', settings.frame);
+    // 古代背景：手机框换成书信，外框设置不再生效。
+    const ancient = Boolean(snapshot.readerSettings && snapshot.readerSettings._ancientEra === true);
+    layer.setAttribute('data-igs-chat-era', ancient ? 'ancient' : 'modern');
+    // 西幻 / 科幻 / 末日：在现代聊天框上另挂 data-igs-chat-world 换配色字体，era 仍为 modern，结构与外框设置不变。
+    const world = String((snapshot.readerSettings && snapshot.readerSettings._worldview) || '');
+    if (!ancient && worldSkinOf(world)) layer.setAttribute('data-igs-chat-world', world);
+    else layer.removeAttribute('data-igs-chat-world');
+    layer.setAttribute('data-igs-chat-frame', ancient ? 'letter' : settings.frame);
     layer.style.setProperty('--igs-chat-dim', String(settings.dim));
+    // 气泡圆角由用户设置；无有效数值时移除变量，样式表回落 16px。
+    if (Number.isFinite(settings.bubbleRadius)) layer.style.setProperty('--igs-chat-radius', `${settings.bubbleRadius}px`);
+    else layer.style.removeProperty('--igs-chat-radius');
     bindLayer(layer, ctx);
     const key = [snapshot.messageId, content.currentIndex, JSON.stringify(chat.messages.map((m) => [m.kind, m.displayName || '', m.text]))].join(':');
-    const renderSig = JSON.stringify([settings.frame, chat]);
+    const renderSig = JSON.stringify([settings.frame, ancient, chat]);
     const previous = states.get(layer);
     if (previous && previous.key === key) {
         previous.settings = settings;
+        previous.ancient = ancient;
         if (previous.renderSig !== renderSig) {
             const revealed = previous.revealed;
             const typing = Boolean(previous.typingRow);
             hideTyping(previous);
             previous.chat = chat;
             previous.renderSig = renderSig;
-            previous.rows = renderRows(layer, chat);
+            previous.rows = renderRows(layer, chat, ancient);
             previous.revealed = 0;
             revealTo(previous, revealed, { animate: false, sound: false });
             if (typing && previous.revealed < previous.rows.length) showTyping(previous, chat.messages[previous.revealed]);
@@ -286,8 +322,8 @@ export function applyChatToDom(root, snapshot, ctx = {}) {
         hideTyping(previous);
     }
     const state = {
-        root, layer, key, renderSig, chat, settings,
-        rows: renderRows(layer, chat),
+        root, layer, key, renderSig, chat, settings, ancient,
+        rows: renderRows(layer, chat, ancient),
         revealed: 0,
         timer: null,
         typingRow: null,
@@ -334,6 +370,7 @@ export function getChatRevealState(root) {
 export const CHAT_LAYER_STYLE_TEXT = `
 #igs-chat-layer{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;padding:clamp(52px,9%,72px) clamp(10px,4%,32px) clamp(16px,5%,40px);box-sizing:border-box;background:rgba(0,0,0,var(--igs-chat-dim,.45));cursor:pointer;font-family:var(--igs-chat-font,inherit);}
 #igs-chat-layer[hidden]{display:none;}
+#igs-overlay.igs-options-visible #igs-chat-layer{display:none;}
 #igs-chat-layer .igs-chat-shell{display:flex;flex-direction:column;width:min(640px,100%);max-height:100%;min-height:0;box-sizing:border-box;}
 #igs-chat-layer .igs-chat-head{align-self:center;flex:none;margin-bottom:10px;padding:4px 14px;border-radius:999px;background:rgba(0,0,0,.38);color:#fff;font-size:13px;line-height:1.5;letter-spacing:.04em;}
 #igs-chat-layer .igs-chat-head[hidden]{display:none;}
@@ -350,9 +387,9 @@ export const CHAT_LAYER_STYLE_TEXT = `
 #igs-chat-layer .igs-chat-avatar{flex:none;width:36px;height:36px;border-radius:8px;object-fit:cover;box-shadow:0 1px 3px rgba(0,0,0,.2);}
 #igs-chat-layer .igs-chat-avatar.is-initial{display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,.15);}
 #igs-chat-layer .igs-chat-name{margin:0 6px 3px;color:rgba(255,255,255,.82);font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,.5);}
-#igs-chat-layer .igs-chat-bubble{padding:9px 13px;border-radius:16px;border:1.5px solid var(--igs-chat-border,transparent);font-size:15px;line-height:1.55;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;box-shadow:0 2px 8px rgba(0,0,0,.18);box-sizing:border-box;}
-#igs-chat-layer .igs-chat-row.is-left .igs-chat-bubble{border-bottom-left-radius:5px;}
-#igs-chat-layer .igs-chat-row.is-right .igs-chat-bubble{border-bottom-right-radius:5px;}
+#igs-chat-layer .igs-chat-bubble{padding:9px 13px;border-radius:var(--igs-chat-radius,16px);border:1.5px solid var(--igs-chat-border,transparent);font-size:15px;line-height:1.55;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;box-shadow:0 2px 8px rgba(0,0,0,.18);box-sizing:border-box;}
+#igs-chat-layer .igs-chat-row.is-left .igs-chat-bubble{border-top-left-radius:min(5px,var(--igs-chat-radius,16px));}
+#igs-chat-layer .igs-chat-row.is-right .igs-chat-bubble{border-top-right-radius:min(5px,var(--igs-chat-radius,16px));}
 #igs-chat-layer .igs-chat-bubble.is-image{padding:6px;width:180px;max-width:100%;}
 #igs-chat-layer .igs-chat-image{position:relative;aspect-ratio:4/3;border-radius:10px;background:linear-gradient(135deg,rgba(0,0,0,.06),rgba(0,0,0,.16));}
 #igs-chat-layer .igs-chat-image::before{content:"";position:absolute;left:50%;top:50%;width:34px;height:26px;margin:-13px 0 0 -17px;border:2.5px solid currentColor;border-radius:5px;opacity:.45;}
@@ -378,16 +415,50 @@ export const CHAT_LAYER_STYLE_TEXT = `
 #igs-chat-layer .igs-chat-row.is-note.igs-chat-pop,#igs-chat-layer .igs-chat-row.is-time.igs-chat-pop{animation:igs-chat-fade .2s ease-out both;}
 @keyframes igs-chat-pop{from{opacity:0;transform:translateY(6px) scale(.6);}to{opacity:1;transform:none;}}
 @keyframes igs-chat-fade{from{opacity:0;}to{opacity:1;}}
-#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-shell{width:min(420px,100%);height:100%;max-height:min(760px,100%);border-radius:28px;border:6px solid var(--igs-chat-frame,#1c1c1f);background:var(--igs-chat-shell,#ededed);box-shadow:0 18px 50px rgba(0,0,0,.5);overflow:hidden;}
-#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-head{align-self:stretch;margin:0;padding:12px 16px 10px;border-radius:0;background:var(--igs-chat-head,#f7f7f7);border-bottom:1px solid rgba(0,0,0,.08);color:var(--igs-chat-head-ink,#1f1f1f);font-size:15px;font-weight:600;text-align:center;}
+/* 手机框按 iPhone 比例（9:19.5）竖长：高度撑满可用区，宽度由比例推出；窄屏时宽度封顶、比例放宽。
+   细黑边框 + 金属外沿 + 灵动岛 + 底部横条，标题栏让出灵动岛的高度。 */
+#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-shell{position:relative;width:auto;height:100%;max-height:min(820px,100%);aspect-ratio:9/19.5;max-width:100%;border-radius:clamp(30px,11%,48px)/clamp(30px,5%,48px);border:8px solid var(--igs-chat-frame,#1c1c1f);background:var(--igs-chat-shell,#ededed);box-shadow:0 0 0 2px #45454b,0 18px 50px rgba(0,0,0,.5);overflow:hidden;}
+#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-shell::before{content:"";position:absolute;top:8px;left:50%;z-index:2;width:32%;max-width:110px;height:24px;border-radius:999px;background:#0b0b0d;transform:translateX(-50%);pointer-events:none;}
+#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-shell::after{content:"";position:absolute;bottom:7px;left:50%;z-index:2;width:36%;height:4px;border-radius:999px;background:rgba(0,0,0,.35);transform:translateX(-50%);pointer-events:none;}
+#igs-chat-layer[data-igs-chat-frame="phone"][data-igs-chat-theme="gradient-veil"] .igs-chat-shell::after{background:rgba(255,255,255,.4);}
+#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-head{align-self:stretch;margin:0;padding:40px 16px 10px;border-radius:0;background:var(--igs-chat-head,#f7f7f7);border-bottom:1px solid rgba(0,0,0,.08);color:var(--igs-chat-head-ink,#1f1f1f);font-size:15px;font-weight:600;text-align:center;}
 #igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-head[hidden]{display:block;visibility:hidden;}
-#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-list{flex:1;padding:12px 12px 16px;}
+#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-list{flex:1;padding:12px 12px 22px;}
 #igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-name,#igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-time{color:var(--igs-chat-sub,#8a8a8a);text-shadow:none;}
 #igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-note{background:rgba(0,0,0,.08);color:var(--igs-chat-sub,#8a8a8a);}
 #igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-bubble{box-shadow:0 1px 1px rgba(0,0,0,.08);}
 #igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-sticker{border-color:var(--igs-chat-sub,#b5b5b5);color:var(--igs-chat-sub,#6b6b6b);text-shadow:none;}
 #igs-chat-layer[data-igs-chat-frame="phone"] .igs-chat-voice-text{background:rgba(0,0,0,.06);}
 #igs-chat-layer[data-igs-chat-frame="phone"][data-igs-chat-theme="gradient-veil"] .igs-chat-voice-text{background:rgba(255,255,255,.1);color:#ddd;}
+/* 古代背景 · 书信往来：竖排信笺从右往左书写，朱红界栏按列对齐；正文之后落款写信人并盖小印。 */
+#igs-chat-layer[data-igs-chat-era="ancient"]{background:rgba(22,12,4,var(--igs-chat-dim,.45));font-family:"STKaiti","KaiTi","Kaiti SC","楷体",serif;}
+#igs-chat-layer[data-igs-chat-era="ancient"] .igs-chat-shell{width:min(760px,100%);}
+#igs-chat-layer[data-igs-chat-era="ancient"] .igs-chat-head{border-radius:2px;padding:5px 18px;background:#f3e6c8;color:#5a1d12;border:1px solid #b8452f;box-shadow:0 2px 8px rgba(0,0,0,.35);font-size:15px;letter-spacing:.3em;}
+#igs-chat-layer[data-igs-chat-era="ancient"] .igs-chat-list{gap:16px;padding:6px 4px;}
+#igs-chat-layer[data-igs-chat-era="ancient"] .igs-chat-row{max-width:92%;}
+#igs-chat-layer .igs-chat-letter{--igs-letter-col:30px;writing-mode:vertical-rl;height:clamp(150px,34vh,240px);max-width:100%;overflow-x:auto;scrollbar-width:none;padding:16px 12px;box-sizing:border-box;border:1px solid rgba(120,70,30,.35);border-radius:2px;background:repeating-linear-gradient(to left,transparent 0 calc(var(--igs-letter-col) - 1px),rgba(178,62,40,.3) calc(var(--igs-letter-col) - 1px) var(--igs-letter-col)) right top/100% 100% content-box,#f6ecd4;color:#2b1d12;font-size:17px;line-height:var(--igs-letter-col);letter-spacing:.08em;white-space:pre-wrap;box-shadow:0 3px 12px rgba(0,0,0,.35);}
+#igs-chat-layer .igs-chat-letter::-webkit-scrollbar{display:none;}
+#igs-chat-layer .igs-chat-row.is-right .igs-chat-letter{background-color:#efe2c2;}
+#igs-chat-layer .igs-chat-letter-sign{padding-top:1.4em;text-align:end;color:#7a2a1a;font-size:14px;}
+#igs-chat-layer .igs-chat-letter-sign::after{content:"";display:inline-block;width:.9em;height:.9em;margin-top:.35em;border-radius:2px;background:#b8452f;vertical-align:middle;}
+#igs-chat-layer .igs-chat-letter.is-typing{height:auto;padding:12px 10px;background:#f6ecd4;color:#7a5a3a;font-size:14px;}
+#igs-chat-layer[data-igs-chat-era="ancient"] .igs-chat-time{color:rgba(243,230,200,.85);letter-spacing:.2em;}
+#igs-chat-layer[data-igs-chat-era="ancient"] .igs-chat-note{background:rgba(243,230,200,.16);color:rgba(243,230,200,.85);}
+#igs-chat-layer[data-igs-chat-era="ancient"] .igs-chat-row.is-letter.igs-chat-pop{transform-origin:right center;animation:igs-chat-unfold .45s ease-out both;}
+@keyframes igs-chat-unfold{from{opacity:0;transform:scaleX(.15);}60%{opacity:1;}to{opacity:1;transform:none;}}
+/* 世界观换皮（西幻羊皮纸 / 科幻全息青光 / 末日旧纸锈边）：只改标题、时间、系统行与气泡描边；气泡底色仍由角色配色内联决定。 */
+#igs-chat-layer[data-igs-chat-world="fantasy"]{font-family:Georgia,"Times New Roman",serif;}
+#igs-chat-layer[data-igs-chat-world="fantasy"] .igs-chat-head{background:#efe2c2;color:#3a2614;border:1px solid #9c7a46;}
+#igs-chat-layer[data-igs-chat-world="fantasy"] .igs-chat-bubble{box-shadow:0 0 0 1px rgba(156,122,70,.55);}
+#igs-chat-layer[data-igs-chat-world="scifi"] .igs-chat-head{background:rgba(8,24,36,.9);color:#d8fbff;border:1px solid rgba(80,220,255,.7);box-shadow:0 0 12px rgba(60,200,255,.4);letter-spacing:.08em;}
+#igs-chat-layer[data-igs-chat-world="scifi"] .igs-chat-bubble{box-shadow:0 0 0 1px rgba(80,220,255,.55),0 0 8px rgba(60,200,255,.3);}
+#igs-chat-layer[data-igs-chat-world="scifi"] .igs-chat-time,#igs-chat-layer[data-igs-chat-world="scifi"] .igs-chat-note{color:#8fd8e8;}
+#igs-chat-layer[data-igs-chat-world="apocalypse"]{font-family:"Courier New",monospace;}
+#igs-chat-layer[data-igs-chat-world="apocalypse"] .igs-chat-head{background:rgba(48,40,32,.93);color:#e8dfcf;border:1px dashed rgba(200,150,80,.6);}
+#igs-chat-layer[data-igs-chat-world="apocalypse"] .igs-chat-bubble{box-shadow:0 0 0 1px rgba(200,150,80,.45);}
+#igs-chat-layer[data-igs-chat-world="taisho"]{font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;}
+#igs-chat-layer[data-igs-chat-world="taisho"] .igs-chat-head{background:#f4ead6;color:#2a1c18;border:1px solid #7b2e2a;}
+#igs-chat-layer[data-igs-chat-world="taisho"] .igs-chat-bubble{box-shadow:0 0 0 1px rgba(123,46,42,.5);}
 #igs-overlay.igs-chat-page #igs-dialog-layer{visibility:hidden;}
 #igs-overlay.igs-record-screen-open #igs-chat-layer{display:none!important;}
 @media (prefers-reduced-motion: reduce){#igs-chat-layer .igs-chat-row.igs-chat-pop,#igs-chat-layer .igs-chat-dot{animation:none!important;}}

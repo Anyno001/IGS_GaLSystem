@@ -1,13 +1,25 @@
 // 天气粒子：远景画布挂后景层（立绘之后），近景画布挂前景层（立绘之前）。
-// 能耗约束：锁 30fps、画布按 CSS 像素（不乘 devicePixelRatio）、同透明度档合批绘制、
+// 能耗约束：锁 30fps（低画质档 20fps、粒子减半）、画布按 CSS 像素（不乘 devicePixelRatio）、同透明度档合批绘制、
 // 图层隐藏（尺寸为 0）时停止请求帧、图层脱离文档时自行退出。
-const FRAME_MS = 1000 / 30;
+import { getQualityFactor } from './render-quality.js';
+import { isStagePaused, onStageResume } from './stage-pause.js';
+
+const FPS = 30;
 const MAX_DT = 0.05;
 const REFERENCE_AREA = 1280 * 720;
 const TAU = Math.PI * 2;
 const MAX_SPLASHES = 80;
-const LEVEL_DENSITY = Object.freeze({ light: 0.5, medium: 1, heavy: 1.7 });
+const SPLASH_LEVELS = 8;
+// 按细分程度取值；只带旧三档 level 的方案取值与细分前相同。
+const GRADE_DENSITY = Object.freeze({ drizzle: 0.28, light: 0.5, medium: 1, heavy: 1.7, storm: 2.3 });
+const GRADE_SPEED = Object.freeze({ drizzle: 0.7, light: 0.85, medium: 1, heavy: 1.12, storm: 1.25 });
+const GRADE_LENGTH = Object.freeze({ drizzle: 0.75, light: 1, medium: 1, heavy: 1.15, storm: 1.32 });
+const GRADE_SNOW_FALL = Object.freeze({ drizzle: 0.85, light: 1, medium: 1, heavy: 1.15, storm: 1.3 });
 const INTENSITY_DENSITY = Object.freeze({ weak: 0.6, medium: 1, strong: 1.35 });
+
+function gradeOf(plan) {
+    return GRADE_DENSITY[plan.grade] ? plan.grade : GRADE_DENSITY[plan.level] ? plan.level : 'medium';
+}
 const BASE_COUNTS = Object.freeze({
     rain: Object.freeze({ far: 120, near: 26 }),
     snow: Object.freeze({ far: 110, near: 16 }),
@@ -32,18 +44,19 @@ function particleColor(kind, time) {
 function createEngine(plan, random) {
     const r = (min, max) => min + random() * (max - min);
     const bucket = () => Math.floor(random() * 3);
-    const heavy = plan.level === 'heavy';
+    const grade = gradeOf(plan);
     const color = particleColor(plan.kind, plan.time);
 
     const rain = {
         spawn(s, seed) {
             const near = s.depth === 'near';
-            const speed = (near ? r(1050, 1350) : r(620, 820)) * (heavy ? 1.12 : plan.level === 'light' ? 0.85 : 1);
-            const len = (near ? r(26, 42) : r(11, 19)) * (heavy ? 1.15 : 1);
-            const angle = (plan.wind ? 0.36 : 0.13) + r(-0.03, 0.03);
+            const speed = (near ? r(1050, 1350) : r(620, 820)) * GRADE_SPEED[grade];
+            const len = (near ? r(26, 42) : r(11, 19)) * GRADE_LENGTH[grade];
+            // 暴雨无风也斜着落。
+            const angle = (plan.wind ? 0.36 : grade === 'storm' ? 0.22 : 0.13) + r(-0.03, 0.03);
             const vx = -Math.sin(angle) * speed;
             const vy = Math.cos(angle) * speed;
-            const splash = near && plan.level !== 'light';
+            const splash = near && grade !== 'light' && grade !== 'drizzle';
             return {
                 x: r(-0.05 * s.w, s.w * 1.05 + s.h * Math.tan(angle)),
                 y: seed ? r(-len, s.h) : r(-s.h * 0.25, -len),
@@ -77,12 +90,20 @@ function createEngine(plan, random) {
             });
             if (!s.splashes.length) return;
             ctx.lineWidth = 1;
-            for (const splash of s.splashes) {
-                const progress = splash.age / splash.life;
-                const radius = splash.size * (0.3 + progress);
-                ctx.globalAlpha = 0.45 * (1 - progress);
+            // 水花按剩余寿命分档合批：每档一次 stroke，不再逐个描边（最多 80 次/帧）。
+            for (let level = SPLASH_LEVELS; level > 0; level -= 1) {
+                let any = false;
                 ctx.beginPath();
-                ctx.ellipse(splash.x, splash.y, radius, radius * 0.28, 0, 0, TAU);
+                for (const splash of s.splashes) {
+                    const progress = splash.age / splash.life;
+                    if (splashLevel(progress) !== level) continue;
+                    const radius = splash.size * (0.3 + progress);
+                    ctx.moveTo(splash.x + radius, splash.y);
+                    ctx.ellipse(splash.x, splash.y, radius, radius * 0.28, 0, 0, TAU);
+                    any = true;
+                }
+                if (!any) continue;
+                ctx.globalAlpha = 0.45 * (level - 0.5) / SPLASH_LEVELS;
                 ctx.stroke();
             }
         },
@@ -98,7 +119,7 @@ function createEngine(plan, random) {
                 x: 0,
                 y: seed ? r(-radius, s.h) : r(-s.h * 0.1, -radius * 2),
                 radius,
-                vy: (near ? r(55, 90) : r(26, 54)) * (heavy ? 1.15 : 1),
+                vy: (near ? r(55, 90) : r(26, 54)) * GRADE_SNOW_FALL[grade],
                 drift: plan.wind ? r(70, 150) * (near ? 1.3 : 1) : r(-10, 10),
                 amp: near ? r(18, 36) : r(6, 16),
                 freq: r(0.25, 0.6),
@@ -253,6 +274,10 @@ function createSurface(doc, layer, depth) {
     return { layer, canvas, ctx, depth, w: 0, h: 0, items: [], splashes: [] };
 }
 
+export function splashLevel(progress) {
+    return Math.min(SPLASH_LEVELS, Math.max(1, Math.ceil((1 - progress) * SPLASH_LEVELS)));
+}
+
 export function startWeatherParticles(options = {}) {
     const { back, front, plan } = options;
     const doc = back && back.ownerDocument;
@@ -263,18 +288,19 @@ export function startWeatherParticles(options = {}) {
     if (!engine) return null;
     const surfaces = [createSurface(doc, back, 'far'), front ? createSurface(doc, front, 'near') : null].filter(Boolean);
     if (!surfaces.length) return null;
-    const density = (LEVEL_DENSITY[plan.level] || 1) * (INTENSITY_DENSITY[options.intensity] || 1);
+    const density = GRADE_DENSITY[gradeOf(plan)] * (INTENSITY_DENSITY[options.intensity] || 1);
     const base = BASE_COUNTS[plan.kind];
+    let quality = getQualityFactor();
 
     const resize = (s, w, h) => {
         s.w = w;
         s.h = h;
-        const scale = Math.min(view.devicePixelRatio || 1, 1);
+        const scale = Math.min(view.devicePixelRatio || 1, 1, quality.dprCap ?? 1);
         s.canvas.width = Math.max(1, Math.round(w * scale));
         s.canvas.height = Math.max(1, Math.round(h * scale));
         s.ctx.setTransform(scale, 0, 0, scale, 0, 0);
         const areaScale = Math.min(1.6, Math.max(0.45, (w * h) / REFERENCE_AREA));
-        const count = w && h ? Math.round(base[s.depth] * density * areaScale) : 0;
+        const count = w && h ? Math.round(base[s.depth] * density * quality.density * areaScale) : 0;
         s.items = Array.from({ length: count }, () => engine.spawn(s, true));
         s.splashes = [];
     };
@@ -298,8 +324,14 @@ export function startWeatherParticles(options = {}) {
         ? new view.ResizeObserver(() => { if (measure()) { lastTime = 0; request(); } })
         : null;
 
+    // 页面隐藏或舞台暂停时不排帧，可见 / 恢复后由 onVisibility 重新拉起（同 fx-daily-particles）。
     function request() {
-        if (!rafId && !stopped) rafId = view.requestAnimationFrame(frame);
+        if (!rafId && !stopped && !doc.hidden && !isStagePaused(back)) rafId = view.requestAnimationFrame(frame);
+    }
+    function onVisibility() {
+        if (doc.hidden) return;
+        lastTime = 0;
+        request();
     }
     function frame(now) {
         rafId = 0;
@@ -309,7 +341,12 @@ export function startWeatherParticles(options = {}) {
         // 有 ResizeObserver 时隐藏即停帧，由尺寸恢复回调重新拉起。
         if (!visible && observer) { lastTime = 0; return; }
         request();
-        if (lastTime && now - lastTime < FRAME_MS - 2) return;
+        const q = getQualityFactor();
+        if (q !== quality) {
+            quality = q;
+            for (const s of surfaces) resize(s, s.w, s.h);
+        }
+        if (lastTime && now - lastTime < 1000 / Math.min(FPS, quality.fps ?? FPS) - 2) return;
         const dt = lastTime ? Math.min(MAX_DT, (now - lastTime) / 1000) : 0;
         lastTime = now;
         clock += dt;
@@ -317,8 +354,12 @@ export function startWeatherParticles(options = {}) {
             if (!s.w || !s.h) continue;
             for (const item of s.items) engine.step(s, item, dt, clock);
             if (s.splashes.length) {
-                for (const splash of s.splashes) splash.age += dt;
-                s.splashes = s.splashes.filter((splash) => splash.age < splash.life);
+                let alive = 0;
+                for (const splash of s.splashes) {
+                    splash.age += dt;
+                    if (splash.age < splash.life) s.splashes[alive++] = splash;
+                }
+                s.splashes.length = alive;
             }
             s.ctx.globalAlpha = 1;
             s.ctx.clearRect(0, 0, s.w, s.h);
@@ -331,10 +372,14 @@ export function startWeatherParticles(options = {}) {
         if (rafId && typeof view.cancelAnimationFrame === 'function') view.cancelAnimationFrame(rafId);
         rafId = 0;
         if (observer) observer.disconnect();
+        if (typeof doc.removeEventListener === 'function') doc.removeEventListener('visibilitychange', onVisibility);
+        offResume();
         for (const s of surfaces) if (s.canvas.parentNode) s.canvas.parentNode.removeChild(s.canvas);
     }
 
     if (observer) for (const s of surfaces) observer.observe(s.layer);
+    if (typeof doc.addEventListener === 'function') doc.addEventListener('visibilitychange', onVisibility);
+    const offResume = onStageResume(back, onVisibility);
     if (measure() || !observer) request();
     return { stop };
 }
