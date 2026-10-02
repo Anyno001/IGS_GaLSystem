@@ -387,7 +387,7 @@ export function cancelBattleFx(root) {
 }
 
 export const BATTLE_FX_STYLE_TEXT = `
-#igs-stage-motion{--igs-battle-accent:#ffe2a0;--igs-battle-bg:color-mix(in srgb,var(--igs-dialog-bg,rgba(31,34,37,.62)) 55%,rgba(14,15,18,.9));--igs-battle-ink:#f4f4f6;--igs-battle-line:rgba(255,255,255,.28);--igs-battle-on-accent:#16171a;--igs-battle-radius:8px;--igs-battle-shadow:0 6px 20px rgba(0,0,0,.35);--igs-battle-stroke:rgba(10,10,14,.85);}
+#igs-stage-motion{--igs-battle-accent:#ffd76a;}
 #igs-stage-motion[data-igs-fx-battle-show="1"] #igs-status-hud{visibility:hidden!important;}
 #igs-stage-motion[data-igs-fx-battle-letterbox] .igs-fx-letterbox-bar{transform:scaleY(1);}
 #igs-stage-motion[data-igs-fx-battle-shake="light"]{animation:igs-battle-shake-light .3s ease-out both;}
@@ -396,11 +396,11 @@ export const BATTLE_FX_STYLE_TEXT = `
 @keyframes igs-battle-shake-heavy{0%,100%{transform:none}12%{transform:translate3d(12px,-5px,0)}28%{transform:translate3d(-11px,4px,0)}44%{transform:translate3d(8px,3px,0)}60%{transform:translate3d(-6px,-2px,0)}78%{transform:translate3d(3px,1px,0)}}
 .igs-fx-battle-skip{position:absolute;inset:0;z-index:8;pointer-events:auto;cursor:pointer;background:transparent;}
 .igs-fx-battle-vignette{position:absolute;inset:0;background:radial-gradient(ellipse at center,transparent 55%,rgba(120,10,20,.28) 100%);animation:igs-battle-fade-in .6s ease-out both;}
-.igs-fx-battle-plate{position:absolute;left:50%;top:clamp(8px,2.5%,22px);transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:min(420px,80%);padding:4px 14px 4px 5px;border:1px solid var(--igs-battle-line);border-radius:var(--igs-battle-radius);background:var(--igs-battle-bg);color:var(--igs-battle-ink);box-shadow:var(--igs-battle-shadow);font-size:13px;letter-spacing:.06em;white-space:nowrap;animation:igs-battle-drop .4s cubic-bezier(.2,1.4,.4,1) both;}
-.igs-fx-battle-plate-mark{flex:none;padding:1px 7px;border-radius:calc(var(--igs-battle-radius) * .6);background:var(--igs-battle-accent);color:var(--igs-battle-on-accent);font-size:11px;font-weight:800;}
-.igs-fx-battle-plate-name{overflow:hidden;text-overflow:ellipsis;}
+.igs-fx-battle-plate{position:absolute;left:50%;top:clamp(8px,2.5%,22px);transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:min(420px,80%);padding:5px 14px 5px 6px;border:2px solid rgba(255,255,255,.88);border-radius:6px;background:linear-gradient(180deg,rgba(30,44,110,.92),rgba(10,16,52,.92));color:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.5),0 4px 14px rgba(0,0,0,.4);font-size:14px;letter-spacing:.06em;white-space:nowrap;animation:igs-battle-drop .4s cubic-bezier(.2,1.4,.4,1) both;}
+.igs-fx-battle-plate-mark{flex:none;padding:1px 6px;border-radius:3px;background:var(--igs-battle-accent);color:#1a1030;font-size:11px;font-weight:800;font-style:italic;}
+.igs-fx-battle-plate-name{overflow:hidden;text-overflow:ellipsis;text-shadow:1px 1px 0 #000;}
 .igs-fx-battle-encounter{position:absolute;inset:0;overflow:hidden;z-index:6;}
-.igs-fx-battle-wipe{position:absolute;left:-30%;right:-30%;height:36%;background:var(--igs-battle-bg);border-block:2px solid var(--igs-battle-accent);transform:skewY(-8deg) translateX(-110%);}
+.igs-fx-battle-wipe{position:absolute;left:-30%;right:-30%;height:36%;background:repeating-linear-gradient(90deg,rgba(8,10,30,.94) 0 26px,rgba(20,26,70,.94) 26px 52px);transform:skewY(-8deg) translateX(-110%);}
 .igs-fx-battle-wipe.is-a{top:13%;animation:igs-battle-wipe-a var(--igs-battle-life,1.9s) cubic-bezier(.7,0,.2,1) both;}
 .igs-fx-battle-wipe.is-b{top:49%;animation:igs-battle-wipe-b var(--igs-battle-life,1.9s) cubic-bezier(.7,0,.2,1) both;}
 .igs-fx-battle-vs-portrait{position:absolute;right:4%;bottom:0;height:94%;max-width:52%;object-fit:contain;object-position:bottom;pointer-events:none;animation:igs-battle-portrait-in var(--igs-battle-life,1.9s) ease-out both;}
@@ -411,14 +411,14 @@ export const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-foe[data-igs-battle-result="miss"] .igs-fx-battle-foe-body{animation-name:igs-battle-foe-dodge;animation-duration:.46s;}
 .igs-fx-battle-foe[data-igs-battle-result="heal"] .igs-fx-battle-foe-body{animation-name:igs-battle-foe-heal;animation-duration:.8s;}
 .igs-fx-battle-foe[data-igs-battle-result="ko"] .igs-fx-battle-foe-body{animation-name:igs-battle-foe-ko;animation-duration:.9s;animation-fill-mode:forwards;}
-.igs-fx-battle-vs{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;color:var(--igs-battle-ink);text-align:center;white-space:nowrap;animation:igs-battle-vs var(--igs-battle-life,1.9s) ease-out both;}
-.igs-fx-battle-vs-cap{font-size:13px;font-weight:800;letter-spacing:.5em;color:var(--igs-battle-accent);}
-.igs-fx-battle-vs-foe{font-size:clamp(26px,6vw,46px);font-weight:900;letter-spacing:.08em;text-shadow:0 2px 0 var(--igs-battle-stroke);}
-.igs-fx-battle-vs-title{font-size:13px;opacity:.85;letter-spacing:.2em;}
+.igs-fx-battle-vs{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;color:#fff;text-align:center;white-space:nowrap;animation:igs-battle-vs var(--igs-battle-life,1.9s) ease-out both;}
+.igs-fx-battle-vs-cap{font-size:13px;font-weight:800;letter-spacing:.5em;color:var(--igs-battle-accent);text-shadow:0 0 8px rgba(0,0,0,.8);}
+.igs-fx-battle-vs-foe{font-size:clamp(26px,6vw,46px);font-weight:900;letter-spacing:.08em;text-shadow:3px 3px 0 #000,0 0 18px rgba(255,80,80,.55);}
+.igs-fx-battle-vs-title{font-size:13px;opacity:.85;letter-spacing:.2em;text-shadow:1px 1px 0 #000;}
 .igs-fx-battle-hit{position:absolute;inset:0;z-index:5;}
-.igs-fx-battle-skill{position:absolute;left:50%;top:clamp(46px,11%,90px);transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;min-width:min(220px,60%);max-width:80%;padding:6px 22px;border:1px solid var(--igs-battle-line);border-bottom:2px solid var(--igs-battle-accent);border-radius:var(--igs-battle-radius);background:var(--igs-battle-bg);color:var(--igs-battle-ink);box-shadow:var(--igs-battle-shadow);text-align:center;animation:igs-battle-skill var(--igs-battle-life,1.3s) ease-out both;}
+.igs-fx-battle-skill{position:absolute;left:50%;top:clamp(46px,11%,90px);transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;min-width:min(220px,60%);max-width:80%;padding:6px 22px;border:2px solid rgba(255,255,255,.9);border-radius:6px;background:linear-gradient(180deg,rgba(30,44,110,.94),rgba(10,16,52,.94));color:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.5),0 6px 18px rgba(0,0,0,.45);text-align:center;animation:igs-battle-skill var(--igs-battle-life,1.3s) ease-out both;}
 .igs-fx-battle-skill-who{font-size:11px;opacity:.75;letter-spacing:.12em;}
-.igs-fx-battle-skill-name{font-size:18px;font-weight:800;letter-spacing:.12em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
+.igs-fx-battle-skill-name{font-size:18px;font-weight:800;letter-spacing:.12em;text-shadow:2px 2px 0 #000;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
 .igs-fx-battle-impact{position:absolute;left:50%;top:40%;height:56%;max-height:340px;aspect-ratio:1/1;transform:translate(-50%,-50%);}
 .igs-fx-battle-hit[data-igs-battle-target="sprite"] .igs-fx-battle-impact{height:44%;}
 .igs-fx-battle-slash{position:absolute;left:-10%;right:-10%;top:50%;height:10px;margin-top:-5px;border-radius:50%;background:linear-gradient(90deg,transparent,#fff 45%,#fff 55%,transparent);box-shadow:0 0 14px 4px var(--igs-battle-accent);transform:rotate(-32deg) scaleX(0);animation:igs-battle-slash .5s cubic-bezier(.2,.9,.3,1) both;}
@@ -432,9 +432,9 @@ export const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-shield{position:absolute;inset:14%;color:#8fd8ff;filter:drop-shadow(0 0 10px rgba(120,200,255,.9));animation:igs-battle-shield .9s ease-out both;}
 .igs-fx-battle-spark{position:absolute;left:calc(22% + var(--i,0) * 11%);bottom:22%;width:12px;height:12px;border-radius:50%;background:radial-gradient(circle,#fff,#7dffb0 45%,transparent 70%);animation:igs-battle-spark 1.1s ease-out both;animation-delay:calc(var(--i,0) * .07s);}
 .igs-fx-battle-pop{position:absolute;left:50%;top:60%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;white-space:nowrap;animation:igs-battle-pop calc(var(--igs-battle-life,1.3s) * .85) cubic-bezier(.2,1.5,.4,1) both;animation-delay:.1s;}
-.igs-fx-battle-pop-label{font-size:clamp(24px,5vw,38px);font-weight:900;font-style:italic;letter-spacing:.06em;color:#fff;-webkit-text-stroke:1.5px var(--igs-battle-stroke);text-shadow:0 2px 0 var(--igs-battle-stroke);}
-.igs-fx-battle-pop-dice{font-size:11px;font-weight:700;letter-spacing:.2em;color:var(--igs-battle-on-accent);background:var(--igs-battle-accent);padding:1px 8px;border-radius:3px;margin-bottom:3px;}
-.igs-fx-battle-pop-target{font-size:12px;color:var(--igs-battle-ink);padding:1px 8px;border-radius:999px;background:var(--igs-battle-bg);}
+.igs-fx-battle-pop-label{font-size:clamp(24px,5vw,38px);font-weight:900;font-style:italic;letter-spacing:.06em;color:#fff;-webkit-text-stroke:1.5px #1a1030;text-shadow:3px 3px 0 #1a1030;}
+.igs-fx-battle-pop-dice{font-size:11px;font-weight:700;letter-spacing:.2em;color:#1a1030;background:var(--igs-battle-accent);padding:1px 8px;border-radius:3px;margin-bottom:3px;}
+.igs-fx-battle-pop-target{font-size:12px;color:#fff;padding:1px 8px;border-radius:999px;background:rgba(10,16,52,.75);text-shadow:1px 1px 0 #000;}
 .igs-fx-battle-hit[data-igs-battle-result="crit"] .igs-fx-battle-pop-label{color:var(--igs-battle-accent);font-size:clamp(30px,6.5vw,48px);}
 .igs-fx-battle-hit[data-igs-battle-result="miss"] .igs-fx-battle-pop-label{color:#c8d0e0;}
 .igs-fx-battle-hit[data-igs-battle-result="guard"] .igs-fx-battle-pop-label{color:#8fd8ff;}
@@ -444,40 +444,26 @@ export const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-hit[data-igs-battle-target="sprite"] .igs-fx-battle-pop{top:50%;}
 .igs-fx-battle-result{position:absolute;inset:0;z-index:6;display:flex;align-items:center;justify-content:center;}
 .igs-fx-battle-result-veil{position:absolute;inset:0;background:rgba(0,0,0,.35);animation:igs-battle-veil var(--igs-battle-life,3s) ease-in-out both;}
-.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-result-veil{background:rgba(30,6,10,.6);}
-.igs-fx-battle-ribbon{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:min(420px,78%);padding:14px 36px;background:var(--igs-battle-bg);border-top:2px solid var(--igs-battle-accent);border-bottom:2px solid var(--igs-battle-accent);border-radius:var(--igs-battle-radius);box-shadow:var(--igs-battle-shadow);color:var(--igs-battle-ink);text-align:center;animation:igs-battle-ribbon var(--igs-battle-life,3s) cubic-bezier(.2,1,.3,1) both;}
-.igs-fx-battle-ribbon-title{font-size:clamp(30px,7vw,54px);font-weight:900;font-style:italic;letter-spacing:.14em;color:var(--igs-battle-accent);text-shadow:0 2px 0 var(--igs-battle-stroke);}
-.igs-fx-battle-ribbon-text{font-size:15px;letter-spacing:.4em;}
+.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-result-veil{background:rgba(40,0,6,.55);backdrop-filter:grayscale(.85);-webkit-backdrop-filter:grayscale(.85);}
+.igs-fx-battle-ribbon{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:min(420px,78%);padding:14px 36px;background:linear-gradient(90deg,transparent,rgba(10,16,52,.92) 14%,rgba(10,16,52,.92) 86%,transparent);border-top:2px solid var(--igs-battle-accent);border-bottom:2px solid var(--igs-battle-accent);color:#fff;text-align:center;animation:igs-battle-ribbon var(--igs-battle-life,3s) cubic-bezier(.2,1,.3,1) both;}
+.igs-fx-battle-ribbon-title{font-size:clamp(30px,7vw,54px);font-weight:900;font-style:italic;letter-spacing:.14em;color:var(--igs-battle-accent);text-shadow:3px 3px 0 #000,0 0 22px rgba(255,215,106,.5);}
+.igs-fx-battle-ribbon-text{font-size:15px;letter-spacing:.4em;text-shadow:1px 1px 0 #000;}
 .igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-ribbon{border-color:#b3262e;}
-.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-ribbon-title{color:#e5484d;}
+.igs-fx-battle-result[data-igs-battle-result="lose"] .igs-fx-battle-ribbon-title{color:#ff5a5a;text-shadow:3px 3px 0 #000,0 0 22px rgba(200,20,30,.6);}
 .igs-fx-battle-result[data-igs-battle-result="escape"] .igs-fx-battle-ribbon{border-color:#8fb4d8;}
-.igs-fx-battle-result[data-igs-battle-result="escape"] .igs-fx-battle-ribbon-title{color:#8fb4d8;}
+.igs-fx-battle-result[data-igs-battle-result="escape"] .igs-fx-battle-ribbon-title{color:#cfe3f5;text-shadow:3px 3px 0 #000;}
 .igs-fx-battle-vignette.is-fantasy{background:radial-gradient(ellipse at center,transparent 50%,rgba(40,24,8,.45) 100%);}
 .igs-fx-battle-vignette.is-scifi{background:radial-gradient(ellipse at center,transparent 50%,rgba(4,30,46,.5) 100%);}
 .igs-fx-battle-vignette.is-apocalypse{background:radial-gradient(ellipse at center,transparent 45%,rgba(30,24,16,.55) 100%);}
-.igs-fx-battle-encounter.is-fantasy,.igs-fx-battle-hit.is-fantasy,.igs-fx-battle-result.is-fantasy,.igs-fx-battle-plate.is-fantasy{--igs-battle-bg:linear-gradient(180deg,#efe2c2,#e2d0a6);--igs-battle-ink:#3a2614;--igs-battle-line:#9c7a46;--igs-battle-accent:#a8652a;--igs-battle-on-accent:#f6ecd4;--igs-battle-stroke:#3a2614;}
-.igs-fx-battle-plate.is-fantasy{font-family:Georgia,"Times New Roman",serif;}
-.igs-fx-battle-encounter.is-scifi,.igs-fx-battle-hit.is-scifi,.igs-fx-battle-result.is-scifi,.igs-fx-battle-plate.is-scifi{--igs-battle-bg:rgba(8,24,36,.9);--igs-battle-ink:#d8fbff;--igs-battle-line:rgba(80,220,255,.7);--igs-battle-accent:#5fe0ff;--igs-battle-shadow:0 0 12px rgba(60,200,255,.45);}
-.igs-fx-battle-encounter.is-apocalypse,.igs-fx-battle-hit.is-apocalypse,.igs-fx-battle-result.is-apocalypse,.igs-fx-battle-plate.is-apocalypse{--igs-battle-bg:rgba(48,40,32,.93);--igs-battle-ink:#e8dfcf;--igs-battle-line:rgba(200,150,80,.6);--igs-battle-accent:#d79a4a;--igs-battle-radius:2px;}
-.igs-fx-battle-plate.is-apocalypse{font-family:"Courier New",monospace;}
+.igs-fx-battle-plate.is-fantasy{border:1px solid #9c7a46;background:linear-gradient(180deg,#efe2c2,#e2d0a6);color:#3a2614;font-family:Georgia,"Times New Roman",serif;}
+.igs-fx-battle-plate.is-scifi{border:1px solid rgba(80,220,255,.7);background:rgba(8,24,36,.9);color:#d8fbff;box-shadow:0 0 12px rgba(60,200,255,.45);}
+.igs-fx-battle-plate.is-apocalypse{border:1px dashed rgba(200,150,80,.6);background:rgba(48,40,32,.93);color:#e8dfcf;font-family:"Courier New",monospace;}
 .igs-fx-battle-encounter.is-fantasy .igs-fx-battle-vs,.igs-fx-battle-hit.is-fantasy .igs-fx-battle-skill,.igs-fx-battle-result.is-fantasy .igs-fx-battle-ribbon{font-family:Georgia,"Times New Roman",serif;}
-.igs-fx-battle-encounter.is-scifi .igs-fx-battle-vs,.igs-fx-battle-hit.is-scifi .igs-fx-battle-skill,.igs-fx-battle-result.is-scifi .igs-fx-battle-ribbon{letter-spacing:.08em;}
-.igs-fx-battle-encounter.is-apocalypse .igs-fx-battle-vs,.igs-fx-battle-hit.is-apocalypse .igs-fx-battle-skill,.igs-fx-battle-result.is-apocalypse .igs-fx-battle-ribbon{font-family:"Courier New",monospace;}
+.igs-fx-battle-encounter.is-scifi .igs-fx-battle-vs,.igs-fx-battle-hit.is-scifi .igs-fx-battle-skill,.igs-fx-battle-result.is-scifi .igs-fx-battle-ribbon{letter-spacing:.08em;filter:drop-shadow(0 0 8px rgba(60,200,255,.7));}
+.igs-fx-battle-encounter.is-apocalypse .igs-fx-battle-vs,.igs-fx-battle-hit.is-apocalypse .igs-fx-battle-skill,.igs-fx-battle-result.is-apocalypse .igs-fx-battle-ribbon{font-family:"Courier New",monospace;filter:sepia(.35) saturate(.8);}
 .igs-fx-battle-vignette.is-taisho{background:radial-gradient(ellipse at center,transparent 50%,rgba(50,16,12,.45) 100%);}
-.igs-fx-battle-encounter.is-taisho,.igs-fx-battle-hit.is-taisho,.igs-fx-battle-result.is-taisho,.igs-fx-battle-plate.is-taisho{--igs-battle-bg:linear-gradient(180deg,#f4ead6,#e8dabb);--igs-battle-ink:#2a1c18;--igs-battle-line:#7b2e2a;--igs-battle-accent:#a83a32;--igs-battle-on-accent:#f4ead6;--igs-battle-stroke:#2a1c18;}
-.igs-fx-battle-plate.is-taisho{font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;}
-.igs-fx-battle-encounter.is-taisho .igs-fx-battle-vs,.igs-fx-battle-hit.is-taisho .igs-fx-battle-skill,.igs-fx-battle-result.is-taisho .igs-fx-battle-ribbon{font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;}
-.igs-fx-battle-vignette.is-magic{background:radial-gradient(ellipse at center,transparent 48%,rgba(34,12,44,.5) 100%);}
-.igs-fx-battle-encounter.is-magic,.igs-fx-battle-hit.is-magic,.igs-fx-battle-result.is-magic,.igs-fx-battle-plate.is-magic{--igs-battle-bg:linear-gradient(180deg,#2c1624,#160b14);--igs-battle-ink:#f3e6c4;--igs-battle-line:#c9a24a;--igs-battle-accent:#ffd27a;--igs-battle-on-accent:#2c1624;--igs-battle-radius:4px;--igs-battle-shadow:0 0 0 1px rgba(201,162,74,.35),0 6px 22px rgba(0,0,0,.45);--igs-battle-stroke:#1a0c12;font-family:"IM Fell English",Georgia,"Times New Roman",serif;}
-.igs-fx-battle-encounter.is-magic .igs-fx-battle-wipe{background:radial-gradient(rgba(255,226,160,.45) 1px,transparent 1.6px) 0 0/22px 22px,var(--igs-battle-bg);}
-.igs-fx-battle-encounter.is-magic .igs-fx-battle-vs-cap,.igs-fx-battle-result.is-magic .igs-fx-battle-ribbon-title,.igs-fx-battle-hit.is-magic .igs-fx-battle-skill-name,.igs-fx-battle-hit.is-magic .igs-fx-battle-pop-label{font-style:italic;}
-.igs-fx-battle-hit.is-magic .igs-fx-battle-skill-name{color:var(--igs-battle-accent);text-shadow:0 0 6px rgba(255,200,110,.55);}
-.igs-fx-battle-hit.is-magic .igs-fx-battle-slash{height:6px;margin-top:-3px;border-radius:3px;transform-origin:0 50%;background:linear-gradient(90deg,transparent,#ffd27a 35%,#fff 62%,#ffd27a 80%,transparent);box-shadow:0 0 10px 3px rgba(255,190,90,.75);}
-.igs-fx-battle-hit.is-magic .igs-fx-battle-slash.is-cross,.igs-fx-battle-hit.is-magic[data-igs-battle-result="ko"] .igs-fx-battle-slash{background:linear-gradient(90deg,transparent,#ff6a4a 35%,#ffe0d0 62%,#ff6a4a 80%,transparent);box-shadow:0 0 12px 4px rgba(230,50,40,.75);}
-.igs-fx-battle-hit.is-magic .igs-fx-battle-flash{background:radial-gradient(circle at 50% 40%,rgba(255,250,230,.9),rgba(255,210,122,.45) 45%,transparent 75%);}
-.igs-fx-battle-hit.is-magic .igs-fx-battle-shield{color:#ffe6a8;filter:drop-shadow(0 0 8px rgba(255,214,130,.85));}
-.igs-fx-battle-hit.is-magic .igs-fx-battle-spark{background:radial-gradient(circle,#fff,#ffe08a 45%,transparent 70%);}
-.igs-fx-battle-result.is-magic .igs-fx-battle-ribbon::after{content:"";position:absolute;right:14px;top:50%;width:28px;height:28px;margin-top:-14px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#c9363d,#7a1218 70%);box-shadow:0 0 0 2px rgba(122,18,24,.45),0 2px 4px rgba(0,0,0,.4);}
+.igs-fx-battle-plate.is-taisho{border:1px solid #7b2e2a;background:linear-gradient(180deg,#f4ead6,#e8dabb);color:#2a1c18;font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;}
+.igs-fx-battle-encounter.is-taisho .igs-fx-battle-vs,.igs-fx-battle-hit.is-taisho .igs-fx-battle-skill,.igs-fx-battle-result.is-taisho .igs-fx-battle-ribbon{font-family:"Yu Mincho","YuMincho","Hiragino Mincho ProN","MS PMincho",serif;filter:sepia(.25);}
 .igs-fx-battle-vignette.is-ancient{background:radial-gradient(ellipse at center,transparent 50%,rgba(26,18,12,.42) 100%);}
 .igs-fx-battle-plate.is-ancient{padding:4px 16px 4px 5px;border:1px solid rgba(43,29,18,.8);border-radius:2px;background:linear-gradient(180deg,#f6ecd4,#e9dab4);color:#1a120c;box-shadow:0 3px 12px rgba(26,18,12,.35);font-family:"STKaiti","KaiTi","Kaiti SC","楷体",serif;font-size:16px;letter-spacing:.12em;}
 .igs-fx-battle-plate.is-ancient .igs-fx-battle-plate-mark{padding:1px 4px;border-radius:2px;background:#b8452f;color:#f6ecd4;font-size:13px;font-weight:400;font-style:normal;box-shadow:inset 0 0 0 1px rgba(246,236,212,.7);}
@@ -529,7 +515,7 @@ export const BATTLE_FX_STYLE_TEXT = `
 #igs-stage-motion[data-igs-fx-battle-motion="snappy"][data-igs-fx-battle-shake]{animation-timing-function:steps(3,end);}
 [data-igs-fx-static] .igs-fx-battle-wipe,[data-igs-fx-static] .igs-fx-battle-slash,[data-igs-fx-static] .igs-fx-battle-spark,[data-igs-fx-static] .igs-fx-battle-hurt,[data-igs-fx-static] .igs-fx-battle-flash{display:none;}
 [data-igs-fx-static] *{animation:none!important;}
-@keyframes igs-battle-portrait-in{0%{opacity:0;transform:translateX(24%);filter:brightness(0)}22%{opacity:1;transform:none;filter:brightness(0)}46%{filter:brightness(1)}82%{opacity:1}100%{opacity:0}}
+@keyframes igs-battle-portrait-in{0%{opacity:0;transform:translateX(24%);filter:brightness(0)}22%{opacity:1;transform:none;filter:brightness(0) drop-shadow(0 0 14px rgba(255,60,60,.85))}46%{filter:brightness(1) drop-shadow(0 0 16px rgba(255,60,60,.55))}82%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-foe-life{0%{opacity:0;transform:translateX(-46%)}14%{opacity:1;transform:translateX(-50%)}84%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-foe-hit{0%{transform:none;filter:none}35%{transform:translateX(3%) rotate(1.5deg);filter:brightness(2)}100%{transform:none;filter:none}}
 @keyframes igs-battle-foe-crit{0%{transform:none;filter:none}30%{transform:translateX(6%) rotate(3deg);filter:brightness(2.8)}60%{transform:translateX(-1%)}100%{transform:none;filter:none}}
@@ -553,7 +539,7 @@ export const BATTLE_FX_STYLE_TEXT = `
 @keyframes igs-battle-pop{0%{opacity:0;transform:translate(-50%,16px) scale(.6)}25%{opacity:1;transform:translate(-50%,0) scale(1.08)}35%{transform:translate(-50%,0) scale(1)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-12px)}}
 @keyframes igs-battle-veil{0%{opacity:0}12%,85%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-ribbon{0%{opacity:0;transform:scaleX(.1)}14%{opacity:1;transform:scaleX(1)}86%{opacity:1;transform:scaleX(1)}100%{opacity:0;transform:scaleX(1.05)}}
-@keyframes igs-battle-portrait-ink{0%{opacity:0;transform:translateX(24%);filter:grayscale(1) brightness(.12)}22%{opacity:1;transform:none;filter:grayscale(1) brightness(.12)}46%{filter:sepia(.3)}82%{opacity:1}100%{opacity:0}}
+@keyframes igs-battle-portrait-ink{0%{opacity:0;transform:translateX(24%);filter:grayscale(1) brightness(.12)}22%{opacity:1;transform:none;filter:grayscale(1) brightness(.12) drop-shadow(0 0 12px rgba(26,18,12,.7))}46%{filter:sepia(.3) drop-shadow(0 0 10px rgba(26,18,12,.45))}82%{opacity:1}100%{opacity:0}}
 @keyframes igs-battle-brush{0%{opacity:0;transform:translateX(-50%) rotate(-5deg) scale(1.2);clip-path:inset(-20% 100% -20% -20%);filter:blur(2px)}16%{opacity:1;transform:translateX(-50%) rotate(-5deg) scale(1);clip-path:inset(-20% -20% -20% -20%);filter:none}80%{opacity:1}100%{opacity:0;transform:translateX(-50%) rotate(-5deg) scale(1.03);clip-path:inset(-20% -20% -20% -20%)}}
 @keyframes igs-battle-ink-slash{0%,55%{opacity:1;transform:rotate(var(--igs-slash-rot,28deg)) translateY(var(--igs-slash-shift,0px))}100%{opacity:0;transform:rotate(var(--igs-slash-rot,28deg)) translateY(var(--igs-slash-shift,0px)) translateX(3%) scaleY(.35)}}
 @keyframes igs-battle-ink-sweep{from{transform:scaleX(0)}to{transform:scaleX(1)}}

@@ -58,8 +58,6 @@ export function applyFxEra(readerSettings, ancient) {
 export const FX_WORLDVIEW_OFF = Object.freeze({
     // 西幻没有现代电子设备：与古代共用现代专属表。
     fantasy: Object.freeze({ ...FX_ERA_MODERN_ONLY, features: FX_ERA_MODERN_FEATURES }),
-    // 魔法世界同西幻：没有现代电子设备。
-    magic: Object.freeze({ ...FX_ERA_MODERN_ONLY, features: FX_ERA_MODERN_FEATURES }),
     // 科幻保留全部现代演出，画面与说法由换皮和提示词切换。
     scifi: Object.freeze({ features: Object.freeze([]) }),
     // 末日：通讯（对讲机、广播）仍在，末日前才有的日常服务与直播拨掉。
@@ -88,11 +86,7 @@ export const APOCALYPSE_ERA_PROMPT_RULE = `[igs时代背景]
 export const TAISHO_ERA_PROMPT_RULE = `[igs时代背景]
 本故事发生在大正时代（和洋折衷的近代日本）。上述igs标签里填写的文字使用大正时代的说法与器物：通讯写电报、黑色座机、书信或差人传话，电话指要接线员转接的座机；娱乐写活动写真、留声机、咖啡馆；时间可写钟点；不要出现手机、电视、网络、直播等现代事物。`;
 
-export const MAGIC_ERA_PROMPT_RULE = `[igs时代背景]
-本故事发生在隐藏于现实之下的魔法世界（魔法学院、古堡、魔法街巷）。上述igs标签里填写的文字使用魔法世界的说法与器物：通讯写猫头鹰送信、羊皮纸便条、壁炉传话或会动的画像传话，时间写「宵禁钟响后」「次日清晨」这类说法；战斗出招的招式名写咒语名称；不要出现手机、电视、网络、直播等现代电子设备。`;
-
 export const WORLDVIEW_PROMPT_RULES = Object.freeze({
-    magic: MAGIC_ERA_PROMPT_RULE,
     ancient: ANCIENT_ERA_PROMPT_RULE,
     fantasy: FANTASY_ERA_PROMPT_RULE,
     scifi: SCIFI_ERA_PROMPT_RULE,

@@ -46,8 +46,6 @@ export const FX_SFX_PARTIALS = Object.freeze({
         p('sine', 4186, 4186, start, 0.12, 0.08, { attack: 0.001 }),
     ])),
     // 科幻通报：终端数字提示音，两声上扬短扫频。
-    // 魔法通报：魔杖点出的一串上行铃音。
-    'notify-magic': Object.freeze([1568, 2093, 2637, 3136].map((f, i) => p('sine', f, f, i * 0.07, 0.3, 0.2, { attack: 0.002 }))),
     'notify-scifi': Object.freeze([
         p('sine', 880, 1320, 0, 0.08, 0.45, { attack: 0.002, sweep: 1 }),
         p('sine', 1320, 1980, 0.11, 0.1, 0.45, { attack: 0.002, sweep: 1 }),

@@ -13,13 +13,12 @@ export const WORLDVIEWS = Object.freeze([
     Object.freeze({ id: 'scifi', label: '科幻', ready: true }),
     Object.freeze({ id: 'apocalypse', label: '末日', ready: true }),
     Object.freeze({ id: 'taisho', label: '大正', ready: true }),
-    Object.freeze({ id: 'magic', label: '魔法', ready: true }),
 ]);
 
 export const DEFAULT_WORLDVIEW = 'modern';
 
 // 在现代演出结构上换皮的世界观（古代有独立分支，不在此列）；演出 / 音效层只经 worldSkinOf 判断，不各自维护列表。
-export const WORLD_SKIN_IDS = Object.freeze(['fantasy', 'scifi', 'apocalypse', 'taisho', 'magic']);
+export const WORLD_SKIN_IDS = Object.freeze(['fantasy', 'scifi', 'apocalypse', 'taisho']);
 export function worldSkinOf(id) {
     return WORLD_SKIN_IDS.includes(id) ? id : '';
 }
@@ -52,10 +51,4 @@ export function applyWorldview(sceneAssets, id) {
     sceneAssets.ancient = id === 'ancient';
     sceneAssets.worldview = id;
     return true;
-}
-
-// 魔法世界在战斗以外的演出沿用西幻换皮：把样式里的 fantasy 规则复制一份改成 magic。
-export function withMagicSkin(css) {
-    const extra = css.split('\n').filter((line) => line.includes('fantasy')).map((line) => line.replace(/fantasy/g, 'magic'));
-    return extra.length ? `${css}\n${extra.join('\n')}` : css;
 }

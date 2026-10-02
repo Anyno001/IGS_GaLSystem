@@ -1,4 +1,4 @@
-import { withMagicSkin, worldSkinOf } from '../../scene/worldview.js';
+import { worldSkinOf } from '../../scene/worldview.js';
 
 import { prefersReducedMotion } from './reduced-motion.js';
 import { chatRevealDelayMs, normalizeChatShowSettings } from './chat-show-runtime.js';
@@ -367,7 +367,7 @@ export function getChatRevealState(root) {
     return state ? { revealed: state.revealed, total: state.rows.length, pending: state.timer != null, typing: Boolean(state.typingRow) } : null;
 }
 
-export const CHAT_LAYER_STYLE_TEXT = withMagicSkin(`
+export const CHAT_LAYER_STYLE_TEXT = `
 #igs-chat-layer{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;padding:clamp(52px,9%,72px) clamp(10px,4%,32px) clamp(16px,5%,40px);box-sizing:border-box;background:rgba(0,0,0,var(--igs-chat-dim,.45));cursor:pointer;font-family:var(--igs-chat-font,inherit);}
 #igs-chat-layer[hidden]{display:none;}
 #igs-overlay.igs-options-visible #igs-chat-layer{display:none;}
@@ -462,4 +462,4 @@ export const CHAT_LAYER_STYLE_TEXT = withMagicSkin(`
 #igs-overlay.igs-chat-page #igs-dialog-layer{visibility:hidden;}
 #igs-overlay.igs-record-screen-open #igs-chat-layer{display:none!important;}
 @media (prefers-reduced-motion: reduce){#igs-chat-layer .igs-chat-row.igs-chat-pop,#igs-chat-layer .igs-chat-dot{animation:none!important;}}
-`.trim());
+`.trim();
