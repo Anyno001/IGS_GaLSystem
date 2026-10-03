@@ -34,14 +34,15 @@ import {
 import { GRADIENT_VEIL_STYLE_TEXT } from '../src/visual/igs-ui/gradient-veil-dialog-skin.js';
 import { getDialogSkinStyleText, listDialogSkinAssetUrls, watchDialogSkinAssets } from '../src/visual/igs-ui/dialog-skin-style.js';
 import { getSettingsShellTemplate } from '../src/visual/igs-ui/settings-shell.js';
+import { findTruncatedFontTables } from '../scripts/font-slices.js';
 import { getSettingsStyleText } from '../src/visual/igs-ui/settings-style.js';
 import { DIALOG_FONT_OPTIONS } from '../src/visual/igs-ui/reader-host-constants.js';
 import {
-    getSceneSettingsSubTabTemplate,
     getReaderSubTabTemplate,
     getSettingsTabTemplate,
     normalizeReaderSubTab,
-    SCENE_SETTINGS_SUBTAB_DEFS,
+    SCENE_SUBTAB_DEFS,
+    SCENE_RULES_TEMPLATE,
     READER_SUBTAB_DEFS,
     SETTINGS_TAB_DEFS,
 } from '../src/visual/igs-ui/settings-tabs.js';
@@ -777,14 +778,14 @@ test('gate:igs-ui:reader-source-keeps-original-selectors', () => {
     assert.match(readerSourceText, /#igs-stage-motion\.igs-stage-shake-active/);
     assert.match(readerSourceText, /prefers-reduced-motion: reduce\)\{#igs-stage-motion/);
     assert.match(readerHostText, /readerSettings\.typewriter\.enabled/);
-    assert.match(readerHostText, /switchSceneSettingsSubTab\(subTab\)/);
-    assert.match(readerHostText, /data-scene-settings-subtab/);
+    assert.match(readerHostText, /switchSceneSubTab\(subTab\)/);
+    assert.match(readerHostText, /data-scene-subtab/);
     assert.match(readerHostText, /switchReaderSubTab\(subTab\)/);
     assert.match(readerHostText, /data-reader-subtab/);
     assert.match(readerHostText, /data-prompt-rule-draft/);
     assert.doesNotMatch(readerHostText, /data-path="bridge\.sceneAssets\.promptRule"/);
     assert.doesNotMatch(readerHostText, /emptyBackgroundColorField|optionBubbleFontSizeField|readerSettings\.emptyBackgroundColor/);
-    assert.match(rendererText, /const dockTop = !compactChrome && readerSettings\.toolbarDock === 'top'/);
+    assert.match(rendererText, /const dockTop = !embeddedMode && readerSettings\.toolbarDock === 'top'/);
     assert.match(rendererText, /statusHud\.classList\.toggle\('igs-hud-collapsed', persistedCollapsed \|\| toolbarExpanded\)/);
     assert.match(rendererText, /class="igs-hud-icon-expand" d="M12 5v14M5 12h14"/);
     assert.doesNotMatch(rendererText, /igs-hud-icon-collapse/);
@@ -824,21 +825,15 @@ test('gate:igs-ui:settings-shell-keeps-original-tabs', () => {
         assert.ok(getSettingsTabTemplate(tab.id).length > 0);
     }
 
-    assert.match(getSettingsTabTemplate('scene'), /sceneSettingsSubTabs/);
-    for (const subTab of fixture.sceneSettingsSubTabs) {
-        const defined = SCENE_SETTINGS_SUBTAB_DEFS.find(([id]) => id === subTab.id);
-        assert.ok(defined);
-        assert.equal(defined[1], subTab.label);
-        assert.ok(getSceneSettingsSubTabTemplate(subTab.id).length > 0);
-    }
-    const rulesTemplate = getSceneSettingsSubTabTemplate('rules');
-    const assetsTemplate = getSceneSettingsSubTabTemplate('assets');
-    assert.match(rulesTemplate, /data-action="reset-prompt-rule"/);
-    assert.match(rulesTemplate, /data-action="save-prompt-rule"/);
-    assert.match(rulesTemplate, /data-result="prompt-rule"/);
-    assert.doesNotMatch(rulesTemplate, /scenePresetBar|sceneSubTabs/);
-    assert.match(assetsTemplate, /scenePresetBar/);
-    assert.match(assetsTemplate, /sceneSubTabs/);
+    // 素材页只有一层页签：角色 / 场景 / 待确认 / 规则。衣柜提示词在规则页。
+    assert.match(getSettingsTabTemplate('scene'), /sceneSubTabs/);
+    assert.match(getSettingsTabTemplate('scene'), /assetScopeBar/);
+    assert.deepEqual(SCENE_SUBTAB_DEFS.map(([id, label]) => ({ id, label })), fixture.sceneSubTabs);
+    assert.match(SCENE_RULES_TEMPLATE, /data-action="reset-prompt-rule"/);
+    assert.match(SCENE_RULES_TEMPLATE, /data-action="save-prompt-rule"/);
+    assert.match(SCENE_RULES_TEMPLATE, /data-result="prompt-rule"/);
+    assert.match(SCENE_RULES_TEMPLATE, /wardrobeSection/);
+    assert.doesNotMatch(SCENE_RULES_TEMPLATE, /scenePresetBar|sceneSubTabs/);
 
     assert.match(getSettingsTabTemplate('reader'), /readerSubTabs/);
     for (const subTab of fixture.readerSubTabs) {
@@ -1054,8 +1049,11 @@ test('gate:igs-ui:bundled-dialog-fonts-keep-assets-and-licenses', () => {
         const font = fs.readFileSync(path.join(root, file));
         assert.ok(font.length > 1024, file);
         assert.ok(['OTTO', 'wOF2', '\0\x01\0\0'].includes(font.subarray(0, 4).toString('ascii')), file);
+        assert.deepEqual(findTruncatedFontTables(font), [], file);
         assert.match(build, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     }
+    const yozai = fs.readFileSync(path.join(root, 'Yozai-Regular.ttf'));
+    assert.ok(findTruncatedFontTables(yozai.subarray(0, 2109440)).includes('glyf'));
     const licenses = [
         'OFL.txt', 'SourceHanSerifCN-LICENSE.txt', 'SourceHanSansCN-LICENSE.txt',
         'Cormorant-OFL.txt', 'Cormorant-OFL-FAQ.txt', 'LXGW-OFL.txt', 'Yozai-OFL.txt',
@@ -1165,7 +1163,7 @@ test('gate:igs-ui:illustrated-dialog-style-uses-three-slice-assets', () => {
 });
 
 test('gate:igs-ui:new-dialog-skins-register-frames-and-typography', () => {
-    const skins = ['retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european'];
+    const skins = ['retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy'];
     for (const skin of skins) {
         assert.equal(normalizeDialogSkin(skin), skin);
         assert.ok(ILLUSTRATED_SKIN_CSS.includes(`#igs-overlay .igs-dialog[data-igs-dialog-skin="${skin}"]{`), skin);
@@ -1173,8 +1171,9 @@ test('gate:igs-ui:new-dialog-skins-register-frames-and-typography', () => {
     }
     assert.match(ILLUSTRATED_SKIN_CSS, /__IGS_ASSET__retro-japanese\/dialog\.png__"\) 0 190 0 200 fill/);
     assert.match(ILLUSTRATED_SKIN_CSS, /__IGS_ASSET__adventure-journey\/name\.png__/);
-    assert.match(ILLUSTRATED_SKIN_CSS, /__IGS_ASSET__elegant-european\/dialog\.png__"\) 0 200 0 200 fill/);
-    assert.match(ILLUSTRATED_SKIN_CSS, /__IGS_ASSET__elegant-european\/ornament-top\.png__/);
+    assert.match(ILLUSTRATED_SKIN_CSS, /__IGS_ASSET__elegant-european\/dialog\.png__"\);[^}]*100% 100%;background-repeat:no-repeat/);
+    assert.ok(!/elegant-european"\]\{[^}]*border-image/.test(ILLUSTRATED_SKIN_CSS), '优雅欧式两侧细线不得穿过中央饰纹');
+    assert.match(ILLUSTRATED_SKIN_CSS, /elegant-european"\]\{[^}]*background-image:url\("data:image\/svg\+xml,/, '优雅欧式饰纹用矢量绘制，高倍屏不糊');
     for (const skin of ['day-minimal', 'elegant-european']) {
         assert.ok(ILLUSTRATED_SKIN_CSS.includes(`#igs-overlay.igs-floating .igs-dialog[data-igs-dialog-skin="${skin}"],#igs-overlay.igs-floating-mobile .igs-dialog[data-igs-dialog-skin="${skin}"],#igs-overlay.igs-mode-embedded .igs-dialog[data-igs-dialog-skin="${skin}"]{left:0;right:0;bottom:0;width:auto;margin:0;transform:none;}`), skin);
     }
@@ -1195,7 +1194,7 @@ test('gate:igs-ui:hud-and-emotion-follow-dialog-skin', () => {
     const main = getOriginalReaderStyleText();
     assert.ok(!main.includes('[data-igs-dialog-skin="western-classic"] #igs-status-hud'));
     const skins = ['western-classic', 'plant-coffee', 'black-white-manga', 'cute-pink', 'gradient-veil',
-        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european'];
+        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy'];
     for (const skin of skins) {
         const css = getDialogSkinStyleText(skin, { base: 'https://cdn.example/dist/skins/' });
         const hud = `#igs-overlay[data-igs-dialog-skin="${skin}"] #igs-status-hud`;
@@ -1222,7 +1221,7 @@ test('gate:igs-ui:options-follow-dialog-skin', () => {
     assert.ok(!main.includes('[data-igs-dialog-skin="western-classic"] .igs-option-bubble'));
     const skinCss = (skin) => getDialogSkinStyleText(skin, { base: 'https://cdn.example/dist/skins/' });
     const skins = ['western-classic', 'plant-coffee', 'black-white-manga', 'cute-pink', 'gradient-veil',
-        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european'];
+        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy'];
     for (const skin of skins) {
         const css = skinCss(skin);
         assert.ok(css.includes(`#igs-overlay[data-igs-dialog-skin="${skin}"] .igs-option-bubble{`), skin);

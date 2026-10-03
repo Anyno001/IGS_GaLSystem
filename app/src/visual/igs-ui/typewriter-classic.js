@@ -1,4 +1,5 @@
 import { buildProsody, punctuationPauseAfter } from './speech-prosody.js';
+import { isBilingualNote } from './bilingual-text.js';
 
 export { punctuationPauseAfter };
 // Read the already-rendered text once. No text node is modified by the reveal.
@@ -44,6 +45,15 @@ function visualLineOverlap(line, rect) {
 // 文字演出 span.igs-tfx.igs-tfx-<id>：取文本节点所在的演出类型（逐字包装的 igs-tfx-ch 不算类型）。
 const TFX_CLASS_RE = /(?:^|\s)igs-tfx-(?!ch(?:\s|$))([a-z]+)/;
 
+// 双语译文不逐字揭示、不发打字音，只把高度并入正文所在行，随该行一起揭开：
+// <rt> 跟原文折行时分成几段，每段并入它正下方那一行；单独成行的译文并入它下面原文的第一行。
+function bilingualNoteOf(node, root) {
+    for (let el = node && node.parentNode; el && el !== root; el = el.parentNode) {
+        if (isBilingualNote(el)) return el;
+    }
+    return null;
+}
+
 function textFxKind(node, root) {
     for (let el = node && node.parentNode; el && el !== root; el = el.parentNode) {
         const name = typeof el.className === 'string' ? el.className
@@ -63,8 +73,28 @@ export function measureClassicReveal(target, speed, options = {}) {
     const lines = [];
     // 字素按 DOM 遍历顺序保留；视觉行只提供垂直遮罩边界。
     const parts = [];
+    let noteTop = null;
     try {
         for (const node of textNodes(target)) {
+            const note = bilingualNoteOf(node, target);
+            if (note) {
+                range.selectNodeContents(node);
+                const isRt = String(note.nodeName).toUpperCase() === 'RT';
+                for (const rect of Array.from(range.getClientRects())) {
+                    if (!(rect.width > 0 && rect.height > 0)) continue;
+                    const top = Math.max(bounds.top, rect.top);
+                    if (!isRt) {
+                        noteTop = noteTop == null ? top : Math.min(noteTop, top);
+                        continue;
+                    }
+                    let below = null;
+                    for (const line of lines) {
+                        if (line.top >= rect.top && (!below || line.top < below.top)) below = line;
+                    }
+                    if (below) below.top = Math.min(below.top, top);
+                }
+                continue;
+            }
             for (const part of graphemes(String(node.nodeValue || ''))) {
                 range.setStart(node, part.start);
                 range.setEnd(node, part.end);
@@ -87,6 +117,10 @@ export function measureClassicReveal(target, speed, options = {}) {
                 } else {
                     line.top = Math.min(line.top, rect.top);
                     line.bottom = Math.max(line.bottom, rect.bottom);
+                }
+                if (noteTop != null) {
+                    line.top = Math.min(line.top, noteTop);
+                    noteTop = null;
                 }
                 parts.push({ text: part.text, line, rect, node, tfx: options.prosody === true ? textFxKind(node, target) : '' });
             }

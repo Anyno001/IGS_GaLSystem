@@ -1,7 +1,7 @@
 import { normalizeAutoIllustrationSettings } from './illustration/auto-illustration-settings.js';
 import { resolveNaiNativeEndpoint } from './request-builders/nai-v4-builder.js';
 import { applyUserPromptsToCaption } from './dbgen-prompt.js';
-import { promptFromCaption, promptFromText } from './generation-prompt.js';
+import { formatStoredPrompt, promptFromCaption, promptFromText } from './generation-prompt.js';
 import { findChatu8Host, requestChatu8Image } from './chatu8-client.js';
 
 // 生图来源：nai = IGS 内置 NAI；dbgen = 数据库生图插件（window.NaiDbGen）；
@@ -14,6 +14,18 @@ export const CHATU8_LABEL = '智绘姬';
 export function normalizeImageSourceMode(value) {
     const mode = String(value || '').trim();
     return IMAGE_SOURCE_MODES.includes(mode) ? mode : 'extension';
+}
+
+// 插件调用不带超时会一直挂着：设置页按钮锁住、单张重画再点也没反应。超时只是不再等，插件那边可能仍在跑。
+export const DBGEN_TIMEOUTS = Object.freeze({ write: 5 * 60 * 1000, paint: 3 * 60 * 1000 });
+
+function withTimeout(promise, ms) {
+    if (!(ms > 0)) return promise;
+    let timer;
+    const expired = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`超过 ${Math.round(ms / 1000)} 秒没有返回，已放弃等待`)), ms);
+    });
+    return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
 }
 
 export function findDbgenApi(globalObject = globalThis) {
@@ -96,7 +108,25 @@ async function chatu8ImageToDataUrl(imageData, win) {
     return blobToDataUrl(blob, blob.type, win);
 }
 
-export function createImageBackend({ nai, getBridge, global: globalObject = globalThis, chatu8 } = {}) {
+function captionLogText(caption) {
+    const stored = promptFromCaption(caption);
+    return formatStoredPrompt(stored) || '（空）';
+}
+
+// 生图日志单条最多 600 字。提示词拆开写，避免被截断后看起来像没拼上。
+function reportLong(report, title, text) {
+    const body = String(text || '（空）');
+    if (typeof report !== 'function') return;
+    const limit = 520;
+    const parts = Math.max(1, Math.ceil(body.length / limit));
+    for (let index = 0; index < parts; index += 1) {
+        const head = parts === 1 ? title : `${title} ${index + 1}/${parts}`;
+        report('info', `${head}\n${body.slice(index * limit, (index + 1) * limit)}`);
+    }
+}
+
+export function createImageBackend({ nai, getBridge, global: globalObject = globalThis, chatu8, report, dbgenTimeouts } = {}) {
+    const timeouts = { ...DBGEN_TIMEOUTS, ...(dbgenTimeouts && typeof dbgenTimeouts === 'object' ? dbgenTimeouts : {}) };
     const readBridge = (override) => (override && typeof override === 'object' ? override : (getBridge ? getBridge() || {} : {}));
     // chatu8 可注入 { findHost, request } 供测试替换；默认走真实的智绘姬事件桥。
     const chatu8Bridge = chatu8 && typeof chatu8 === 'object' ? chatu8 : {};
@@ -132,11 +162,11 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         let written = null;
         try {
             if (typeof api.generateSinglePrompt !== 'function') return { ok: false, error: `${DBGEN_LABEL}版本过旧，缺少写提示词接口` };
-            written = await api.generateSinglePrompt({
+            written = await withTimeout(api.generateSinglePrompt({
                 description,
                 ...(meta.skipRecall === true && { skipRecall: true }),
                 ...(meta.messageId != null && { messageId: Number(meta.messageId) }),
-            });
+            }), timeouts.write);
             if (!written || !written.ok || !written.value || !written.value.caption) {
                 return { ok: false, error: `${DBGEN_LABEL}写提示词失败：${describeResultError(written, '未返回提示词')}` };
             }
@@ -156,11 +186,11 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         if (typeof api.generateSinglePrompt !== 'function') return { ok: false, error: `${DBGEN_LABEL}版本过旧，缺少写提示词接口` };
         let written;
         try {
-            written = await api.generateSinglePrompt({
+            written = await withTimeout(api.generateSinglePrompt({
                 description,
                 skipRecall: true,
                 ...(meta.messageId != null && { messageId: Number(meta.messageId) }),
-            });
+            }), timeouts.write);
         } catch (error) {
             return { ok: false, error: `${DBGEN_LABEL}写提示词失败：${(error && error.message) || error}` };
         }
@@ -188,10 +218,10 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         if (typeof api.generateSinglePrompt !== 'function') return { ok: false, error: `${DBGEN_LABEL}版本过旧，缺少写提示词接口` };
         let written;
         try {
-            written = await api.generateSinglePrompt({
+            written = await withTimeout(api.generateSinglePrompt({
                 description,
                 ...(meta.messageId != null && { messageId: Number(meta.messageId) }),
-            });
+            }), timeouts.write);
         } catch (error) {
             return { ok: false, error: `${DBGEN_LABEL}写提示词失败：${(error && error.message) || error}` };
         }
@@ -218,15 +248,23 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
     async function paintDbgenCaption(api, meta, caption) {
         const userPrompts = meta.userPrompts && typeof meta.userPrompts === 'object' ? meta.userPrompts : null;
         const merged = userPrompts ? applyUserPromptsToCaption(caption, userPrompts) : caption;
+        const positive = userPrompts ? String(userPrompts.positive || '').trim() : '';
+        const negative = userPrompts ? String(userPrompts.negative || '').trim() : '';
+        reportLong(report, '拼之前', captionLogText(caption));
+        reportLong(report, '要拼的模板', positive || negative
+            ? `正向：${positive || '（空）'}\n负面：${negative || '（空）'}`
+            : '（这次没带模板）');
+        reportLong(report, '发出去', captionLogText(merged));
         const size = parseSize(meta.size);
         // 立绘走数据库生图时默认打开透明底。模型用插件自己的运行配置，这里不传 model。
         const params = {
             ...(size || {}),
             ...(meta.transparent === true && { straight_alpha: true, tag_hint_transparent_background: true }),
+            ...(Number.isInteger(meta.seed) && meta.seed >= 0 && { seed: meta.seed }),
         };
         let result;
         try {
-            result = await api.generate({ caption: merged, replaceCharacterKeywords: true, ...(Object.keys(params).length && { params }) });
+            result = await withTimeout(api.generate({ caption: merged, replaceCharacterKeywords: true, ...(Object.keys(params).length && { params }) }), timeouts.paint);
         } catch (error) {
             return { ok: false, error: `${DBGEN_LABEL}出图失败：${(error && error.message) || error}`, prompt: promptFromCaption(merged) };
         }

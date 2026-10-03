@@ -10,9 +10,11 @@ import {
 import { normalizeStageDirectionSettings } from './stage-direction-runtime.js';
 import { AMBIENT_KINDS, AMBIENT_LABELS, normalizeAmbientSoundSettings, normalizeBgmSettings } from './scene-audio.js';
 import { normalizeTextFxSettings } from './text-fx.js';
+import { BILINGUAL_DISPLAYS, BILINGUAL_DISPLAY_LABELS, BILINGUAL_FOREIGN_LABELS, BILINGUAL_LAYOUTS, BILINGUAL_LAYOUT_LABELS, BILINGUAL_TARGET_LABELS, normalizeBilingualSettings } from './bilingual-text.js';
 import { CLICK_WAIT_MARK_LABELS, normalizeClickWaitMarkSettings } from './click-wait-mark.js';
 import { DAILY_FX_LABELS, normalizeDailyFxSettings } from './fx-daily-model.js';
 import { DAILY_FX_KINDS } from '../../scene/daily-fx-directives.js';
+import { FX_WORLDVIEW_ONLY } from '../../scene/fx-era.js';
 import { normalizeUiSoundSettings } from './ui-sfx.js';
 import { normalizeAudioMasterSettings } from './audio-bus.js';
 
@@ -70,6 +72,19 @@ function renderTextFields(textFx, clickWait) {
     return { textFx: tfx, clickWaitMark };
 }
 
+function renderBilingualField(bilingual) {
+    const displays = BILINGUAL_DISPLAYS.map((id) => [id, BILINGUAL_DISPLAY_LABELS[id]]);
+    const layouts = BILINGUAL_LAYOUTS.map((id) => [id, BILINGUAL_LAYOUT_LABELS[id]]);
+    return checkbox(`${P}.bilingual.enabled`, bilingual.enabled, '双语台词')
+        + (bilingual.enabled ? sub(field(`${P}.bilingual.display`, '显示方式', segmentedInput(`${P}.bilingual.display`, bilingual.display, displays, '显示方式'))
+            + field(`${P}.bilingual.layout`, '注音排版', segmentedInput(`${P}.bilingual.layout`, bilingual.layout, layouts, '注音排版'))
+            + `<div class="igs-source-filter-grid">`
+            + field(`${P}.bilingual.foreign`, '角色语言', selectInput(`${P}.bilingual.foreign`, bilingual.foreign, Object.entries(BILINGUAL_FOREIGN_LABELS)))
+            + field(`${P}.bilingual.target`, '译文语言', selectInput(`${P}.bilingual.target`, bilingual.target, Object.entries(BILINGUAL_TARGET_LABELS)))
+            + `</div>`
+            + '<div class="igs-source-filter-note">AI 会用外语写所有角色的台词和心里话，并用〖〗附上译文，以小字显示在原文上方；旁白不受影响。注音排版：交错＝整段译文随原文逐行交错；译文在上＝完整译文放在原文上方；按分句＝每个分句各自注音（AI 也会一句一个〖〗）。电脑端按 T 键可临时切换注音、仅原文、仅译文。</div>') : '');
+}
+
 function renderTrackRow(track) {
     const keywords = track.keywords.length ? track.keywords.map(esc).join('、') : '默认曲（无关键词时播放）';
     return `<div class="igs-bgm-track"><div class="igs-bgm-track-main"><b>${esc(track.name)}</b><span>${keywords}</span></div>`
@@ -94,9 +109,17 @@ function renderSoundFields(bgm, ambient, ui, master, more) {
     return { master: masterBody, bgm: bgmBody, ambient: ambientBody, ui: uiBody };
 }
 
-function renderDailyField(daily, more) {
+// 其他世界观的专属日常（古风抚琴、魔法施咒等）不列出；已存的勾选保留，切回对应世界观时照常显示。
+function dailyKindsFor(worldview) {
+    const foreign = new Set(Object.entries(FX_WORLDVIEW_ONLY)
+        .filter(([owner]) => owner !== worldview)
+        .flatMap(([, table]) => table.dailyFx || []));
+    return DAILY_FX_KINDS.filter((kind) => !foreign.has(kind));
+}
+
+function renderDailyField(daily, more, worldview) {
     return checkbox(`${P}.dailyFx.enabled`, daily.enabled, '日常演出')
-        + (daily.enabled ? sub(more('daily-kinds', '选择日常类型', `<div class="igs-source-filter-grid">${DAILY_FX_KINDS.map((kind) => checkbox(`${P}.dailyFx.${kind}`, daily[kind], DAILY_FX_LABELS[kind])).join('')}`
+        + (daily.enabled ? sub(more('daily-kinds', '选择日常类型', `<div class="igs-source-filter-grid">${dailyKindsFor(worldview).map((kind) => checkbox(`${P}.dailyFx.${kind}`, daily[kind], DAILY_FX_LABELS[kind])).join('')}`
             + checkbox(`${P}.dailyFx.petals`, daily.petals, '樱花、落叶飘落')
             + checkbox(`${P}.dailyFx.photoAlbum`, daily.photoAlbum, '拍照存入 CG 库')
             + `</div>`
@@ -104,12 +127,13 @@ function renderDailyField(daily, more) {
 }
 
 // 舞台调度、文字演出、日常演出与场景声音的设置片段，由「演出」页按分类重新编排；持久化路径不变。
-export function renderStageDirectionFields(reader, more = collapsible) {
+export function renderStageDirectionFields(reader, more = collapsible, { worldview = 'modern' } = {}) {
     const src = reader && typeof reader === 'object' ? reader : {};
     return {
         ...renderStageFields(normalizeStageDirectionSettings(src), more),
         ...renderTextFields(normalizeTextFxSettings(src.textFx), normalizeClickWaitMarkSettings(src.clickWaitMark)),
-        daily: renderDailyField(normalizeDailyFxSettings(src.dailyFx), more),
+        bilingual: renderBilingualField(normalizeBilingualSettings(src.bilingual)),
+        daily: renderDailyField(normalizeDailyFxSettings(src.dailyFx), more, worldview),
         ...renderSoundFields(normalizeBgmSettings(src.bgm), normalizeAmbientSoundSettings(src.ambientSound), normalizeUiSoundSettings(src.uiSound), normalizeAudioMasterSettings(src.audioMaster), more),
     };
 }

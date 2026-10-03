@@ -25,11 +25,23 @@ test('gate:outfits:sprite-lookup-uses-outfit-exact-and-group', () => {
 });
 
 test('gate:outfits:sprite-lookup-miss-uses-this-outfit-calm', () => {
+    // 服装缺这一格：先回落角色默认立绘；没有默认图才用这一套的「平和」（旧数据）。
     const missingMood = resolveSpriteAsset('小林海斗', '害羞', ctx, '泳装');
-    assert.deepEqual([missingMood.url, missingMood.source, missingMood.slot, missingMood.outfit], ['swim-calm.png', 'user-outfit', '平和', '泳装']);
+    assert.deepEqual([missingMood.url, missingMood.source, missingMood.slot, missingMood.outfit], ['base.png', 'user-outfit', '默认', '泳装']);
+    const noBase = { ...ctx, sceneAssets: { ...ctx.sceneAssets, characters: { 小林海斗: { 喜悦: 'base-joy.png' } } } };
+    assert.deepEqual(resolveSpriteAsset('小林海斗', '害羞', noBase, '泳装').url, 'swim-calm.png');
     assert.equal(resolveSpriteAsset('小林海斗', '平和', ctx, '睡衣').url, 'base.png');
     assert.equal(resolveSpriteAsset('小林海斗', '喜悦', ctx, '默认').url, 'base-joy.png');
     assert.equal(resolveSpriteAsset('小林海斗', '喜悦', ctx, '不存在').url, 'base-joy.png');
+    const nudeCtx = {
+        sceneAssets: {
+            ...sceneAssets,
+            characterOutfits: {
+                小林海斗: { 日常: { words: [], moods: {}, wardrobe: '裸体', base: 'nude.png' } },
+            },
+        },
+    };
+    assert.equal(resolveSpriteAsset('小林海斗', '害羞', nudeCtx, '日常').url, 'nude.png');
     const legacy = resolveSpriteAsset('小林海斗', '喜悦', ctx);
     assert.deepEqual([legacy.url, legacy.source, 'outfit' in legacy], ['base-joy.png', 'user', false]);
 });

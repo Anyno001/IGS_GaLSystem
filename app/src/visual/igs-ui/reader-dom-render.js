@@ -1,3 +1,5 @@
+import { magicHouseVars } from './dialog-theme-css-skins.js';
+import { resolveSpeakerMagicHouse } from './magic-house.js';
 import { normalizeSkinDialogScale } from './dialog-skin-frame.js';
 import { RECORD_ICONS } from './record-icons.js';
 import {
@@ -31,7 +33,7 @@ import { renderItemFx } from './fx-item-render.js';
 import { renderBattleFx } from './fx-battle-render.js';
 import { renderDailyFx } from './fx-daily.js';
 import { peekSpriteHead, probeSpriteHead, resolveSpriteHead, spriteBackgroundSize, spriteWidthPercent } from './fx-anchor.js';
-import { applyWeatherFx } from './weather-fx-runtime.js';
+import { applyWeatherFx, resolveWeatherFxTime } from './weather-fx-runtime.js';
 import { applySceneGrade } from './scene-grade.js';
 import { applyStageDirection } from './stage-direction-runtime.js';
 import { applyCastToDom, castRomanceAttr, castSlotKey, clearCastDom, isCastAlignEnabled, isCastCollapsed, isCastRomanceDuoEnabled, isStageCastEnabled, layoutCastSlots, resolveCastCapacity, resolveCastRomanceMode, resolveCastRomanceTarget, isCastLeanEnabled, markCalledCast, playCastBeats, resolveCastPosePlan, resolveCastReactPage, applySpeakerFlip, castStageEntrances } from './stage-cast-render.js';
@@ -43,9 +45,10 @@ import { applyRomanceToDom } from './romance-runtime.js';
 import { applyMetaFx } from './meta-runtime.js';
 import { applySceneAudio } from './scene-audio.js';
 import { applyTextFxMarkup, armTextFx, disarmTextFx } from './text-fx.js';
+import { fitBilingualRuby, normalizeBilingualSettings, renderBilingualHtml, resolveBilingualDisplay } from './bilingual-text.js';
 import { preloadDialogFonts, resolveDialogFontMetrics } from './dialog-theme-typography.js';
 import { clearSpriteOutfitSwap, spriteLookOf } from './sprite-outfit-swap.js';
-import { cgSizeForMode } from '../../generated-images/illustration/auto-illustration-service.js';
+import { cgSizeForMode, EMBEDDED_PHONE_MAX_WIDTH, isPortraitTouchWindow } from '../../generated-images/illustration/auto-illustration-service.js';
 import { applyClickWaitMark } from './click-wait-mark.js';
 import { applyHtmlCardToDom } from './html-card-layer.js';
 import { applyChatToDom } from './chat-layer.js';
@@ -412,7 +415,6 @@ export function buildFallbackSettingsOverlay(doc, snapshot, ctx = {}) {
     if (typeof ctx.renderSettingsBody === 'function') {
         body.innerHTML = ctx.renderSettingsBody(snapshot.tab, snapshot.draft, {
             readerSubTab: snapshot.readerSubTab,
-            sceneSettingsSubTab: snapshot.sceneSettingsSubTab,
             sceneSubTab: snapshot.sceneSubTab,
             promptRuleStatus: snapshot.resultText && snapshot.resultText.promptRule,
             promptRuleDraft: snapshot.resultText && snapshot.resultText.promptRuleDraft,
@@ -433,8 +435,9 @@ export function applyToolbarState(root, current) {
     const pins = new Set(Array.isArray(readerSettings.pinnedBtns) ? readerSettings.pinnedBtns : []);
     const hiddenSet = new Set(Array.isArray(readerSettings.hiddenBtns) ? readerSettings.hiddenBtns : []);
     const embeddedMode = current.snapshot && current.snapshot.mode === 'embedded';
-    const compactChrome = embeddedMode || Boolean(root.classList && root.classList.contains('igs-default-reader-chrome'));
-    const dockTop = !compactChrome && readerSettings.toolbarDock === 'top';
+    const defaultChrome = Boolean(root.classList && root.classList.contains('igs-default-reader-chrome'));
+    const dockTop = !embeddedMode && readerSettings.toolbarDock === 'top';
+    const compactChrome = embeddedMode || defaultChrome || dockTop;
     const toolbarExpanded = current.toolbarCollapsed === false;
     if (root.classList) {
         root.classList.toggle('igs-toolbar-expanded', toolbarExpanded);
@@ -611,6 +614,14 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
     });
     applyDialogBgOverride(root, snapshot, materialDialog);
     if (root.style) root.style.setProperty('--igs-skin-scale', String(normalizeSkinDialogScale(readerSettings.skinDialogScale)));
+    if (root.style) {
+        // 魔法世界观下魔法星夜随说话角色换学院色；旁白、系统台词、没学院的角色与其他世界观一律用全局配色。
+        const content = snapshot.content || {};
+        const byCharacter = readerSettings._worldview === 'magic' && content.textType !== 'narration' && content.textType !== 'system';
+        const speaker = byCharacter ? (content.spriteCharacter || content.speaker) : '';
+        const house = resolveSpeakerMagicHouse(readerSettings._sceneAssets, speaker, readerSettings.magicHouse);
+        for (const [name, value] of Object.entries(magicHouseVars(house, readerSettings.magicAccent))) root.style.setProperty(name, value);
+    }
     applyGradientVeilToDom(root, dialog, readerSettings);
 
     if (textEl) {
@@ -679,8 +690,8 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
         dialog.style.background = '';
     }
 
-    const compactChrome = embeddedMode || !materialDialog;
-    const toolbarDock = compactChrome ? 'float' : (readerSettings.toolbarDock === 'top' ? 'top' : 'float');
+    const compactChrome = embeddedMode;
+    const toolbarDock = embeddedMode ? 'float' : (readerSettings.toolbarDock === 'top' ? 'top' : 'float');
     if (root && root.classList) {
         root.classList.toggle('igs-toolbar-top', toolbarDock === 'top');
     }
@@ -1006,6 +1017,59 @@ export function syncEmbeddedHostFrame(root, sizeText) {
     if (typeof host.setAttribute === 'function') host.setAttribute('data-igs-frame', 'size');
 }
 
+// 楼层被酒馆重绘或暂时隐藏时量到宽 0。这时不能按「不是手机」钉横屏，沿用上次钉好的比例；
+// 还没钉过就按窗口宽度判断。
+export function pinEmbeddedHostFrame(root, backgroundSize, mode) {
+    const host = root && typeof root.closest === 'function' ? root.closest('.igs-embedded-host') : null;
+    const rect = host && typeof host.getBoundingClientRect === 'function' ? host.getBoundingClientRect() : null;
+    const measured = Boolean(rect && rect.width > 0);
+    const pinned = Boolean(host && typeof host.getAttribute === 'function' && host.getAttribute('data-igs-frame') === 'size');
+    if (!measured && pinned) return;
+    const win = root && root.ownerDocument && root.ownerDocument.defaultView;
+    const portrait = isPortraitTouchWindow(win);
+    const viewport = measured
+        ? { width: rect.width, height: rect.height, portrait }
+        : (win && win.innerWidth > 0 ? { width: win.innerWidth, height: win.innerHeight, portrait } : null);
+    syncEmbeddedHostFrame(root, cgSizeForMode(backgroundSize, mode, viewport));
+}
+
+// 内嵌框横竖恢复：旋转屏幕只改宿主栏宽，渲染快照不会自动重跑，钉错的 aspect-ratio 会一直残留。
+// 观察宿主宽度跨过手机阈值（EMBEDDED_PHONE_MAX_WIDTH）时按同一 cgSizeForMode 规则重钉一次，
+// 只写宿主 aspect-ratio，不重绘阅读器。宿主断开或阅读器退出内嵌时解绑。
+export function watchEmbeddedFrameResize(overlay, frameState) {
+    if (!overlay || !frameState) return null;
+    const host = typeof overlay.closest === 'function' ? overlay.closest('.igs-embedded-host') : null;
+    const doc = overlay.ownerDocument || null;
+    const win = (doc && doc.defaultView) || null;
+    if (!host || !win || typeof win.ResizeObserver !== 'function') return null;
+    const measure = () => {
+        const rect = typeof host.getBoundingClientRect === 'function' ? host.getBoundingClientRect() : null;
+        return rect ? Number(rect.width) || 0 : 0;
+    };
+    const isPhoneWidth = (width) => (width > 0 && width <= EMBEDDED_PHONE_MAX_WIDTH) || isPortraitTouchWindow(win);
+    let lastPhone = isPhoneWidth(measure());
+    let observer = null;
+    const unobserve = () => {
+        if (!observer) return;
+        try { observer.disconnect(); } catch (error) { /* best-effort */ }
+        observer = null;
+    };
+    observer = new win.ResizeObserver(() => {
+        if (host.isConnected === false) { unobserve(); return; }
+        const width = measure();
+        const phone = isPhoneWidth(width);
+        if (phone === lastPhone) return;
+        lastPhone = phone;
+        const sizeText = cgSizeForMode(frameState.backgroundSize, frameState.mode, { width, height: 0, portrait: phone });
+        const match = String(sizeText || '').match(/^(\d+)\s*[xX×]\s*(\d+)$/);
+        if (!match) return;
+        if (host.style && host.style.aspectRatio === `${match[1]} / ${match[2]}`) return;
+        syncEmbeddedHostFrame(overlay, sizeText);
+    });
+    observer.observe(host);
+    return unobserve;
+}
+
 function writeBackgroundImage(element, url) {
     const value = url ? `url("${url.replace(/"/g, '&quot;')}")` : '';
     if (backgroundImageKeys.get(element) === value) return;
@@ -1065,16 +1129,13 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         }
     }
     const backgroundAssetUrl = resolveAssetUrl(snapshot.content.backgroundImage);
-    const frameHost = typeof root.closest === 'function' ? root.closest('.igs-embedded-host') : null;
-    const frameRect = frameHost && typeof frameHost.getBoundingClientRect === 'function' ? frameHost.getBoundingClientRect() : null;
-    const frameViewport = frameRect && frameRect.width > 0
-        ? { width: frameRect.width, height: frameRect.height }
-        : null;
-    syncEmbeddedHostFrame(root, cgSizeForMode(
-        snapshot.readerSettings && snapshot.readerSettings._cgBackgroundSize,
-        snapshot.mode,
-        frameViewport,
-    ));
+    if (current && typeof current === 'object') {
+        // 渲染主路径每张快照刷新钉尺寸输入；宽度观察器跨阈值时按同一份输入重算。
+        const frameState = current.embeddedFrame || (current.embeddedFrame = {});
+        frameState.backgroundSize = snapshot.readerSettings ? snapshot.readerSettings._cgBackgroundSize : '';
+        frameState.mode = snapshot.mode;
+    }
+    pinEmbeddedHostFrame(root, snapshot.readerSettings && snapshot.readerSettings._cgBackgroundSize, snapshot.mode);
 
     if (bg && backgroundAssetUrl) {
         writeBackgroundImage(bg, backgroundAssetUrl);
@@ -1321,7 +1382,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         const sceneAssetsEnabled = snapshot.readerSettings._sceneAssets && snapshot.readerSettings._sceneAssets.enabled;
         const textType = snapshot.content.textType || 'narration';
         const textFxOn = Boolean(snapshot.readerSettings.textFx && snapshot.readerSettings.textFx.enabled);
-        const renderedHtml = applyTextFxMarkup(renderDialogueHtml(snapshot.content.displayText, theme, sceneAssetsEnabled), textFxOn);
+        const bilingualDisplay = resolveBilingualDisplay(snapshot.readerSettings.bilingual, snapshot.readerSettings._bilingualDisplay);
+        const renderedHtml = applyTextFxMarkup(renderBilingualHtml(renderDialogueHtml(snapshot.content.displayText, theme, sceneAssetsEnabled), bilingualDisplay, normalizeBilingualSettings(snapshot.readerSettings.bilingual).layout), textFxOn);
         const textRenderKey = [snapshot.messageId, snapshot.content.currentIndex, textType, renderedHtml].join(':');
 
         typewriterTextType = textType === 'system' ? 'narration' : textType;
@@ -1358,6 +1420,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         } else {
             textEl.style.color = '';
         }
+        // 字体、字号定下后再量：放不下一行的注音改成译文单独成行，打字机随后按改好的排版测量。
+        if (bilingualDisplay === 'ruby') fitBilingualRuby(textEl);
     }
     const stageShakeSettings = snapshot.readerSettings && snapshot.readerSettings.stageShake;
     const stageShakeKey = [
@@ -1421,6 +1485,10 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         // 背景是素材自带时段变体（如夜景图）时不再叠时段调色。
         timedAsset: Boolean(snapshot.content && snapshot.content.backgroundTimed === true && snapshot.content.illustrationActive !== true),
     });
+    // 场景时段挂到 overlay 上，供对话框等界面随昼夜调整明暗；不受天气/夜间调色开关影响，夜景底图本身就暗。
+    const sceneTime = resolveWeatherFxTime(snapshot.content && snapshot.content.sceneTime);
+    if (sceneTime) root.setAttribute('data-igs-scene-time', sceneTime);
+    else root.removeAttribute('data-igs-scene-time');
     applyClickWaitMark(root, snapshot.readerSettings && snapshot.readerSettings.clickWaitMark);
     const stageDirection = applyStageDirection(root, snapshot, {
         bgUrl: backgroundAssetUrl,
@@ -1588,6 +1656,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     applyReaderModeRuntime(root, snapshot, current, {
         isActiveReader: (reader) => (typeof ctx.isActiveReader === 'function' ? ctx.isActiveReader(reader) : true),
         requestClose: () => { if (typeof ctx.closeReader === 'function') ctx.closeReader(); },
+        watchEmbeddedFrame: () => watchEmbeddedFrameResize(root, current && current.embeddedFrame),
     });
     if (textEl && typewriterRenderKey) {
         const typewriterSettings = snapshot.readerSettings.typewriter || {};

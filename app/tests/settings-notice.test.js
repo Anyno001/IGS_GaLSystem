@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeSettingsFailure, isQuotaError, markSettingsButtonBusy, remountSettingsNotice, settingsBusyLabel, showSettingsProgress } from '../src/visual/igs-ui/settings-notice.js';
+import { SETTINGS_NOTICE_STYLE_TEXT, beginSettingsProgress, describeSettingsFailure, isQuotaError, markSettingsButtonBusy, remountSettingsNotice, remountSettingsProgress, settingsBusyLabel, showSettingsProgress } from '../src/visual/igs-ui/settings-notice.js';
 import { bootstrapIGS, createMemoryStorage } from '../src/index.js';
 import { saveScenePresets } from '../src/scene/scene-preset-store.js';
 import { clearMoodReview, removeMoodReview, recordMoodReview } from '../src/scene/mood-review-store.js';
@@ -72,7 +72,9 @@ test('gate:settings-notice:slow-actions-show-busy-state-and-restore', () => {
     assert.equal(settingsBusyLabel('fetch-llm-models'), '拉取中…');
     assert.equal(settingsBusyLabel('scene-add-bg'), '');
     assert.equal(settingsBusyLabel('outfit-expression-set:%E5%86%AC%E6%9C%88:%E6%97%A5%E5%B8%B8'), '');
-    assert.equal(settingsBusyLabel('char-expression-retry:%E5%86%AC%E6%9C%88:%E6%84%A4%E6%80%92'), '生成中…');
+    assert.equal(settingsBusyLabel('char-expression-retry:%E5%86%AC%E6%9C%88:%E6%84%A4%E6%80%92'), '生图中');
+    assert.equal(settingsBusyLabel('char-generate-sprite:%E5%86%AC%E6%9C%88'), '生图中');
+    assert.equal(settingsBusyLabel('outfit-generate-nude:%E5%86%AC%E6%9C%88:%E6%97%A5%E5%B8%B8'), '生图中');
     const attrs = new Map();
     const button = { textContent: '测试生图', disabled: false, isConnected: true, setAttribute: (k, v) => attrs.set(k, v), removeAttribute: (k) => attrs.delete(k) };
     const restore = markSettingsButtonBusy(button, '测试中…');
@@ -140,6 +142,9 @@ test('gate:settings-notice:expression-progress-shows-write-then-each-image', () 
     assert.equal(button.textContent, '2/8');
     assert.equal(showSettingsProgress(host, null), null);
     assert.equal(host.querySelector('.igs-settings-progress'), null);
+    assert.match(SETTINGS_NOTICE_STYLE_TEXT, /igs-settings-progress\{[^}]*background:var\(--igs-settings-raised\)/);
+    assert.match(SETTINGS_NOTICE_STYLE_TEXT, /color:var\(--igs-settings-ink\)/);
+    assert.equal(SETTINGS_NOTICE_STYLE_TEXT.includes('#2f5f78'), false);
 });
 
 test('gate:settings-notice:full-storage-keeps-panel-open-with-readable-reason', () => {
@@ -176,4 +181,32 @@ test('gate:settings-a11y:touch-targets-and-range-labels', async () => {
     assert.match(rangeInput('a.volume', 0.5, '环境音量'), /aria-label="环境音量"/);
     assert.match(rangeInput('a.volume', 0.5), /aria-label="音量"/);
     assert.doesNotMatch(rangeInput('a.volume', 0.5, '总音量'), /打字音效音量/);
+});
+
+test('gate:settings-notice:sprite-regenerate-closes-menu-and-progress-waits-for-every-job', () => {
+    assert.equal(settingsBusyLabel('char-generate-sprite:%E5%86%AC%E6%9C%88'), '生图中');
+    assert.equal(settingsBusyLabel('status-avatar-generate:%E5%86%AC%E6%9C%88'), '生图中');
+    const host = { id: 'igs-unified-settings', querySelector: () => null };
+    const joy = beginSettingsProgress(() => host, '生图中：冬月·喜悦');
+    const anger = beginSettingsProgress(() => host, '生图中：冬月·愤怒');
+    // 已挂着的进度条：remount 时只改文字，读出来就是当前显示的那句。
+    const peek = () => {
+        let seen = '';
+        const textEl = { set textContent(value) { seen = value; } };
+        const fill = { setAttribute() {}, style: {} };
+        const bar = { setAttribute() {}, querySelector: (sel) => (sel === '.igs-settings-progress-text' ? textEl : sel === '.igs-settings-progress-track' ? {} : fill) };
+        const container = { id: 'igs-unified-settings', ownerDocument: {}, querySelector: (sel) => (sel === '.igs-settings-progress' ? bar : null) };
+        bar.parentNode = container;
+        remountSettingsProgress(container);
+        return seen;
+    };
+    assert.match(peek(), /冬月·愤怒（共 2 项在画）/);
+    joy.end();
+    assert.equal(peek(), '生图中：冬月·愤怒', 'the job still running keeps its progress');
+    anger.update('生图中：冬月·愤怒 1/1');
+    assert.equal(peek(), '生图中：冬月·愤怒 1/1');
+    anger.end();
+    assert.equal(peek(), '', 'last job done clears the bar');
+    joy.end();
+    assert.equal(remountSettingsProgress({ id: 'igs-unified-settings', querySelector: () => null }), null);
 });

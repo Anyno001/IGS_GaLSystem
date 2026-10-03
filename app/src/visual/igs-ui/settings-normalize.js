@@ -46,7 +46,7 @@ export function normalizeSettingsValue(path, value) {
         if (/^readerSettings\.(titleCard|mangaFx|heartbeatFx|flashFx|favorToast|fxTags|fxSound)\.(enabled|onLocation|onTime|call|notify|flashback|dream|letterbox|sfx|eye)$/.test(path)) {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
-        if (/^readerSettings\.(sceneTransition|timeTint|spriteMotion|spriteActions|camera|stageCast|textFx|clickWaitMark|bgm|ambientSound|uiSound)\.(enabled|night|alignHeads|romanceDuo|castReact|castStage|breathing|castBreathing|castLean|speakBounce|enterExit|emotionFade|kenBurns|parallax|closeUp|birds|rain|wind|insects|waves|crowd|thunder|stream|fire|snow|cicadas|frogs|chimes|bell|clock|drip|train|tavern|ship|traffic)$/.test(path)
+        if (/^readerSettings\.(sceneTransition|timeTint|spriteMotion|spriteActions|camera|stageCast|textFx|bilingual|clickWaitMark|bgm|ambientSound|uiSound)\.(enabled|night|alignHeads|romanceDuo|castReact|castStage|breathing|castBreathing|castLean|speakBounce|enterExit|emotionFade|kenBurns|parallax|closeUp|birds|rain|wind|insects|waves|crowd|thunder|stream|fire|snow|cicadas|frogs|chimes|bell|clock|drip|train|tavern|ship|traffic)$/.test(path)
             || /^readerSettings\.dailyFx\.(enabled|petals|photoAlbum|timeskip|photo|letter|note|bell|broadcast|fireworks|touch|alarm|omikuji|receipt|tv)$/.test(path)
             || /^readerSettings\.(liveFx|audienceFx|innerFx)\.(enabled|muteOnNsfw|ambient|useThought)$/.test(path)
             || path === 'readerSettings.typewriter.punctuationPause'
@@ -169,12 +169,15 @@ export function normalizeSpriteLayouts(value) {
 export function resolveSpriteLayout(layouts, mode, character, mood, outfit = '') {
     const def = { posX: 50, posY: 100, scale: 100 };
     const modeLayout = layouts && layouts[mode];
-    const scale = modeLayout && Number.isFinite(Number(modeLayout.scale)) ? Number(modeLayout.scale) : def.scale;
-    const placed = (layout) => ({ posX: layout.posX, posY: layout.posY, scale });
+    const placed = (layout) => ({
+        posX: layout.posX,
+        posY: layout.posY,
+        scale: Number.isFinite(Number(layout.scale)) ? Number(layout.scale) : def.scale,
+    });
     if (!layouts) return def;
     if (character) {
         const identity = spriteIdentity(character, outfit);
-        // 服装先查自身位置；未调过时回落到角色整体位置，不借用原有立绘的单表情位置。比例只认当前模式的那一个。
+        // 服装先查自身位置；未调过时回落到角色整体位置，不借用原有立绘的单表情位置。命中的那条记录自己的大小就是画出来的大小。
         if (identity !== character) {
             if (mood && layouts[`${mode}::${identity}::${mood}`]) return placed(layouts[`${mode}::${identity}::${mood}`]);
             if (layouts[`${mode}::${identity}`]) return placed(layouts[`${mode}::${identity}`]);
@@ -186,7 +189,7 @@ export function resolveSpriteLayout(layouts, mode, character, mood, outfit = '')
         if (layouts[charKey]) return placed(layouts[charKey]);
     }
     if (modeLayout) return placed(modeLayout);
-    return { ...def, scale };
+    return def;
 }
 
 export function resolveActiveTheme(snapshot) {

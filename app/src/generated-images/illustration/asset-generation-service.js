@@ -2,20 +2,28 @@ import { numberParagraphs } from './marker-placer.js';
 import { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } from './asset-prompt.js';
 import { requestWithSoftRetry } from './prompt-kit.js';
 import { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } from './auto-illustration-settings.js';
+import { cgSizeForMode } from './auto-illustration-service.js';
 import { supportsNaiTransparentBackground } from '../request-builders/nai-v4-builder.js';
 import { collectAssetNeeds, tempAssetKeyOf, GENERATED_ASSET_URL_PREFIX, generatedAssetIdOf, isGeneratedAssetUrl } from '../../scene/asset-match.js';
 import { floorKeyOf } from '../../media/illustration-store.js';
 import { GENERATED_IMAGE_SCHEMA_VERSION, isLegacyGeneratedImage, isQuotaError, normalizeGeneratedImageRecord } from '../../media/generated-asset-store.js';
-import { buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, expressionSpritePrompts, uprightSpriteCaption } from '../dbgen-prompt.js';
+import { buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption } from '../dbgen-prompt.js';
 import { normalizeStoredPrompt, promptFromCaption } from '../generation-prompt.js';
 import { resolveCharacterKey } from '../../scene/scene-directives.js';
 import { isCharacterDnaEmpty, resolveCharacterDna } from '../../scene/character-dna.js';
 
 export const GENERATED_ASSET_UPDATED_EVENT = 'igs:generated-asset-updated';
 const IMAGE_CACHE_LIMIT = 60;
+const AVATAR_SIZE = '1024x1024';
+const AVATAR_POSITIVE = 'chibi, solo, round face, face focus, head only, close-up, centered, looking at viewer, smile, simple background';
+const AVATAR_NEGATIVE = 'body, shoulders, neck, upper body, cowboy shot, full body, hands, multiple views, realistic, text, watermark, signature, frame, border';
 // review：等待楼层结束时让用户处理；chat：用户选择仅本聊天使用；
 // library：已加入素材库（由生成区条目接管）；discarded：丢弃。
 const ACTIVE_TEMP_STATUSES = new Set(['review', 'chat']);
+
+function randomSeed() {
+    return Math.floor(Math.random() * 4294967295);
+}
 
 function toReadableText(raw) {
     return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
@@ -56,6 +64,13 @@ export function createAssetGenerationService(deps) {
             sceneAssets: raw.sceneAssets && typeof raw.sceneAssets === 'object' ? raw.sceneAssets : {},
         };
     };
+
+    // 场景背景补全与剧情 CG 用同一套横竖规则：手机内嵌/竖屏触屏把背景尺寸宽高对调。
+    const backgroundSize = (s) => cgSizeForMode(
+        s.auto.assets.backgroundSize,
+        typeof deps.getReaderMode === 'function' ? deps.getReaderMode() : 'pc',
+        typeof deps.getViewport === 'function' ? deps.getViewport() : null,
+    );
 
     function emit(detail) {
         if (events && typeof events.emit === 'function') events.emit(GENERATED_ASSET_UPDATED_EVENT, detail);
@@ -125,14 +140,13 @@ export function createAssetGenerationService(deps) {
         return '';
     }
 
-    function matchContext(s, userName, knownCharacters = []) {
+    function matchContext(s, knownCharacters = []) {
         return {
             sceneAssets: s.sceneAssets,
             generatedAssets: s.sceneAssets.generated,
             strict: s.strict,
             tempBackground,
             tempSprite,
-            userName,
             knownCharacters,
         };
     }
@@ -184,7 +198,7 @@ export function createAssetGenerationService(deps) {
         const transparent = isSprite && plannedVia !== 'chatu8'
             && (plannedVia === 'dbgen' || supportsNaiTransparentBackground(s.auto.nai.model));
         const slot = buildAssetSlot(item, { transparent, templates: s.auto.assets.templates });
-        const size = isSprite ? s.auto.assets.spriteSize : s.auto.assets.backgroundSize;
+        const size = isSprite ? s.auto.assets.spriteSize : backgroundSize(s);
         // 数据库生图：描述只说明画什么。正负模板随 userPrompts 传出，出图前合并进最终 caption。
         const userPrompts = { positive: slot.scene, negative: slot.sceneUc };
         const meta = {
@@ -248,7 +262,7 @@ export function createAssetGenerationService(deps) {
                 try {
                     result = await nai.generateDbgenCaption({
                         caption,
-                        size: s.auto.assets.backgroundSize,
+                        size: backgroundSize(s),
                         messageId: floor.messageId,
                         userPrompts: { positive: slot.scene, negative: slot.sceneUc },
                     });
@@ -283,6 +297,83 @@ export function createAssetGenerationService(deps) {
         return records;
     }
 
+    // 数据库生图：本楼缺的立绘一次写完，再按份出图。超过 8 张均分成两批，一批写完并出完再写下一批。
+    async function generateSpriteBatch(items, s, floor, floorKey) {
+        const records = [];
+        let stopError = '';
+        const putSpriteRecord = async (item, result) => {
+            const key = tempAssetKeyOf(floor.chatId, item.need);
+            const base = {
+                key, chatId: floor.chatId, floorKey, messageId: floor.messageId, swipeId: floor.swipeId,
+                type: item.need.type, name: item.need.name, time: item.need.time || '', weather: item.need.weather || '',
+                tags: item.tags, createdAt: now(),
+            };
+            let record;
+            if (result && result.ok && result.dataUrl) {
+                const imageId = newId();
+                const image = await buildSpriteImageRecord(imageId, result.dataUrl, true, base.createdAt);
+                const prompt = normalizeStoredPrompt(result.prompt);
+                if (prompt) image.prompt = prompt;
+                const saved = await putImageWithQuotaFallback(image);
+                rememberImage(imageId, image.dataUrl);
+                record = { ...base, imageId, status: 'review', ...(saved.diagnostic ? { sourceUnavailable: saved.diagnostic } : {}) };
+            } else {
+                record = { ...base, imageId: '', status: 'failed', error: (result && result.error) || 'NAI 生成失败' };
+                report('error', `素材「${item.need.name}」生成失败：${record.error}`);
+            }
+            await store.putAsset(record);
+            if (tempChatId === floor.chatId) tempRecords.set(key, record);
+            emit({ chatId: floor.chatId, messageId: floor.messageId, swipeId: floor.swipeId, key, reason: 'generated' });
+            return record;
+        };
+        for (const batch of splitWriteBatches(items)) {
+            if (stopError) {
+                for (const item of batch) records.push(await putSpriteRecord(item, { ok: false, error: stopError }));
+                continue;
+            }
+            let written;
+            try {
+                written = await nai.writeDbgenPrompt({
+                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need)),
+                    messageId: floor.messageId,
+                });
+            } catch (error) {
+                written = { ok: false, error: `写提示词失败：${(error && error.message) || error}` };
+            }
+            const captions = written && written.ok && Array.isArray(written.captions) ? written.captions : [];
+            if (!written || !written.ok) {
+                stopError = written && written.error ? written.error : '写提示词失败';
+                for (const item of batch) records.push(await putSpriteRecord(item, { ok: false, error: stopError }));
+                continue;
+            }
+            for (let index = 0; index < batch.length; index += 1) {
+                const item = batch[index];
+                const found = captions.find((entry) => Number(entry.slotId) === index + 1);
+                const caption = found && found.caption;
+                const slot = buildAssetSlot(item, { transparent: true, templates: s.auto.assets.templates });
+                const prompts = expressionSpritePrompts(slot.scene, slot.sceneUc);
+                let result;
+                if (!caption) {
+                    result = { ok: false, error: '没有对应的立绘提示词' };
+                } else {
+                    try {
+                        result = await nai.generateDbgenCaption({
+                            caption: applyCharacterDnaToCaption(caption, item.need && item.need.dna),
+                            size: s.auto.assets.spriteSize,
+                            messageId: floor.messageId,
+                            transparent: true,
+                            userPrompts: { positive: prompts.positive, negative: prompts.negative },
+                        });
+                    } catch (error) {
+                        result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` };
+                    }
+                }
+                records.push(await putSpriteRecord(item, result));
+            }
+        }
+        return records;
+    }
+
     async function run(messageId, floor, key, s, manual) {
         // 失败或中途刷新残留的 planning 不算处理完，下次渲染时重试。
         const previous = await store.getFloor(key);
@@ -291,7 +382,6 @@ export function createAssetGenerationService(deps) {
         const numbered = numberParagraphs(floor.text);
         const match = matchContext(
             s,
-            messageHost.getUserName ? messageHost.getUserName() : '',
             messageHost.getCharacterNames ? messageHost.getCharacterNames() : [],
         );
         // 背景按本楼实际缺的张数生成，不跟立绘共用每层上限。已生成的在匹配时剔掉。
@@ -347,11 +437,22 @@ export function createAssetGenerationService(deps) {
         let count = 0;
         const errors = [];
         const backgrounds = plan.items.filter((item) => item.need && item.need.type === 'background');
-        const others = plan.items.filter((item) => !item.need || item.need.type !== 'background');
+        const sprites = plan.items.filter((item) => item.need && item.need.type === 'sprite');
         const batchBackgrounds = backend.ownPrompts && backgrounds.length && nai && typeof nai.writeDbgenPrompt === 'function';
-        const queue = batchBackgrounds ? others : plan.items;
+        const batchSprites = backend.ownPrompts && sprites.length && nai && typeof nai.writeDbgenPrompt === 'function';
+        const queue = plan.items.filter((item) => {
+            if (batchBackgrounds && item.need && item.need.type === 'background') return false;
+            if (batchSprites && item.need && item.need.type === 'sprite') return false;
+            return true;
+        });
         if (batchBackgrounds) {
             for (const record of await generateBackgroundBatch(backgrounds, s, floor, key)) {
+                if (record.status === 'review') count += 1;
+                else errors.push(`「${record.name}」${record.error}`);
+            }
+        }
+        if (batchSprites) {
+            for (const record of await generateSpriteBatch(sprites, s, floor, key)) {
                 if (record.status === 'review') count += 1;
                 else errors.push(`「${record.name}」${record.error}`);
             }
@@ -472,12 +573,13 @@ export function createAssetGenerationService(deps) {
         };
     }
 
-    async function paintExpressionCaption(name, mood, caption) {
-        const upright = uprightSpriteCaption(caption) || caption;
+    // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。
+    async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false } = {}) {
+        const upright = uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw }), dna)) || caption;
         const meta = expressionPaintMeta();
         let painted;
         try {
-            painted = await nai.generateDbgenCaption({ ...meta, caption: upright });
+            painted = await nai.generateDbgenCaption({ ...meta, caption: upright, ...(seed != null && { seed }) });
         } catch (error) {
             painted = { ok: false, error: (error && error.message) || '出图失败' };
         }
@@ -504,48 +606,174 @@ export function createAssetGenerationService(deps) {
         if (typeof onProgress === 'function') onProgress(event);
     }
 
-    // 一次写词拿回全部分，再按表情顺序串行出图。某一张失败不影响后面的。
-    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, onProgress } = {}) {
+    // 按 9 张分批写词：不超过 9 张一次写完，超过 9 张平分 2 批，超过 18 张平分 3 批。
+    // 一批写完并逐张出完，再写下一批；某一张失败不影响后面的。
+    // 插件少给某几份时只在这一批里补写；signal 中止后已画好的图保留，还没写的批不再写。
+    // 一次点击里各批共用一颗新种子：衣服、画风接近；删掉重来、补画都是新种子，不会画回旧图。
+    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, note, nsfw, onProgress, signal } = {}) {
         const labels = (Array.isArray(moods) ? moods : []).map((item) => String(item || '').trim()).filter(Boolean);
         if (!labels.length) return { ok: false, error: '没有表情分组' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
             return { ok: false, error: '当前图像来源不能写表情差分' };
         }
-        reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: labels.length });
-        let written;
-        try {
-            written = await nai.writeDbgenPrompt({
-                description: buildExpressionDiffDescription(name, basePrompt, labels, dna, outfit),
-            });
-        } catch (error) {
-            return { ok: false, error: (error && error.message) || '写提示词失败' };
-        }
-        if (!written || !written.ok) return { ok: false, error: (written && written.error) || '写提示词失败' };
-        const captions = Array.isArray(written.captions) ? written.captions : [];
+        const paint = {
+            look: expressionLookTags(basePrompt, outfit),
+            seed: randomSeed(),
+            nsfw: nsfw === true,
+        };
+        const paintDna = expressionPaintDna(dna, outfit);
+        const stopped = () => Boolean(signal && signal.aborted);
         const items = [];
-        for (let i = 0; i < labels.length; i += 1) {
-            reportExpressionProgress(onProgress, { phase: 'paint', done: i + 1, total: labels.length, mood: labels[i] });
-            const slot = captions.find((item) => Number(item && item.slotId) === i + 1);
-            const caption = slot && slot.caption;
-            if (!caption) {
-                items.push({ mood: labels[i], ok: false, error: '写提示词没有返回这一份' });
+        let painted = 0;
+        let writeError = '';
+        for (const batch of splitExpressionWriteBatches(labels)) {
+            if (stopped()) break;
+            if (writeError) {
+                for (const mood of batch) items.push({ mood, ok: false, error: writeError });
                 continue;
             }
-            items.push(await paintExpressionCaption(name, labels[i], caption));
+            let pending = batch.slice();
+            // 每一批最多两轮：第一轮写这一批，第二轮只补插件漏掉的那几份。
+            for (let round = 0; round < 2 && pending.length; round += 1) {
+                if (stopped()) break;
+                reportExpressionProgress(onProgress, { phase: 'write', done: painted, total: labels.length });
+                let written;
+                try {
+                    written = await nai.writeDbgenPrompt({
+                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw }),
+                    });
+                } catch (error) {
+                    const message = (error && error.message) || '写提示词失败';
+                    if (!items.length) return { ok: false, error: message };
+                    for (const mood of pending) items.push({ mood, ok: false, error: message });
+                    writeError = message;
+                    break;
+                }
+                if (!written || !written.ok) {
+                    const message = (written && written.error) || '写提示词失败';
+                    if (!items.length) return { ok: false, error: message };
+                    for (const mood of pending) items.push({ mood, ok: false, error: message });
+                    writeError = message;
+                    break;
+                }
+                const captions = Array.isArray(written.captions) ? written.captions : [];
+                const missing = [];
+                for (let i = 0; i < pending.length; i += 1) {
+                    if (stopped()) {
+                        // 词已经写好的带上，存成注记，之后「继续生图」不用重写。
+                        for (let j = i; j < pending.length; j += 1) {
+                            const left = captions.find((item) => Number(item && item.slotId) === j + 1);
+                            items.push({ mood: pending[j], ok: false, error: '已停止', ...(left && left.caption && { caption: left.caption }) });
+                        }
+                        pending = [];
+                        break;
+                    }
+                    painted += 1;
+                    reportExpressionProgress(onProgress, { phase: 'paint', done: painted, total: labels.length, mood: pending[i] });
+                    const slot = captions.find((item) => Number(item && item.slotId) === i + 1);
+                    const caption = slot && slot.caption;
+                    if (!caption) {
+                        missing.push(pending[i]);
+                        items.push({ mood: pending[i], ok: false, error: '写提示词没有返回这一份' });
+                        continue;
+                    }
+                    const result = await paintExpressionCaption(name, pending[i], caption, paintDna, paint);
+                    items.push(result);
+                }
+                pending = round === 0 ? missing : [];
+            }
         }
-        return { ok: true, items };
+        return { ok: true, items, stopped: stopped() };
     }
 
-    // 失败槽重画：已有 caption 就只出这一张，不再写词。
-    async function generateExpressionImage({ name, mood, caption, basePrompt, dna, outfit, onProgress } = {}) {
+    // 继续生图：词已经写好（停下、超时、出图失败留下的），直接按存下的词出图，不重写；这一批共用一颗新种子。
+    async function paintExpressionCaptions({ name, items, basePrompt, dna, outfit, nsfw, onProgress, signal } = {}) {
+        const list = (Array.isArray(items) ? items : []).filter((item) => item && item.mood && item.caption);
+        if (!list.length) return { ok: false, error: '没有写好词、还没出图的表情' };
+        if (!nai || typeof nai.generateDbgenCaption !== 'function') return { ok: false, error: '当前图像来源不能出图' };
+        const paint = { look: expressionLookTags(basePrompt, outfit), seed: randomSeed(), nsfw: nsfw === true };
+        const paintDna = expressionPaintDna(dna, outfit);
+        const stopped = () => Boolean(signal && signal.aborted);
+        const results = [];
+        for (let i = 0; i < list.length; i += 1) {
+            const { mood, caption } = list[i];
+            if (stopped()) {
+                results.push({ mood, ok: false, error: '已停止', caption });
+                continue;
+            }
+            reportExpressionProgress(onProgress, { phase: 'paint', done: i + 1, total: list.length, mood });
+            results.push(await paintExpressionCaption(name, mood, caption, paintDna, paint));
+        }
+        return { ok: true, items: results, stopped: stopped() };
+    }
+
+    // 单张重画：有这一格的提示词就不再写词（写词要等插件的模型，单张也得几十秒），
+    // 直接叠上当前的表情、衣服、DNA 硬合再出图；显式换一颗随机种子——不传种子时插件用自己的配置，固定种子会画出同一张。
+    async function generateExpressionImage({ name, mood, caption, basePrompt, dna, outfit, note, nsfw, onProgress } = {}) {
         const label = String(mood || '').trim();
         if (!label) return { ok: false, error: '没有表情' };
         if (caption) {
             reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: label });
-            const item = await paintExpressionCaption(name, label, caption);
+            const look = expressionLookTags(basePrompt, outfit);
+            const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true });
             return { ok: true, items: [item] };
         }
-        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, onProgress });
+        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, onProgress });
+    }
+
+    // 状态栏头像：Q 版大头，方图、不抠图，直接把图交回去，由设置页缩小后存进头像。
+    async function generateCharacterAvatar({ name, dna, onProgress } = {}) {
+        const who = String(name || '').trim();
+        if (!who) return { ok: false, error: '没有角色' };
+        if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
+            return { ok: false, error: '当前图像来源不能生成头像' };
+        }
+        reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '头像' });
+        let written;
+        try {
+            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna) });
+        } catch (error) {
+            return { ok: false, error: (error && error.message) || '写提示词失败' };
+        }
+        if (!written || !written.ok || !written.caption) {
+            return { ok: false, error: (written && written.error) || '写提示词失败' };
+        }
+        reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: '头像' });
+        let painted;
+        try {
+            painted = await nai.generateDbgenCaption({
+                caption: applyCharacterDnaToCaption(written.caption, dna),
+                size: AVATAR_SIZE,
+                userPrompts: { positive: AVATAR_POSITIVE, negative: AVATAR_NEGATIVE },
+            });
+        } catch (error) {
+            painted = { ok: false, error: (error && error.message) || '出图失败' };
+        }
+        if (!painted || !painted.ok || !painted.dataUrl) return { ok: false, error: (painted && painted.error) || '出图失败' };
+        return { ok: true, dataUrl: painted.dataUrl };
+    }
+
+    // 设置页主动出一张默认立绘：写一份提示词，再出图。不经过楼内补图。
+    async function generateCharacterSprite({ name, dna, nude = false, onProgress } = {}) {
+        const who = String(name || '').trim();
+        if (!who) return { ok: false, error: '没有角色' };
+        if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
+            return { ok: false, error: '当前图像来源不能写立绘' };
+        }
+        reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '默认' });
+        let written;
+        try {
+            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true }) });
+        } catch (error) {
+            return { ok: false, error: (error && error.message) || '写提示词失败' };
+        }
+        if (!written || !written.ok || !written.caption) {
+            return { ok: false, error: (written && written.error) || '写提示词失败' };
+        }
+        reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: '默认' });
+        const painted = await paintExpressionCaption(who, '默认', written.caption, dna);
+        if (!painted.ok) return { ok: false, error: painted.error || '出图失败', prompt: painted.prompt };
+        return { ok: true, imageId: painted.imageId, prompt: painted.prompt };
     }
 
     function clothingCaption(prompt) {
@@ -617,9 +845,26 @@ export function createAssetGenerationService(deps) {
         return { ok: true, prompt: stored };
     }
 
+    async function readStoredImage(id) {
+        const key = String(id || '');
+        if (!key || !store || typeof store.getImage !== 'function') return null;
+        const record = normalizeGeneratedImageRecord(await store.getImage(key));
+        return record ? JSON.parse(JSON.stringify(record)) : null;
+    }
+
+    async function writeStoredImage(record) {
+        const image = record && typeof record === 'object' ? record : null;
+        const key = image && String(image.id || '');
+        if (!key || !store || typeof store.putImage !== 'function') return { ok: false, error: '图片存不了' };
+        const stored = { ...image, id: key };
+        await store.putImage(stored);
+        if (stored.dataUrl) rememberImage(key, stored.dataUrl);
+        return { ok: true };
+    }
+
     return {
-        processMessage, resolveUrl, tempBackground, tempSprite, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt,
-        generateExpressionSet, generateExpressionImage, writeWardrobePrompt, paintWardrobeReference,
+        processMessage, resolveUrl, tempBackground, tempSprite, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage,
+        generateExpressionSet, generateExpressionImage, paintExpressionCaptions, generateCharacterSprite, generateCharacterAvatar, writeWardrobePrompt, paintWardrobeReference,
         getEditableImage, saveMatteEdit,
         getRecord: (key) => currentTempRecords().get(key) || null,
         start() {

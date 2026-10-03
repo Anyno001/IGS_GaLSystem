@@ -1,5 +1,6 @@
 import { createPublicApi, attachPublicApi, detachPublicApi } from '../api/public-api.js';
-import { createTavernHelperAdapter } from '../host/tavern-helper-adapter.js';
+import { createTavernHelperAdapter, getSillyTavernContext } from '../host/tavern-helper-adapter.js';
+import { sceneAssetsForContext } from '../scene/asset-scope.js';
 import { createPresetRegistry } from '../presets/preset-registry.js';
 import { createInputChannel } from '../host/input-channel.js';
 import { parseSceneText } from '../scene/text-parser.js';
@@ -21,6 +22,7 @@ import { normalizeChatShowSettings, resolveChatShowPromptRule } from '../visual/
 import { resolveFxPromptRule, resolveItemFxPromptRule, resolveRomanceFxPromptRule, resolveStageCastFxPromptRule } from '../visual/igs-ui/fx-prompt.js';
 import { resolveDanmakuPromptRule } from '../visual/igs-ui/danmaku-prompt.js';
 import { resolveTextFxPromptRule } from '../visual/igs-ui/text-fx.js';
+import { resolveBilingualPromptRule } from '../visual/igs-ui/bilingual-text.js';
 import { resolveDailyFxPromptRule } from '../visual/igs-ui/fx-daily-prompt.js';
 import { beginMetaDigestSend, clearMetaDigest, finishMetaDigestSend, onMetaDigestChange, resolveMetaDigestRule } from '../visual/igs-ui/meta-digest.js';
 import { applyFxWorldview, resolveWorldviewPromptRule } from '../scene/fx-era.js';
@@ -48,7 +50,7 @@ import { buildTagGrammar, DEPTH0_REMINDER, normalizePromptPlacement } from '../v
 import { detectPromptTriggers } from '../scene/prompt-triggers.js';
 import { collectPromptContext } from '../host/prompt-context.js';
 
-const IGS_VERSION = '0.33.16';
+const IGS_VERSION = '0.34.24';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
@@ -69,6 +71,9 @@ function createImageJobReporter(globalObject, getBridge, log) {
 
 export function bootstrapIGS(options = {}) {
     const globalObject = options.global || globalThis.window || globalThis;
+    function sceneAssetsNow(sceneAssets) {
+        return sceneAssetsForContext(sceneAssets, getSillyTavernContext(globalObject));
+    }
     const events = options.events || createEventBus();
     const hostAdapter = options.hostAdapter || createTavernHelperAdapter(globalObject);
     const storageLike = options.storage || getStorageLike(globalObject);
@@ -102,12 +107,19 @@ export function bootstrapIGS(options = {}) {
         const bridge = (getUnifiedSettingsSnapshot() || {}).bridge || {};
         return { ...bridge, autoIllustration: mergeLegacyNaiSettings(bridge.autoIllustration, bridge.imageApi) };
     };
-    const imageBackend = options.imageBackend || createImageBackend({ nai: naiOfficialClient, getBridge: readImageBridge, global: globalObject });
     const imageJobLog = options.imageJobLog || createImageJobLog({
         storage: storageLike,
         getSettings: () => ((getUnifiedSettingsSnapshot() || {}).bridge || {}).imageJobLog,
     });
     const reportImageJob = options.reportImageJob || createImageJobReporter(globalObject, () => (getUnifiedSettingsSnapshot() || {}).bridge || {}, imageJobLog);
+    const imageBackend = options.imageBackend || createImageBackend({
+        nai: naiOfficialClient,
+        getBridge: readImageBridge,
+        global: globalObject,
+        report: (level, message) => {
+            if (imageJobLog && typeof imageJobLog.add === 'function') imageJobLog.add(level, message);
+        },
+    });
     // CG 库与自动插图共用同一个插图存储实例。
     const illustrationStore = options.illustrationStore || createIndexedDbIllustrationStore(globalObject);
     const illustrationService = options.illustrationService || createAutoIllustrationService({
@@ -121,7 +133,7 @@ export function bootstrapIGS(options = {}) {
             return String(snapshot.readerMode || (snapshot.bridge && snapshot.bridge.openMode) || 'pc');
         },
         getViewport: () => readCgViewport(globalObject),
-        getSceneAssets: () => readImageBridge().sceneAssets,
+        getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
         events,
         random: options.random,
         report: reportImageJob,
@@ -136,8 +148,13 @@ export function bootstrapIGS(options = {}) {
         matte: options.alphaMatte || createAlphaMatte(globalObject),
         getSettings: () => {
             const bridge = readImageBridge();
-            return { autoIllustration: bridge.autoIllustration, sceneAssets: bridge.sceneAssets };
+            return { autoIllustration: bridge.autoIllustration, sceneAssets: sceneAssetsNow(bridge.sceneAssets) };
         },
+        getReaderMode: () => {
+            const snapshot = getUnifiedSettingsSnapshot() || {};
+            return String(snapshot.readerMode || (snapshot.bridge && snapshot.bridge.openMode) || 'pc');
+        },
+        getViewport: () => readCgViewport(globalObject),
         events,
         report: reportImageJob,
     });
@@ -507,7 +524,7 @@ export function bootstrapIGS(options = {}) {
 
     function syncSceneAssetsInjection(generationType = null) {
         const unified = getUnifiedSettingsSnapshot();
-        const sceneAssets = unified.bridge && unified.bridge.sceneAssets;
+        const sceneAssets = sceneAssetsNow(unified.bridge && unified.bridge.sceneAssets);
         // 世界观：与之冲突的演出开关在这里拨成关，AI 不会收到它们的语法说明；时代规则按世界观追加（现代为空）。
         const worldview = resolveWorldview(sceneAssets);
         const ancient = worldview === 'ancient';
@@ -557,6 +574,8 @@ export function bootstrapIGS(options = {}) {
         if (itemFxRule) rules.push(itemFxRule);
         const textFxRule = resolveTextFxPromptRule(Boolean(readerSettings && readerSettings.textFx && readerSettings.textFx.enabled));
         if (textFxRule) rules.push(textFxRule);
+        const bilingualRule = resolveBilingualPromptRule(readerSettings && readerSettings.bilingual);
+        if (bilingualRule) rules.push(bilingualRule);
         const dailyFxRule = resolveDailyFxPromptRule(readerSettings && readerSettings.dailyFx);
         if (dailyFxRule) rules.push(dailyFxRule);
         const battleFxRule = resolveBattleFxPromptRule(Boolean(readerSettings && readerSettings.battleFx && readerSettings.battleFx.enabled));

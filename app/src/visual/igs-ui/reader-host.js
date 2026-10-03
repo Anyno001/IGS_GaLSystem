@@ -8,7 +8,9 @@ import {
 import { extractSceneDirectives, resolveSceneStateAtIndex, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers, resolveNearestCharacterBefore } from '../../scene/scene-directives.js';
 import { classifySceneKey, resolveCharacterKey } from '../../scene/scene-directives.js';
 import { recordOutfitReview, dropConfirmedOutfitReview } from '../../scene/outfit-review-store.js';
-import { renderOutfitReviewList, renderWardrobe } from './settings-outfit-fields.js';
+import { assetOwnerKey, assetShadowsGlobal, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, normalizeAssetCards, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
+import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
+import { menuItem, placeRowMenu, renderOutfitReviewList, renderRowMenu, renderWardrobe } from './settings-outfit-fields.js';
 
 
 import { isMarkerDirectiveLine, stripMarkerDirectives } from '../../scene/directive-tags.js';
@@ -37,7 +39,7 @@ import { renderWorldviewRow } from './worldview-fields.js';
 import { renderQualityRow } from './render-quality-fields.js';
 import { normalizeSpriteHeads } from './fx-anchor.js';
 import { parseHtmlCardMarker } from '../../scene/html-cards.js';
-import { resolveBackgroundAsset, resolveSpriteAsset, isGeneratedAssetUrl, addGeneratedAssetToLibrary, normalizeGeneratedLibrary, isNonSpriteSpeaker } from '../../scene/asset-match.js';
+import { resolveBackgroundAsset, resolveSpriteAsset, isGeneratedAssetUrl, bindGeneratedBackground, bindGeneratedSprite, fileGeneratedHoldings, normalizeGeneratedLibrary, isNonSpriteSpeaker, collectGeneratedImageIds } from '../../scene/asset-match.js';
 import { STAGE_CAST_MAX_SEATS, STAGE_CAST_SCAN_LIMIT, pickCastMembers, resolveCastOffset, resolveStageCast } from '../../scene/stage-cast.js';
 import { normalizeStageCastSettings } from './stage-direction-settings.js';
 import { resolveRomanceRivalTarget } from './romance-settings.js';
@@ -45,7 +47,7 @@ import { clearCastDom } from './stage-cast-render.js';
 import { CHARACTER_DNA_FIELDS, normalizeCharacterDnaMap, resolveCharacterDna } from '../../scene/character-dna.js';
 import { createOutfitResolver, normalizeCharacterOutfits, normalizeWardrobe, resolveSpriteOutfit } from '../../scene/character-outfits.js';
 import { collectOutfitClues } from '../../data/shujuku/outfit-clues.js';
-import { renderDnaCandidateBar, renderDnaOnlyCharacterList } from './settings-fields.js';
+import { CHARACTER_ADD_MENU, renderDnaCandidateBar, renderDnaOnlyCharacterList } from './settings-fields.js';
 import { loadMatteEditor } from './sprite-matte-editor.js';
 import { mountMatteEditor } from './sprite-matte-editor-mount.js';
 import { createCanvasImageCodec } from './sprite-matte-editor-view.js';
@@ -67,15 +69,13 @@ import { getSettingsShellTemplate } from './settings-shell.js';
 import { getSettingsStyleText } from './settings-style.js';
 import {
     getImageSubTabTemplate,
-    getSceneSettingsSubTabTemplate,
     getReaderSubTabTemplate,
     getSettingsTabTemplate,
     normalizeImageSubTab,
-    normalizeSceneSettingsSubTab,
     normalizeSceneSubTab,
     normalizeReaderSubTab,
     IMAGE_SUBTAB_DEFS,
-    SCENE_SETTINGS_SUBTAB_DEFS,
+    SCENE_RULES_TEMPLATE,
     SCENE_SUBTAB_DEFS,
     READER_SUBTAB_DEFS,
     SETTINGS_TAB_DEFS,
@@ -116,11 +116,12 @@ import {
     colorInput,
     field,
     renderCharacterAssetList,
+    renderMoodGroupList,
     renderMoodReviewList,
     renderPinnedButtons,
     renderSceneAssetList,
     renderGeneratedAssetPane,
-    renderScenePresetBar,
+    countGeneratedWaiting,
     renderStageShakeSettings,
     renderChatShowSettings,
     renderSystemRoleSettings,
@@ -154,7 +155,6 @@ import {
 import { buildReaderSourceSignature, createReaderSourceCache } from './reader-source-cache.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
 import { createChatStreamObserver } from '../../host/chat-stream-observer.js';
-import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { findAcuDice, formatCheckMessage, resolveDiceCommand } from '../../choices/dice-check.js';
 import { buildResultFxPlan, normalizeResultFxSettings, resultDetailOf } from './fx-result-model.js';
 import { cancelResultFx, playResultFx } from './fx-result.js';
@@ -206,17 +206,17 @@ import { createRecordPanelController } from './record-panel.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { buildStatusHudModel, listStatusHudTables, normalizeStatusHudSettings, resolveStatusAvatar } from '../../data/shujuku/status-hud-model.js';
 import { readOptionItems } from '../../choices/option-table.js';
-import { handleSettingsAction as runSettingsAction } from './settings-actions.js';
-import { SETTINGS_NOTICE_MS, describeSettingsFailure, markSettingsButtonBusy, remountSettingsNotice, settingsBusyLabel } from './settings-notice.js';
+import { handleSettingsAction as runSettingsAction, releasedGeneratedImageIds } from './settings-actions.js';
+import { SETTINGS_NOTICE_MS, describeSettingsFailure, markSettingsButtonBusy, remountSettingsNotice, remountSettingsProgress, settingsBusyLabel } from './settings-notice.js';
 import { createSettingsDialogs } from './settings-dialog.js';
 import { captureSettingsFocus, restoreSettingsFocus } from './settings-focus.js';
 import { renderSectionResetButton, sectionResetPlaceholders } from './settings-sections.js';
 import { createOnboardingController } from './onboarding-guide-controller.js';
 import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLabel } from '../../generated-images/image-job-log.js';
-import { loadScenePresets, loadActiveScenePresetName } from '../../scene/scene-preset-store.js';
 import { applyFxWorldview } from '../../scene/fx-era.js';
 import { resolveWorldview } from '../../scene/worldview.js';
-import { loadAssetFolders } from './asset-folders.js';
+import { loadAssetFoldersFor } from './asset-folders.js';
+import { isLayeredPreset, loadLegacyPresets, legacyPresetHasContent, presetCardLayers } from '../../scene/legacy-preset.js';
 import { renderAssetFolderView, renderAssetFolderSelect } from './asset-folder-view.js';
 import { loadMoodReview, recordMoodReview } from '../../scene/mood-review-store.js';
 import { LEGACY_READER_MODES } from '../../storage/legacy-igs.js';
@@ -238,6 +238,10 @@ import {
     normalizeClassicDialogWidthPercent,
     normalizeDialogSkin,
 } from './classic-dialog-skin.js';
+import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_ACCENT_DEFAULT, MAGIC_HOUSES, MAGIC_HOUSE_DEFAULT, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
+import { normalizeCharacterHouses } from './magic-house.js';
+import { DIALOG_SKIN_QINGLV } from './dialog-theme-guofeng.js';
+import { DIALOG_SKIN_FAIRY_TALE } from './dialog-theme-fairytale.js';
 import { normalizeGradientVeil } from './gradient-veil-dialog-skin.js';
 import { SKIN_DIALOG_SCALE_OPTIONS, SKIN_DIALOG_SCALE_DEFAULT, normalizeSkinDialogScale } from './dialog-skin-frame.js';
 import { normalizeStageShakeSettings } from './stage-shake-runtime.js';
@@ -256,6 +260,9 @@ import { resolveChatTheme } from './chat-themes.js';
 import { isSystemRole, normalizeSystemRoleSettings } from './system-role.js';
 import { formatChatBlockAsText, parseChatMarker } from '../../scene/chat-blocks.js';
 import { normalizePromptPlacement } from './tag-grammar.js';
+import { nextBilingualDisplay, normalizeBilingualSettings, resolveBilingualDisplay, stripBilingualTranslation } from './bilingual-text.js';
+
+const ASSET_MOVE_ALL_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg>';
 import {
     applyReaderSnapshotToDom,
     applyToolbarState,
@@ -264,12 +271,17 @@ import {
     normalizeReaderStableLayers,
 } from './reader-dom-render.js';
 
+// 设置页改角色的某一项时，按这些字段里有没有这个角色名判断它在本卡还是全局。
+const ASSET_CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
+
 export function createIgsReaderHost(options = {}) {
     let statusHudClient = null;
     let statusHudCallback = null;
     const state = {
         activeReader: null,
         activeSettings: null,
+        // T 键临时切换的双语显示方式 { base, value }：只在本次会话内有效，不写入设置；设置里改了显示方式即失效。
+        bilingualDisplay: null,
     };
     const settingsDialogs = createSettingsDialogs({
         getContainer: () => (state.activeSettings && state.activeSettings.dom ? state.activeSettings.dom.root : null),
@@ -307,6 +319,7 @@ export function createIgsReaderHost(options = {}) {
         : null;
     const offItemImageUpdated = typeof offItemImageUpdatedRaw === 'function' ? offItemImageUpdatedRaw : () => {};
     let settingsImageRefreshTimer = 0;
+    const settingsBusyActions = new Set();
     function scheduleSettingsImageRefresh() {
         if (settingsImageRefreshTimer) return;
         const g = options.global || globalThis;
@@ -325,7 +338,7 @@ export function createIgsReaderHost(options = {}) {
                 if (settings.tab === 'scene') scheduleSettingsImageRefresh();
                 return;
             }
-            if (settings.asyncState.sceneSubTab === 'generated') rerenderSettings();
+            if (settings.asyncState.sceneSubTab === 'review') rerenderSettings();
         })
         : () => {};
     // 日志更新时只替换列表 DOM，不整页重渲染，避免打断正在输入的设置项。
@@ -575,7 +588,8 @@ export function createIgsReaderHost(options = {}) {
             tab: normalizedTab,
             draft: cloneData(initialSnapshot),
             initialOpenMode: initialSnapshot.bridge.openMode,
-            asyncState: { scenePresetName: loadActiveScenePresetName((options.global || globalThis).localStorage) },
+            asyncState: {},
+            committedImageIds: collectGeneratedImageIds(initialSnapshot.bridge && initialSnapshot.bridge.sceneAssets),
             controller,
             dom: null,
         };
@@ -1113,14 +1127,10 @@ export function createIgsReaderHost(options = {}) {
                 asyncState.settingsSearch = '';
                 return rerenderSettings();
             },
-            switchSceneSettingsSubTab(subTab) {
-                if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
-                state.activeSettings.asyncState.sceneSettingsSubTab = normalizeSceneSettingsSubTab(subTab);
-                return rerenderSettings();
-            },
             switchSceneSubTab(subTab) {
                 if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
                 state.activeSettings.asyncState.sceneSubTab = normalizeSceneSubTab(subTab);
+                state.activeSettings.asyncState.wardrobeFocus = '';
                 return rerenderSettings();
             },
             setValue(path, value, editOptions) {
@@ -1395,6 +1405,7 @@ export function createIgsReaderHost(options = {}) {
             : null;
         if (!save) return { ok: false, reason: 'missing-save-handler' };
 
+        if (draft.bridge && draft.bridge.sceneAssets) fileGeneratedHoldings(draft.bridge.sceneAssets);
         let result;
         try {
             result = save({
@@ -1410,6 +1421,17 @@ export function createIgsReaderHost(options = {}) {
         }
 
         const snapshot = resolveBridgeConfigSnapshot({ mode: 'default' });
+        const savedAssets = snapshot.bridge && snapshot.bridge.sceneAssets;
+        const previousIds = state.activeSettings.committedImageIds || [];
+        state.activeSettings.committedImageIds = collectGeneratedImageIds(savedAssets);
+        const released = releasedGeneratedImageIds(previousIds, savedAssets, (options.global || globalThis).localStorage);
+        const imageService = options.generatedAssets;
+        if (released.length && imageService && typeof imageService.deleteImages === 'function') {
+            Promise.resolve(imageService.deleteImages(released)).catch(() => {
+                const globalObj = options.global || globalThis;
+                if (globalObj.alert) globalObj.alert('配置已保存，但有图片没能从本机清掉。');
+            });
+        }
         state.activeSettings.draft = cloneData(snapshot);
         if (state.activeReader) {
             const current = state.activeReader.payload;
@@ -1463,12 +1485,14 @@ export function createIgsReaderHost(options = {}) {
             }
             return '<div class="igs-scene-empty">正在读取…</div>';
         }
+        const selected = asyncState.imageCgSelected instanceof Set ? asyncState.imageCgSelected : new Set();
         const tiles = asyncState.imageCgEntries.map((entry, index) => {
             const url = String((entry && entry.dataUrl) || '').trim();
             if (!/^(?:data:image\/|https?:\/\/|blob:)/i.test(url)) return '';
             const label = entry.kind === 'photo' ? '照片' : `第 ${entry.messageId} 楼`;
+            const on = selected.has(entry.key);
             // 大图按序号回查已读列表，避免把整段 data URL 再塞进 data-action。
-            return `<button type="button" class="igs-image-cg-tile" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图"><img src="${esc(url)}" decoding="async" alt=""><span>${esc(label)}</span></button>`;
+            return `<article class="igs-image-cg-tile"><label class="igs-image-cg-check"><input type="checkbox" data-action="image-cg-toggle:${index}" ${on ? 'checked' : ''} aria-label="选择${esc(label)}"></label><button type="button" class="igs-image-cg-view" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图"><img src="${esc(url)}" decoding="async" alt=""><span>${esc(label)}</span></button><button type="button" class="igs-image-cg-delete" data-action="image-cg-delete:${index}">删除</button></article>`;
         }).join('');
         return tiles || '<div class="igs-scene-empty">还没有生成过 CG</div>';
     }
@@ -1523,7 +1547,8 @@ export function createIgsReaderHost(options = {}) {
     // 按生成素材库里引用该图片的角色名取 DNA（经 DNA 主名/原名匹配）；找不到时不注入。
     function findDnaForGeneratedImage(imageId) {
         const draft = state.activeSettings && state.activeSettings.draft;
-        const sa = (draft && draft.bridge && draft.bridge.sceneAssets) || {};
+        const raw = (draft && draft.bridge && draft.bridge.sceneAssets) || {};
+        const sa = sceneAssetsForContext(raw, getSillyTavernContext(options.global || globalThis)) || {};
         const chars = normalizeGeneratedLibrary(sa.generated).characters;
         const token = `igs-gen:${imageId}`;
         const name = Object.keys(chars).find((n) => JSON.stringify(chars[n] || {}).includes(token));
@@ -2396,16 +2421,15 @@ export function createIgsReaderHost(options = {}) {
     function noteUnlistedOutfits(directives, sceneAssets) {
         const storage = (options.global || globalThis).localStorage;
         if (!storage) return;
-        const wardrobe = sceneAssets.wardrobe && typeof sceneAssets.wardrobe === 'object' ? sceneAssets.wardrobe : {};
-        dropConfirmedOutfitReview(storage, wardrobe);
+        const resolveOutfit = createOutfitResolver(sceneAssets);
+        dropConfirmedOutfitReview(storage, (character, word) => Boolean(resolveOutfit(character, word)));
         const fresh = [];
         for (const d of directives) {
             if (!d || !d.unknownOutfit || !d.character) continue;
-            if (Object.prototype.hasOwnProperty.call(wardrobe, d.unknownOutfit)) continue;
             const character = resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, d.character) || d.character;
             if (recordOutfitReview(storage, { character, word: d.unknownOutfit })) fresh.push(`「${character}」的「${d.unknownOutfit}」`);
         }
-        if (fresh.length) writeToast(`有新服装待确认：${fresh.join('、')}。打开衣柜可以生成提示词，或删除这条。`, 4200);
+        if (fresh.length) writeToast(`有新服装待确认：${fresh.join('、')}。到「素材 → 待确认」里归入已有服装或新建。`, 4200);
     }
 
     function buildReaderSnapshot(payload, mode, readerSettings, index = 0) {
@@ -2704,8 +2728,8 @@ export function createIgsReaderHost(options = {}) {
             // fingerprint, not by row ordinal. Reformatting (image blocks, italic narration,
             // merged/stripped lines) desyncs any positional counter, so we look the source
             // text up directly. normalizeFingerprint strips the translation tail *（…）*,
-            // brackets and whitespace so a substring compare is stable.
-            const normalizeFingerprint = (s) => String(s || '')
+            // bilingual 〖…〗 translations, brackets and whitespace so a substring compare is stable.
+            const normalizeFingerprint = (s) => stripBilingualTranslation(s)
                 .replace(/\*（[^）]*）\*/g, '')
                 .replace(/[\[\]\*（）]/g, '')
                 .replace(/\s+/g, '')
@@ -2863,7 +2887,6 @@ export function createIgsReaderHost(options = {}) {
                     spriteMood = spriteHit.slot || spriteMood;
                 }
                 if (!chatPage && normalizeStageCastSettings(readerSettings.stageCast).enabled) {
-                    const castUser = String((getSillyTavernContext(options.global || globalThis) || {}).name1 || '');
                     const castKeyOf = (name) => resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, name) || name;
                     const speakerKey = castKeyOf(spriteChar);
                     // 修罗场：恋爱对象先于最近开口的人入选，保证对象在台上（romanceDuo 关闭时不钉）。
@@ -2874,7 +2897,7 @@ export function createIgsReaderHost(options = {}) {
                         // 定位失败时按页码取最近一条台词重新定位，避免名单整体清空。
                         offset: resolveCastOffset({ offset: outfitOffset, directives: sceneDirectives, segmentIndex: normalizedIndex, locate: (t) => locateTextOffsetInSource(sceneSourceForOffset, t) }),
                         keyOf: castKeyOf,
-                        isEligible: (name) => !isNonSpriteSpeaker(name, castUser) && !isSystemRole(name, readerSettings.systemRole),
+                        isEligible: (name) => !isNonSpriteSpeaker(name) && !isSystemRole(name, readerSettings.systemRole),
                         limit: STAGE_CAST_SCAN_LIMIT,
                         // 站位「离开」（castStage 开启时）：离开后没再开口的人不进名单，再次开口即回台。
                         goneAt: normalizeStageCastSettings(readerSettings.stageCast).castStage ? pageFx.goneAt : null,
@@ -3019,7 +3042,6 @@ export function createIgsReaderHost(options = {}) {
         const tab = normalizeSettingsTab(settingsState.tab);
         const imageSubTab = tab === 'image' ? normalizeImageSubTab(settingsState.asyncState.imageSubTab) : null;
         const readerSubTab = tab === 'reader' ? normalizeReaderSubTab(settingsState.asyncState.readerSubTab) : null;
-        const sceneSettingsSubTab = tab === 'scene' ? normalizeSceneSettingsSubTab(settingsState.asyncState.sceneSettingsSubTab) : null;
         const sceneSubTab = tab === 'scene' ? normalizeSceneSubTab(settingsState.asyncState.sceneSubTab) : null;
         const settingsTheme = normalizeSettingsTheme(draft.bridge.settingsTheme);
         const body = renderSettingsBody(tab, draft, settingsState.asyncState);
@@ -3031,7 +3053,6 @@ export function createIgsReaderHost(options = {}) {
             tab,
             imageSubTab,
             readerSubTab,
-            sceneSettingsSubTab,
             sceneSubTab,
             settingsTheme,
             settingsThemeSwitch: renderSettingsThemeSwitch(settingsTheme),
@@ -3095,6 +3116,9 @@ export function createIgsReaderHost(options = {}) {
         }
 
         const bridge = draft.bridge;
+        const worldviewAssets = asyncState.assetScopeKey
+            ? effectiveSceneAssets(bridge.sceneAssets, asyncState.assetScopeKey)
+            : bridge.sceneAssets;
         const imageApi = bridge.imageApi;
         const sourceFilter = bridge.sourceFilter;
         const reader = draft.readerSettings;
@@ -3103,7 +3127,7 @@ export function createIgsReaderHost(options = {}) {
 
         if (tab === 'basic') {
             return renderTemplate(getSettingsTabTemplate('basic'), {
-                performancePresetBar: renderPerformancePresetBar(reader, { home: true, extraRows: renderWorldviewRow(bridge.sceneAssets) + renderQualityRow(reader) }),
+                performancePresetBar: renderPerformancePresetBar(reader, { home: true, extraRows: renderWorldviewRow(worldviewAssets) + renderQualityRow(reader) }),
                 advancedFilterOpen: advancedOpen('source-filter'),
                 advancedRegexOpen: advancedOpen('virtual-regex'),
                 openModeField: `<div class="igs-segmented-field">${field(
@@ -3198,24 +3222,12 @@ export function createIgsReaderHost(options = {}) {
                 autoNsfwField: checkbox('bridge.autoIllustration.nsfwEnabled', auto.nsfwEnabled, 'NSFW 自动生图'),
                 autoNsfwHidden: hiddenAttr(!auto.nsfwEnabled),
                 autoNsfwCountField: field('bridge.autoIllustration.nsfwCount', '每层张数', numberInput('bridge.autoIllustration.nsfwCount', auto.nsfwCount, 1, NSFW_COUNT_MAX)),
-                autoAssetSpriteField: checkbox('bridge.autoIllustration.assets.spriteEnabled', auto.assets.spriteEnabled, '自动补全无名角色立绘'),
-                autoAssetBackgroundField: checkbox('bridge.autoIllustration.assets.backgroundEnabled', auto.assets.backgroundEnabled, '自动补全缺失场景背景'),
-                autoAssetStrictField: checkbox('bridge.autoIllustration.assets.strictMatch', auto.assets.strictMatch, '精准场景匹配'),
-                autoAssetMaxField: field('bridge.autoIllustration.assets.maxPerFloor', '每层最多生成数', numberInput('bridge.autoIllustration.assets.maxPerFloor', auto.assets.maxPerFloor, 1, 16)),
-                autoAssetSpriteSizeField: field('bridge.autoIllustration.assets.spriteSize', '立绘尺寸', textInput('bridge.autoIllustration.assets.spriteSize', auto.assets.spriteSize, '832x1216')),
-                autoAssetBackgroundSizeField: field('bridge.autoIllustration.assets.backgroundSize', '背景尺寸', textInput('bridge.autoIllustration.assets.backgroundSize', auto.assets.backgroundSize, '1216x832')),
-                autoAssetBackgroundTemplateField: field('bridge.autoIllustration.assets.templates.background', '场景正向提示词模板', autoTextarea('bridge.autoIllustration.assets.templates.background', auto.assets.templates.background, '必须包含 {tags}')),
-                autoAssetBackgroundNegativeTemplateField: field('bridge.autoIllustration.assets.templates.backgroundNegative', '场景负面提示词模板', autoTextarea('bridge.autoIllustration.assets.templates.backgroundNegative', auto.assets.templates.backgroundNegative, '不希望场景出现的 tag')),
-                autoAssetSpriteTemplateField: field('bridge.autoIllustration.assets.templates.sprite', '人物正向提示词模板', autoTextarea('bridge.autoIllustration.assets.templates.sprite', auto.assets.templates.sprite, '必须包含 {tags}')),
-                autoAssetSpriteNegativeTemplateField: field('bridge.autoIllustration.assets.templates.spriteNegative', '人物负面提示词模板', autoTextarea('bridge.autoIllustration.assets.templates.spriteNegative', auto.assets.templates.spriteNegative, '不希望人物立绘出现的 tag')),
-                autoAssetNsfwExtraField: field('bridge.autoIllustration.assets.templates.nsfwExtra', 'NSFW 附加提示词', autoTextarea('bridge.autoIllustration.assets.templates.nsfwExtra', auto.assets.templates.nsfwExtra, 'NSFW 被拒后重试时追加的提示词')),
                 autoInterludeField: checkbox('bridge.autoIllustration.interludeEnabled', auto.interludeEnabled, '过场插图'),
                 autoInterludeHidden: hiddenAttr(!auto.interludeEnabled),
                 autoInterludeProbabilityField: field('bridge.autoIllustration.interludeProbability', '触发概率 %', numberInput('bridge.autoIllustration.interludeProbability', auto.interludeProbability, 0, 100)),
                 autoInterludeMaxField: field('bridge.autoIllustration.interludeMaxCount', '每层最多张数', numberInput('bridge.autoIllustration.interludeMaxCount', auto.interludeMaxCount, 1, 16)),
                 autoAssetSpriteField: checkbox('bridge.autoIllustration.assets.spriteEnabled', auto.assets.spriteEnabled, '自动生成角色立绘'),
                 autoAssetBackgroundField: checkbox('bridge.autoIllustration.assets.backgroundEnabled', auto.assets.backgroundEnabled, '自动生成场景背景'),
-                autoAssetStrictField: checkbox('bridge.autoIllustration.assets.strictMatch', auto.assets.strictMatch, '严格匹配背景素材'),
                 autoAssetMaxField: field('bridge.autoIllustration.assets.maxPerFloor', '每层最多素材数', numberInput('bridge.autoIllustration.assets.maxPerFloor', auto.assets.maxPerFloor, 1, 16)),
                 autoAssetSpriteSizeField: field('bridge.autoIllustration.assets.spriteSize', '立绘尺寸', textInput('bridge.autoIllustration.assets.spriteSize', auto.assets.spriteSize, '832x1216')),
                 autoAssetBackgroundSizeField: field('bridge.autoIllustration.assets.backgroundSize', '背景尺寸', textInput('bridge.autoIllustration.assets.backgroundSize', auto.assets.backgroundSize, '1216x832')),
@@ -3263,12 +3275,54 @@ export function createIgsReaderHost(options = {}) {
         }
 
         if (tab === 'scene') {
-            const sceneAssets = bridge.sceneAssets || {};
+            const scopeState = rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+            // 列表显示这张卡实际会用的一份（本卡盖在全局上）。每条带「本卡 / 全局」标签，改哪条就写回它所在的那一边。
+            const sceneAssets = draftEffectiveAssets(state.activeSettings);
+            const assetRoot = bridge.sceneAssets || {};
+            const cardKey = String(scopeState.assetScopeKey || '');
+            const storage = (options.global || globalThis).localStorage;
+            const scopeTag = (collection, name) => {
+                if (!cardKey) return '';
+                const inCard = Boolean(assetOwnerKey(assetRoot, cardKey, [collection], name));
+                // 两格切换：亮的那格是现在放的地方，点另一格就迁过去。
+                const move = `asset-move:${collection}:${encodeURIComponent(String(name))}`;
+                const seg = (here, label, title) => (here
+                    ? `<span class="igs-scope-seg is-on" aria-current="true">${label}</span>`
+                    : `<button type="button" class="igs-scope-seg" data-action="${move}" title="${title}">${label}</button>`);
+                return `<span class="igs-asset-scope-switch" role="group" aria-label="放在本卡还是全局">${seg(inCard, '本卡', '收进本卡：只有这张角色卡用')}${seg(!inCard, '全局', '放到全局：所有角色卡共用')}</span>`
+                    + (inCard && assetShadowsGlobal(assetRoot, cardKey, collection, name) ? '<span class="igs-asset-scope-note" title="全局另有一份同名的，这张卡用本卡这份">覆盖全局</span>' : '');
+            };
+            const presetMap = loadLegacyPresets(storage);
+            const presetNames = Object.entries(presetMap).filter(([, preset]) => legacyPresetHasContent(preset) || presetCardLayers(preset).length).map(([name]) => name);
+            // 预设是存档 / 模板：存这张卡实际在用的一套，套用时整层换成预设。旧版存的预设也在这里。
+            const presetRow = (name) => {
+                const n = encodeURIComponent(name);
+                // 分层预设各回各层，一个「套用」就够；旧版不分层的预设才问套到本卡还是全局。
+                const layered = isLayeredPreset(presetMap[name]);
+                const cards = presetCardLayers(presetMap[name]).map((layer) => layer.label);
+                const where = layered ? `<span class="igs-asset-preset-where">全局${cards.length ? ` + ${esc(cards.join('、'))}` : ''}</span>` : '';
+                const apply = layered
+                    ? `<button type="button" class="igs-review-link is-primary" data-action="preset-apply:${n}">套用</button>`
+                    : cardKey
+                    ? `<details class="igs-add-menu igs-asset-preset-apply"><summary class="igs-review-link is-primary">套用</summary><div class="igs-add-menu-list" role="menu">`
+                        + menuItem(`preset-apply:${n}:card`, `套到本卡「${scopeState.assetScopeLabel}」`) + menuItem(`preset-apply:${n}:global`, '套到全局') + '</div></details>'
+                    : `<button type="button" class="igs-review-link is-primary" data-action="preset-apply:${n}:global">套用</button>`;
+                return `<div class="igs-asset-preset-row"><span class="igs-asset-preset-name" title="${esc(name)}">${esc(name)}</span>${where}${apply}`
+                    + renderRowMenu([menuItem(`preset-export:${n}`, '导出文件'), menuItem(`preset-rename:${n}`, '重命名'), menuItem(`preset-delete:${n}`, '删除', ' is-danger')], `预设「${name}」的操作`)
+                    + '</div>';
+            };
+            const presetOpen = asyncState.advancedOpen && asyncState.advancedOpen['asset-presets'] ? ' open' : '';
+            const presetSection = `<details class="igs-asset-presets" data-advanced="asset-presets"${presetOpen}><summary class="igs-asset-presets-summary">预设</summary>`
+                + `<div class="igs-asset-presets-body">${presetNames.map(presetRow).join('') || '<div class="igs-asset-presets-empty">还没有预设。把现在这一套存下来，以后可以套到别的角色卡。</div>'}`
+                + '<div class="igs-asset-presets-tools"><button type="button" class="igs-settings-action" data-action="preset-save">存为预设</button><button type="button" class="igs-settings-action" data-action="preset-import">导入预设</button></div></div></details>';
+            const assetScopeBar = `<div class="igs-asset-scope-bar"><span class="igs-asset-scope-name">${cardKey ? `当前角色卡：${esc(scopeState.assetScopeLabel)}` : '没打开角色卡，素材都在全局'}</span>`
+                + (scopeState.assetScopeKind === 'card' && cardKey ? '<button type="button" class="igs-settings-action" data-action="asset-card-export">导出这张角色卡</button>' : '')
+                + '<button type="button" class="igs-settings-action" data-action="asset-card-import">导入角色卡素材包</button></div>'
+                + presetSection;
             const disabled = !sceneAssets.enabled;
-            const sceneSettingsSubTab = normalizeSceneSettingsSubTab(asyncState.sceneSettingsSubTab);
             const subTab = normalizeSceneSubTab(asyncState.sceneSubTab);
-            // 文件夹只是本地界面归类：按当前预设读取，素材数据原样传给原有列表渲染器。
-            const assetFolders = loadAssetFolders((options.global || globalThis).localStorage, asyncState.scenePresetName || '');
+            // 文件夹只是本地界面归类：按当前角色卡存，卡里还没建过就沿用全局的。
+            const assetFolders = loadAssetFoldersFor(storage, cardKey);
             const firstUrl = (values) => (values.map((v) => String(v || '').trim()).find(Boolean) || '');
             const generatedService = options.generatedAssets || null;
             const resolveGenerated = (url) => (isGeneratedAssetUrl(url)
@@ -3280,9 +3334,34 @@ export function createIgsReaderHost(options = {}) {
                 weatherGroups: sceneAssets.weatherGroups || [],
                 resolveUrl: resolveGenerated,
                 folderSelect: (name) => renderAssetFolderSelect('scenes', name, assetFolders.scenes),
+                scopeTag,
             };
-            const scenesHtml = renderAssetFolderView('scenes', sceneAssets.scenes || {}, {
+            const scopeFilters = asyncState.assetScopeFilter && typeof asyncState.assetScopeFilter === 'object' ? asyncState.assetScopeFilter : {};
+            const ownedBy = (collection, name) => (assetOwnerKey(assetRoot, cardKey, [collection], name) ? 'card' : 'global');
+            const filterOf = (collection) => (cardKey && (scopeFilters[collection] === 'card' || scopeFilters[collection] === 'global') ? scopeFilters[collection] : 'all');
+            const scopedEntries = (collection) => {
+                const all = sceneAssets[collection] || {};
+                const filter = filterOf(collection);
+                if (filter === 'all') return all;
+                return Object.fromEntries(Object.entries(all).filter(([name]) => ownedBy(collection, name) === filter));
+            };
+            // 只在打开了角色卡时出现。切到「本卡」可以一键全放到全局，切到「全局」可以一键全收进本卡。
+            const scopeFilterBar = (collection) => {
+                if (!cardKey) return '';
+                const names = Object.keys(sceneAssets[collection] || {});
+                const cardCount = names.filter((name) => ownedBy(collection, name) === 'card').length;
+                const counts = { all: names.length, card: cardCount, global: names.length - cardCount };
+                const filter = filterOf(collection);
+                const chip = (id, label) => `<button type="button" class="igs-asset-filter${filter === id ? ' is-active' : ''}" data-action="asset-filter:${collection}:${id}" aria-pressed="${filter === id}">${label}<span class="igs-asset-filter-count">${counts[id]}</span></button>`;
+                // 一键迁移常驻在筛选旁：点开选方向，数量为 0 的那项不能点，选了还会再确认一次。
+                const bulkItem = (dest, label, count) => `<button type="button" class="igs-add-menu-item" data-action="asset-move-all:${collection}:${dest}" role="menuitem"${count ? '' : ' disabled'}>${label}</button>`;
+                const bulk = `<details class="igs-add-menu igs-asset-bulk-menu" data-asset-bulk="${collection}"><summary class="igs-btn-mgr-icon igs-asset-bulk" title="一键迁移" aria-label="一键迁移">${ASSET_MOVE_ALL_SVG}</summary>`
+                    + `<div class="igs-add-menu-list" role="menu">${bulkItem('global', `本卡的 ${counts.card} 个全部放到全局`, counts.card)}${bulkItem('card', `全局的 ${counts.global} 个全部收进本卡`, counts.global)}</div></details>`;
+                return `<span class="igs-asset-filter-group" role="group" aria-label="按归属筛选" data-asset-filter="${collection}">${chip('all', '全部')}${chip('card', '本卡')}${chip('global', '全局')}</span>${bulk}`;
+            };
+            const scenesHtml = renderAssetFolderView('scenes', scopedEntries('scenes'), {
                 state: assetFolders,
+                lead: scopeFilterBar('scenes'),
                 renderList: (subset) => renderSceneAssetList(subset, sceneListOptions),
                 thumbOf: (name, value) => resolveGenerated(typeof value === 'string' ? value : firstUrl([value && value.url].concat(Object.values((value && value.times) || {}).map((t) => (typeof t === 'string' ? t : t && t.url))))),
             });
@@ -3295,28 +3374,37 @@ export function createIgsReaderHost(options = {}) {
                 moodGroups: sceneAssets.moodGroups || [],
                 expandedSlots: asyncState.expandedSpriteSlots instanceof Set ? asyncState.expandedSpriteSlots : new Set(),
                 statusAvatars: sceneAssets.statusAvatars || {},
+                // 角色学院只在魔法世界观下有意义；其他世界观的魔法星夜只当星空框用，不显示这一行。
+                magicHouse: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY && resolveWorldview(worldviewAssets) === 'magic' ? { sceneAssets, fallback: reader.magicHouse } : null,
                 resolveUrl: resolveGenerated,
                 expressionNotes: normalizeGeneratedLibrary(sceneAssets.generated).expressionNotes,
-                folderSelect: (name) => renderAssetFolderSelect('characters', name, assetFolders.characters),
+                folderSelect: (name, opts) => renderAssetFolderSelect('characters', name, assetFolders.characters, opts),
+                scopeTag,
+                isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]),
             };
-            const charsHtml = renderAssetFolderView('characters', sceneAssets.characters || {}, {
+            const charsHtml = renderAssetFolderView('characters', scopedEntries('characters'), {
                 state: assetFolders,
+                lead: scopeFilterBar('characters'),
                 renderList: (subset) => renderCharacterAssetList(subset, charListOptions),
                 thumbOf: (name, moods) => resolveGenerated(firstUrl(Object.values(moods || {}).concat([(sceneAssets.statusAvatars || {})[name]]))),
             });
-            const scenePresets = loadScenePresets((options.global || globalThis).localStorage);
-            const scenePresetBarHtml = renderScenePresetBar(scenePresets, asyncState.scenePresetName || '');
-            const generatedPane = renderGeneratedAssetPane({
+            const generatedArgs = {
                 library: normalizeGeneratedLibrary(sceneAssets.generated),
                 characters: sceneAssets.characters || {},
+                scenes: sceneAssets.scenes || {},
                 temp: generatedService && typeof generatedService.listTemp === 'function' ? generatedService.listTemp() : [],
                 resolveUrl: resolveGenerated,
-                presetNames: Object.keys(scenePresets || {}),
-                currentPreset: asyncState.scenePresetName || '',
                 moodGroups: sceneAssets.moodGroups || [],
-            });
-            const subTabsHtml = `<div class="igs-scene-subtabs" role="tablist">`
-                + SCENE_SUBTAB_DEFS.map(([id, label]) => `<button type="button" class="igs-scene-subtab${subTab === id ? ' is-active' : ''}" data-scene-subtab="${id}" role="tab" aria-selected="${subTab === id ? 'true' : 'false'}">${label}</button>`).join('')
+            };
+            // 待确认：AI 写出但没登记的服装词、词库外的情绪词、生成了还没入库的图。
+            const resolveOutfit = createOutfitResolver(sceneAssets);
+            const outfitReview = dropConfirmedOutfitReview(storage, (character, word) => Boolean(resolveOutfit(character, word)));
+            const moodReview = loadMoodReview(storage);
+            const waitingCount = outfitReview.length + moodReview.length + countGeneratedWaiting(generatedArgs);
+            const reviewPane = `<div class="igs-settings-section igs-review-pane">`
+                + renderOutfitReviewList(outfitReview, sceneAssets.characterOutfits || {}, sceneAssets.characters || {})
+                + renderMoodReviewList(moodReview, sceneAssets.moodGroups)
+                + renderGeneratedAssetPane(generatedArgs)
                 + `</div>`;
             const scenesPane = `<div class="igs-settings-section">
         <div class="igs-settings-section-head">
@@ -3329,26 +3417,22 @@ export function createIgsReaderHost(options = {}) {
             </div>
           </details>
         </div>
+        ${checkbox('bridge.autoIllustration.assets.strictMatch', normalizeAutoIllustrationSettings(bridge.autoIllustration).assets.strictMatch, '严格匹配场景素材')}
+        <div class="igs-source-filter-note">开启后只认精确与别名命中的背景，不拿相近场景的图顶替；匹配不到就按缺失补画。</div>
         ${scenesHtml}
       </div>`;
             const charactersPane = `<div class="igs-settings-section">
         <div class="igs-settings-section-head">
           <div class="igs-settings-subhead">角色立绘</div>
-          <button class="igs-btn-mgr-icon" data-action="scene-add-char" type="button" title="添加角色">+</button>
+          ${CHARACTER_ADD_MENU}
         </div>
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
         ${checkbox('bridge.sceneAssets.moodFuzzyMatch', sceneAssets.moodFuzzyMatch, '情绪词模糊匹配')}
-        <div class="igs-source-filter-note">词库里没有的相近情绪词也会自动归组（如「嘲弄」归入「嘲讽」）。可能归错，可在下方「待确认情绪词」里核对。</div>
-        ${renderMoodReviewList(loadMoodReview((options.global || globalThis).localStorage))}
-        ${renderOutfitReviewList(dropConfirmedOutfitReview((options.global || globalThis).localStorage, sceneAssets.wardrobe), sceneAssets.characterOutfits || {}, sceneAssets.characters || {})}
+        <div class="igs-source-filter-note">词库里没有的相近情绪词也会自动归组（如「嘲弄」归入「嘲讽」）。可能归错，可在「待确认」页核对。</div>
         ${renderDnaCandidateBar(asyncState.dnaCandidate)}
         ${charsHtml}
         ${renderDnaOnlyCharacterList(sceneAssets.characterDna || {}, sceneAssets.characters || {})}
-        <div class="igs-settings-row"><button class="igs-settings-action" data-action="reset-mood-groups" type="button">恢复默认词库</button></div>
       </div>`;
-            const sceneSettingsSubTabs = SCENE_SETTINGS_SUBTAB_DEFS.map(([id, label]) => (
-                `<button type="button" class="igs-scene-settings-subtab${sceneSettingsSubTab === id ? ' is-active' : ''}" data-scene-settings-subtab="${id}" role="tab" aria-selected="${sceneSettingsSubTab === id ? 'true' : 'false'}">${label}</button>`
-            )).join('');
             const promptRuleDraft = typeof asyncState.promptRuleDraft === 'string'
                 ? asyncState.promptRuleDraft
                 : String(sceneAssets.promptRule || '');
@@ -3362,15 +3446,24 @@ export function createIgsReaderHost(options = {}) {
                         'AI 不按标签输出时改回聊天末尾。')
                     + checkbox('bridge.sceneAssets.promptAdaptive', sceneAssets.promptAdaptive !== false, '按需注入')
                     + '<div class="igs-source-filter-note">只在用得上时附完整说明。</div></details>',
-                scenePresetBar: scenePresetBarHtml,
-                sceneSubTabs: subTabsHtml,
-                sceneSubPane: subTab === 'wardrobe' ? renderWardrobe(sceneAssets.wardrobe, dropConfirmedOutfitReview((options.global || globalThis).localStorage, sceneAssets.wardrobe), resolveGenerated) : (subTab === 'generated' ? generatedPane : (subTab === 'characters' ? charactersPane : scenesPane)),
+                wardrobeSection: renderWardrobe(scopedEntries('wardrobe'), { resolveUrl: resolveGenerated, scopeTag, focus: asyncState.wardrobeFocus || '', lead: scopeFilterBar('wardrobe') }),
+                moodSection: renderMoodGroupList(sceneAssets.moodGroups, { isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]) })
+                    + '<div class="igs-settings-row"><button class="igs-settings-action" data-action="mood-apply-preset" type="button">套用预设词库</button><button class="igs-settings-action" data-action="reset-mood-groups" type="button">恢复默认词库</button></div>',
             };
+            const sceneSubTabs = SCENE_SUBTAB_DEFS.map(([id, label]) => {
+                const count = id === 'review' && waitingCount ? `<span class="igs-scene-subtab-count">${waitingCount}</span>` : '';
+                return `<button type="button" class="igs-scene-settings-subtab${subTab === id ? ' is-active' : ''}" data-scene-subtab="${id}" role="tab" aria-selected="${subTab === id ? 'true' : 'false'}">${label}${count}</button>`;
+            }).join('');
+            const assetPane = (html) => `<div class="igs-settings-grid" data-scene-settings-pane="assets"><div class="igs-source-filter">${html}</div></div>`;
+            const sceneSubPane = subTab === 'rules'
+                ? renderTemplate(SCENE_RULES_TEMPLATE, sceneValues)
+                : assetPane(subTab === 'review' ? reviewPane : (subTab === 'scenes' ? scenesPane : charactersPane));
             return renderTemplate(getSettingsTabTemplate('scene'), {
                 sceneToggle: checkbox('bridge.sceneAssets.enabled', sceneAssets.enabled, '启用场景素材模式'),
                 sceneHidden: hiddenAttr(disabled),
-                sceneSettingsSubTabs,
-                sceneSettingsSubPane: renderTemplate(getSceneSettingsSubTabTemplate(sceneSettingsSubTab), sceneValues),
+                assetScopeBar,
+                sceneSubTabs,
+                sceneSubPane,
             });
         }
 
@@ -3403,8 +3496,9 @@ export function createIgsReaderHost(options = {}) {
             ...sectionResetPlaceholders(),
             fontSizeField: field('readerSettings.fontSize', '字体大小', selectInput('readerSettings.fontSize', reader.fontSize, [12, 13, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30].map((n) => [n, `${n}px`]))),
             dialogFontWeightField: field('readerSettings.dialogFontWeight', '对话框字重', selectInput('readerSettings.dialogFontWeight', reader.dialogFontWeight == null ? 'null' : reader.dialogFontWeight, [['null', '跟随当前样式'], [300, '细体'], [400, '常规'], [500, '中等'], [700, '粗体']])),
-            dialogSkinField: field('readerSettings.dialogSkin', '对话框风格', selectInput('readerSettings.dialogSkin', reader.dialogSkin, [['default', '默认'], ['western-classic', '西欧古典'], [DIALOG_SKIN_ELEGANT_EUROPEAN, '优雅欧式'], [DIALOG_SKIN_RETRO_JAPANESE, '复古日式'], [DIALOG_SKIN_ADVENTURE_JOURNEY, '冒险旅途'], [DIALOG_SKIN_PLANT_COFFEE, '植物咖啡'], [DIALOG_SKIN_WARM_PICTUREBOOK, '温暖绘本'], [DIALOG_SKIN_DAY_MINIMAL, '日间简约'], [DIALOG_SKIN_BLACK_WHITE_MANGA, '黑白漫画'], [DIALOG_SKIN_CUTE_PINK, '超可爱粉'], [DIALOG_SKIN_GRADIENT_VEIL, '渐变黑幕']])),
+            dialogSkinField: field('readerSettings.dialogSkin', '对话框风格', selectInput('readerSettings.dialogSkin', reader.dialogSkin, [['default', '默认'], ['western-classic', '西欧古典'], [DIALOG_SKIN_ELEGANT_EUROPEAN, '优雅欧式'], [DIALOG_SKIN_MAGIC_ACADEMY, '魔法星夜'], [DIALOG_SKIN_RETRO_JAPANESE, '复古日式'], [DIALOG_SKIN_QINGLV, '青绿山水'], [DIALOG_SKIN_ADVENTURE_JOURNEY, '冒险旅途'], [DIALOG_SKIN_PLANT_COFFEE, '植物咖啡'], [DIALOG_SKIN_WARM_PICTUREBOOK, '温暖绘本'], [DIALOG_SKIN_FAIRY_TALE, '童话小镇'], [DIALOG_SKIN_DAY_MINIMAL, '日间简约'], [DIALOG_SKIN_BLACK_WHITE_MANGA, '黑白漫画'], [DIALOG_SKIN_CUTE_PINK, '超可爱粉'], [DIALOG_SKIN_GRADIENT_VEIL, '渐变黑幕']])),
             gradientVeilFields: gradientVeilDialog ? '<div class="igs-gradient-veil-settings">' + field('readerSettings.gradientVeil.color', '黑幕颜色', colorInput('readerSettings.gradientVeil.color', reader.gradientVeil.color)) + field('readerSettings.gradientVeil.heightPercent', '渐变高度', selectInput('readerSettings.gradientVeil.heightPercent', reader.gradientVeil.heightPercent, [30, 40, 50, 60, 70].map((n) => [n, `${n}%`]))) + field('readerSettings.gradientVeil.opacity', '最大不透明度', selectInput('readerSettings.gradientVeil.opacity', reader.gradientVeil.opacity, [.4, .55, .7, .85, 1].map((n) => [n, `${Math.round(n * 100)}%`]))) + field('readerSettings.gradientVeil.speakerStyle', '姓名样式', selectInput('readerSettings.gradientVeil.speakerStyle', reader.gradientVeil.speakerStyle, [['default', '默认主题'], ['plain-text', '纯文字']])) + '</div>' : '',
+            magicHouseField: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY ? field('readerSettings.magicHouse', resolveWorldview(bridge.sceneAssets) === 'magic' ? '学院配色' : '配色', selectInput('readerSettings.magicHouse', normalizeMagicHouse(reader.magicHouse), MAGIC_HOUSES.map((house) => [house.id, house.label]))) + (MAGIC_HOUSES.find((house) => house.id === normalizeMagicHouse(reader.magicHouse)).custom ? field('readerSettings.magicAccent', '装饰颜色', colorInput('readerSettings.magicAccent', normalizeMagicAccent(reader.magicAccent))) : '') : '',
             classicDialogWidthPercentField: classicDialog ? field('readerSettings.classicDialogWidthPercent', '电脑端宽度', selectInput('readerSettings.classicDialogWidthPercent', reader.classicDialogWidthPercent, [60, 70, 80, 90, 100].map((n) => [n, `${n}%`]))) : '',
             skinDialogScaleField: classicDialog || illustratedDialog ? field('readerSettings.skinDialogScale', '对话框高度', selectInput('readerSettings.skinDialogScale', reader.skinDialogScale, SKIN_DIALOG_SCALE_OPTIONS.map((n) => [n, n === 1 ? '原尺寸' : `${Math.round(n * 100)}%`]))) : '',
             optionFontSizeField: field('readerSettings.optionFontSize', '选项字体大小', selectInput('readerSettings.optionFontSize', reader.optionFontSize, [10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map((n) => [n, `${n}px`]))),
@@ -3494,13 +3588,14 @@ export function createIgsReaderHost(options = {}) {
             dialogBgOpacityField: !dialogBgEditable ? '' : field(`${themePath}.bgOpacity`, '背景不透明度', selectInput(`${themePath}.bgOpacity`, displayTheme.bgOpacity == null ? 'null' : displayTheme.bgOpacity, [['null', '跟随玻璃'], [0, '0%'], [.1, '10%'], [.2, '20%'], [.35, '35%'], [.5, '50%'], [.62, '62%'], [.74, '74%'], [.88, '88%'], [1, '100%']], !themeCustom)),
         };
         if (readerSubTab === 'performance') {
-            readerValues.performanceSections = renderPerformanceSettings(reader, { worldview: renderWorldviewRow(bridge.sceneAssets),
+            readerValues.performanceSections = renderPerformanceSettings(reader, { worldview: renderWorldviewRow(worldviewAssets), worldviewId: resolveWorldview(worldviewAssets),
                 typewriter: readerValues.playbackSpeed + readerValues.typewriterToggle + readerValues.typewriterControls,
                 stageShake: [readerValues.stageShakeToggle, readerValues.stageShakeSettings],
                 weatherFx: [readerValues.weatherFxToggle, readerValues.weatherFxSettings],
                 chatShow: [readerValues.chatShowToggle, readerValues.chatShowSettings],
                 narrationFilter: readerValues.narrationFilterToggle,
                 sentencePaging: readerValues.sentencePagingToggle,
+                sentencePagingOn: Boolean(bridge.sentencePaging),
                 nsfw: readerValues.nsfwSpriteModeField + readerValues.nsfwVeilLevelField,
             }, (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]));
         }
@@ -3663,6 +3758,15 @@ export function createIgsReaderHost(options = {}) {
             if (event.key === 'h' || event.key === 'H') {
                 event.preventDefault();
                 controller.invokeAction('hide');
+                return;
+            }
+            if ((event.key === 't' || event.key === 'T') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+                const reader = state.activeReader.snapshot && state.activeReader.snapshot.readerSettings;
+                const display = reader ? resolveBilingualDisplay(reader.bilingual, reader._bilingualDisplay) : '';
+                if (!display) return;
+                event.preventDefault();
+                state.bilingualDisplay = { base: normalizeBilingualSettings(reader.bilingual).display, value: nextBilingualDisplay(display) };
+                rerenderActiveReader();
             }
         };
         // 内嵌模式：点挂载楼层的小铅笔（.mes_edit）时先关闭阅读器并恢复原文；
@@ -3930,11 +4034,6 @@ export function createIgsReaderHost(options = {}) {
                 controller.goToSetting(settingGo.getAttribute('data-setting-go'));
                 return;
             }
-            const sceneSettingsSubTab = event.target.closest('[data-scene-settings-subtab]');
-            if (sceneSettingsSubTab) {
-                controller.switchSceneSettingsSubTab(sceneSettingsSubTab.getAttribute('data-scene-settings-subtab'));
-                return;
-            }
             const sceneSubTab = event.target.closest('[data-scene-subtab]');
             if (sceneSubTab) {
                 controller.switchSceneSubTab(sceneSubTab.getAttribute('data-scene-subtab'));
@@ -3983,7 +4082,13 @@ export function createIgsReaderHost(options = {}) {
                 event.preventDefault();
                 const busyLabel = settingsBusyLabel(actName);
                 if (busyLabel) {
-                    if (settingsBusyActions.has(actName)) return;
+                    // 菜单项点完就收起菜单，进度看底部进度条；同一格还在画时说一声，不再静默吞掉。
+                    const menu = action.closest('details.igs-add-menu');
+                    if (menu) menu.open = false;
+                    if (settingsBusyActions.has(actName)) {
+                        showSettingsNotice('这一张还在画，画好会自动换上。');
+                        return;
+                    }
                     settingsBusyActions.add(actName);
                     const restore = markSettingsButtonBusy(action, busyLabel);
                     try {
@@ -4035,7 +4140,8 @@ export function createIgsReaderHost(options = {}) {
             }
             const statusAvatarChar = target.getAttribute('data-status-avatar-char');
             if (statusAvatarChar) {
-                const assets = state.activeSettings.draft.bridge.sceneAssets;
+                rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+                const assets = draftAssetLibrary(state.activeSettings, { collections: ASSET_CHARACTER_FIELDS, name: statusAvatarChar });
                 const avatars = assets.statusAvatars || (assets.statusAvatars = {});
                 if (Object.hasOwn(avatars, statusAvatarChar) || !['__proto__', 'constructor', 'prototype'].includes(statusAvatarChar)) {
                     avatars[statusAvatarChar] = target.value;
@@ -4043,10 +4149,20 @@ export function createIgsReaderHost(options = {}) {
                 }
                 return;
             }
+            const charHouse = target.getAttribute('data-char-house');
+            if (charHouse && !['__proto__', 'constructor', 'prototype'].includes(charHouse)) {
+                const assets = state.activeSettings.draft.bridge.sceneAssets;
+                const houses = assets.characterHouses || (assets.characterHouses = {});
+                if (target.value) houses[charHouse] = target.value;
+                else delete houses[charHouse];
+                state.activeSettings.snapshot.draft = cloneData(state.activeSettings.draft);
+                return;
+            }
             const wardrobeName = target.getAttribute('data-wardrobe-name');
             if (wardrobeName) {
                 if (['__proto__', 'constructor', 'prototype'].includes(wardrobeName)) return;
-                const assets = state.activeSettings.draft.bridge.sceneAssets;
+                rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+                const assets = draftAssetLibrary(state.activeSettings, { collections: ['wardrobe'], name: wardrobeName });
                 const wardrobe = assets.wardrobe && typeof assets.wardrobe === 'object' && !Array.isArray(assets.wardrobe)
                     ? assets.wardrobe : (assets.wardrobe = {});
                 const entry = wardrobe[wardrobeName] && typeof wardrobe[wardrobeName] === 'object' && !Array.isArray(wardrobe[wardrobeName])
@@ -4060,7 +4176,8 @@ export function createIgsReaderHost(options = {}) {
             if (dnaChar && dnaField) {
                 // 角色 DNA 输入只更新草稿，关闭设置时统一保存；不重绘，避免丢焦点。
                 if (!CHARACTER_DNA_FIELDS.includes(dnaField) || ['__proto__', 'constructor', 'prototype'].includes(dnaChar)) return;
-                const assets = state.activeSettings.draft.bridge.sceneAssets;
+                rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+                const assets = draftAssetLibrary(state.activeSettings, { collections: ASSET_CHARACTER_FIELDS, name: dnaChar });
                 const dnaMap = assets.characterDna && typeof assets.characterDna === 'object' && !Array.isArray(assets.characterDna)
                     ? assets.characterDna : (assets.characterDna = {});
                 const entry = Object.hasOwn(dnaMap, dnaChar) && dnaMap[dnaChar] && typeof dnaMap[dnaChar] === 'object' ? dnaMap[dnaChar] : (dnaMap[dnaChar] = {});
@@ -4119,24 +4236,23 @@ export function createIgsReaderHost(options = {}) {
                 controller.invoke(`asset-folder-move:${folderMoveKind}:${encodeURIComponent(assetName)}:${encodeURIComponent(event.target.value)}`);
                 return;
             }
-            // 生成素材「移到 / 复制到预设」：选项值为 move|copy:<编码后的预设名>。
-            const genTransferType = event.target && event.target.getAttribute ? event.target.getAttribute('data-gen-transfer') : '';
-            if (genTransferType) {
-                const choice = String(event.target.value || '');
-                const colon = choice.indexOf(':');
-                if (colon < 0) return;
-                const genName = event.target.getAttribute('data-gen-name') || '';
-                controller.invoke(`gen-lib-transfer:${choice.slice(0, colon)}:${encodeURIComponent(genTransferType)}:${encodeURIComponent(genName)}:${choice.slice(colon + 1)}`);
+            const reviewChar = event.target && event.target.getAttribute ? event.target.getAttribute('data-outfit-review-char') : '';
+            if (reviewChar) {
+                if (!event.target.value) return;
+                const reviewWord = event.target.getAttribute('data-outfit-review-word') || '';
+                controller.invoke(`outfit-review-assign:${[reviewChar, reviewWord, event.target.value].map((value) => encodeURIComponent(value || '')).join(':')}`);
+                return;
+            }
+            const moodReviewWord = event.target && event.target.getAttribute ? event.target.getAttribute('data-mood-review-word') : '';
+            if (moodReviewWord) {
+                if (!event.target.value) return;
+                controller.invoke(`mood-review-assign:${encodeURIComponent(moodReviewWord)}:${encodeURIComponent(event.target.value)}`);
                 return;
             }
             const wardrobeChar = event.target && event.target.getAttribute ? event.target.getAttribute('data-outfit-wardrobe-char') : '';
             if (wardrobeChar) {
                 const wardrobeOutfit = event.target.getAttribute('data-outfit-wardrobe') || '';
                 controller.invoke(`scene-set-outfit-wardrobe-url:${[wardrobeChar, wardrobeOutfit, event.target.value].map((value) => encodeURIComponent(value || '')).join(':')}`);
-                return;
-            }
-            if (event.target && event.target.getAttribute && event.target.getAttribute('data-preset-select') !== null) {
-                controller.invoke('scene-preset-apply:' + encodeURIComponent(event.target.value));
                 return;
             }
             // 一键档位条的「适配世界」下拉：转成 worldview:<id> 动作，未就绪的世界观由动作层拒绝。
@@ -4150,9 +4266,18 @@ export function createIgsReaderHost(options = {}) {
             if (!path) return;
             controller.setValue(path, target.value, { liveInput: target.tagName !== 'SELECT' && target.type !== 'color' });
         });
+        // 点下拉菜单（⋯、＋）以外的地方，把开着的菜单收起。
+        root.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!root.querySelectorAll) return;
+            for (const menu of root.querySelectorAll('details.igs-add-menu[open]')) {
+                if (!(target && typeof menu.contains === 'function' && menu.contains(target))) menu.open = false;
+            }
+        }, true);
         // toggle 不冒泡，用捕获阶段记住「高级」折叠区的展开状态，避免重渲染后被收起。
         root.addEventListener('toggle', (event) => {
             const target = event.target;
+            if (target && target.classList && target.classList.contains('igs-add-menu')) placeRowMenu(target, doc.defaultView || globalThis);
             const key = target && target.getAttribute ? target.getAttribute('data-advanced') : '';
             if (!key || !state.activeSettings || !state.activeSettings.asyncState) return;
             const asyncState = state.activeSettings.asyncState;
@@ -4258,7 +4383,8 @@ export function createIgsReaderHost(options = {}) {
     function mutateGeneratedLibrary(mutator) {
         if (state.activeSettings) {
             const bridge = state.activeSettings.draft.bridge = state.activeSettings.draft.bridge || {};
-            const sceneAssets = bridge.sceneAssets = bridge.sceneAssets || {};
+            rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+            const sceneAssets = draftAssetLibrary(state.activeSettings);
             const result = mutator(sceneAssets.generated);
             if (!result || result.ok === false) return result || { ok: false };
             sceneAssets.generated = result.library;
@@ -4268,9 +4394,38 @@ export function createIgsReaderHost(options = {}) {
         }
         let result = null;
         const saved = saveBridgePatch((bridge) => {
-            result = mutator(bridge.sceneAssets && bridge.sceneAssets.generated);
+            const root = bridge.sceneAssets = bridge.sceneAssets || {};
+            const scope = resolveAssetScope(getSillyTavernContext(options.global || globalThis));
+            relocateLegacyCard(root, scope.key, scope.legacyKey);
+            const bucket = scope.key ? ensureCardLibrary(root, scope.key) : root;
+            result = mutator(bucket.generated);
             if (!result || result.ok === false) return null;
-            return { sceneAssets: { ...(bridge.sceneAssets || {}), generated: result.library } };
+            bucket.generated = result.library;
+            return { sceneAssets: root };
+        });
+        if (!result || result.ok === false) return saved.reason === 'missing-save-handler' ? saved : (result || { ok: false });
+        return saved && saved.ok !== false ? result : (saved || { ok: false, reason: 'save-failed' });
+    }
+
+    function mutateSceneLibrary(mutator) {
+        if (state.activeSettings) {
+            rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+            const sceneAssets = draftAssetLibrary(state.activeSettings);
+            const result = mutator(sceneAssets);
+            if (!result || result.ok === false) return result || { ok: false };
+            const persisted = persistSettingsDraft();
+            if (persisted.ok !== false) rerenderSettings();
+            return persisted.ok === false ? persisted : result;
+        }
+        let result = null;
+        const saved = saveBridgePatch((bridge) => {
+            const root = bridge.sceneAssets = bridge.sceneAssets || {};
+            const scope = resolveAssetScope(getSillyTavernContext(options.global || globalThis));
+            relocateLegacyCard(root, scope.key, scope.legacyKey);
+            const bucket = scope.key ? ensureCardLibrary(root, scope.key) : root;
+            result = mutator(bucket);
+            if (!result || result.ok === false) return null;
+            return { sceneAssets: root };
         });
         if (!result || result.ok === false) return saved.reason === 'missing-save-handler' ? saved : (result || { ok: false });
         return saved && saved.ok !== false ? result : (saved || { ok: false, reason: 'save-failed' });
@@ -4294,14 +4449,33 @@ export function createIgsReaderHost(options = {}) {
         const withDna = status === 'library-dna' && item.type === 'sprite';
         if (status === 'library-dna') status = 'library';
         let addedName = '';
-        if (status === 'library') {
-            const added = mutateGeneratedLibrary((library) => addGeneratedAssetToLibrary(library, item, name || item.name));
+        if (status === 'library' && item.type === 'background') {
+            const added = mutateSceneLibrary((assets) => {
+                const bound = bindGeneratedBackground(assets, item, name || item.name);
+                if (!bound.ok) return bound;
+                assets.scenes = bound.scenes;
+                return bound;
+            });
             if (!added || added.ok === false) {
-                writeToastSafe('加入素材库失败：名称不能为空');
+                writeToastSafe('加入场景素材失败：名称不能为空');
                 return;
             }
             addedName = added.name;
-            writeToastSafe(`已加入素材库「${added.name}」`);
+            writeToastSafe(`已放入场景素材「${added.name}」`);
+        } else if (status === 'library') {
+            const added = mutateSceneLibrary((assets) => {
+                const bound = bindGeneratedSprite(assets, name || item.name, item.imageId ? `igs-gen:${item.imageId}` : '', { replace: true });
+                if (!bound.ok) return bound;
+                assets.characters = bound.characters;
+                assets.characterAliases = bound.characterAliases;
+                return bound;
+            });
+            if (!added || added.ok === false) {
+                writeToastSafe('放入角色立绘失败：名称不能为空');
+                return;
+            }
+            addedName = added.name;
+            writeToastSafe(`已放入角色立绘「${added.name}」`);
         }
         if (typeof service.setStatus === 'function') await service.setStatus(item.key, status);
         if (state.activeReader) rerenderActiveReader();
@@ -4397,18 +4571,22 @@ export function createIgsReaderHost(options = {}) {
         if (nextBody && scrollTop) nextBody.scrollTop = scrollTop;
         restoreSettingsFocus(container, focus);
         remountSettingsNotice(container, current.notice);
+        remountSettingsProgress(container);
         settingsDialogs.remount(container);
         onboarding.mountInSettings(container);
     }
 
     // 保存失败或动作抛异常时在面板内提示原因；面板重绘时由 updateMountedSettings 补回。
-    const settingsBusyActions = new Set();
-
     function reportSettingsFailure(result) {
-        const current = state.activeSettings;
         const message = describeSettingsFailure(result);
-        if (!current || !message) return;
+        if (!message) return;
         if (result && result.thrown) console.warn('[IGS] 设置操作失败', result.thrown);
+        showSettingsNotice(message);
+    }
+
+    function showSettingsNotice(message) {
+        const current = state.activeSettings;
+        if (!current || !message) return;
         const notice = { message, until: Date.now() + SETTINGS_NOTICE_MS };
         current.notice = notice;
         remountSettingsNotice(current.dom && current.dom.root, notice);
@@ -4422,13 +4600,18 @@ export function createIgsReaderHost(options = {}) {
 
     function attachBridgeReaderExtras(readerSettings, bridge) {
         // readerSettings 是每次新克隆的快照，按世界观拨掉冲突演出不会写回存档。
-        const worldview = resolveWorldview(bridge.sceneAssets);
+        const sceneAssets = bridge.sceneAssets
+            ? sceneAssetsForContext(bridge.sceneAssets, getSillyTavernContext(options.global || globalThis))
+            : null;
+        const worldview = resolveWorldview(sceneAssets);
         Object.assign(readerSettings, applyFxWorldview(readerSettings, worldview));
         // 演出与聊天层据此换皮：_ancientEra 保留给既有古风分支，_worldview 供西幻 / 科幻 / 末日换皮。
         readerSettings._ancientEra = worldview === 'ancient';
         readerSettings._worldview = worldview;
-        readerSettings._sceneAssets = bridge.sceneAssets || null;
+        readerSettings._sceneAssets = sceneAssets;
         readerSettings._sentencePaging = Boolean(bridge.sentencePaging);
+        const bilingualOverride = state.bilingualDisplay;
+        readerSettings._bilingualDisplay = bilingualOverride && bilingualOverride.base === normalizeBilingualSettings(readerSettings.bilingual).display ? bilingualOverride.value : '';
         readerSettings._vnTheme = readerSettings.vnTheme || null;
         readerSettings._strictBackgroundMatch = isStrictBackgroundMatch(bridge.autoIllustration);
         readerSettings._cgBackgroundSize = normalizeAutoIllustrationSettings(bridge.autoIllustration).assets.backgroundSize;
@@ -4554,6 +4737,7 @@ export function createIgsReaderHost(options = {}) {
         }
         normalized.characterDna = normalizeCharacterDnaMap(normalized.characterDna);
         normalized.characterOutfits = normalizeCharacterOutfits(normalized.characterOutfits);
+        normalized.characterHouses = normalizeCharacterHouses(normalized.characterHouses);
         normalized.wardrobe = normalizeWardrobe(normalized.wardrobe);
         normalized.moodGroups = normalizeMoodGroups(normalized.moodGroups);
         // init group arrays
@@ -4582,6 +4766,7 @@ export function createIgsReaderHost(options = {}) {
         }
         normalized.unifiedSpriteLayout = normalizeBoolean(normalized.unifiedSpriteLayout, false);
         normalized.moodFuzzyMatch = normalizeBoolean(normalized.moodFuzzyMatch, false);
+        normalizeAssetCards(normalized);
         return normalized;
     }
 
@@ -4624,6 +4809,8 @@ export function createIgsReaderHost(options = {}) {
             gradientVeil: normalizeGradientVeil(null),
             classicDialogWidthPercent: CLASSIC_DIALOG_WIDTH_PERCENT_DEFAULT,
             skinDialogScale: SKIN_DIALOG_SCALE_DEFAULT,
+            magicHouse: MAGIC_HOUSE_DEFAULT,
+            magicAccent: MAGIC_ACCENT_DEFAULT,
             fontSize: 18,
             dialogFontWeight: null,
             optionFontSize: 14,
@@ -4658,6 +4845,8 @@ export function createIgsReaderHost(options = {}) {
         normalized.gradientVeil = normalizeGradientVeil(normalized.gradientVeil);
         normalized.classicDialogWidthPercent = normalizeClassicDialogWidthPercent(normalized.classicDialogWidthPercent);
         normalized.skinDialogScale = normalizeSkinDialogScale(normalized.skinDialogScale);
+        normalized.magicHouse = normalizeMagicHouse(normalized.magicHouse);
+        normalized.magicAccent = normalizeMagicAccent(normalized.magicAccent);
         normalized.fontSize = normalizeFiniteNumber(normalized.fontSize, base.fontSize);
         normalized.dialogFontWeight = normalized.dialogFontWeight != null
             && [300, 400, 500, 700].includes(Number(normalized.dialogFontWeight))

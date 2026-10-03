@@ -71,6 +71,8 @@ test('gate:igs-ui:toolbar-top-first-row-aligns-with-toggle-and-close', () => {
     assert.match(css, /#igs-overlay\.igs-toolbar-top \.igs-ctrl-bar\{[^}]*align-items:flex-start[^}]*flex-wrap:nowrap/);
     // 按钮区限宽（约 8 个一行）提前换行，行内左对齐。
     assert.match(css, /#igs-overlay\.igs-toolbar-top #igs-bar-btns\{[^}]*max-width:336px[^}]*justify-content:flex-start[^}]*flex-wrap:wrap/);
+    // 和楼层内嵌一样离顶边、左右 14px，不贴边。
+    assert.match(css, /#igs-overlay\.igs-toolbar-top #igs-toolbar-layer\{inset:14px 14px auto 14px;/);
 });
 
 
@@ -505,7 +507,7 @@ test('gate:simulation:scene-assets-injects-prompt-and-renders-single-configured-
     assert.match(injected.value, /\[igs-scene:/);
     assert.match(injected.value, /NSFW场景加第4栏大写NSFW/);
     assert.doesNotMatch(injected.value, /\{\{mood_groups\}\}/);
-    assert.match(injected.value, /喜悦：开心、欢喜、欣喜/);
+    assert.match(injected.value, /喜悦：开心、高兴、愉快/);
     assert.match(injected.value, /\[igs-char:角色名\|表情\|服装\|对白\]/);
     assert.doesNotMatch(injected.value, /\{\{outfit_groups\}\}/);
     assert.match(injected.value, /对上哪套就写哪套的名字/);
@@ -1184,7 +1186,7 @@ test('gate:simulation:scene-and-character-aliases-reuse-original-assets-and-layo
     assert.equal(snapshot.content.spriteCharacter, '爱丽丝');
     const sprite = document.getElementById('igs-overlay').querySelector('#igs-sprite');
     assert.equal(sprite.style.backgroundPosition, '14% 78%');
-    assert.equal(sprite.style.backgroundSize, 'auto 100%');
+    assert.equal(sprite.style.backgroundSize, 'auto 126%');
     vn.destroy();
 });
 
@@ -2547,18 +2549,20 @@ test('gate:simulation:igs-ui-default-skin-unifies-dialog-and-toolbar-with-embedd
     const pinned = overlay.querySelector('#igs-bar-pinned');
     assert.equal(opened.reader.snapshot.readerSettings.toolbarDock, 'top');
     assert.equal(overlay.classList.contains('igs-default-reader-chrome'), true);
-    assert.equal(overlay.classList.contains('igs-toolbar-top'), false);
-    assert.equal(toolbar.getAttribute('data-igs-toolbar-dock'), 'float');
-    assert.equal(toolbar.style.transformOrigin, 'right top');
+    assert.equal(overlay.classList.contains('igs-toolbar-top'), true);
+    assert.equal(toolbar.getAttribute('data-igs-toolbar-dock'), 'top');
+    assert.equal(toolbar.style.transformOrigin, '');
     assert.equal(collapsible.style.gap, '2px');
     assert.equal(pinned.style.gap, '2px');
 
     opened.reader.controller.toggleToolbar();
-    assert.equal(overlay.querySelector('#igs-btn-settings').parentNode, collapsible);
+    assert.equal(overlay.querySelector('#igs-btn-settings').parentNode, pinned);
     const css = getOriginalReaderStyleText();
     assert.match(css, /#igs-overlay\.igs-default-reader-chrome \.igs-dialog\{[^}]*display:flex[^}]*overflow:hidden[^}]*padding:9px 18px 14px/);
-    assert.match(css, /#igs-overlay\.igs-default-reader-chrome #igs-toolbar-layer\{inset:14px 14px auto auto;width:auto;height:auto;transform:none;\}/);
-    assert.match(css, /#igs-overlay\.igs-default-reader-chrome \.igs-ctrl-bar\{[^}]*position:static[^}]*gap:1\.5px[^}]*padding:0[^}]*background:transparent[^}]*border:0[^}]*box-shadow:none/);
+    assert.doesNotMatch(css, /#igs-overlay\.igs-default-reader-chrome #igs-toolbar-layer\{inset:14px/);
+    assert.match(css, /#igs-overlay\.igs-default-reader-chrome \.igs-ctrl-bar\{[^}]*gap:1\.5px[^}]*padding:0[^}]*background:transparent[^}]*border:0[^}]*box-shadow:none/);
+    assert.match(css, /#igs-overlay\.igs-toolbar-top \.igs-ctrl-bar\{[^}]*background:transparent[^}]*border:0[^}]*box-shadow:none[^}]*backdrop-filter:none/);
+    assert.match(css, /#igs-overlay\.igs-toolbar-top \.igs-ctrl-bar \.igs-icon-btn svg\{width:11px;height:11px;transform:scale\(1\.2\);transform-origin:center;\}/);
     assert.match(css, /#igs-overlay\.igs-default-reader-chrome \.igs-ctrl-bar \.igs-icon-btn svg\{width:11px;height:11px;transform:scale\(1\.2\);transform-origin:center;\}/);
     // 按钮换行成两排时工具栏层会撑满可用宽度，按钮必须保持靠右，不能退回左上角。
     assert.match(css, /#igs-overlay\.igs-default-reader-chrome:not\(\.igs-toolbar-top\) \.igs-ctrl-bar,[^{]*\{justify-content:flex-end;\}/);
@@ -2590,8 +2594,11 @@ test('gate:simulation:igs-ui-toolbar-top-wraps-early-without-clipping-rows', () 
 test('gate:simulation:igs-ui-toolbar-dock-invalid-falls-back-to-float', async () => {
     const storage = createMemoryStorage();
     storage.setItem('igs-reader-settings-v9-default', JSON.stringify({ toolbarDock: 'bogus' }));
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const globalObject = document.defaultView;
+    globalObject.localStorage = storage;
     const vn = bootstrapIGS({
-        global: { localStorage: storage },
+        global: globalObject,
         autoAttachMagicWand: false,
         hostAdapter: {
             getCurrentMessage: async () => ({ id: 1, text: '旁白。' }),
@@ -2600,7 +2607,40 @@ test('gate:simulation:igs-ui-toolbar-dock-invalid-falls-back-to-float', async ()
     });
 
     const opened = await vn.openLatestAvailable('pc');
+    const overlay = document.getElementById('igs-overlay');
+    const toolbar = overlay.querySelector('#igs-ctrl-bar');
     assert.equal(opened.reader.snapshot.readerSettings.toolbarDock, 'float');
+    assert.equal(overlay.classList.contains('igs-default-reader-chrome'), true);
+    assert.equal(overlay.classList.contains('igs-toolbar-top'), false);
+    assert.equal(toolbar.getAttribute('data-igs-toolbar-dock'), 'float');
+    assert.equal(toolbar.style.transformOrigin, 'right bottom');
+
+    vn.destroy();
+});
+
+test('gate:simulation:igs-ui-gradient-veil-toolbar-dock-follows-the-setting', async () => {
+    const storage = createMemoryStorage();
+    storage.setItem('igs-reader-settings-v9-default', JSON.stringify({ toolbarDock: 'top', dialogSkin: 'gradient-veil' }));
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const globalObject = document.defaultView;
+    globalObject.localStorage = storage;
+    const vn = bootstrapIGS({
+        global: globalObject,
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => ({ id: 1, text: '旁白。' }),
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+
+    const opened = await vn.openLatestAvailable('pc');
+    const overlay = document.getElementById('igs-overlay');
+    const toolbar = overlay.querySelector('#igs-ctrl-bar');
+    assert.equal(opened.reader.snapshot.readerSettings.toolbarDock, 'top');
+    assert.equal(overlay.classList.contains('igs-gradient-veil-active'), true);
+    assert.equal(overlay.classList.contains('igs-default-reader-chrome'), true);
+    assert.equal(overlay.classList.contains('igs-toolbar-top'), true);
+    assert.equal(toolbar.getAttribute('data-igs-toolbar-dock'), 'top');
 
     vn.destroy();
 });
@@ -3147,7 +3187,7 @@ test('gate:simulation:sprite-layout-save-survives-mode-mismatch', async () => {
     const opened = await vn.openLatestAvailable('mobile');
     let sprite = document.getElementById('igs-overlay').querySelector('#igs-sprite');
     assert.equal(opened.reader.snapshot.mode, 'mobile');
-    assert.equal(sprite.style.backgroundSize, 'auto 100%');
+    assert.equal(sprite.style.backgroundSize, 'auto 156%');
     assert.equal(sprite.style.backgroundPosition, '12% 34%');
 
     const settings = (await opened.reader.controller.invokeAction('settings')).controller;
@@ -3156,7 +3196,7 @@ test('gate:simulation:sprite-layout-save-survives-mode-mismatch', async () => {
     sprite = document.getElementById('igs-overlay').querySelector('#igs-sprite');
     assert.equal(vn.getState().igsUi.activeReader.mode, 'mobile');
     assert.equal(vn.getState().igsUi.activeReader.snapshot.mode, 'mobile');
-    assert.equal(sprite.style.backgroundSize, 'auto 100%');
+    assert.equal(sprite.style.backgroundSize, 'auto 156%');
     assert.equal(sprite.style.backgroundPosition, '12% 34%');
 
     vn.destroy();
@@ -3263,16 +3303,26 @@ test('gate:simulation:scene-sub-tab-switches-pane', async () => {
     const settings = (await opened.reader.controller.invokeAction('settings')).controller;
     settings.switchTab('scene');
 
-    const rulesView = settings.switchSceneSettingsSubTab('rules');
-    assert.equal(rulesView.snapshot.sceneSettingsSubTab, 'rules');
+    // 素材页一层页签：角色 / 场景 / 待确认 / 规则。衣柜提示词在规则页。
+    const rulesView = settings.switchSceneSubTab('rules');
+    assert.equal(rulesView.snapshot.sceneSubTab, 'rules');
     assert.match(rulesView.snapshot.html, /data-scene-settings-pane="rules"/);
     assert.match(rulesView.snapshot.html, /保存提示词/);
+    assert.match(rulesView.snapshot.html, /衣柜提示词/);
     assert.doesNotMatch(rulesView.snapshot.html, /背景场景/);
+    assert.equal(settings.switchSceneSubTab('wardrobe').snapshot.sceneSubTab, 'rules', '旧的衣柜页签落到规则');
 
-    const assetsView = settings.switchSceneSettingsSubTab('assets');
-    assert.equal(assetsView.snapshot.sceneSettingsSubTab, 'assets');
+    const reviewView = settings.switchSceneSubTab('review');
+    // 待确认页固定三块：服装词、情绪词、刚生成的图，没东西时也在，只剩一行标题。
+    assert.deepEqual([...reviewView.snapshot.html.matchAll(/data-review-card="([a-z]+)"/g)].map((m) => m[1]), ['outfit', 'mood', 'generated']);
+    assert.match(reviewView.snapshot.html, /刚生成的图/);
+    assert.match(reviewView.snapshot.html, /data-action="asset-card-import"/);
+
+    const assetsView = settings.switchSceneSubTab('scenes');
     assert.match(assetsView.snapshot.html, /data-scene-settings-pane="assets"/);
-    settings.switchSceneSubTab('scenes');
+    // 「严格匹配场景素材」从生图页迁到场景子页：跟随背景列表，不在生图页出现。
+    assert.match(assetsView.snapshot.html, /data-switch="bridge\.autoIllustration\.assets\.strictMatch"/);
+    assert.match(assetsView.snapshot.html, /严格匹配场景素材/);
     const scenesView = await settings.invoke(`scene-toggle-bg:${encodeURIComponent('旧城')}`);
     assert.match(scenesView.snapshot.html, /背景场景/);
     assert.match(scenesView.snapshot.html, /场景别名/);
@@ -3280,8 +3330,9 @@ test('gate:simulation:scene-sub-tab-switches-pane', async () => {
     const charsView = settings.switchSceneSubTab('characters');
     assert.match(charsView.snapshot.html, /统一角色立绘位置/);
     assert.doesNotMatch(charsView.snapshot.html, />角色别名<\/div>/);
-    assert.match(charsView.snapshot.html, /data-status-avatar-char=/);
-    assert.match(charsView.snapshot.html, /https:\/\/\.\.\. 或 data:image\/\.\.\./);
+    // 头像地址在毛笔打开的「角色设定」里；头部的头像本身是上传按钮。
+    assert.match(charsView.snapshot.html, /class="igs-char-avatar" data-action="status-avatar-pick:/);
+    assert.doesNotMatch(charsView.snapshot.html, /data-status-avatar-char=/);
     assert.match(charsView.snapshot.html, /爱丽/);
 
     vn.destroy();
@@ -7834,12 +7885,11 @@ test('gate:simulation:ancient-era-filters-modern-fx-from-prompt-and-reader', asy
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
     const storage = createMemoryStorage();
     const injected = [];
-    const names = ['古风卡', '现代卡'];
     const vn = bootstrapIGS({
         global: {
             document,
             localStorage: storage,
-            prompt: () => names.shift() || '',
+            prompt: () => '',
             confirm: () => true,
             SillyTavern: { getContext: () => ({ setExtensionPrompt: (id, text) => injected.push([id, text]) }) },
         },
@@ -7872,7 +7922,6 @@ test('gate:simulation:ancient-era-filters-modern-fx-from-prompt-and-reader', asy
         // 时代只在一键档位条的「适配世界」下拉里切换，场景素材页不再有勾选框。
         assert.doesNotMatch(settings.getSnapshot().html, /data-path="bridge\.sceneAssets\.ancient"/);
         await settings.invoke('worldview:ancient');
-        await settings.invoke('scene-preset-save');
         assert.equal(settings.close().ok, true);
         const ancientPrompt = mainPrompt();
         assert.match(ancientPrompt, /igs时代背景/);
@@ -7893,18 +7942,6 @@ test('gate:simulation:ancient-era-filters-modern-fx-from-prompt-and-reader', asy
         const saved = JSON.parse(storage.getItem('igs-reader-settings-v9-default'));
         assert.notEqual(saved.fxTags.call, false);
         assert.notEqual(saved.dailyFx.photo, false);
-
-        // 预设保存带上时代；切到旧预设（无该字段）按现代处理，切换预设会立即落盘并重新注入。
-        const presets = JSON.parse(storage.getItem('igs:scene-presets:v1')).presets;
-        assert.equal(presets['古风卡'].ancient, true);
-        presets['旧预设'] = { scenes: {}, characters: {} };
-        storage.setItem('igs:scene-presets:v1', JSON.stringify({ version: 1, presets, active: '古风卡' }));
-        settings = await openSettings();
-        settings.switchTab('scene');
-        await settings.invoke(`scene-preset-apply:${encodeURIComponent('旧预设')}`);
-        assert.doesNotMatch(mainPrompt(), /igs时代背景/);
-        await settings.invoke(`scene-preset-apply:${encodeURIComponent('古风卡')}`);
-        assert.match(mainPrompt(), /igs时代背景/);
     } finally {
         vn.destroy();
     }
@@ -8271,16 +8308,20 @@ test('gate:simulation:outfit-settings-add-slot-url-persist-reopen-and-custom-rul
         assert.deepEqual(JSON.parse(storage.getItem('igs:outfit-review:v1')).items, [{ character: '小林海斗', word: '泳装' }]);
         const respond = (kind) => (kind === 'confirm' ? true : answers.shift() || '');
         let settings = withSettingsDialogs(document, opened.reader.controller.openSettings('scene').controller, respond);
-        settings.switchSceneSubTab('characters');
-        let html = settings.getSnapshot().html;
-        assert.match(html, /待确认服装词/);
-        assert.match(html, /data-outfit-tabs="小林海斗"><button[^>]*is-active[^>]*>原装<\/button><button[^>]*igs-outfit-tab-add/);
+        // 待确认服装词在「待确认」页，页签上带数字；新建之后回到角色页看这套服装。
+        let html = settings.switchSceneSubTab('review').snapshot.html;
+        assert.match(html, /data-review-card="outfit"[\s\S]*?outfit-review-dismiss:/);
+        assert.match(html, /data-scene-subtab="review"[^>]*>待确认<span class="igs-scene-subtab-count">\d+<\/span>/);
+        html = settings.switchSceneSubTab('characters').snapshot.html;
+        assert.doesNotMatch(html, /data-review-card=/);
+        // 角色平时只占一行；新建服装后会自动展开到那套。
+        assert.doesNotMatch(html, /data-outfit-tabs="小林海斗"/);
 
         await settings.invoke(`outfit-review-create:${c}:${o}`);
-        html = settings.getSnapshot().html;
-        assert.doesNotMatch(html, /待确认服装词/);
+        assert.match(settings.switchSceneSubTab('review').snapshot.html, /class="igs-review-card is-empty" data-review-card="outfit"/);
+        html = settings.switchSceneSubTab('characters').snapshot.html;
         assert.match(html, /data-outfit-panel="泳装"/, 'created outfit opens as the active tab');
-        assert.match(html, /data-outfit-fallback="喜悦">.*?回落原装「喜悦」/);
+        assert.match(html, /data-outfit-fallback="喜悦">.*?回落原装「默认」/);
         answers.push('比基尼');
 
         await settings.invoke(`scene-add-outfit-word:${c}:${o}`);
@@ -8299,7 +8340,7 @@ test('gate:simulation:outfit-settings-add-slot-url-persist-reopen-and-custom-rul
         root.dispatchEvent({ type: 'input', target: input });
         assert.equal(storage.getItem('igs_bridge_config'), savedBefore, 'typing must not save');
 
-        settings.switchSceneSettingsSubTab('rules');
+        settings.switchSceneSubTab('rules');
         assert.match(settings.getSnapshot().html, /data-result="prompt-rule-outfit">当前为自定义规则，未包含服装栏说明/);
         assert.equal(settings.close().ok, true);
 
@@ -8307,13 +8348,12 @@ test('gate:simulation:outfit-settings-add-slot-url-persist-reopen-and-custom-rul
         assert.deepEqual(saved, { 小林海斗: { 泳装: { words: ['比基尼'], moods: { 喜悦: 'https://example.com/swim-new.png' } } } });
 
         settings = withSettingsDialogs(document, opened.reader.controller.openSettings('scene').controller, respond);
-        settings.switchSceneSettingsSubTab('assets');
         settings.switchSceneSubTab('characters');
         await settings.invoke(`scene-outfit-tab:${c}:${o}`);
         assert.match(settings.getSnapshot().html, /data-scene-outfit="泳装" data-scene-outfit-mood="喜悦" value="https:\/\/example\.com\/swim-new\.png"/);
         assert.match(settings.getSnapshot().html, />泳装<span class="igs-outfit-tab-count">1<\/span>/);
         await settings.invoke('reset-prompt-rule');
-        settings.switchSceneSettingsSubTab('rules');
+        settings.switchSceneSubTab('rules');
         assert.doesNotMatch(settings.getSnapshot().html, /data-result="prompt-rule-outfit"/);
         settings.close();
     } finally {

@@ -63,26 +63,51 @@ test('gate:outfits:wardrobe-prompt-is-shared-and-named-link-wins', () => {
     assert.equal(resolveWardrobePrompt(wardrobe, { wardrobe: '没有' }, '便服'), null);
     assert.deepEqual(normalizeWardrobe({ 校服: { prompt: 'a', reference: 'igs-gen:ref' } }).校服, { prompt: 'a', reference: 'igs-gen:ref' });
     assert.equal(normalizeWardrobe({ 校服: { prompt: 'a', reference: 'https://x' } }).校服.reference, undefined);
+    assert.equal(Object.prototype.hasOwnProperty.call(normalizeWardrobe({ 裸体: { prompt: 'nude' }, 校服: { prompt: 'a' } }), '裸体'), false);
+    const kept = normalizeCharacterOutfits({ 冬月: { 日常: { words: [], moods: {}, wardrobe: '裸体', base: 'igs-gen:nude' }, 裸体: { words: [], moods: {} } } });
+    assert.equal(kept['冬月']['日常'].wardrobe, '裸体');
+    assert.equal(kept['冬月']['日常'].base, 'igs-gen:nude');
+    assert.equal(kept['冬月']['裸体'], undefined);
 });
 
-test('gate:outfits:wardrobe-pending-row-can-generate-or-dismiss', async () => {
+// 衣柜提示词在规则页：只列已有的条目；AI 写出的陌生服装词在「待确认」页处理，不在这里。
+test('gate:outfits:wardrobe-rules-list-and-scope-tag', async () => {
     const { renderWardrobe } = await import('../src/visual/igs-ui/settings-outfit-fields.js');
-    const html = renderWardrobe({}, [{ character: '冬月', word: '浴衣' }]);
-    assert.match(html, /igs-wardrobe-group"><div class="igs-settings-section-head"><div class="igs-settings-subhead">已确认/);
-    assert.match(html, /igs-wardrobe-pending-list"><div class="igs-settings-section-head"><div class="igs-settings-subhead">待确认/);
-    assert.ok(html.indexOf('已确认') < html.indexOf('待确认'));
-    assert.doesNotMatch(html, /这里写衣服的生图提示词/);
-    assert.match(html, /data-action="wardrobe-generate-prompt:%E5%86%AC%E6%9C%88:%E6%B5%B4%E8%A1%A3"/);
-    assert.match(html, /data-action="outfit-review-dismiss:%E5%86%AC%E6%9C%88:%E6%B5%B4%E8%A1%A3"/);
-    const filled = renderWardrobe({ 校服: { prompt: 'uniform', reference: 'igs-gen:ref' } }, [], () => 'data:image/png;base64,QQ==');
+    const html = renderWardrobe({});
+    assert.match(html, /还没有衣柜提示词/);
+    assert.doesNotMatch(html, /待确认|outfit-review-dismiss/);
+    // 和场景页一样：「+」在标题右边，筛选在下一行左边。
+    const { SCENE_RULES_TEMPLATE } = await import('../src/visual/igs-ui/settings-tabs.js');
+    assert.match(SCENE_RULES_TEMPLATE, /衣柜提示词<span[^>]*>（只在生图时用）<\/span><button[^>]*data-action="wardrobe-add"/);
+    assert.match(renderWardrobe({}, { lead: '<b>筛选</b>' }), /^<div class="igs-wardrobe-group"><div class="igs-asset-folder-bar"><b>筛选<\/b><\/div>/);
+    const tagged = renderWardrobe({ 校服: { prompt: '' } }, { scopeTag: (collection, name) => `<i>${collection}:${name}</i>`, focus: '校服' });
+    assert.match(tagged, /<i>wardrobe:校服<\/i>/);
+    assert.match(tagged, /igs-wardrobe-item is-focus/);
+    const filled = renderWardrobe({ 校服: { prompt: 'uniform', reference: 'igs-gen:ref' } }, { resolveUrl: () => 'data:image/png;base64,QQ==' });
     assert.match(filled, /data-action="wardrobe-reference:%E6%A0%A1%E6%9C%8D"/);
     assert.match(filled, /src="data:image\/png;base64,QQ=="/);
     const empty = renderWardrobe({ 冬月星见日常: { prompt: '' } });
     assert.match(empty, new RegExp(`data-action="wardrobe-generate-prompt:${encodeURIComponent('冬月星见日常')}"`));
     assert.match(empty, /<input class="igs-scene-url-input igs-wardrobe-prompt"/);
     assert.doesNotMatch(empty, /<textarea/);
-    const confirmed = renderWardrobe({ 晚礼服: { prompt: 'gown' } }, [{ character: '林小雨', word: '晚礼服' }]);
-    assert.doesNotMatch(confirmed, /igs-wardrobe-pending-list/);
+    const hidden = renderWardrobe({ 裸体: { prompt: 'nude, nude' }, 校服: { prompt: '' } });
+    assert.equal(hidden.includes('裸体'), false);
+    assert.equal(hidden.includes('nude'), false);
+    const { renderCharacterSlotTabs } = await import('../src/visual/igs-ui/settings-outfit-fields.js');
+    const tabs = renderCharacterSlotTabs({
+        charName: '冬月',
+        baseMoods: [],
+        baseListHtml: '',
+        outfits: { 日常: { words: [], moods: {}, wardrobe: '裸体' } },
+        activeOutfit: '日常',
+        sceneAssets: { wardrobe: { 冬月星见日常: { prompt: 'daily' } } },
+        isOpen: () => true,
+    });
+    assert.match(tabs, /igs-wardrobe-pick/);
+    assert.match(tabs, /scene-set-outfit-wardrobe-url:[^"]*%E8%A3%B8%E4%BD%93/);
+    assert.match(tabs, /outfit-generate-nude:/);
+    assert.equal(tabs.includes('scene-outfit-tab:%E5%86%AC%E6%9C%88:%E8%A3%B8%E4%BD%93'), false);
+    assert.equal(tabs.includes('编辑提示词'), false);
 });
 
 test('gate:outfits:prompt-groups-text', () => {

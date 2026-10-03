@@ -10,6 +10,8 @@ test('gate:settings-polish:image-tab-has-cg-gallery-pane', () => {
     assert.match(cg, /data-image-pane="cg"/);
     assert.match(cg, /\{\{imageCgList\}\}/);
     assert.match(cg, /data-action="image-cg-refresh"/);
+    assert.match(cg, /data-action="image-cg-delete-selected"/);
+    assert.match(cg, /data-action="image-cg-delete-all"/);
     // 生图内容页模板保持完整，且不再重复放 CG 库按钮。
     const auto = getImageSubTabTemplate('auto');
     assert.match(auto, /data-image-pane="auto"/);
@@ -22,8 +24,9 @@ test('gate:settings-polish:mood-review-actions-sit-outside-chip', () => {
     const chip = html.match(/<span class="igs-mood-review-chip">[\s\S]*?<\/span>/)[0];
     assert.doesNotMatch(chip, /<button/);
     assert.doesNotMatch(html, /爱丽丝/, '标签不带所属角色');
-    assert.match(html, /<\/span><button type="button" class="igs-review-link is-primary" data-action="mood-review-assign:[^"]+"[^>]*>加入<\/button>/);
+    assert.match(html, /<\/b><\/span><span class="igs-review-actions"><select class="igs-asset-move igs-review-select" data-mood-review-word="/);
     assert.match(html, /data-action="mood-review-dismiss:[^"]+"[^>]*>忽略<\/button>/);
+    assert.doesNotMatch(html, /建为情绪组|mood-review-assign/);
     assert.doesNotMatch(html, />×</);
 });
 
@@ -81,7 +84,8 @@ test('gate:settings-polish:mood-review-rows-align-buttons', async () => {
     const mod = await import('../src/visual/igs-ui/settings-style.js');
     const css = Object.values(mod).filter((v) => typeof v === 'string').join('\n')
         || (typeof mod.getSettingsStyleText === 'function' ? mod.getSettingsStyleText() : '');
-    assert.ok(css.includes('.igs-mood-review-list{display:flex;flex-direction:column;'));
-    assert.ok(css.includes('.igs-mood-review-item{display:grid;grid-template-columns:minmax(0,1fr) auto auto;'));
-    assert.ok(css.includes('.igs-mood-review-item .igs-review-link{min-width:52px;min-height:28px;'));
+    assert.ok(css.includes('.igs-review-list{display:flex;flex-direction:column;'));
+    assert.ok(css.includes('.igs-review-item{display:flex;flex-wrap:wrap;align-items:center;'));
+    assert.ok(css.includes('.igs-review-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;'));
+    assert.ok(css.includes('.igs-review-actions .igs-review-link{min-width:52px;min-height:28px;'));
 });

@@ -20,7 +20,7 @@ import {
     parseImageSlots,
 } from '../src/scene/image-slots.js';
 import { parseSceneText } from '../src/scene/text-parser.js';
-import { applyAlignStyle, syncEmbeddedHostFrame } from '../src/visual/igs-ui/reader-dom-render.js';
+import { applyAlignStyle, pinEmbeddedHostFrame, syncEmbeddedHostFrame, watchEmbeddedFrameResize } from '../src/visual/igs-ui/reader-dom-render.js';
 import { resolveSpriteLayout, resolveActiveTheme, renderDialogueHtml } from '../src/visual/igs-ui/settings-normalize.js';
 import {
     DIALOG_SKIN_BLACK_WHITE_MANGA,
@@ -235,6 +235,112 @@ test('gate:igs-ui:embedded-frame-locks-configured-size', () => {
     const portrait = host();
     syncEmbeddedHostFrame({ className: 'igs-mode-embedded', closest: () => portrait }, '832x1216');
     assert.equal(portrait.style.aspectRatio, '832 / 1216');
+});
+
+test('gate:igs-ui:embedded-frame-keeps-pinned-ratio-when-host-unmeasured', () => {
+    // 手机上楼层暂时量到宽 0，不能掉回横屏比例；量得到时照常按宽度判断。
+    let width = 390;
+    const host = {
+        style: {},
+        attrs: {},
+        getAttribute(key) { return this.attrs[key] || null; },
+        setAttribute(key, value) { this.attrs[key] = value; },
+        removeAttribute(key) { delete this.attrs[key]; },
+        getBoundingClientRect: () => ({ width, height: width ? 570 : 0 }),
+    };
+    const win = { innerWidth: 390, innerHeight: 844 };
+    const root = { className: 'igs-mode-embedded', closest: () => host, ownerDocument: { defaultView: win } };
+    pinEmbeddedHostFrame(root, '1216x832', 'embedded');
+    assert.equal(host.style.aspectRatio, '832 / 1216');
+    width = 0;
+    pinEmbeddedHostFrame(root, '1216x832', 'embedded');
+    assert.equal(host.style.aspectRatio, '832 / 1216');
+    width = 900;
+    pinEmbeddedHostFrame(root, '1216x832', 'embedded');
+    assert.equal(host.style.aspectRatio, '1216 / 832');
+
+    // 第一次就量不到：按窗口宽度判断，手机钉竖屏。
+    const fresh = { ...host, style: {}, attrs: {}, getBoundingClientRect: () => ({ width: 0, height: 0 }) };
+    pinEmbeddedHostFrame({ ...root, closest: () => fresh }, '1216x832', 'embedded');
+    assert.equal(fresh.style.aspectRatio, '832 / 1216');
+});
+
+test('gate:igs-ui:embedded-frame-relocks-on-orientation-crossing', () => {
+    // 横屏打开钉横屏；转回竖屏（栏宽 ≤640）后重钉竖屏，再转横屏恢复，宿主断开自解绑。
+   let width = 844;
+    const host = {
+        style: {},
+        attrs: {},
+        isConnected: true,
+        getBoundingClientRect() { return { width, height: width * 832 / 1216 }; },
+        getAttribute(key) { return this.attrs[key] || null; },
+        setAttribute(key, value) { this.attrs[key] = value; },
+        removeAttribute(key) { delete this.attrs[key]; },
+    };
+    let observerCallback = null;
+    let disconnected = 0;
+    const overlay = {
+        className: 'igs-mode-embedded',
+        closest() { return host; },
+        ownerDocument: {
+            defaultView: {
+                ResizeObserver: class {
+                    constructor(callback) { observerCallback = callback; }
+                    observe() {}
+                    disconnect() { disconnected += 1; observerCallback = null; }
+                },
+            },
+        },
+    };
+    syncEmbeddedHostFrame(overlay, '1216x832');
+    assert.equal(host.style.aspectRatio, '1216 / 832');
+    const unwatch = watchEmbeddedFrameResize(overlay, { backgroundSize: '1216x832', mode: 'embedded' });
+    assert.equal(typeof unwatch, 'function');
+    width = 390;
+    observerCallback();
+    assert.equal(host.style.aspectRatio, '832 / 1216');
+    width = 844;
+    observerCallback();
+    assert.equal(host.style.aspectRatio, '1216 / 832');
+    observerCallback();
+    assert.equal(host.style.aspectRatio, '1216 / 832');
+    host.isConnected = false;
+    width = 390;
+    observerCallback();
+    assert.equal(disconnected, 1);
+    assert.equal(host.style.aspectRatio, '1216 / 832');
+});
+
+test('gate:igs-ui:embedded-frame-watch-unobserve-stops-relock', () => {
+    let width = 390;
+    const host = {
+        style: {},
+        isConnected: true,
+        getBoundingClientRect() { return { width, height: width * 1216 / 832 }; },
+        setAttribute() {},
+        removeAttribute() {},
+    };
+    let observerCallback = null;
+    let disconnected = 0;
+    const overlay = {
+        className: 'igs-mode-embedded',
+        closest() { return host; },
+        ownerDocument: {
+            defaultView: {
+                ResizeObserver: class {
+                    constructor(callback) { observerCallback = callback; }
+                    observe() {}
+                    disconnect() { disconnected += 1; observerCallback = null; }
+                },
+            },
+        },
+    };
+    syncEmbeddedHostFrame(overlay, '832x1216');
+    assert.equal(host.style.aspectRatio, '832 / 1216');
+    const unwatch = watchEmbeddedFrameResize(overlay, { backgroundSize: '1216x832', mode: 'embedded' });
+    unwatch();
+    assert.equal(disconnected, 1);
+    assert.equal(observerCallback, null);
 });
 
 test('gate:igs-ui:embedded-host-mounts-beside-mes-text-and-restores', () => {
@@ -1236,8 +1342,9 @@ test('gate:igs-ui:resolve-sprite-layout-keeps-mode-isolated', () => {
         mobile: { posX: 50, posY: 100, scale: 110 },
         'mobile::小林海斗::平和': { posX: 40, posY: 90, scale: 200 },
     };
-    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '小林海斗', '平和'), { posX: 70, posY: 30, scale: 90 });
-    assert.deepEqual(resolveSpriteLayout(layouts, 'mobile', '小林海斗', '平和'), { posX: 40, posY: 90, scale: 110 });
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '小林海斗', '平和'), { posX: 70, posY: 30, scale: 180 });
+    assert.deepEqual(resolveSpriteLayout(layouts, 'mobile', '小林海斗', '平和'), { posX: 40, posY: 90, scale: 200 });
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '没摆过', ''), { posX: 50, posY: 100, scale: 90 });
     // 切到没有该 key 的模式回退默认，不会串用其他模式的数据
     assert.deepEqual(resolveSpriteLayout(layouts, 'web', '小林海斗', '平和'), { posX: 50, posY: 100, scale: 100 });
 });
@@ -1444,12 +1551,11 @@ test('gate:scene:mood-review-list-renders-one-add-per-word-as-compact-chips', ()
     const html = renderMoodReviewList([
         { word: '嘲弄', character: '爱丽丝', quality: 'fuzzy', group: '嫌弃' },
         { word: '冷笑', character: '', quality: 'default', group: '' },
-    ]);
-    assert.match(html, /mood-review-assign:%E5%98%B2%E5%BC%84/);
-    assert.match(html, /mood-review-assign:%E5%86%B7%E7%AC%91/);
-    assert.equal((html.match(/>加入</g) || []).length, 2);
-    // 每个词只有一个「加入」，不再有确认 / 改到其他组等多步按钮，也不用带框的大按钮。
-    assert.doesNotMatch(html, /mood-review-accept|确认加入|改到其他组|加入情绪组|igs-settings-action/);
+    ], [{ label: '嫌弃', words: ['嘲讽'] }, { label: '平和', words: ['平静'] }]);
+    assert.match(html, /data-mood-review-word="嘲弄"/);
+    assert.match(html, /data-mood-review-word="冷笑"/);
+    assert.match(html, /<option value="">加入…<\/option><option value="嫌弃">嫌弃<\/option>/);
+    assert.doesNotMatch(html, /mood-review-assign|确认加入|改到其他组|加入情绪组|建为情绪组/);
     assert.doesNotMatch(html, /未命中|显示默认立绘|模糊归入|请核对/);
     assert.doesNotMatch(html, /igs-mood-review-who/, '待确认情绪词标签不带所属角色');
     assert.match(html, /class="igs-review-clear" data-action="mood-review-clear"/);
@@ -1593,18 +1699,17 @@ test('gate:scene:mood-review-assign-moves-word-into-group-and-clears-entry', asy
         readerSettings: {},
     };
     let persistCount = 0;
-    const answers = ['嫌弃', '平和'];
     const ctx = {
         state: { activeSettings: { draft, readerMode: 'pc', asyncState: {} } },
-        options: { global: { localStorage: storage, prompt: () => answers.shift() || '', alert: () => {} } },
+        options: { global: { localStorage: storage, alert: () => {} } },
         closeSettings: () => ({ ok: true }),
         persistSettingsDraft: () => { persistCount += 1; return { ok: true }; },
         rerenderSettings: () => ({ ok: true }),
         buildRegexPreview: () => '',
     };
-    await handleSettingsAction(`mood-review-assign:${encodeURIComponent('嘲弄')}`, ctx);
+    await handleSettingsAction(`mood-review-assign:${encodeURIComponent('嘲弄')}:${encodeURIComponent('嫌弃')}`, ctx);
     assert.deepEqual(draft.bridge.sceneAssets.moodGroups[0].words, ['嘲讽', '嘲弄']);
-    await handleSettingsAction(`mood-review-assign:${encodeURIComponent('冷笑')}`, ctx);
+    await handleSettingsAction(`mood-review-assign:${encodeURIComponent('冷笑')}:${encodeURIComponent('平和')}`, ctx);
     assert.deepEqual(draft.bridge.sceneAssets.moodGroups[1].words, ['平静', '冷笑']);
     assert.equal(persistCount, 2);
     assert.deepEqual(loadMoodReview(storage), []);
@@ -1763,10 +1868,11 @@ test('gate:settings:generated-asset-actions-manage-library-and-temp-status', asy
     assert.equal(draft.bridge.sceneAssets.generated.scenes['新夜景'], undefined);
     assert.deepEqual(deleted, [['bg-old']]);
 
-    // 临时背景入库必须同步 sceneAssets.generated 与服务状态；丢弃只写回临时状态。
+    // 临时背景入库进场景素材，不进生成素材库。
     promptValue = '临时夜景';
     await handleSettingsAction(`gen-temp-accept:${enc('temp/bg')}`, ctx);
-    assert.equal(draft.bridge.sceneAssets.generated.scenes['临时夜景'].times['夜晚'].url, 'igs-gen:bg-temp');
+    assert.equal(draft.bridge.sceneAssets.scenes['临时夜景'].times['夜晚'].url, 'igs-gen:bg-temp');
+    assert.equal(draft.bridge.sceneAssets.generated.scenes['临时夜景'], undefined);
     await handleSettingsAction(`gen-temp-discard:${enc('temp/bg')}`, ctx);
     assert.deepEqual(statuses, [
         { key: 'temp/bg', status: 'library' },
@@ -1842,6 +1948,7 @@ test('gate:settings:generated-asset-actions-rollback-on-persist-and-service-fail
         assert.equal(result.reason, 'status-failed');
         assert.equal(persistCount, 2);
         assert.equal(draft.bridge.sceneAssets.generated.scenes['临时景'], undefined);
+        assert.equal(draft.bridge.sceneAssets.scenes['临时景'], undefined);
     }
 
     {
@@ -1871,14 +1978,12 @@ test('gate:settings:generated-asset-download-button-and-action', async () => {
         ],
         resolveUrl: () => '',
     });
-    assert.ok(html.includes(`data-action="gen-asset-prompt:${enc('bg-lib')}"`));
-    assert.ok(html.includes(`data-action="gen-asset-prompt:${enc('sp-lib')}"`));
-    assert.ok(html.includes(`data-action="gen-asset-prompt:${enc('sp-temp')}"`));
-    assert.equal((html.match(/gen-asset-prompt:/g) || []).length, 3, '没有图片的失败记录不显示提示词按钮');
-    assert.ok(html.includes(`data-action="gen-asset-download:${enc('bg-lib')}:${enc('夜景-背景.png')}"`));
-    assert.ok(html.includes(`data-action="gen-asset-download:${enc('sp-lib')}:${enc('爱丽丝-立绘.png')}"`));
-    assert.ok(html.includes(`data-action="gen-asset-download:${enc('sp-temp')}:${enc('若叶睦-立绘.png')}"`));
-    assert.equal((html.match(/gen-asset-download:/g) || []).length, 3, '没有图片的失败记录不显示下载按钮');
+    assert.equal(html.includes('gen-asset-prompt:'), false);
+    assert.equal(html.includes('gen-asset-download:'), false);
+    assert.equal(html.includes('gen-lib-remove:'), false);
+    assert.ok(html.includes(`data-action="gen-temp-accept:${enc('temp/sp')}"`));
+    assert.ok(html.includes(`data-action="gen-matte-edit:${enc('sp-temp')}"`));
+    assert.equal(html.includes('gen-matte-edit:'), true);
 
     const clicks = [];
     const created = [];
@@ -1933,7 +2038,7 @@ test('gate:settings:generated-asset-download-button-and-action', async () => {
 });
 
 
-test('gate:scene:asset-alias-actions-and-presets-reuse-existing-entries', async () => {
+test('gate:scene:asset-alias-actions-reuse-existing-entries', async () => {
     const storage = createMemoryStorage();
     const prompts = ['爱丽', '古城', '艾莉西亚'];
     const draft = {
@@ -1971,13 +2076,6 @@ test('gate:scene:asset-alias-actions-and-presets-reuse-existing-entries', async 
     assert.deepEqual(draft.bridge.sceneAssets.characterAliases['爱丽丝'], ['爱丽']);
     assert.deepEqual(draft.bridge.sceneAssets.scenes['旧城'].words, ['古城']);
 
-    await handleSettingsAction('scene-preset-save', ctx);
-    draft.bridge.sceneAssets.characterAliases['爱丽丝'] = [];
-    draft.bridge.sceneAssets.scenes['旧城'].words = [];
-    await handleSettingsAction(`scene-preset-apply:${encodeURIComponent('别名预设')}`, ctx);
-    assert.deepEqual(draft.bridge.sceneAssets.characterAliases['爱丽丝'], ['爱丽']);
-    assert.deepEqual(draft.bridge.sceneAssets.scenes['旧城'].words, ['古城']);
-
     await handleSettingsAction(`scene-rename-char:${encodeURIComponent('爱丽丝')}`, ctx);
     assert.deepEqual(draft.bridge.sceneAssets.characterAliases['艾莉西亚'], ['爱丽']);
     assert.equal(draft.bridge.sceneAssets.characterAliases['爱丽丝'], undefined);
@@ -1986,7 +2084,7 @@ test('gate:scene:asset-alias-actions-and-presets-reuse-existing-entries', async 
     assert.deepEqual(draft.bridge.sceneAssets.characterAliases['艾莉西亚'], []);
     assert.deepEqual(draft.bridge.sceneAssets.scenes['旧城'].words, []);
     assert.equal(alerts, 0);
-    assert.ok(persistCount >= 6);
+    assert.ok(persistCount >= 5);
 });
 
 test('gate:scene:settings-action-mood-groups-toggle-and-reset', async () => {
@@ -2011,6 +2109,40 @@ test('gate:scene:settings-action-mood-groups-toggle-and-reset', async () => {
     assert.ok(rerenders >= 3);
 });
 
+test('gate:scene:mood-group-list-shows-the-containers-and-their-count', () => {
+    const extra = DEFAULT_MOOD_GROUPS.concat([{ label: '嘲讽', words: ['嘲弄', '讥讽'] }]);
+    const host = createIgsReaderHost({
+        global: {},
+        getUnifiedSettings: () => ({
+            version: '0.34.3',
+            bridge: {
+                openMode: 'pc',
+                sceneAssets: {
+                    enabled: true,
+                    scenes: {},
+                    characters: { 冬月星见: { 默认: '' } },
+                    moodGroups: extra,
+                },
+            },
+            readerMode: 'pc',
+            readerSettings: {},
+        }),
+        saveUnifiedSettings: () => ({ ok: true }),
+    });
+    host.openReader({ message: { text: '旁白。' } }, { mode: 'pc' });
+    const opened = host.openSettings({ tab: 'scene' });
+    opened.controller.switchSceneSubTab('rules');
+    const html = opened.controller.getSnapshot().html;
+    assert.match(html, new RegExp(`data-mood-group-count="${extra.length}"`));
+    assert.match(html, new RegExp(`class="igs-mood-group-total">${extra.length}</`));
+    for (const group of extra) {
+        assert.match(html, new RegExp(`data-mood-group="${group.label}"`));
+    }
+    assert.match(html, /嘲讽/);
+    assert.match(html, /2 个词/);
+    host.destroy();
+});
+
 test('gate:scene:mood-create-group-auto-first-word-and-blocks-dup', async () => {
     const draft = { bridge: { sceneAssets: { enabled: true, scenes: {}, characters: {}, moodGroups: [{ label: '喜悦', words: ['开心'] }] } }, readerSettings: {} };
     let alerts = 0;
@@ -2026,7 +2158,10 @@ test('gate:scene:mood-create-group-auto-first-word-and-blocks-dup', async () => 
     await handleSettingsAction(`mood-create-group:${encodeURIComponent('愤怒')}`, ctx);
     const created = draft.bridge.sceneAssets.moodGroups.find((g) => g.label === '愤怒');
     assert.ok(created);
-    assert.deepEqual(created.words, ['愤怒']);
+    // 组名命中预设：自动填入这一组的预设近义词（别的组已占用的词跳过）。
+    assert.equal(created.words[0], '愤怒');
+    assert.ok(created.words.includes('怒喝'));
+    assert.equal(created.words.includes('开心'), false);
     // 组名撞名：阻止 + alert
     const before = draft.bridge.sceneAssets.moodGroups.length;
     await handleSettingsAction(`mood-create-group:${encodeURIComponent('喜悦')}`, ctx);
@@ -2239,6 +2374,7 @@ test('gate:igs-ui:settings-repaints-thumbs-when-generated-images-arrive', () => 
     host.openReader({ message: { text: '旁白。' } }, { mode: 'pc' });
     const opened = host.openSettings({ tab: 'scene' });
     opened.controller.switchSceneSubTab('characters');
+    opened.controller.invoke(`ui-toggle-open:${encodeURIComponent('char-open:Kaito')}`);
     assert.equal(opened.controller.getSnapshot().html.includes('data:image/png;base64,aaa'), false);
     images.set('igs-gen:abc', 'data:image/png;base64,aaa');
     notify({ reason: 'image-loaded', imageId: 'abc' });
@@ -2272,19 +2408,22 @@ test('gate:igs-ui:sprite-slot-expand-shows-thumbnail-and-words', async () => {
     const opened = host.openSettings({ tab: 'scene' });
     const controller = opened.controller;
     controller.switchTab('scene');
-    controller.switchSceneSettingsSubTab('assets');
     controller.switchSceneSubTab('characters');
+    // 角色平时只有一行，先展开 Kaito 才看得到情绪槽。
+    await controller.invoke(`ui-toggle-open:${encodeURIComponent('char-open:Kaito')}`);
 
     // 折叠态：不含缩略图
     const snap = controller.getSnapshot();
-    assert.equal(/igs-sprite-thumb/.test(snap.html), false);
+    // 收起时每格只有小缩略图（igs-outfit-thumb），没有展开后的大图。
+    assert.equal(/class="igs-sprite-thumb[ "]/.test(snap.html), false);
     assert.doesNotMatch(snap.html, />角色别名<\/div>/);
     assert.match(snap.html, /海斗/);
 
     // 展开后：含缩略图和该情绪组的词
     const after = await controller.invoke(`scene-toggle-mood:${encodeURIComponent('Kaito')}:${encodeURIComponent('喜悦')}`);
-    assert.match(after.snapshot.html, /igs-sprite-thumb/);
+    assert.match(after.snapshot.html, /class="igs-sprite-thumb[ "]/);
     assert.match(after.snapshot.html, /开心/);
+    assert.doesNotMatch(after.snapshot.html, /建为情绪组|无对应情绪组/);
 
     host.destroy();
 });
@@ -3560,9 +3699,11 @@ test('gate:simulation:status-hud-table-picker-wires-actions-and-only-highlights-
 test('gate:scene:character-assets-render-status-avatar-row', () => {
     const html = renderCharacterAssetList(
         { H: { 默认: '' } },
-        { aliases: { H: [] }, moodGroups: [], statusAvatars: { H: 'data:image/png;base64,AAA' } },
+        { aliases: { H: [] }, moodGroups: [], statusAvatars: { H: 'data:image/png;base64,AAA' }, isOpen: () => true },
     );
-    assert.equal((html.match(/状态栏头像/g) || []).length, 1);
+    // 头像本身就是上传按钮；地址和清除在毛笔打开的「角色设定」里。
+    assert.match(html, /<button type="button" class="igs-char-avatar" data-action="status-avatar-pick:H"/);
+    assert.match(renderCharacterAssetList({ H: { 默认: '' } }, { statusAvatars: { H: 'x' } }), /^(?![\s\S]*status-avatar-url)/);
     assert.match(html, /class="igs-scene-url-input igs-status-avatar-url"[^>]*data-status-avatar-char="H"[^>]*value="data:image\/png;base64,AAA"/);
     assert.match(html, /data-action="status-avatar-pick:H"/);
     assert.match(html, /data-action="status-avatar-clear:H"/);
@@ -3827,38 +3968,6 @@ test('gate:scene:status-avatar-rename-migrates-avatar-key', async () => {
     assert.equal(draft.bridge.sceneAssets.statusAvatars['爱丽丝'], undefined);
 });
 
-test('gate:scene:scene-preset-round-trip-keeps-status-avatars', async () => {
-    const storage = createMemoryStorage();
-    const draft = {
-        bridge: {
-            sceneAssets: {
-                enabled: true,
-                scenes: {},
-                characters: { '爱丽丝': { '平和': 'sprite' } },
-                characterAliases: { '爱丽丝': ['爱丽'] },
-                statusAvatars: { '爱丽丝': 'data:image/png;base64,AAA' },
-                moodGroups: [],
-            },
-        },
-        readerSettings: {},
-    };
-    const ctx = {
-        state: { activeSettings: { draft, readerMode: 'pc', asyncState: { scenePresetName: '头像预设' } } },
-        options: { global: { localStorage: storage, alert: () => {} } },
-        closeSettings: () => ({ ok: true }),
-        persistSettingsDraft: () => ({ ok: true }),
-        rerenderSettings: () => ({ ok: true }),
-        buildRegexPreview: () => '',
-    };
-    await handleSettingsAction('scene-preset-save', ctx);
-    const saved = JSON.parse(storage.getItem('igs:scene-presets:v1')).presets['头像预设'];
-    assert.equal(saved.statusAvatars['爱丽丝'], 'data:image/png;base64,AAA');
-
-    draft.bridge.sceneAssets.statusAvatars = {};
-    await handleSettingsAction('scene-preset-apply:' + encodeURIComponent('头像预设'), ctx);
-    assert.equal(draft.bridge.sceneAssets.statusAvatars['爱丽丝'], 'data:image/png;base64,AAA');
-});
-
 test('gate:igs-ui:gradient-veil-normalizes-values-and-shares-default-theme', () => {
     assert.equal(normalizeDialogSkin(DIALOG_SKIN_GRADIENT_VEIL), DIALOG_SKIN_GRADIENT_VEIL);
     assert.deepEqual(normalizeGradientVeil({
@@ -4069,7 +4178,7 @@ test('character dna: prompt tags keep weight groups, dedupe case-insensitively a
 });
 
 
-test('gate:scene:character-dna-lifecycle-and-preset-round-trip', async () => {
+test('gate:scene:character-dna-lifecycle', async () => {
     const storage = createMemoryStorage();
     const dnaAlice = { identity: 'silver hair', defaultAppearance: 'uniform', negative: 'glasses', triggerWords: 'alice_v2' };
     const draft = {
@@ -4097,22 +4206,6 @@ test('gate:scene:character-dna-lifecycle-and-preset-round-trip', async () => {
     };
     const sa = () => draft.bridge.sceneAssets;
 
-    await handleSettingsAction('scene-preset-save', ctx);
-    const stored = JSON.parse(storage.getItem('igs:scene-presets:v1'));
-    assert.equal(stored.presets['DNA预设'].characterDna['爱丽丝'].triggerWords, 'alice_v2');
-    assert.equal(stored.presets['DNA预设'].characterDna['路人甲'].identity, 'brown hair');
-
-    sa().characterDna = {};
-    await handleSettingsAction('scene-preset-apply:' + encodeURIComponent('DNA预设'), ctx);
-    assert.equal(sa().characterDna['爱丽丝'].identity, 'silver hair');
-
-    // 旧预设没有 characterDna 字段：应用后保留当前 DNA，不静默清空。
-    stored.presets['旧预设'] = { scenes: {}, characters: cloneForTest(sa().characters), characterAliases: { '爱丽丝': ['爱丽'], '白墨': [] } };
-    storage.setItem('igs:scene-presets:v1', JSON.stringify(stored));
-    await handleSettingsAction('scene-preset-apply:' + encodeURIComponent('旧预设'), ctx);
-    assert.equal(sa().characterDna['爱丽丝'].identity, 'silver hair');
-    assert.deepEqual(Object.keys(sa().characterDna), ['爱丽丝', '白墨', '路人甲']);
-
     prompts.push('艾莉西亚');
     await handleSettingsAction('scene-rename-char:' + encodeURIComponent('爱丽丝'), ctx);
     assert.equal(sa().characterDna['艾莉西亚'].identity, 'silver hair');
@@ -4134,19 +4227,22 @@ test('gate:scene:character-dna-lifecycle-and-preset-round-trip', async () => {
     assert.equal(sa().characterDna['路人甲'].identity, 'brown hair');
 });
 
-function cloneForTest(value) {
-    return JSON.parse(JSON.stringify(value));
-}
-
-
 test('gate:igs-ui:character-dna-editor-renders-escaped-name-and-values', async () => {
     const { renderCharacterAssetList, renderCharacterDnaEditor } = await import('../src/visual/igs-ui/settings-fields.js');
     const empty = renderCharacterDnaEditor('白墨', null);
     assert.ok(empty.includes('角色 DNA（未填写）'));
     assert.equal((empty.match(/data-dna-field="/g) || []).length, 4);
-    const html = renderCharacterAssetList({ 'A.<b>': { '默认': '' } }, {
+    // DNA 在角色那一行的 ⋯ 里（「角色设定」），点开才出编辑区。
+    const closed = renderCharacterAssetList({ 'A.<b>': { '默认': '' } }, {
         characterDna: { 'A.<b>': { identity: 'silver hair', triggerWords: 'alice_v2' } },
     });
+    assert.match(closed, /class="igs-add-menu igs-row-menu"[\s\S]*?data-action="scene-toggle-dna:A.%3Cb%3E" role="menuitem">角色设定（别名、头像、DNA）</);
+    assert.ok(!closed.includes('data-dna-field='));
+    const html = renderCharacterAssetList({ 'A.<b>': { '默认': '' } }, {
+        characterDna: { 'A.<b>': { identity: 'silver hair', triggerWords: 'alice_v2' } },
+        isOpen: (key) => key === 'char-dna:A.<b>',
+    });
+    assert.ok(html.includes('>收起角色设定<'));
     assert.ok(html.includes('data-dna-char="A.&lt;b&gt;"'));
     assert.ok(!html.includes('data-dna-char="A.<b>"'));
     assert.ok(html.includes('data-dna-field="identity" placeholder='));
@@ -4222,7 +4318,8 @@ test('gate:scene:dna-only-character-add-rename-remove-and-list', async () => {
 
     await handleSettingsAction('scene-remove-dna-char:' + encodeURIComponent('路人乙'), ctx);
     assert.deepEqual(Object.keys(sa().characterDna), ['爱丽丝']);
-    assert.ok(renderDnaOnlyCharacterList(sa().characterDna, sa().characters).includes('igs-scene-empty'));
+    // 没有只有 DNA 的角色时整块不出现，入口在「角色立绘」标题旁。
+    assert.equal(renderDnaOnlyCharacterList(sa().characterDna, sa().characters), '');
 });
 
 
@@ -4586,8 +4683,15 @@ test('gate:igs-ui:sprite-matte-editor-mode-and-save-errors', async () => {
         temp: [{ key: 'k1', type: 'sprite', name: '路人', imageId: 'sp2' }, { key: 'k2', type: 'background', name: '街道', imageId: 'bg2' }],
         resolveUrl: () => '',
     });
+    // 还没进角色的生成立绘留在「刚生成的图」里，同样可以修复抠图；进了角色就不在这里了。
     assert.ok(pane.includes('data-action="gen-matte-edit:sp1"'));
     assert.ok(pane.includes('data-action="gen-matte-edit:sp2"'));
+    const placed = renderGeneratedAssetPane({
+        library: { characters: { '爱丽丝': { '默认': 'igs-gen:sp1' } } },
+        characters: { '爱丽丝': { '默认': 'igs-gen:sp1' } },
+        resolveUrl: () => '',
+    });
+    assert.ok(!placed.includes('gen-matte-edit:sp1'));
     assert.ok(!pane.includes('gen-matte-edit:bg1'));
     assert.ok(!pane.includes('gen-matte-edit:bg2'));
 });

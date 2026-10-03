@@ -13,7 +13,7 @@ export const ILLUSTRATION_UPDATED_EVENT = 'igs:illustration-updated';
 export const ILLUSTRATION_PROGRESS_EVENT = 'igs:illustration-progress';
 
 // 手机内嵌栏宽。框高是我们按尺寸钉出来的，不能拿高来判断横竖。
-const EMBEDDED_PHONE_MAX_WIDTH = 640;
+export const EMBEDDED_PHONE_MAX_WIDTH = 640;
 
 // 电脑、网页全屏、全屏用背景尺寸。窄屏模式把宽高对调。
 // 楼层内嵌：正文栏不超过 640 像素就是手机，钉竖屏尺寸；更宽钉横屏尺寸。
@@ -22,11 +22,19 @@ export function cgSizeForMode(backgroundSize, mode, viewport) {
     const usePortrait = mode === 'mobile' || (mode === 'embedded' && isPhoneEmbedded(viewport));
     if (!usePortrait) return landscape;
     const match = landscape.match(/^(\d+)\s*[xX×]\s*(\d+)$/);
-    if (!match || match[1] === match[2]) return landscape;
+    // 背景尺寸本身填成竖的就直接用，不能再对调回横屏。
+    if (!match || Number(match[1]) <= Number(match[2])) return landscape;
     return `${match[2]}x${match[1]}`;
 }
 
+// 手机缩放、平板、折叠屏的正文栏可能量出超过 640。触屏且窗口竖着拿时同样钉竖屏。
+export function isPortraitTouchWindow(win) {
+    if (!win || !(win.innerWidth > 0) || !(win.innerHeight > win.innerWidth)) return false;
+    try { return typeof win.matchMedia === 'function' && win.matchMedia('(pointer: coarse)').matches; } catch (error) { return false; }
+}
+
 function isPhoneEmbedded(viewport) {
+    if (viewport && viewport.portrait === true) return true;
     const width = Number(viewport && viewport.width) || 0;
     return width > 0 && width <= EMBEDDED_PHONE_MAX_WIDTH;
 }
@@ -50,10 +58,12 @@ export function readCgViewport(globalObject) {
     const rect = host && typeof host.getBoundingClientRect === 'function' ? host.getBoundingClientRect() : null;
     const hostWidth = rect ? Number(rect.width) : 0;
     const hostHeight = rect ? Number(rect.height) : 0;
-    if (hostWidth > 0 && hostHeight > 0) return { width: hostWidth, height: hostHeight };
+    const portrait = isPortraitTouchWindow(globalObject);
+    if (hostWidth > 0 && hostHeight > 0) return { width: hostWidth, height: hostHeight, ...(portrait && { portrait }) };
     return {
         width: Number(globalObject && globalObject.innerWidth) || 0,
         height: Number(globalObject && globalObject.innerHeight) || 0,
+        ...(portrait && { portrait }),
     };
 }
 
@@ -270,7 +280,7 @@ export function createAutoIllustrationService(deps) {
             }
             const slot = Number(item.slotId) || slots.length + 1;
             const bound = bindCharacterDnaToCaption(item.caption, sceneAssets, characters, slot);
-            for (const warning of bound.warnings) report('warn', `第 ${messageId} 楼${warning}`);
+            for (const warning of bound.warnings) report('info', `第 ${messageId} 楼${warning}`);
             slots.push({ slot, caption: bound.caption, anchorSentence });
         }
         if (!slots.length) {
@@ -419,7 +429,7 @@ export function createAutoIllustrationService(deps) {
         {
             const bound = bindCharacterDnaToSlots(plan.slots, readSceneAssets(), numbered.characters);
             plan.slots = bound.slots;
-            for (const warning of bound.warnings) report('warn', `第 ${messageId} 楼${warning}`);
+            for (const warning of bound.warnings) report('info', `第 ${messageId} 楼${warning}`);
         }
 
         const latest = messageHost.readFloor(messageId);

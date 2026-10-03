@@ -42,13 +42,16 @@ export const UI_SFX_FAMILIES = Object.freeze({
 const SKIN_FAMILIES = Object.freeze({
     'retro-japanese': 'wood',
     'adventure-journey': 'wood',
+    'qinglv-shanshui': 'wood',
     'black-white-manga': 'paper',
     'warm-picturebook': 'paper',
+    'fairy-tale': 'paper',
     'plant-coffee': 'paper',
     'western-classic': 'paper',
     'cute-pink': 'soft',
     'day-minimal': 'soft',
     'elegant-european': 'glass',
+    'magic-academy': 'glass',
     'gradient-veil': 'glass',
 });
 

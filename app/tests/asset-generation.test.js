@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { classifySceneKey, lookupSceneBackground } from '../src/scene/scene-directives.js';
 import {
     resolveBackgroundAsset, resolveSpriteAsset, collectAssetNeeds,
-    addGeneratedAssetToLibrary, bindGeneratedSprite, renameGeneratedLibraryEntry, removeGeneratedLibraryEntry, normalizeGeneratedLibrary,
+    addGeneratedAssetToLibrary, bindGeneratedSprite, fileGeneratedHoldings, renameGeneratedLibraryEntry, removeGeneratedLibraryEntry, normalizeGeneratedLibrary,
 } from '../src/scene/asset-match.js';
 import { parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems, ASSET_PLANNER_SYSTEM_PROMPT } from '../src/generated-images/illustration/asset-prompt.js';
 import { looksLikeRefusal, requestWithSoftRetry, applyTemplate } from '../src/generated-images/illustration/prompt-kit.js';
@@ -49,7 +49,8 @@ test('gate:assets:unnamed-character-detection', () => {
     assert.equal(resolveSpriteAsset('小艾', '', ctx).url, 'ally.png');
     assert.equal(resolveSpriteAsset('空槽角色', '', ctx).needsGeneration, false);
     assert.equal(resolveSpriteAsset('神秘少女', '', ctx).needsGeneration, true);
-    for (const name of ['旁白', '阿明', '？？？']) assert.equal(resolveSpriteAsset(name, '', ctx).needsGeneration, false, name);
+    assert.equal(resolveSpriteAsset('阿明', '', ctx).needsGeneration, true);
+    for (const name of ['旁白', '？？？']) assert.equal(resolveSpriteAsset(name, '', ctx).needsGeneration, false, name);
     const needs = collectAssetNeeds(
         { scenes: [{ scene: '废弃工厂', time: '夜晚' }, { scene: '废弃工厂', time: '夜晚' }], characters: ['神秘少女', '艾莉', '神秘少女'] },
         ctx, { background: true, sprite: true, limit: 4 },
@@ -72,6 +73,27 @@ test('gate:assets:generated-library-is-separate-and-renamable', () => {
     const removed = removeGeneratedLibraryEntry(bg.library, 'background', '工厂');
     assert.deepEqual(removed.imageIds, ['img2']);
     assert.equal(removed.library.scenes.工厂, undefined);
+});
+
+test('gate:assets:filing-generated-holdings-leaves-one-reference', () => {
+    const assets = {
+        characters: { 莉莉: { 默认: 'igs-gen:img1' } },
+        scenes: {},
+        generated: {
+            characters: { 莉莉: { 默认: 'igs-gen:img1' }, 新角色: { 默认: 'igs-gen:img2', 喜悦: 'igs-gen:img3' } },
+            scenes: { 工厂: { url: 'igs-gen:bg1', words: [], times: {} } },
+            expressionNotes: { 莉莉: { 喜悦: { positive: 'smile' } } },
+        },
+    };
+    fileGeneratedHoldings(assets);
+    assert.equal(assets.characters.莉莉.默认, 'igs-gen:img1');
+    assert.equal(assets.characters.新角色.默认, 'igs-gen:img2');
+    assert.equal(assets.characters.新角色.喜悦, 'igs-gen:img3');
+    assert.equal(assets.scenes.工厂.url, 'igs-gen:bg1');
+    assert.equal(assets.generated.characters.莉莉, undefined);
+    assert.equal(assets.generated.characters.新角色, undefined);
+    assert.equal(assets.generated.scenes.工厂, undefined);
+    assert.equal(assets.generated.expressionNotes.莉莉.喜悦.positive, 'smile');
 });
 
 test('gate:assets:generated-library-normalizes-buckets', () => {
@@ -620,13 +642,23 @@ test('gate:assets:dbgen-sprite-passes-frontend-templates', async () => {
     const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const floor = { chatId: 'c', messageId: 3, swipeId: 0, isAi: true, isLatest: true, text: '[igs-char:神秘少女|平静|你来了。]' };
-    const metas = [];
+    const caption = {
+        v4_prompt: { caption: { base_caption: '1girl, solo', char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
+    };
+    const writes = [];
+    const paints = [];
     const service = createAssetGenerationService({
         messageHost: { getChatId: () => 'c', readFloor: () => floor, readPreviousAiTexts: () => [] },
         llm: { async request() { throw new Error('不应请求副 LLM'); } },
         nai: {
             describe: () => ({ mode: 'dbgen', via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
-            async generate(slot, settings, meta) { metas.push(meta); return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: '1girl, solo', negative: 'lowres' } }; },
+            writeDbgenPrompt: async (meta) => { writes.push(meta); return { ok: true, captions: [{ slotId: 1, caption }] }; },
+            generateDbgenCaption: async (meta) => {
+                paints.push(meta);
+                return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: '1girl, solo', negative: 'lowres' } };
+            },
+            generate: async () => { throw new Error('立绘不应逐张写词'); },
         },
         store: createMemoryGeneratedAssetStore(),
         getSettings: () => ({
@@ -635,27 +667,110 @@ test('gate:assets:dbgen-sprite-passes-frontend-templates', async () => {
         }),
     });
     const result = await service.processMessage(3, { manual: true });
-    assert.deepEqual([result.ok, result.count], [true, 1]);
-    const meta = metas[0];
-    assert.ok(!meta.description.includes('全身'), '不再写死全身构图');
-    assert.match(meta.description, /神秘少女/);
-    assert.match(meta.description, /无背景，透明底/);
-    assert.ok(!meta.description.includes('必须原样写入'));
-    assert.ok(!meta.description.includes('upper body'));
-    assert.ok(!meta.description.includes('cowboy shot'));
-    assert.ok(!/loli|shota|underage/.test(meta.description));
+    assert.deepEqual([result.ok, result.count, writes.length, paints.length], [true, 1, 1, 1]);
+    const description = writes[0].description;
+    assert.ok(!description.includes('全身'), '不再写死全身构图');
+    assert.match(description, /神秘少女/);
+    assert.match(description, /无背景，透明底/);
+    assert.match(description, /slotid 从 1 数到 1/);
+    assert.ok(!description.includes('必须原样写入'));
+    assert.ok(!description.includes('upper body'));
+    assert.ok(!description.includes('cowboy shot'));
+    assert.ok(!description.includes('楼层'));
+    assert.ok(!/loli|shota|underage/.test(description));
+    const meta = paints[0];
     assert.ok(meta.userPrompts.positive.startsWith('upper body, red ribbon'));
     assert.ok(meta.userPrompts.positive.includes('transparent background'));
     assert.equal(meta.transparent, true);
-    assert.equal(meta.skipRecall, true);
     assert.ok(meta.userPrompts.negative.startsWith('cowboy shot, hat'));
     const saved = await service.getImagePrompt(service.listTemp()[0].imageId);
     assert.deepEqual(saved, { positive: '1girl, solo', negative: 'lowres' });
 });
 
+test('gate:assets:dbgen-sprites-write-once-then-paint-and-split-past-eight', async () => {
+    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
+    const names = ['甲', '乙', '丙'];
+    const floor = {
+        chatId: 'c', messageId: 3, swipeId: 0, isAi: true, isLatest: true,
+        text: names.map((name) => `[igs-char:${name}|平静|你好。]`).join('\n'),
+    };
+    const captionOf = (text) => ({
+        v4_prompt: { caption: { base_caption: text, char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
+    });
+    const order = [];
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'c', readFloor: () => floor, readPreviousAiTexts: () => [] },
+        llm: { async request() { throw new Error('不应请求副 LLM'); } },
+        nai: {
+            describe: () => ({ mode: 'dbgen', via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
+            writeDbgenPrompt: async (meta) => {
+                order.push(`write:${(meta.description.match(/写(\d+)张立绘/) || [])[1]}`);
+                assert.match(meta.description, /1\. 甲\n2\. 乙\n3\. 丙/);
+                assert.match(meta.description, /无背景，透明底/);
+                return {
+                    ok: true,
+                    captions: names.map((name, index) => ({ slotId: index + 1, caption: captionOf(name) })).reverse(),
+                };
+            },
+            generateDbgenCaption: async (meta) => {
+                order.push(`paint:${meta.caption.v4_prompt.caption.base_caption}`);
+                return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: '1girl', negative: 'lowres' } };
+            },
+            generate: async () => { throw new Error('立绘不应逐张写词'); },
+        },
+        store: createMemoryGeneratedAssetStore(),
+        getSettings: () => ({
+            autoIllustration: { assets: { spriteEnabled: true, maxPerFloor: 8 } },
+            sceneAssets: { enabled: true, scenes: {}, characters: {} },
+        }),
+    });
+    const result = await service.processMessage(3, { manual: true });
+    assert.equal(result.ok, true);
+    assert.equal(result.count, 3);
+    assert.deepEqual(order, ['write:3', 'paint:甲', 'paint:乙', 'paint:丙']);
+
+    const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
+    const manyFloor = {
+        chatId: 'c2', messageId: 4, swipeId: 0, isAi: true, isLatest: true,
+        text: many.map((name) => `[igs-char:${name}|平静|你好。]`).join('\n'),
+    };
+    const splitOrder = [];
+    const split = createAssetGenerationService({
+        messageHost: { getChatId: () => 'c2', readFloor: () => manyFloor, readPreviousAiTexts: () => [] },
+        llm: {},
+        nai: {
+            describe: () => ({ mode: 'dbgen', via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
+            writeDbgenPrompt: async (meta) => {
+                const count = Number((meta.description.match(/写(\d+)张立绘/) || [])[1]);
+                splitOrder.push(`write:${count}`);
+                const listed = meta.description.split('\n').filter((line) => /^\d+\. /.test(line)).map((line) => line.replace(/^\d+\. /, ''));
+                return { ok: true, captions: listed.map((name, index) => ({ slotId: index + 1, caption: captionOf(name) })) };
+            },
+            generateDbgenCaption: async (meta) => {
+                splitOrder.push(`paint:${meta.caption.v4_prompt.caption.base_caption}`);
+                return { ok: true, dataUrl: 'data:image/png;base64,AAA' };
+            },
+        },
+        store: createMemoryGeneratedAssetStore(),
+        getSettings: () => ({
+            autoIllustration: { assets: { spriteEnabled: true, maxPerFloor: 16 } },
+            sceneAssets: { enabled: true, scenes: {}, characters: {} },
+        }),
+    });
+    const splitResult = await split.processMessage(4, { manual: true });
+    assert.equal(splitResult.count, 10);
+    const secondWrite = splitOrder.lastIndexOf('write:5');
+    assert.equal(splitOrder.indexOf('paint:e') < secondWrite, true);
+    assert.equal(splitOrder.indexOf('paint:f') > secondWrite, true);
+    assert.deepEqual(splitOrder.filter((item) => item.startsWith('write')), ['write:5', 'write:5']);
+});
+
 test('gate:image-backend:dbgen-merges-frontend-prompts-into-caption', async () => {
     const { createImageBackend } = await import('../src/generated-images/image-backend.js');
     const calls = [];
+    const logs = [];
     const globalObject = {
         btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
         NaiDbGen: {
@@ -669,7 +784,7 @@ test('gate:image-backend:dbgen-merges-frontend-prompts-into-caption', async () =
             async generate(req) { calls.push(['gen', req]); return { ok: true, value: [{ blob: new Blob([Uint8Array.from([1])], { type: 'image/png' }), mimeType: 'image/png' }] }; },
         },
     };
-    const backend = createImageBackend({ nai: {}, global: globalObject, getBridge: () => ({ imageApi: { mode: 'dbgen' } }) });
+    const backend = createImageBackend({ nai: {}, global: globalObject, getBridge: () => ({ imageApi: { mode: 'dbgen' } }), report: (level, message) => logs.push([level, message]) });
     const result = await backend.generate({}, {}, {
         messageId: 7, description: '画角色', size: '832x1216',
         userPrompts: { positive: 'cowboy shot, 1.2::grey background::', negative: 'Full Body, feet' },
@@ -693,6 +808,13 @@ test('gate:image-backend:dbgen-merges-frontend-prompts-into-caption', async () =
         '正面：smile',
         '位置：0.50, 0.50',
     ].join('\n'));
+    const logged = logs.map((entry) => entry[1]).join('\n');
+    assert.match(logged, /拼之前/);
+    assert.match(logged, /1girl, full body, blonde hair/);
+    assert.match(logged, /要拼的模板/);
+    assert.match(logged, /cowboy shot, 1\.2::grey background::/);
+    assert.match(logged, /发出去/);
+    assert.match(logged, /1girl, blonde hair, cowboy shot, 1\.2::grey background::/);
 });
 
 test('gate:llm:user-head-and-tail-wrap-requests-and-default-empty', async () => {
@@ -925,10 +1047,11 @@ test('gate:assets:bind-generated-sprite-to-character-default', () => {
 });
 
 test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async () => {
-    const { DEFAULT_MOOD_GROUPS } = await import('../src/scene/mood-groups.js');
+    const { DEFAULT_MOOD_GROUPS, moodTierLabels, moodPresetTags } = await import('../src/scene/mood-groups.js');
     const { renderCharacterAssetList, renderGeneratedAssetPane } = await import('../src/visual/igs-ui/settings-fields.js');
     const { buildExpressionDiffDescription, uprightSpriteCaption } = await import('../src/generated-images/dbgen-prompt.js');
-    const labels = DEFAULT_MOOD_GROUPS.map((group) => group.label);
+    const labels = moodTierLabels(8);
+    const moodGroups = DEFAULT_MOOD_GROUPS;
     const captionOf = (text) => ({
         v4_prompt: { caption: { base_caption: text, char_captions: [] } },
         v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
@@ -937,6 +1060,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     let active = 0;
     let maxActive = 0;
     let angryFailed = false;
+    const seeds = [];
     const painted = [];
     const nai = {
         describe: () => ({ via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
@@ -959,7 +1083,8 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
             assert.match(meta.description, /slotid: 1\nscene: 1girl, silver hair\nscene_uc: lowres\nchar: 0\.5,0\.5 \| silver hair\nchar_uc: blonde hair/);
             assert.equal(meta.caption, undefined);
             assert.match(meta.description, /下面这份是已有立绘，外貌和构图按它画。这不是要回写的图。\nslotid: 1\nscene: 1girl, silver hair/);
-            assert.match(meta.description, /按 slotid 1 到 8 的顺序另写 8 份：1 喜悦、2 愤怒、3 悲伤、4 紧张、5 平和、6 害羞、7 嫌弃、8 爱恋/);
+            const slotOrder = labels.map((label, index) => `${index + 1} ${label}`).join('、');
+            assert.match(meta.description, new RegExp(`按 slotid 1 到 8 的顺序另写 8 份：${slotOrder}`));
             assert.ok(meta.description.indexOf('下面这份是已有立绘') < meta.description.indexOf('按 slotid 1 到 8'));
             return {
                 ok: true,
@@ -972,6 +1097,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
             maxActive = Math.max(maxActive, active);
             const text = meta.caption.v4_prompt.caption.base_caption;
             painted.push(text);
+            seeds.push(meta.seed);
             await Promise.resolve();
             active -= 1;
             assert.equal(meta.transparent, true);
@@ -1013,13 +1139,17 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     assert.equal(dna.identity, '银发，说话很冲');
     assert.equal(promptCalls, 1);
     assert.equal(maxActive, 1);
-    assert.deepEqual(painted, labels.map((label) => `expr ${label}, cowboy shot, standing, facing viewer, straight-on`));
+    assert.deepEqual(painted, labels.map((label) => `fuyuko, ${moodPresetTags(label)}, silver hair, expr ${label}, cowboy shot, standing, facing viewer, straight-on`));
+    assert.equal(new Set(seeds).size, 1, 'one seed for the whole set');
+    assert.ok(Number.isInteger(seeds[0]) && seeds[0] >= 0);
+    const angryIndex = labels.indexOf('愤怒');
+    assert.ok(angryIndex >= 0);
     assert.equal(result.items.length, 8);
     assert.equal(result.items[0].ok, true);
     assert.equal(result.items[0].imageId, 'expr-1');
-    assert.equal(result.items[1].ok, false);
-    assert.equal(result.items[1].mood, '愤怒');
-    assert.equal(result.items[1].caption.v4_prompt.caption.base_caption, 'expr 愤怒, cowboy shot, standing, facing viewer, straight-on');
+    assert.equal(result.items[angryIndex].ok, false);
+    assert.equal(result.items[angryIndex].mood, '愤怒');
+    assert.equal(result.items[angryIndex].caption.v4_prompt.caption.base_caption, `fuyuko, ${moodPresetTags('愤怒')}, silver hair, expr 愤怒, cowboy shot, standing, facing viewer, straight-on`);
     assert.equal(progress[0].phase, 'write');
     assert.equal(progress[0].done, 0);
     assert.equal(progress[0].total, 8);
@@ -1027,7 +1157,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     assert.equal(progress[1].done, 1);
     const retryProgress = [];
     const retry = await service.generateExpressionImage({
-        name: '冬月', mood: '愤怒', caption: result.items[1].caption,
+        name: '冬月', mood: '愤怒', caption: result.items[angryIndex].caption,
         onProgress: (event) => retryProgress.push(event),
     });
     assert.deepEqual(retryProgress, [{ phase: 'paint', done: 1, total: 1, mood: '愤怒' }]);
@@ -1039,7 +1169,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
         sceneAssets: {
             characters: { 冬月: { 默认: 'igs-gen:def', 喜悦: 'igs-gen:joy' } },
             characterAliases: {},
-            moodGroups: DEFAULT_MOOD_GROUPS,
+            moodGroups,
         },
     });
     assert.equal(hit.url, 'igs-gen:joy');
@@ -1050,6 +1180,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
         冬月: { 默认: 'igs-gen:def', 喜悦: 'igs-gen:joy', 愤怒: '' },
     }, {
         expressionNotes: { 冬月: { 愤怒: { positive: 'angry face', negative: 'lowres', error: '上游拒绝' } } },
+        isOpen: (key) => key === 'char-open:冬月',
     });
     assert.ok(html.includes('data-action="char-expression-set:%E5%86%AC%E6%9C%88"'));
     assert.ok(html.includes('data-action="char-expression-prompt:%E5%86%AC%E6%9C%88:%E5%96%9C%E6%82%A6"'));
@@ -1064,6 +1195,12 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     assert.match(written, /服装提示词：\nschool swimsuit, one-piece/);
     assert.match(written, /不要沿用原装的衣服/);
     assert.equal(written.includes('衣服按这些词来画'), false);
+    const nude = buildExpressionDiffDescription('冬月', { positive: '1girl' }, ['喜悦'], null, { name: '裸体', words: ['全裸'], ownImage: false, prompt: 'completely nude', nude: true });
+    assert.match(nude, /这一套是裸体/);
+    assert.match(nude, /不要画任何衣服/);
+    assert.equal(nude.includes('服装提示词：'), false);
+    assert.equal(nude.includes('completely nude'), false);
+    assert.equal(nude.includes('全裸'), false);
     const own = buildExpressionDiffDescription('冬月', { positive: '1girl' }, ['喜悦'], null, { name: '泳装', words: ['泳衣'], ownImage: true });
     assert.match(own, /不要画成别的衣服/);
     assert.equal(own.includes('不要沿用原装的衣服'), false);
@@ -1073,6 +1210,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
         characterOutfits: { 冬月: { 泳装: { words: ['泳衣'], moods: { 愤怒: '', 喜悦: 'igs-gen:joy' } } } },
         outfitTabs: { 冬月: '泳装' },
         expressionNotes: { '冬月\u0001泳装': { 愤怒: { error: '上游拒绝' } } },
+        isOpen: () => true,
     });
     assert.ok(outfitHtml.includes('data-action="outfit-expression-set:%E5%86%AC%E6%9C%88:%E6%B3%B3%E8%A3%85"'));
     assert.equal(outfitHtml.includes('char-expression-set:'), false);
@@ -1080,12 +1218,14 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     assert.ok(outfitHtml.includes('data-action="outfit-expression-prompt:%E5%86%AC%E6%9C%88:%E6%B3%B3%E8%A3%85:%E5%96%9C%E6%82%A6"'));
     assert.ok(outfitHtml.includes('data-action="outfit-expression-retry:%E5%86%AC%E6%9C%88:%E6%B3%B3%E8%A3%85:%E5%96%9C%E6%82%A6"'));
     const pane = renderGeneratedAssetPane({
-        library: { characters: { 冬月: { 默认: 'igs-gen:def', 喜悦: 'igs-gen:joy' } } },
-        characters: { 冬月: { 默认: 'igs-gen:def' } },
+        temp: [{ key: 'k1', type: 'sprite', name: '冬月', imageId: 'def' }],
         resolveUrl: () => '',
     });
-    assert.ok(pane.includes('已绑定为默认立绘'));
+    assert.ok(pane.includes('入库到角色'));
+    assert.ok(pane.includes('修复抠图'));
     assert.equal(pane.includes('绑定到角色'), false);
+    assert.equal(pane.includes('提示词'), false);
+    assert.equal(pane.includes('下载'), false);
     assert.equal(pane.includes('表情差分'), false);
     assert.equal(pane.includes('igs-expression-cell'), false);
     const leaned = uprightSpriteCaption({
@@ -1098,6 +1238,57 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     assert.equal(leaned.v4_prompt.caption.base_caption, '1girl');
     assert.match(leaned.v4_negative_prompt.caption.char_captions[0].char_caption, /dutch angle, from side, profile/);
     assert.equal(leaned.v4_negative_prompt.caption.char_captions[0].char_caption.includes('head tilt'), false);
+});
+
+test('gate:assets:expression-set-splits-writes-by-nine', async () => {
+    const { splitWriteBatches, splitExpressionWriteBatches } = await import('../src/generated-images/dbgen-prompt.js');
+    const ten = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
+    const eighteen = Array.from({ length: 18 }, (_, index) => `m${index + 1}`);
+    const nineteen = eighteen.concat('m19');
+    // 楼内补立绘仍按 8 份拆成两批。表情差分：9 及以内一批，超过 9 平分 2 批，超过 18 平分 3 批。
+    assert.deepEqual(splitWriteBatches(ten), [ten.slice(0, 5), ten.slice(5)]);
+    assert.deepEqual(splitExpressionWriteBatches(ten.slice(0, 9)), [ten.slice(0, 9)]);
+    assert.deepEqual(splitExpressionWriteBatches(ten), [ten.slice(0, 5), ten.slice(5)]);
+    assert.deepEqual(splitExpressionWriteBatches(eighteen), [eighteen.slice(0, 9), eighteen.slice(9)]);
+    assert.deepEqual(splitExpressionWriteBatches(nineteen), [nineteen.slice(0, 7), nineteen.slice(7, 13), nineteen.slice(13)]);
+
+    const captionOf = (text) => ({
+        v4_prompt: { caption: { base_caption: text, char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
+    });
+    const order = [];
+    const nai = {
+        writeDbgenPrompt: async ({ description }) => {
+            const listed = String(description || '').match(/另写 (\d+) 份：([^。]+)/);
+            const names = listed ? listed[2].split('、').map((part) => part.replace(/^\d+\s*/, '')) : [];
+            order.push(`write:${names.length}`);
+            return { ok: true, captions: names.map((mood, index) => ({ slotId: index + 1, caption: captionOf(`expr ${mood}`) })) };
+        },
+        generateDbgenCaption: async ({ caption }) => {
+            const text = caption.v4_prompt.caption.base_caption;
+            const mood = text.match(/expr ([a-j])/)?.[1] || text;
+            order.push(`paint:${mood}`);
+            return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: text, negative: '' } };
+        },
+    };
+    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'c1', getUserName: () => '', readPreviousAiTexts: () => [] },
+        llm: null, nai, store: createMemoryGeneratedAssetStore(), getSettings: () => ({}), events: null, matte: async (dataUrl) => dataUrl,
+    });
+    const result = await service.generateExpressionSet({
+        name: '冬月',
+        basePrompt: { positive: '1girl' },
+        moods: ten,
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.items.map((item) => item.mood), ten);
+    assert.deepEqual(order, [
+        'write:5',
+        ...ten.slice(0, 5).map((mood) => `paint:${mood}`),
+        'write:5',
+        ...ten.slice(5).map((mood) => `paint:${mood}`),
+    ]);
 });
 
 test('gate:assets:wardrobe-prompt-writes-once-and-does-not-paint', async () => {
@@ -1152,4 +1343,244 @@ test('gate:assets:wardrobe-reference-paints-the-saved-prompt', async () => {
     assert.deepEqual(painted, { ok: true, imageId: 'ref-1' });
     assert.equal(writes, 0);
     assert.equal(await service.resolveUrl('igs-gen:ref-1'), 'data:image/png;base64,QQ==');
+});
+
+test('gate:assets:character-sprite-writes-from-dna-then-paints-default', async () => {
+    const { buildCharacterSpriteDescription } = await import('../src/generated-images/dbgen-prompt.js');
+    const { renderCharacterAssetList, renderDnaOnlyCharacterList } = await import('../src/visual/igs-ui/settings-fields.js');
+    const text = buildCharacterSpriteDescription('冬月', {
+        identity: '银发', defaultAppearance: '白裙', negative: 'extra fingers', triggerWords: 'fuyuko',
+    });
+    assert.match(text, /画角色「冬月」的立绘/);
+    assert.match(text, /固定身份：\n银发/);
+    assert.match(text, /默认外观：\n白裙/);
+    assert.match(text, /无背景，透明底/);
+    assert.match(text, /只写一份，slotid 为 1/);
+    assert.equal(text.includes('楼层'), false);
+    assert.equal(text.includes('正文'), false);
+    const nudeSprite = buildCharacterSpriteDescription('冬月', { identity: '银发' }, { nude: true });
+    assert.match(nudeSprite, /画角色「冬月」的裸体立绘/);
+    assert.match(nudeSprite, /不要画任何衣服、内衣和配饰/);
+    assert.match(nudeSprite, /不要套用现成的服装提示词/);
+    assert.equal(nudeSprite.includes('完全裸体'), false);
+    const bare = buildCharacterSpriteDescription('路人甲', null);
+    assert.match(bare, /按这个角色补一个日常样子/);
+    assert.equal(bare.includes('固定身份'), false);
+    assert.match(text, /以下面的设定为准，优先于上下文、世界书和角色库/);
+    assert.equal(bare.includes('优先于上下文'), false);
+
+    const caption = {
+        v4_prompt: { caption: { base_caption: '1girl, silver hair', char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
+    };
+    const order = [];
+    const nai = {
+        describe: () => ({ via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
+        writeDbgenPrompt: async (meta) => {
+            order.push('write');
+            assert.match(meta.description, /冬月/);
+            return { ok: true, caption };
+        },
+        generateDbgenCaption: async (meta) => {
+            order.push('paint');
+            assert.equal(meta.transparent, true);
+            assert.match(meta.caption.v4_prompt.caption.base_caption, /cowboy shot/);
+            return { ok: true, dataUrl: 'data:image/png;base64,QQ==', prompt: { positive: '1girl', negative: 'lowres' } };
+        },
+    };
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'chat', readFloor: () => null, readPreviousAiTexts: () => [], on: () => () => {} },
+        llm: {}, nai, store: createMemoryGeneratedAssetStore(),
+        getSettings: () => ({ autoIllustration: {}, sceneAssets: {} }),
+        newId: () => 'sprite-1',
+        matte: async (dataUrl) => dataUrl,
+    });
+    const result = await service.generateCharacterSprite({ name: '冬月', dna: { identity: '银发' } });
+    assert.deepEqual([result.ok, result.imageId], [true, 'sprite-1']);
+    assert.deepEqual(order, ['write', 'paint']);
+
+    const html = renderCharacterAssetList({ 冬月: { 默认: '' } }, { isOpen: () => true });
+    assert.ok(html.includes('data-action="char-generate-sprite:%E5%86%AC%E6%9C%88"'));
+    assert.ok(html.includes('生成立绘'));
+    const dnaOnly = renderDnaOnlyCharacterList({ 路人甲: { identity: '' } }, {});
+    assert.ok(dnaOnly.includes('data-action="char-generate-sprite:%E8%B7%AF%E4%BA%BA%E7%94%B2"'));
+});
+
+test('gate:assets:floor-sprite-descriptions-carry-dna', async () => {
+    const { buildDbgenSpriteBatchDescription, buildDbgenAssetDescription } = await import('../src/generated-images/dbgen-prompt.js');
+    const alice = { type: 'sprite', name: '爱丽丝', dna: { identity: '', defaultAppearance: 'black hair, blue eyes', negative: 'blonde hair', triggerWords: '' } };
+    const plain = { type: 'sprite', name: '路人甲' };
+    const batch = buildDbgenSpriteBatchDescription([plain, alice]);
+    assert.match(batch, /第 2 份：\n「爱丽丝」的长相以下面的设定为准/);
+    assert.match(batch, /默认外观：\nblack hair, blue eyes/);
+    assert.match(batch, /不要出现：\nblonde hair/);
+    assert.equal(batch.includes('第 1 份'), false);
+    assert.equal(buildDbgenSpriteBatchDescription([plain]).includes('长相按设定写'), false);
+    const single = buildDbgenAssetDescription(alice);
+    assert.match(single, /默认外观：\nblack hair, blue eyes/);
+    assert.equal(buildDbgenAssetDescription(plain).includes('默认外观'), false);
+});
+
+test('gate:assets:expression-mood-tags-beat-copied-neutral-face-and-dna-pose', async () => {
+    const { applyMoodToCaption, applyCharacterDnaToCaption, buildExpressionDiffDescription, buildCharacterSpriteDescription, buildDbgenSpriteBatchDescription } = await import('../src/generated-images/dbgen-prompt.js');
+    const caption = {
+        v4_prompt: { caption: { base_caption: '1girl, black hair, expressionless, closed mouth, arms at sides, red hoodie', char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: '', char_captions: [] } },
+    };
+    const laugh = applyMoodToCaption(caption, '大笑').v4_prompt.caption.base_caption;
+    assert.match(laugh, /^laughing, open mouth/);
+    assert.doesNotMatch(laugh, /expressionless|closed mouth|arms at sides/);
+    assert.match(laugh, /red hoodie/);
+    assert.equal(applyMoodToCaption(caption, '默认'), caption);
+    assert.equal(applyMoodToCaption(caption, '自建组'), caption);
+    const withChar = { ...caption, v4_prompt: { caption: { base_caption: 'solo', char_captions: [{ char_caption: '1girl, expressionless', centers: [{ x: 0.5, y: 0.5 }] }] } } };
+    const charOut = applyMoodToCaption(withChar, '哭泣').v4_prompt.caption;
+    assert.equal(charOut.base_caption, 'solo');
+    assert.match(charOut.char_captions[0].char_caption, /^crying, tears/);
+    assert.doesNotMatch(charOut.char_captions[0].char_caption, /expressionless/);
+    const dna = { defaultAppearance: 'black hair, red eyes, expressionless, light smile, closed mouth, arms at sides, hands on hips, red hoodie', negative: 'smile' };
+    const merged = applyCharacterDnaToCaption(applyMoodToCaption(caption, '喜悦'), dna);
+    const positive = merged.v4_prompt.caption.base_caption;
+    assert.match(positive, /^black hair, red eyes, red hoodie, smile, happy/);
+    assert.doesNotMatch(positive, /expressionless|light smile|closed mouth|arms at sides|hands on hips/);
+    assert.equal(merged.v4_negative_prompt.caption.base_caption.includes('smile'), false);
+    const text = buildExpressionDiffDescription('冬月', { caption }, ['大笑'], null, null);
+    assert.match(text, /表情和动作不要沿用/);
+    assert.match(buildCharacterSpriteDescription('冬月', null), /轻量的日常小动作/);
+    assert.match(buildDbgenSpriteBatchDescription([{ name: '冬月' }]), /轻量的日常小动作/);
+    assert.equal(buildAssetSlot({ need: { type: 'sprite', name: '冬月' }, tags: '1girl', uc: '' }).scene.includes('arms at sides'), false);
+    const legacy = '{tags}, solo, cowboy shot, standing, facing viewer, looking at viewer, straight-on, arms at sides, centered, {matte}';
+    assert.equal(normalizeAutoIllustrationSettings({ assets: { templates: { sprite: legacy } } }).assets.templates.sprite.includes('arms at sides'), false);
+    assert.equal(normalizeAutoIllustrationSettings({ assets: { templates: { sprite: '{tags}, arms at sides' } } }).assets.templates.sprite, '{tags}, arms at sides');
+});
+
+test('gate:assets:expression-look-keeps-clothes-from-one-source', async () => {
+    const { expressionLookTags, expressionPaintDna, applyLookToCaption } = await import('../src/generated-images/dbgen-prompt.js');
+    const base = { caption: {
+        v4_prompt: { caption: { base_caption: 'solo', char_captions: [{ char_caption: '1girl, black hair, red hoodie, shorts, expressionless, closed mouth, arms at sides, cowboy shot, standing, transparent background' }] } },
+        v4_negative_prompt: { caption: { base_caption: '', char_captions: [] } },
+    } };
+    assert.equal(expressionLookTags(base, null), '1girl, black hair, red hoodie, shorts');
+    assert.equal(expressionLookTags(base, { name: '泳装', prompt: 'white bikini, 白色泳衣, sun hat', ownImage: false }), 'white bikini, sun hat');
+    assert.equal(expressionLookTags(base, { name: '泳装', prompt: '', ownImage: false }), '', 'old clothes must not leak into a new outfit');
+    assert.equal(expressionLookTags(base, { name: '泳装', prompt: '', ownImage: true }), '1girl, black hair, red hoodie, shorts');
+    assert.equal(expressionLookTags({ positive: '1girl, maid outfit, smile' }, null), '1girl, maid outfit');
+    const dna = { identity: 'black hair', defaultAppearance: 'red hoodie' };
+    assert.equal(expressionPaintDna(dna, null), dna);
+    assert.deepEqual(expressionPaintDna(dna, { name: '泳装' }), { identity: 'black hair', defaultAppearance: '' });
+    const caption = { v4_prompt: { caption: { base_caption: 'laughing, red jacket', char_captions: [] } }, v4_negative_prompt: { caption: { base_caption: '', char_captions: [] } } };
+    assert.equal(applyLookToCaption(caption, 'red hoodie, shorts').v4_prompt.caption.base_caption, 'red hoodie, shorts, laughing, red jacket');
+    assert.equal(applyLookToCaption(caption, ''), caption);
+});
+
+test('gate:assets:reroll-paints-the-slot-prompt-with-a-fresh-seed-and-no-rewrite', async () => {
+    const cap = (t) => ({ v4_prompt: { caption: { base_caption: t, char_captions: [] } }, v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } } });
+    const writes = [];
+    const paints = [];
+    const nai = {
+        writeDbgenPrompt: async (meta) => { writes.push(meta.description); return { ok: true, caption: cap('fresh'), captions: [1, 2].map((slotId) => ({ slotId, caption: cap('fresh') })) }; },
+        generateDbgenCaption: async (meta) => { paints.push(meta); return { ok: true, dataUrl: 'data:image/png;base64,QQ==', prompt: { positive: 'x', negative: '' } }; },
+    };
+    let seq = 0;
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'chat', readFloor: () => null, readPreviousAiTexts: () => [], on: () => () => {} },
+        llm: {}, nai, store: createMemoryGeneratedAssetStore(),
+        getSettings: () => ({ autoIllustration: {}, sceneAssets: {} }),
+        newId: () => `r-${seq += 1}`,
+        matte: async (dataUrl) => dataUrl,
+    });
+    const basePrompt = { positive: '1girl, red hoodie', negative: '', caption: cap('1girl, red hoodie, expressionless') };
+    const old = cap('old pose, expressionless, closed mouth');
+    await service.generateExpressionImage({ name: '冬月', mood: '大笑', caption: old, basePrompt });
+    await service.generateExpressionImage({ name: '冬月', mood: '大笑', caption: old, basePrompt });
+    assert.equal(writes.length, 0, 'reroll paints straight away, no slow prompt writing');
+    const text = paints[0].caption.v4_prompt.caption.base_caption;
+    assert.match(text, /^laughing, open mouth/);
+    assert.match(text, /red hoodie/);
+    assert.doesNotMatch(text, /expressionless|closed mouth/);
+    assert.ok(Number.isInteger(paints[0].seed) && Number.isInteger(paints[1].seed));
+    assert.notEqual(paints[0].seed, paints[1].seed, 'each reroll gets a new seed');
+    await service.generateExpressionSet({ name: '冬月', basePrompt, moods: ['喜悦', '愤怒'] });
+    await service.generateExpressionSet({ name: '冬月', basePrompt, moods: ['喜悦', '愤怒'] });
+    assert.equal(paints[2].seed, paints[3].seed, 'one batch shares a seed');
+    assert.notEqual(paints[2].seed, paints[4].seed, 'deleting and redoing gets a new seed');
+});
+
+test('gate:dbgen:plugin-calls-time-out-instead-of-hanging', async () => {
+    const { createImageBackend } = await import('../src/generated-images/image-backend.js');
+    const never = () => new Promise(() => {});
+    const NaiDbGen = { generate: never, generateSinglePrompt: never };
+    const backend = createImageBackend({ global: { NaiDbGen }, dbgenTimeouts: { write: 20, paint: 20 } });
+    const caption = { v4_prompt: { caption: { base_caption: '1girl', char_captions: [] } } };
+    const painted = await backend.generateDbgenCaption({ caption });
+    assert.equal(painted.ok, false);
+    assert.match(painted.error, /没有返回，已放弃等待/);
+    const written = await backend.writeDbgenPrompt({ description: '画一张' });
+    assert.equal(written.ok, false);
+    assert.match(written.error, /没有返回，已放弃等待/);
+});
+
+test('gate:assets:stopped-expression-set-keeps-captions-and-resume-paints-without-rewriting', async () => {
+    const moods = ['喜悦', '愤怒', '悲伤'];
+    const captionOf = (text) => ({
+        v4_prompt: { caption: { base_caption: text, char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
+    });
+    let writes = 0;
+    const painted = [];
+    const signal = { aborted: false };
+    const nai = {
+        writeDbgenPrompt: async () => {
+            writes += 1;
+            return { ok: true, captions: moods.map((mood, index) => ({ slotId: index + 1, caption: captionOf(`expr ${mood}`) })) };
+        },
+        generateDbgenCaption: async ({ caption }) => {
+            painted.push(JSON.stringify(caption));
+            signal.aborted = true; // 画完第一张就按停止
+            return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: 'x', negative: '' } };
+        },
+    };
+    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'c1', getUserName: () => '', readPreviousAiTexts: () => [] },
+        llm: null, nai, store: createMemoryGeneratedAssetStore(), getSettings: () => ({}), events: null, matte: async (dataUrl) => dataUrl,
+    });
+    const first = await service.generateExpressionSet({ name: '冬月', basePrompt: { positive: '1girl' }, moods, signal });
+    assert.equal(first.stopped, true);
+    const left = first.items.filter((item) => item.error === '已停止');
+    assert.deepEqual(left.map((item) => item.mood), ['愤怒', '悲伤']);
+    assert.ok(left.every((item) => item.caption));
+
+    const { pendingExpressionCaptions } = await import('../src/visual/igs-ui/settings-outfit-fields.js');
+    const notes = {
+        愤怒: { error: '已停止', caption: left[0].caption },
+        悲伤: { error: '已停止', caption: left[1].caption },
+        害羞: { error: '出图失败', caption: captionOf('expr 害羞') },
+        被删: { error: '出图失败', caption: captionOf('expr 被删') },
+    };
+    const pending = pendingExpressionCaptions(notes, { 默认: 'igs-gen:a', 喜悦: 'igs-gen:b', 害羞: '' });
+    assert.deepEqual(pending.map((item) => item.mood), ['愤怒', '悲伤', '害羞']);
+
+    signal.aborted = false;
+    nai.generateDbgenCaption = async ({ caption }) => {
+        painted.push(JSON.stringify(caption));
+        return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: 'x', negative: '' } };
+    };
+    const resumed = await service.paintExpressionCaptions({ name: '冬月', items: pending, basePrompt: { positive: '1girl' }, signal });
+    assert.equal(resumed.ok, true);
+    assert.deepEqual(resumed.items.map((item) => item.ok), [true, true, true]);
+    assert.equal(writes, 1, '继续生图不重写词');
+    assert.match(painted.at(-1), /expr 害羞/);
+});
+
+test('gate:assets:resume-button-shows-only-when-captions-wait-for-paint', async () => {
+    const { renderCharacterSlotTabs } = await import('../src/visual/igs-ui/settings-outfit-fields.js');
+    const caption = { v4_prompt: { caption: { base_caption: 'x', char_captions: [] } } };
+    const base = { charName: '冬月', baseMoods: ['默认'], baseListHtml: '', outfits: {}, activeOutfit: '', icons: {} };
+    const sceneAssets = { characters: { 冬月: { 默认: 'igs-gen:a' } } };
+    const idle = renderCharacterSlotTabs({ ...base, sceneAssets, expressionNotes: {} });
+    assert.equal(idle.includes('expression-resume'), false);
+    const waiting = renderCharacterSlotTabs({ ...base, sceneAssets, expressionNotes: { 冬月: { 愤怒: { error: '已停止', caption } } } });
+    assert.ok(waiting.includes('data-action="char-expression-resume:%E5%86%AC%E6%9C%88"'));
+    assert.ok(waiting.includes('继续生图（1）'));
 });
