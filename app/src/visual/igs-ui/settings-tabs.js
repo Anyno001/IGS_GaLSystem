@@ -251,6 +251,12 @@ const READER_TEXT_TEMPLATE = `
     <div class="igs-source-filter-grid">
       {{fontSizeField}}
       {{dialogFontWeightField}}
+      {{dialogTextEffectField}}
+      <div class="igs-reader-text-effect-options">
+        {{dialogTextEffectColorField}}
+        {{dialogTextEffectStrengthField}}
+        {{dialogTextEffectSizeField}}
+      </div>
     </div>
   </div>
   <div class="igs-source-filter igs-text-style">

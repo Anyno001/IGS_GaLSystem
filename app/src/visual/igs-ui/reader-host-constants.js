@@ -120,6 +120,10 @@ export const DIALOG_FONT_OPTIONS = Object.freeze([
 export const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.fontSize',
     'readerSettings.dialogFontWeight',
+    'readerSettings.dialogTextEffect',
+    'readerSettings.dialogTextEffectColor',
+    'readerSettings.dialogTextEffectStrength',
+    'readerSettings.dialogTextEffectSize',
     'readerSettings.dialogSkin',
     'readerSettings.gradientVeil.color',
     'readerSettings.gradientVeil.heightPercent',

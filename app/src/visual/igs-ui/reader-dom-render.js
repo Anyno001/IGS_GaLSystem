@@ -1397,6 +1397,25 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         }
         applyDialogTextSize(textEl, snapshot.readerSettings.fontSize);
         textEl.style.fontWeight = snapshot.readerSettings.dialogFontWeight == null ? '' : String(snapshot.readerSettings.dialogFontWeight);
+        const textEffect = snapshot.readerSettings.dialogTextEffect;
+        const effectColor = snapshot.readerSettings.dialogTextEffectColor;
+        const effectStrength = Number(snapshot.readerSettings.dialogTextEffectStrength);
+        const effectSize = Number(snapshot.readerSettings.dialogTextEffectSize);
+        if ((textEffect === 'outline' || textEffect === 'shadow')
+            && /^#[0-9a-fA-F]{6}$/.test(effectColor)
+            && Number.isFinite(effectStrength) && Number.isFinite(effectSize)) {
+            const rgb = [1, 3, 5].map((index) => parseInt(effectColor.slice(index, index + 2), 16)).join(',');
+            const ink = `rgba(${rgb},${Math.max(5, Math.min(50, effectStrength)) / 100})`;
+            const size = Math.max(0.4, Math.min(2, effectSize));
+            // 先绘制描边再绘制填充：内侧半圈由原字色盖住，描边只在字形外侧可见。
+            textEl.style.paintOrder = textEffect === 'outline' ? 'stroke fill' : '';
+            textEl.style.webkitTextStroke = textEffect === 'outline' ? `${size * 2}px ${ink}` : '';
+            textEl.style.textShadow = textEffect === 'shadow' ? `0 ${size * 1.25}px ${size * 2.5}px ${ink}` : 'none';
+        } else {
+            textEl.style.paintOrder = '';
+            textEl.style.webkitTextStroke = '';
+            textEl.style.textShadow = '';
+        }
         textEl.style.marginTop = '';
         textEl.style.paddingTop = '';
         const isNarration = textType === 'narration';
