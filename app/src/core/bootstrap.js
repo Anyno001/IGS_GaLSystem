@@ -1,6 +1,7 @@
 import { createPublicApi, attachPublicApi, detachPublicApi } from '../api/public-api.js';
 import { createTavernHelperAdapter, getSillyTavernContext } from '../host/tavern-helper-adapter.js';
 import { sceneAssetsForContext } from '../scene/asset-scope.js';
+import { withTavernGeneratedAssetFiles, withTavernIllustrationFiles } from '../media/tavern-image-files.js';
 import { createPresetRegistry } from '../presets/preset-registry.js';
 import { createInputChannel } from '../host/input-channel.js';
 import { parseSceneText } from '../scene/text-parser.js';
@@ -19,7 +20,7 @@ import { resolveVisualMode } from '../visual/visual-mode.js';
 import { DEFAULT_SCENE_PROMPT_RULE, LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3, normalizeScenePromptRule } from '../visual/igs-ui/reader-host-constants.js';
 import { createIgsReaderHost } from '../visual/igs-ui/reader-host.js';
 import { normalizeChatShowSettings, resolveChatShowPromptRule } from '../visual/igs-ui/chat-show-runtime.js';
-import { resolveFxPromptRule, resolveItemFxPromptRule, resolveRomanceFxPromptRule, resolveStageCastFxPromptRule } from '../visual/igs-ui/fx-prompt.js';
+import { resolveBgmPromptRule, resolveFxPromptRule, resolveItemFxPromptRule, resolveRomanceFxPromptRule, resolveStageCastFxPromptRule } from '../visual/igs-ui/fx-prompt.js';
 import { resolveDanmakuPromptRule } from '../visual/igs-ui/danmaku-prompt.js';
 import { resolveTextFxPromptRule } from '../visual/igs-ui/text-fx.js';
 import { resolveBilingualPromptRule } from '../visual/igs-ui/bilingual-text.js';
@@ -50,7 +51,7 @@ import { buildTagGrammar, DEPTH0_REMINDER, normalizePromptPlacement } from '../v
 import { detectPromptTriggers } from '../scene/prompt-triggers.js';
 import { collectPromptContext } from '../host/prompt-context.js';
 
-const IGS_VERSION = '0.34.26';
+const IGS_VERSION = '0.34.39';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
@@ -116,12 +117,13 @@ export function bootstrapIGS(options = {}) {
         nai: naiOfficialClient,
         getBridge: readImageBridge,
         global: globalObject,
+        llm: secondaryLlm,
         report: (level, message) => {
             if (imageJobLog && typeof imageJobLog.add === 'function') imageJobLog.add(level, message);
         },
     });
     // CG 库与自动插图共用同一个插图存储实例。
-    const illustrationStore = options.illustrationStore || createIndexedDbIllustrationStore(globalObject);
+    const illustrationStore = options.illustrationStore || withTavernIllustrationFiles(createIndexedDbIllustrationStore(globalObject), globalObject);
     const illustrationService = options.illustrationService || createAutoIllustrationService({
         messageHost: illustrationMessageHost,
         llm: secondaryLlm,
@@ -139,7 +141,7 @@ export function bootstrapIGS(options = {}) {
         report: reportImageJob,
     });
     // 物品图与素材补全共用 igs-generated-assets 存储实例。
-    const generatedAssetStore = options.generatedAssetStore || createIndexedDbGeneratedAssetStore(globalObject);
+    const generatedAssetStore = options.generatedAssetStore || withTavernGeneratedAssetFiles(createIndexedDbGeneratedAssetStore(globalObject), globalObject);
     const assetGenerationService = options.assetGenerationService || createAssetGenerationService({
         messageHost: illustrationMessageHost,
         llm: secondaryLlm,
@@ -228,6 +230,9 @@ export function bootstrapIGS(options = {}) {
         itemImages: itemCg.itemImages,
         cgGallery: itemCg.cgGallery,
         onItemImageUpdated: itemCg.onItemImageUpdated,
+        requestMoodClassification({ system, user }, llmSettings) {
+            return secondaryLlm.request({ system, user }, llmSettings);
+        },
         getCurrentChatId: () => (typeof illustrationMessageHost.getChatId === 'function' ? illustrationMessageHost.getChatId() : ''),
         imageJobLog,
         getUnifiedSettings: getUnifiedSettingsSnapshot,
@@ -437,13 +442,15 @@ export function bootstrapIGS(options = {}) {
     }
 
     function getUnifiedSettingsSnapshot(input = {}) {
-        const bridge = {
-            ...cloneData(state.legacyIgs && state.legacyIgs.bridge || {}),
-            ...cloneData(state.config || {}),
-        };
+        // The shallow merge picks one value per key. Clone only the winning graph;
+        // cloning the overwritten sceneAssets tree and then cloning it again is costly.
+        const bridge = cloneData({
+            ...(state.legacyIgs && state.legacyIgs.bridge || {}),
+            ...(state.config || {}),
+        });
         if (bridge.sceneAssets && typeof bridge.sceneAssets === 'object' && !Array.isArray(bridge.sceneAssets)) {
             bridge.sceneAssets = {
-                ...cloneData(bridge.sceneAssets),
+                ...bridge.sceneAssets,
                 promptRule: normalizeScenePromptRule(bridge.sceneAssets.promptRule),
             };
         }
@@ -452,7 +459,7 @@ export function bootstrapIGS(options = {}) {
             state.legacyIgs && state.legacyIgs.displayMode,
             bridge,
         );
-        const readerSettingsByMode = cloneData(state.legacyIgs && state.legacyIgs.readerSettingsByMode || {});
+        const readerSettingsByMode = state.legacyIgs && state.legacyIgs.readerSettingsByMode || {};
         // 优先 default 桶；老用户 default 为空时回退到旧的 pc/mobile 分桶或顶层 readerSettings。
         const hasKeys = (obj) => obj && typeof obj === 'object' && Object.keys(obj).length > 0;
         const resolvedReaderSettings = hasKeys(readerSettingsByMode['default']) ? readerSettingsByMode['default']
@@ -470,11 +477,13 @@ export function bootstrapIGS(options = {}) {
 
     function saveUnifiedSettings(payload = {}) {
         const currentLegacy = state.legacyIgs || readLegacyIgsSettings(storageLike);
-        const nextBridge = {
-            ...cloneData(currentLegacy.bridge || {}),
-            ...cloneData(state.config || {}),
-            ...cloneData(payload.bridge || {}),
-        };
+        // Merge first, then copy the winning values once. Copying each source before
+        // the shallow merge duplicates large sceneAssets libraries that get overwritten.
+        const nextBridge = cloneData({
+            ...(currentLegacy.bridge || {}),
+            ...(state.config || {}),
+            ...(payload.bridge || {}),
+        });
         const displayMode = resolveLegacyReaderMode(
             nextBridge.openMode,
             currentLegacy.displayMode,
@@ -507,10 +516,10 @@ export function bootstrapIGS(options = {}) {
             : { ok: true, legacy: nextLegacy, persisted: false };
         if (writeResult.ok === false) return writeResult;
         state.legacyIgs = cloneData(writeResult.legacy);
-        state.config = {
-            ...cloneData(state.config || {}),
-            ...cloneData(nextBridge),
-        };
+        state.config = cloneData({
+            ...(state.config || {}),
+            ...nextBridge,
+        });
         events.emit('igs:legacy-settings-updated', cloneData(state.legacyIgs));
         // 用户改了日志保留天数 / 条数后立即按新规则清理。
         if (imageJobLog && typeof imageJobLog.prune === 'function') imageJobLog.prune();
@@ -528,7 +537,7 @@ export function bootstrapIGS(options = {}) {
         // 世界观：与之冲突的演出开关在这里拨成关，AI 不会收到它们的语法说明；时代规则按世界观追加（现代为空）。
         const worldview = resolveWorldview(sceneAssets);
         const ancient = worldview === 'ancient';
-        const eraRule = resolveWorldviewPromptRule(worldview);
+        const eraRule = resolveWorldviewPromptRule(worldview, sceneAssets);
         const readerSettings = applyFxWorldview(unified.readerSettings, worldview);
         const placement = normalizePromptPlacement(sceneAssets && sceneAssets.promptPlacement);
         // 交互摘要：只在有待送出的事件时注入，生成结束后清空（见 attachMetaDigestSync）。
@@ -582,6 +591,8 @@ export function bootstrapIGS(options = {}) {
         if (battleFxRule) rules.push(battleFxRule);
         const romanceFxRule = resolveRomanceFxPromptRule(readerSettings && readerSettings.romanceFx);
         if (romanceFxRule) rules.push(romanceFxRule);
+        const bgmRule = resolveBgmPromptRule(readerSettings && readerSettings.bgm);
+        if (bgmRule) rules.push(bgmRule);
         const stageCastFxRule = resolveStageCastFxPromptRule(readerSettings && readerSettings.stageCast);
         if (stageCastFxRule) rules.push(stageCastFxRule);
         const danmakuRule = resolveDanmakuPromptRule(readerSettings);

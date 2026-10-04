@@ -62,6 +62,7 @@ import {
     fuzzyResolveMoodGroup,
 } from '../src/scene/mood-groups.js';
 import { loadMoodReview, recordMoodReview, MOOD_REVIEW_LIMIT } from '../src/scene/mood-review-store.js';
+import { applyMoodAssignments, parseMoodClassification } from '../src/scene/mood-classify.js';
 import { renderMoodReviewList } from '../src/visual/igs-ui/settings-fields.js';
 import { handleSettingsAction } from '../src/visual/igs-ui/settings-actions.js';
 import { getNextSettingsTheme, normalizeSettingsTheme } from '../src/visual/igs-ui/settings-theme.js';
@@ -1349,6 +1350,17 @@ test('gate:igs-ui:resolve-sprite-layout-keeps-mode-isolated', () => {
     assert.deepEqual(resolveSpriteLayout(layouts, 'web', '小林海斗', '平和'), { posX: 50, posY: 100, scale: 100 });
 });
 
+test('gate:igs-ui:resolve-sprite-layout-default-scale-only-fills-unplaced', () => {
+    const layouts = { 'pc::小林海斗::平和': { posX: 70, posY: 30, scale: 180 } };
+    // 没调过的立绘按默认高度；调过的保持自己的大小
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '上传角色', '平和', '', 80), { posX: 50, posY: 100, scale: 80 });
+    assert.deepEqual(resolveSpriteLayout(null, 'pc', '上传角色', '', '', 120), { posX: 50, posY: 100, scale: 120 });
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '小林海斗', '平和', '', 80), { posX: 70, posY: 30, scale: 180 });
+    // 旧设置没有这项、或值异常时仍是 100
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '上传角色', '', '', undefined), { posX: 50, posY: 100, scale: 100 });
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '上传角色', '', '', 'abc'), { posX: 50, posY: 100, scale: 100 });
+});
+
 test('gate:scene:igs-message-source:formats-default-bubble-body', () => {
     const payload = buildIgsTextPayload({
         text: '<content>[igs-char:玉子|开心|欢迎来到图书馆。]</content>',
@@ -1714,6 +1726,119 @@ test('gate:scene:mood-review-assign-moves-word-into-group-and-clears-entry', asy
     assert.equal(persistCount, 2);
     assert.deepEqual(loadMoodReview(storage), []);
 });
+
+test('gate:scene:mood-review-ai-classify-manual-single-request-and-existing-groups', async () => {
+    const storage = memoryStorage();
+    recordMoodReview(storage, { word: '嘲弄', quality: 'default' });
+    recordMoodReview(storage, { word: '迟疑', quality: 'default' });
+    const draft = { bridge: { autoIllustration: { llm: { source: 'openai', endpoint: '', model: '' } }, sceneAssets: {
+        enabled: true, moodGroups: [{ label: '嫌弃', words: ['反感'] }, { label: '思考', words: ['沉思'] }],
+    } }, readerSettings: {} };
+    let resolveAnswer;
+    let requests = 0;
+    let writes = 0;
+    let sent;
+    const ctx = { state: { activeSettings: { draft, asyncState: {} } },
+        options: { global: { localStorage: storage, alert: () => {} }, requestMoodClassification: (input, llm) => {
+            requests += 1;
+            sent = { input, llm };
+            return new Promise((resolve) => { resolveAnswer = resolve; });
+        } },
+        persistSettingsDraft: () => { writes += 1; return { ok: true }; },
+        rerenderSettings: () => ({ ok: true }),
+    };
+    assert.equal(requests, 0, 'opening settings never starts AI classification');
+    const first = handleSettingsAction('mood-review-ai-classify', ctx);
+    assert.equal(requests, 1, 'one click starts one LLM request');
+    assert.equal(sent.llm.source, 'tavern', 'unfilled independent API falls back to Tavern');
+    assert.deepEqual(JSON.parse(sent.input.user).words, ['迟疑', '嘲弄']);
+    assert.deepEqual(JSON.parse(sent.input.user).groups[0], { label: '嫌弃', words: ['反感'] });
+    assert.match(sent.input.system, /分类习惯/);
+    assert.match(sent.input.system, /最合适/);
+    assert.equal((await handleSettingsAction('mood-review-ai-classify', ctx)).reason, 'mood-classification-busy');
+    assert.equal(requests, 1, 'second click while pending cannot start another request');
+    resolveAnswer(JSON.stringify({ assignments: [{ word: '嘲弄', group: '嫌弃' }, { word: '迟疑', group: '思考' }] }));
+    assert.equal((await first).count, 2);
+    assert.equal(writes, 1);
+    assert.deepEqual(draft.bridge.sceneAssets.moodGroups.map((g) => g.words), [['反感', '嘲弄'], ['沉思', '迟疑']]);
+    assert.deepEqual(loadMoodReview(storage), []);
+});
+
+
+test('gate:scene:mood-classification-rejects-a-new-group-and-keeps-words-in-the-chosen-group', () => {
+    const groups = [{ label: '思考', words: ['沉思'] }, { label: '喜悦', words: ['开心'] }];
+    assert.throws(() => parseMoodClassification('{"assignments":[{"word":"迟疑","group":"新建"}]}', ['迟疑'], ['思考', '喜悦']), /invalid-assignment/);
+    const parsed = parseMoodClassification('说明\n{"assignments":[{"word":"迟疑","group":"思考"}]}', ['迟疑'], ['思考', '喜悦']);
+    assert.deepEqual(applyMoodAssignments(groups, parsed)[0].words, ['沉思', '迟疑']);
+    assert.deepEqual(groups[0].words, ['沉思']);
+});
+
+test('gate:scene:mood-review-ai-classify-rejects-incomplete-or-unknown-assignments', async () => {
+    for (const answer of [
+        '{"assignments":[{"word":"迟疑","group":"思考"}]}',
+        '{"assignments":[{"word":"迟疑","group":"新建组"},{"word":"嘲弄","group":"嫌弃"}]}',
+        '{"assignments":[{"word":"迟疑","group":"思考"},{"word":"迟疑","group":"嫌弃"}]}',
+    ]) {
+        const storage = memoryStorage();
+        recordMoodReview(storage, { word: '嘲弄' });
+        recordMoodReview(storage, { word: '迟疑' });
+        const draft = { bridge: { sceneAssets: { moodGroups: [{ label: '思考', words: ['沉思'] }, { label: '嫌弃', words: [] }] } } };
+        let writes = 0;
+        let calls = 0;
+        const ctx = { state: { activeSettings: { draft, asyncState: {} } },
+            options: { global: { localStorage: storage, alert: () => {} }, requestMoodClassification: async () => { calls++; return answer; } },
+            persistSettingsDraft: () => { writes++; return { ok: true }; }, rerenderSettings: () => ({ ok: true }),
+        };
+        const result = await handleSettingsAction('mood-review-ai-classify', ctx);
+        assert.equal(result.reason, 'mood-classification-failed');
+        assert.equal(calls, 1);
+        assert.equal(writes, 0);
+        assert.deepEqual(draft.bridge.sceneAssets.moodGroups.map((g) => g.words), [['沉思'], []]);
+        assert.deepEqual(loadMoodReview(storage).map((item) => item.word), ['迟疑', '嘲弄']);
+    }
+});
+
+test('gate:scene:mood-review-ai-classify-restores-groups-when-review-store-write-fails', async () => {
+    const storage = memoryStorage();
+    recordMoodReview(storage, { word: '迟疑' });
+    const originalSet = storage.setItem;
+    storage.setItem = (key, value) => {
+        if (key === 'igs:mood-review:v1') throw new Error('full');
+        return originalSet(key, value);
+    };
+    const draft = { bridge: { sceneAssets: { moodGroups: [{ label: '思考', words: [] }] } } };
+    let saves = 0;
+    const ctx = { state: { activeSettings: { draft, asyncState: {} } },
+        options: { global: { localStorage: storage, alert: () => {} }, requestMoodClassification: async () => '{"assignments":[{"word":"迟疑","group":"思考"}]}' },
+        persistSettingsDraft: () => {
+            saves++;
+            ctx.state.activeSettings.draft = structuredClone(ctx.state.activeSettings.draft);
+            return { ok: true };
+        }, rerenderSettings: () => ({ ok: true }),
+    };
+    const result = await handleSettingsAction('mood-review-ai-classify', ctx);
+    assert.equal(result.reason, 'store-write-failed');
+    assert.equal(saves, 2, 'second save restores the original settings');
+    assert.deepEqual(draft.bridge.sceneAssets.moodGroups, [{ label: '思考', words: [] }]);
+    assert.deepEqual(ctx.state.activeSettings.draft.bridge.sceneAssets.moodGroups, [{ label: '思考', words: [] }], 'replacement draft must be restored too');
+    assert.deepEqual(loadMoodReview(storage).map((item) => item.word), ['迟疑']);
+});
+
+test('gate:scene:mood-review-ai-classify-restores-draft-when-settings-save-throws', async () => {
+    const storage = memoryStorage();
+    recordMoodReview(storage, { word: '迟疑' });
+    const draft = { bridge: { sceneAssets: { moodGroups: [{ label: '思考', words: [] }] } } };
+    const ctx = { state: { activeSettings: { draft, asyncState: {} } },
+        options: { global: { localStorage: storage, alert: () => {} }, requestMoodClassification: async () => '{"assignments":[{"word":"迟疑","group":"思考"}]}' },
+        persistSettingsDraft: () => { throw new Error('storage full'); }, rerenderSettings: () => ({ ok: true }),
+    };
+    const result = await handleSettingsAction('mood-review-ai-classify', ctx);
+    assert.equal(result.reason, 'mood-classification-failed');
+    assert.deepEqual(draft.bridge.sceneAssets.moodGroups, [{ label: '思考', words: [] }]);
+    assert.deepEqual(loadMoodReview(storage).map((item) => item.word), ['迟疑']);
+});
+
+
 
 test('gate:scene:prompt-rule-draft-only-persists-on-explicit-save', async () => {
     const draft = {

@@ -7,6 +7,7 @@ import {
 } from '../../scene/message-source.js';
 import { extractSceneDirectives, resolveSceneStateAtIndex, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers, resolveNearestCharacterBefore } from '../../scene/scene-directives.js';
 import { classifySceneKey, resolveCharacterKey } from '../../scene/scene-directives.js';
+import { normalizeSpriteEnhance } from './sprite-enhance.js';
 import { recordOutfitReview, dropConfirmedOutfitReview } from '../../scene/outfit-review-store.js';
 import { assetOwnerKey, assetShadowsGlobal, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, normalizeAssetCards, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
@@ -28,7 +29,8 @@ import { closeRomanceFx } from './romance-runtime.js';
 import { closeMetaFx } from './meta-runtime.js';
 import { normalizeRomanceFxSettings, resolveNsfwSpan } from './romance-settings.js';
 import { cancelDailyFx } from './fx-daily.js';
-import { cancelSceneAudio } from './scene-audio.js';
+import { cancelSceneAudio, skipBgmTrack } from './scene-audio.js';
+import { applyBgmNoteToDom, toggleBgmNote } from './bgm-note.js';
 import { parkAudioBus, unparkAudioBus } from './audio-bus.js';
 import { isStagePaused, setStagePauseReason, watchStagePause } from './stage-pause.js';
 import { createReaderAutoPlay } from './reader-auto-play.js';
@@ -36,10 +38,11 @@ import { playUiSfx } from './ui-sfx.js';
 import { FX_SETTINGS_NORMALIZERS, normalizeFxReaderSettings } from './fx-settings.js';
 import { renderPerformancePresetBar, renderPerformanceSettings } from './performance-settings-layout.js';
 import { renderWorldviewRow } from './worldview-fields.js';
+import { findLastDreadLevel } from '../../scene/horror.js';
 import { renderQualityRow } from './render-quality-fields.js';
 import { normalizeSpriteHeads } from './fx-anchor.js';
 import { parseHtmlCardMarker } from '../../scene/html-cards.js';
-import { resolveBackgroundAsset, resolveSpriteAsset, isGeneratedAssetUrl, bindGeneratedBackground, bindGeneratedSprite, fileGeneratedHoldings, normalizeGeneratedLibrary, isNonSpriteSpeaker, collectGeneratedImageIds } from '../../scene/asset-match.js';
+import { resolveBackgroundAsset, resolveSpriteAsset, resolveNudeSpriteAsset, isGeneratedAssetUrl, bindGeneratedBackground, bindGeneratedSprite, fileGeneratedHoldings, normalizeGeneratedLibrary, isNonSpriteSpeaker, collectGeneratedImageIds } from '../../scene/asset-match.js';
 import { STAGE_CAST_MAX_SEATS, STAGE_CAST_SCAN_LIMIT, pickCastMembers, resolveCastOffset, resolveStageCast } from '../../scene/stage-cast.js';
 import { normalizeStageCastSettings } from './stage-direction-settings.js';
 import { resolveRomanceRivalTarget } from './romance-settings.js';
@@ -57,6 +60,7 @@ import { clearCurrentCg } from '../../generated-images/illustration/clear-curren
 import { floorKeyOf } from '../../media/illustration-store.js';
 import { normalizeMoodGroups, resolveMoodGroup } from '../../scene/mood-groups.js';
 import { NSFW_COUNT_MAX, normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
+import { describeLlmReady } from '../../generated-images/illustration/caption-writer.js';
 import { normalizeImageSourceMode, mergeLegacyNaiSettings } from '../../generated-images/image-backend.js';
 import {
     getOriginalReaderHtml,
@@ -194,6 +198,7 @@ import {
     normalizeReaderMode,
     normalizeSettingsTab,
     normalizeSettingsValue,
+    normalizeSpriteDefaultScale,
     normalizeSpriteLayouts,
     setPath,
 } from './settings-normalize.js';
@@ -212,13 +217,15 @@ import { createSettingsDialogs } from './settings-dialog.js';
 import { captureSettingsFocus, restoreSettingsFocus } from './settings-focus.js';
 import { renderSectionResetButton, sectionResetPlaceholders } from './settings-sections.js';
 import { createOnboardingController } from './onboarding-guide-controller.js';
+import { applyPerformanceProfile } from './performance-profile.js';
 import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLabel } from '../../generated-images/image-job-log.js';
 import { applyFxWorldview } from '../../scene/fx-era.js';
 import { resolveWorldview } from '../../scene/worldview.js';
 import { loadAssetFoldersFor } from './asset-folders.js';
 import { isLayeredPreset, loadLegacyPresets, legacyPresetHasContent, presetCardLayers } from '../../scene/legacy-preset.js';
 import { renderAssetFolderView, renderAssetFolderSelect } from './asset-folder-view.js';
-import { loadMoodReview, recordMoodReview } from '../../scene/mood-review-store.js';
+import { loadMoodReview, recordMoodReview, removeMoodReview } from '../../scene/mood-review-store.js';
+import { applyMoodAssignments, buildMoodClassificationRequest, parseMoodClassification, resolveSecondaryLlm } from '../../scene/mood-classify.js';
 import { LEGACY_READER_MODES } from '../../storage/legacy-igs.js';
 import {
     CLASSIC_DIALOG_HEIGHT,
@@ -240,8 +247,10 @@ import {
 } from './classic-dialog-skin.js';
 import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_ACCENT_DEFAULT, MAGIC_HOUSES, MAGIC_HOUSE_DEFAULT, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { normalizeCharacterHouses } from './magic-house.js';
+import { HORROR_DREAD_CAP_DEFAULT, HORROR_DREAD_CAP_LABELS, HORROR_DREAD_LEVELS, normalizeHorrorDreadCap } from './horror-dread.js';
 import { DIALOG_SKIN_QINGLV } from './dialog-theme-guofeng.js';
 import { DIALOG_SKIN_FAIRY_TALE } from './dialog-theme-fairytale.js';
+import { DIALOG_SKIN_HORROR_GORE, DIALOG_SKIN_HORROR_PSYCH } from './dialog-theme-horror.js';
 import { normalizeGradientVeil } from './gradient-veil-dialog-skin.js';
 import { SKIN_DIALOG_SCALE_OPTIONS, SKIN_DIALOG_SCALE_DEFAULT, normalizeSkinDialogScale } from './dialog-skin-frame.js';
 import { normalizeStageShakeSettings } from './stage-shake-runtime.js';
@@ -273,6 +282,7 @@ import {
 
 // 设置页改角色的某一项时，按这些字段里有没有这个角色名判断它在本卡还是全局。
 const ASSET_CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
+const LAST_SETTINGS_PAGE_KEY = 'igs:settings-last-page:v1';
 
 export function createIgsReaderHost(options = {}) {
     let statusHudClient = null;
@@ -294,12 +304,25 @@ export function createIgsReaderHost(options = {}) {
         getSettingsController: () => (state.activeSettings ? state.activeSettings.controller : null),
         rerenderSettings: () => rerenderSettings(),
         getDocument: () => getRootDocument(options.global),
+        applyPerformanceProfile: (answers) => {
+            if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
+            const draft = state.activeSettings.draft;
+            draft.readerSettings = draft.readerSettings || {};
+            applyPerformanceProfile(draft.readerSettings, answers);
+            return { ok: true };
+        },
     });
 
     const sourceCache = createReaderSourceCache({
         parse: (input) => buildIgsTextPayload(input.liveMessage, input.parseOptions),
     });
     const imageResourceCache = createImageResourceCache(options.global || globalThis);
+    let moodAutoTimer = 0;
+    let moodAutoRunning = false;
+    let moodAutoAgain = false;
+    let moodAutoDisposed = false;
+    let moodAutoFloorSent = '';
+    let moodAutoFloorWaiting = '';
     let embeddedStoryObserver = null;
     let embeddedStoryTimer = null;
     const streamObserver = createChatStreamObserver({
@@ -318,24 +341,62 @@ export function createIgsReaderHost(options = {}) {
         ? options.onItemImageUpdated(() => { if (state.activeReader) rerenderActiveReader(); })
         : null;
     const offItemImageUpdated = typeof offItemImageUpdatedRaw === 'function' ? offItemImageUpdatedRaw : () => {};
-    let settingsImageRefreshTimer = 0;
+    // 快照 → 遮罩内层 HTML；不放进快照字段，免得 getSnapshot/克隆多带一份。
+    const settingsShellHtml = new WeakMap();
     const settingsBusyActions = new Set();
-    function scheduleSettingsImageRefresh() {
-        if (settingsImageRefreshTimer) return;
+    // 生图从 IndexedDB 一张张异步补回，每张都会发 image-loaded。按窗口合并成一次重绘，
+    // 否则 N 张图触发 N 次整页重绘、每次又带上已到的全部 dataUrl，开销随张数平方增长。
+    const IMAGE_REFRESH_BATCH_MS = 120;
+    let imageRefreshTimer = 0;
+    let readerImageRefreshPending = false;
+    let settingsImageRefreshPending = false;
+    // 设置面板全屏盖住阅读器时不重绘后面的舞台，记一笔，关面板时补一次。
+    let readerStaleBehindSettings = false;
+    // 手指按着或 ⋯ 菜单开着时不整页重绘：重绘会收掉菜单、换掉按下的按钮，点击落空。
+    let settingsPointerDown = false;
+    function settingsInteracting() {
+        const root = state.activeSettings && state.activeSettings.dom && state.activeSettings.dom.root;
+        if (settingsPointerDown) return true;
+        return Boolean(root && typeof root.querySelector === 'function' && root.querySelector('details.igs-add-menu[open]'));
+    }
+    function flushDeferredImageRefresh() {
+        if (settingsImageRefreshPending && !imageRefreshTimer) scheduleImageRefresh();
+    }
+    function scheduleImageRefresh({ reader = false, settings = false } = {}) {
+        if (reader) readerImageRefreshPending = true;
+        if (settings) settingsImageRefreshPending = true;
+        if (imageRefreshTimer) return;
         const g = options.global || globalThis;
         const schedule = typeof g.setTimeout === 'function' ? g.setTimeout.bind(g) : setTimeout;
-        settingsImageRefreshTimer = schedule(() => {
-            settingsImageRefreshTimer = 0;
-            if (state.activeSettings && state.activeSettings.tab === 'scene') rerenderSettings();
-        }, 0);
+        imageRefreshTimer = schedule(() => {
+            imageRefreshTimer = 0;
+            const doReader = readerImageRefreshPending;
+            const doSettings = settingsImageRefreshPending;
+            readerImageRefreshPending = false;
+            settingsImageRefreshPending = false;
+            if (doReader && state.activeReader) {
+                if (state.activeSettings) readerStaleBehindSettings = true;
+                else rerenderActiveReader();
+            }
+            if (doSettings && state.activeSettings && state.activeSettings.tab === 'scene') {
+                // 交互中先搁着，松手或菜单收起时由 flushDeferredImageRefresh 补刷。
+                if (settingsInteracting()) settingsImageRefreshPending = true;
+                else rerenderSettings();
+            }
+        }, IMAGE_REFRESH_BATCH_MS);
     }
     const offGeneratedAssetUpdated = typeof options.onGeneratedAssetUpdated === 'function'
         ? options.onGeneratedAssetUpdated((detail) => {
-            if (state.activeReader) rerenderActiveReader();
             const settings = state.activeSettings;
+            const imageLoaded = Boolean(detail && detail.reason === 'image-loaded');
+            if (state.activeReader) {
+                if (settings) readerStaleBehindSettings = true;
+                else if (imageLoaded) scheduleImageRefresh({ reader: true });
+                else rerenderActiveReader();
+            }
             if (!settings) return;
-            if (detail && detail.reason === 'image-loaded') {
-                if (settings.tab === 'scene') scheduleSettingsImageRefresh();
+            if (imageLoaded) {
+                if (settings.tab === 'scene') scheduleImageRefresh({ settings: true });
                 return;
             }
             if (settings.asyncState.sceneSubTab === 'review') rerenderSettings();
@@ -570,11 +631,36 @@ export function createIgsReaderHost(options = {}) {
             optionsForRender.index ?? current.index);
     }
 
+    function rememberSettingsPage(current) {
+        try {
+            const storage = (options.global || globalThis).localStorage;
+            if (!storage || typeof storage.setItem !== 'function') return;
+            const page = current.asyncState || {};
+            storage.setItem(LAST_SETTINGS_PAGE_KEY, JSON.stringify({
+                tab: normalizeSettingsTab(current.tab),
+                readerSubTab: normalizeReaderSubTab(page.readerSubTab),
+                sceneSubTab: normalizeSceneSubTab(page.sceneSubTab),
+                imageSubTab: normalizeImageSubTab(page.imageSubTab),
+            }));
+        } catch (error) {
+            try { console.warn('[IGS] 设置页记忆写入失败：', error); } catch { /* 控制台不可用时不影响切页 */ }
+        }
+    }
+
     function openSettings(openOptions = {}) {
-        const normalizedTab = normalizeSettingsTab(openOptions.tab);
+        // 显式指定页签（阅读器工具按钮、引导跳转）始终优先于上次停留的位置。
+        let lastPage = null;
+        try {
+            const storage = (options.global || globalThis).localStorage;
+            const stored = storage && storage.getItem(LAST_SETTINGS_PAGE_KEY);
+            const parsed = stored ? JSON.parse(stored) : null;
+            lastPage = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+        } catch { /* 无存储权限时仍可打开设置 */ }
+        const normalizedTab = normalizeSettingsTab(openOptions.tab || (state.activeSettings && state.activeSettings.tab) || (lastPage && lastPage.tab));
         const fallbackMode = state.activeReader ? state.activeReader.mode : undefined;
         if (state.activeSettings) {
             state.activeSettings.tab = normalizedTab;
+            rememberSettingsPage(state.activeSettings);
             return rerenderSettings();
         }
 
@@ -588,7 +674,11 @@ export function createIgsReaderHost(options = {}) {
             tab: normalizedTab,
             draft: cloneData(initialSnapshot),
             initialOpenMode: initialSnapshot.bridge.openMode,
-            asyncState: {},
+            asyncState: {
+                readerSubTab: normalizeReaderSubTab(lastPage && lastPage.readerSubTab),
+                sceneSubTab: normalizeSceneSubTab(lastPage && lastPage.sceneSubTab),
+                imageSubTab: normalizeImageSubTab(lastPage && lastPage.imageSubTab),
+            },
             committedImageIds: collectGeneratedImageIds(initialSnapshot.bridge && initialSnapshot.bridge.sceneAssets),
             controller,
             dom: null,
@@ -597,6 +687,7 @@ export function createIgsReaderHost(options = {}) {
         settingsState.dom = mountSettingsDom(controller);
         syncSettingsStagePause();
         playReaderUiSfx('open');
+        rememberSettingsPage(settingsState);
         return rerenderSettings();
     }
 
@@ -775,8 +866,14 @@ export function createIgsReaderHost(options = {}) {
         }
         unmountNode(current.dom && current.dom.root);
         state.activeSettings = null;
+        settingsPointerDown = false;
         onboarding.onSettingsClosed();
         syncSettingsStagePause();
+        scheduleMoodAutoClassify();
+        if (readerStaleBehindSettings) {
+            readerStaleBehindSettings = false;
+            if (state.activeReader) rerenderActiveReader();
+        }
         playReaderUiSfx('close');
         return { ok: true };
     }
@@ -804,6 +901,9 @@ export function createIgsReaderHost(options = {}) {
     }
 
     function destroy() {
+        moodAutoDisposed = true;
+        if (moodAutoTimer) moodAutoTimers().clearTimeout(moodAutoTimer);
+        moodAutoTimer = 0;
         const closed = closeSettings();
         if (closed.ok === false) return closed;
         offIllustrationUpdated();
@@ -985,6 +1085,11 @@ export function createIgsReaderHost(options = {}) {
         current.streamBaselineRaw = '';
         current.streamBaselineVisible = '';
         current.streamPhase = 'idle';
+        if (moodAutoFloorWaiting && moodAutoFloorWaiting !== moodAutoFloorSent) {
+            moodAutoFloorSent = moodAutoFloorWaiting;
+            moodAutoFloorWaiting = '';
+            scheduleMoodAutoClassify();
+        }
         const mount = current.dom && current.dom.embeddedMount;
         const host = mount && mount.host;
         if (host && host.removeAttribute) host.removeAttribute('data-igs-embedded-loading');
@@ -1085,7 +1190,7 @@ export function createIgsReaderHost(options = {}) {
             invokeAction(action) {
                 return handleReaderAction(action);
             },
-            openSettings(tab = 'basic') {
+            openSettings(tab) {
                 return openSettings({ tab, mode: state.activeReader ? state.activeReader.mode : 'pc' });
             },
             close() {
@@ -1102,16 +1207,19 @@ export function createIgsReaderHost(options = {}) {
             switchTab(tab) {
                 if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
                 state.activeSettings.tab = normalizeSettingsTab(tab);
+                rememberSettingsPage(state.activeSettings);
                 return rerenderSettings();
             },
             switchImageSubTab(subTab) {
                 if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
                 state.activeSettings.asyncState.imageSubTab = normalizeImageSubTab(subTab);
+                rememberSettingsPage(state.activeSettings);
                 return rerenderSettings();
             },
             switchReaderSubTab(subTab) {
                 if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
                 state.activeSettings.asyncState.readerSubTab = normalizeReaderSubTab(subTab);
+                rememberSettingsPage(state.activeSettings);
                 return rerenderSettings();
             },
             // 设置搜索：跳到搜索结果所在的分页 / 子页，并展开所在分组与折叠区。
@@ -1125,12 +1233,14 @@ export function createIgsReaderHost(options = {}) {
                 asyncState.advancedOpen = { ...(asyncState.advancedOpen || {}) };
                 for (const key of entry.target.open) asyncState.advancedOpen[key] = true;
                 asyncState.settingsSearch = '';
+                rememberSettingsPage(state.activeSettings);
                 return rerenderSettings();
             },
             switchSceneSubTab(subTab) {
                 if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
                 state.activeSettings.asyncState.sceneSubTab = normalizeSceneSubTab(subTab);
                 state.activeSettings.asyncState.wardrobeFocus = '';
+                rememberSettingsPage(state.activeSettings);
                 return rerenderSettings();
             },
             setValue(path, value, editOptions) {
@@ -1391,9 +1501,12 @@ export function createIgsReaderHost(options = {}) {
             setPath(draft, `${themeRoot}.preset`, 'custom');
         }
         if (editOptions.liveInput) {
-            state.activeSettings.snapshot.draft = cloneData(draft);
+            // getSnapshot() clones before exposing this value; do not deep-copy the entire
+            // asset library for every keystroke (including long prompts and API keys).
+            state.activeSettings.snapshot.draft = draft;
             return { ok: true };
         }
+        if (path === 'bridge.sceneAssets.moodAutoClassify' && value === true) scheduleMoodAutoClassify();
         return rerenderSettings();
     }
 
@@ -1406,10 +1519,19 @@ export function createIgsReaderHost(options = {}) {
         if (!save) return { ok: false, reason: 'missing-save-handler' };
 
         if (draft.bridge && draft.bridge.sceneAssets) fileGeneratedHoldings(draft.bridge.sceneAssets);
+        // The next settings open trims and validates asset templates. Persist the same
+        // canonical values now, otherwise an unchanged second close rewrites the bridge.
+        // Keep the draft intact on failure and avoid copying the large sceneAssets tree.
+        const auto = draft.bridge && draft.bridge.autoIllustration;
+        const bridgeToSave = auto && auto.assets && auto.assets.templates
+            ? { ...draft.bridge, autoIllustration: {
+                ...auto, assets: { ...auto.assets, templates: normalizeAutoIllustrationSettings(auto).assets.templates },
+            } }
+            : draft.bridge;
         let result;
         try {
             result = save({
-                bridge: draft.bridge,
+                bridge: bridgeToSave,
                 readerMode: 'default',
                 readerSettings: draft.readerSettings,
             });
@@ -1417,7 +1539,12 @@ export function createIgsReaderHost(options = {}) {
             return { ok: false, reason: 'save-failed', saveError: error };
         }
         if (!result || result.ok === false) {
-            return { ok: false, reason: 'save-failed', saveError: result && (result.message || result.reason) };
+            return {
+                ok: false,
+                reason: 'save-failed',
+                saveError: result && (result.message || result.reason),
+                ...(result && result.rollbackFailed ? { rollbackFailed: true } : {}),
+            };
         }
 
         const snapshot = resolveBridgeConfigSnapshot({ mode: 'default' });
@@ -1427,10 +1554,13 @@ export function createIgsReaderHost(options = {}) {
         const released = releasedGeneratedImageIds(previousIds, savedAssets, (options.global || globalThis).localStorage);
         const imageService = options.generatedAssets;
         if (released.length && imageService && typeof imageService.deleteImages === 'function') {
-            Promise.resolve(imageService.deleteImages(released)).catch(() => {
+            const reportDeleteFailure = () => {
                 const globalObj = options.global || globalThis;
                 if (globalObj.alert) globalObj.alert('配置已保存，但有图片没能从本机清掉。');
-            });
+            };
+            Promise.resolve().then(() => imageService.deleteImages(released)).then((result) => {
+                if (result === false || (result && result.ok === false)) reportDeleteFailure();
+            }).catch(reportDeleteFailure);
         }
         state.activeSettings.draft = cloneData(snapshot);
         if (state.activeReader) {
@@ -1569,13 +1699,24 @@ export function createIgsReaderHost(options = {}) {
             return runManualAssetGeneration();
         }
         if (normalizedAction === 'settings') {
-            return state.activeReader.controller.openSettings('basic');
+            return state.activeReader.controller.openSettings();
         }
         if (normalizedAction === 'hide') {
             return state.activeReader.controller.toggleHidden();
         }
         if (normalizedAction === 'close') {
             return state.activeReader.controller.close();
+        }
+        // 地点栏 ♪：点音符展开曲名；换一首在当前情绪池里轮到下一首，并保持展开。
+        if (normalizedAction === 'bgm-note') {
+            const open = toggleBgmNote(state.activeReader.dom?.overlay);
+            return open === null ? { ok: false, reason: 'bgm-not-playing' } : { ok: true, expanded: open };
+        }
+        if (normalizedAction === 'bgm-next') {
+            const skipped = skipBgmTrack();
+            if (!skipped || !skipped.track) return { ok: false, reason: 'bgm-not-playing' };
+            applyBgmNoteToDom(skipped.root, skipped.track, { open: true });
+            return { ok: true, track: skipped.track.name };
         }
         if (normalizedAction === 'toggle-record-menu' || ['map', 'diary', 'inventory', 'relationships', 'favor'].includes(normalizedAction)) {
             const current = state.activeReader;
@@ -1984,7 +2125,7 @@ export function createIgsReaderHost(options = {}) {
         const current = state.activeReader;
         if (!current) return { ok: false, reason: 'reader-not-open' };
         const content = current.snapshot && current.snapshot.content || {};
-        if (!content.illustrationActive || !content.illustrationUrl || !content.illustrationSlot) {
+        if (!content.illustrationSlot) {
             writeToastSafe('当前页没有可重画的 CG。');
             return { ok: true, reason: 'no-current-cg' };
         }
@@ -2405,6 +2546,125 @@ export function createIgsReaderHost(options = {}) {
         }
     }
 
+    function moodAutoTimers() {
+        const clock = options.global || globalThis;
+        return {
+            setTimeout: typeof clock.setTimeout === 'function' ? clock.setTimeout.bind(clock) : globalThis.setTimeout.bind(globalThis),
+            clearTimeout: typeof clock.clearTimeout === 'function' ? clock.clearTimeout.bind(clock) : globalThis.clearTimeout.bind(globalThis),
+        };
+    }
+
+    function moodAutoContext() {
+        const draft = state.activeSettings && state.activeSettings.draft && state.activeSettings.draft.bridge;
+        if (draft) {
+            return {
+                enabled: draft.sceneAssets && draft.sceneAssets.moodAutoClassify === true,
+                groups: normalizeMoodGroups(draft.sceneAssets && draft.sceneAssets.moodGroups),
+                llm: resolveSecondaryLlm(draft.autoIllustration),
+            };
+        }
+        const unified = resolveBridgeConfigSnapshot({ mode: state.activeReader ? state.activeReader.mode : 'default' });
+        const assets = unified.bridge && unified.bridge.sceneAssets;
+        return {
+            enabled: Boolean(assets && assets.moodAutoClassify === true),
+            groups: normalizeMoodGroups(assets && assets.moodGroups),
+            llm: resolveSecondaryLlm(unified.bridge && unified.bridge.autoIllustration),
+        };
+    }
+
+    function reportMoodAuto(message) {
+        if (state.activeSettings) {
+            state.activeSettings.asyncState.moodAutoStatus = message;
+            if (!moodAutoDisposed) rerenderSettings();
+            return;
+        }
+        if (message) writeToastSafe(message);
+    }
+
+    function commitAutoMoodGroups(nextGroups) {
+        if (state.activeSettings && state.activeSettings.draft && state.activeSettings.draft.bridge) {
+            const assets = state.activeSettings.draft.bridge.sceneAssets || (state.activeSettings.draft.bridge.sceneAssets = {});
+            assets.moodGroups = cloneData(nextGroups);
+            return persistSettingsDraft();
+        }
+        const save = typeof options.saveUnifiedSettings === 'function' ? options.saveUnifiedSettings : null;
+        if (!save) return { ok: false, reason: 'missing-save-handler' };
+        const unified = resolveBridgeConfigSnapshot({ mode: state.activeReader ? state.activeReader.mode : 'default' });
+        unified.bridge.sceneAssets.moodGroups = nextGroups;
+        const result = save({
+            bridge: unified.bridge,
+            readerMode: unified.readerMode,
+            readerSettings: unified.readerSettings,
+        });
+        return result || { ok: false, reason: 'save-failed' };
+    }
+
+    function scheduleMoodAutoClassify() {
+        if (moodAutoDisposed) return;
+        const clock = moodAutoTimers();
+        if (moodAutoTimer) clock.clearTimeout(moodAutoTimer);
+        moodAutoTimer = clock.setTimeout(() => {
+            moodAutoTimer = 0;
+            void runMoodAutoClassify();
+        }, 280);
+    }
+
+    async function runMoodAutoClassify() {
+        if (moodAutoDisposed) return;
+        if (moodAutoRunning) {
+            moodAutoAgain = true;
+            return;
+        }
+        const storage = (options.global || globalThis).localStorage;
+        const context = moodAutoContext();
+        if (!context.enabled || !storage || typeof options.requestMoodClassification !== 'function') return;
+        const labels = context.groups.map((group) => String(group.label || '').trim()).filter(Boolean);
+        if (!labels.length) return;
+        const pending = loadMoodReview(storage);
+        const fresh = [];
+        for (const item of pending) {
+            const word = String(item && item.word || '').trim();
+            if (!word) continue;
+            if (resolveMoodGroup(word, context.groups)) removeMoodReview(storage, word);
+            else fresh.push(word);
+        }
+        if (!fresh.length) return;
+        const groupsSnapshot = JSON.stringify(context.groups);
+        moodAutoRunning = true;
+        try {
+            const raw = await options.requestMoodClassification(
+                buildMoodClassificationRequest(context.groups, fresh),
+                context.llm,
+            );
+            if (moodAutoDisposed) return;
+            const live = moodAutoContext();
+            if (!live.enabled || JSON.stringify(live.groups) !== groupsSnapshot) {
+                moodAutoAgain = true;
+                return;
+            }
+            const results = parseMoodClassification(raw, fresh, labels);
+            const still = fresh.filter((word) => loadMoodReview(storage).some((item) => item.word === word));
+            if (!still.length) return;
+            const kept = new Map([...results].filter(([word]) => still.includes(word)));
+            const saved = commitAutoMoodGroups(applyMoodAssignments(live.groups, kept));
+            if (!saved || saved.ok === false) {
+                reportMoodAuto('归类失败，新情绪仍留在待确认。');
+                return;
+            }
+            for (const word of still) removeMoodReview(storage, word);
+            if (state.activeReader) rerenderActiveReader();
+            reportMoodAuto(state.activeSettings ? `已归入 ${still.length} 个新情绪。` : `已把 ${still.length} 个新情绪归入情绪组。`);
+        } catch {
+            if (!moodAutoDisposed) reportMoodAuto('归类失败，新情绪仍留在待确认。');
+        } finally {
+            moodAutoRunning = false;
+            if (moodAutoAgain && !moodAutoDisposed) {
+                moodAutoAgain = false;
+                scheduleMoodAutoClassify();
+            }
+        }
+    }
+
     function noteUnlistedMood(spriteHit, mood, sceneAssets) {
         const word = String(mood || '').trim();
         const quality = spriteHit && spriteHit.quality;
@@ -2415,6 +2675,37 @@ export function createIgsReaderHost(options = {}) {
         const storage = (options.global || globalThis).localStorage;
         if (!storage) return;
         recordMoodReview(storage, { word, character: spriteHit.character, quality, group: spriteHit.slot });
+    }
+
+    // 一楼里的新情绪收成一份，只请求一次副 API。翻页不再逐条请求。
+    function noteFloorMoods(messageId, directives, sceneAssets) {
+        if (!sceneAssets || sceneAssets.enabled !== true) return;
+        const storage = (options.global || globalThis).localStorage;
+        if (!storage || !Array.isArray(directives)) return;
+        const seen = new Set();
+        const words = [];
+        for (const directive of directives) {
+            if (!directive || (directive.type !== 'char' && directive.type !== 'thought')) continue;
+            const word = String(directive.mood || '').trim();
+            if (!word || seen.has(word)) continue;
+            seen.add(word);
+            if (resolveMoodGroup(word, sceneAssets.moodGroups)) continue;
+            const character = resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, directive.character) || directive.character;
+            const slots = sceneAssets.characters && sceneAssets.characters[character];
+            if (slots && Object.prototype.hasOwnProperty.call(slots, word)) continue;
+            words.push(word);
+            recordMoodReview(storage, { word, character, quality: 'default' });
+        }
+        if (sceneAssets.moodAutoClassify !== true || !words.length) return;
+        const signature = `${messageId}|${words.join('\n')}`;
+        if (signature === moodAutoFloorSent) return;
+        if (state.activeReader && state.activeReader.streamPhase === 'streaming') {
+            moodAutoFloorWaiting = signature;
+            return;
+        }
+        moodAutoFloorSent = signature;
+        moodAutoFloorWaiting = '';
+        scheduleMoodAutoClassify();
     }
 
     // 服装栏写了该角色没登记的服装名：记入待确认服装词，供设置页一键归入或新建。
@@ -2573,6 +2864,7 @@ export function createIgsReaderHost(options = {}) {
         };
         const sceneDirectives = Array.isArray(extracted.sceneDirectives) ? extracted.sceneDirectives
             : Array.isArray(payload.sceneDirectives) ? payload.sceneDirectives : [];
+        noteFloorMoods(firstDefined(payload.messageId, payload.message && payload.message.id, ''), sceneDirectives, sceneAssets);
         const hasIgsDirectives = sceneDirectives.length > 0;
         let finalBackgroundImage = backgroundImage;
         let finalBackgroundTimed = false;
@@ -2581,6 +2873,7 @@ export function createIgsReaderHost(options = {}) {
         let resolvedSpeaker = scene.speaker || '';
         let spriteCharacter = '';
         let spriteOutfit = '';
+        let nsfwCgPortrait = '';
         let castSprites = [];
         let speakerCastOrder = null;
         const extractedSegmentImageSlots = Array.isArray(extracted.segmentImageSlots) ? extracted.segmentImageSlots : [];
@@ -2611,6 +2904,12 @@ export function createIgsReaderHost(options = {}) {
                 : resolveSceneStateAtIndex(sceneDirectives, normalizedIndex))
             : null;
         const sceneStateForBg = (ownSceneState && ownSceneState.scene) ? ownSceneState : inheritedSceneState;
+        // 恐怖档位：取当前页正文之前最近的 [igs-dread:N]，本楼没有就用向前追溯到的（见 igs-compat）。
+        const ownDread = sceneSourceForOffset.indexOf('[igs-dread') === -1 ? null : (() => {
+            const offset = currentOffset >= 0 ? currentOffset : locateTextOffsetInSource(sceneSourceForOffset, currentText);
+            return findLastDreadLevel(sceneSourceForOffset, offset >= 0 ? offset : undefined);
+        })();
+        const sceneDread = ownDread !== null ? ownDread : (payload.inheritedDread == null ? null : payload.inheritedDread);
         // 亲密演出的 NSFW 强度曲线与情事阶段（升温 / 顶点 / 余韵）：只在开启且当前页为 NSFW 时，按与当前页相同的规则判定本楼每页是否 NSFW，
         // 得出当前页在 NSFW 连续段中的位置；上一楼层末尾的场景为 NSFW 时视为延续，不再渐强。
         const romanceForSpan = normalizeRomanceFxSettings(readerSettings.romanceFx);
@@ -2687,14 +2986,16 @@ export function createIgsReaderHost(options = {}) {
                 slot: illustrationHit.slot,
             }) || '')
             : '';
-        const markerImageUrl = illustrationHit && !illustrationUrl
-            ? resolveIllustrationMarkerImageUrl(displayImageState, illustrationHit.slot)
+        // 没生成出自己的图时，只用这条标记已经绑上的槽位图（数据库生图）。
+        // 不拿未绑定的图、也不拿别的数组位置上的图来顶。
+        const boundMarkerUrl = illustrationHit && !illustrationUrl
+            ? resolveBoundSlotImageUrl(displayImageState, illustrationHit.slot)
             : '';
         if (illustrationUrl) {
             finalBackgroundImage = illustrationUrl;
             spriteImage = null;
-        } else if (markerImageUrl) {
-            finalBackgroundImage = markerImageUrl;
+        } else if (boundMarkerUrl) {
+            finalBackgroundImage = boundMarkerUrl;
             spriteImage = null;
         } else if (slotBoundUrl) {
             finalBackgroundImage = slotBoundUrl;
@@ -2709,7 +3010,7 @@ export function createIgsReaderHost(options = {}) {
             }
             spriteImage = null;
         }
-        const cgActive = Boolean(illustrationUrl || markerImageUrl);
+        const cgActive = Boolean(illustrationUrl);
         // Per-segment classification from the formatted segment text itself.
         // Order matters: thought (*...*) is checked before dialogue ([名字]：) because
         // a thought segment looks like *[名字]：...* and would otherwise match dialogue.
@@ -2851,6 +3152,12 @@ export function createIgsReaderHost(options = {}) {
                 // carries the raw tag (no reformatted "[名字]：" line to parse).
                 spriteChar = sceneStateForBg.character;
                 spriteMood = sceneStateForBg.mood || '';
+            }
+            // NSFW 挂 CG 时对话框左侧的裸体头像：只跟本页自己的说话人（旁白页不继承上一位，直接不显示）。
+            if (cgActive && htmlCardIndex < 0 && bubbleSpeaker && sceneStateForBg && sceneStateForBg.nsfw && sceneAssets && sceneAssets.enabled
+                && (textType === 'dialogue' || textType === 'thought')
+                && normalizeStatusHudSettings(readerSettings.statusHud).nsfwCgPortrait) {
+                nsfwCgPortrait = resolveGenerated(resolveNudeSpriteAsset(bubbleSpeaker, bubbleMood, assetMatchCtx).url) || '';
             }
             // HTML 卡片独占舞台前景：不继承上一段角色的立绘，也不发起素材解析。
             if (htmlCardIndex < 0 && !hideChatSprite && !slotBoundUrl && !cgActive && sceneAssets && sceneAssets.enabled && spriteChar && !(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw)) {
@@ -3019,9 +3326,11 @@ export function createIgsReaderHost(options = {}) {
                 sceneLocation: statusSceneInfo.location,
                 sceneTime: statusSceneInfo.time,
                 sceneWeather: statusSceneInfo.weather,
+                sceneDread,
                 sceneNsfw: Boolean(sceneStateForBg && sceneStateForBg.nsfw),
                 illustrationActive: Boolean(illustrationUrl),
                 cgActive,
+                nsfwCgPortrait,
                 illustrationSlot: illustrationHit ? illustrationHit.slot : null,
                 illustrationUrl,
                 statusHud: buildStatusHudForSnapshot(readerSettings, sceneStateForBg && sceneStateForBg.nsfw ? '' : resolvedSpeaker, sceneStateForBg && sceneStateForBg.nsfw ? '' : bubbleMood, statusSceneInfo, textType === 'narration' || textType === 'thought' || textType === 'chat' || textType === 'system' || Boolean(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw), { character: spriteCharacter, outfit: spriteOutfit }),
@@ -3048,8 +3357,14 @@ export function createIgsReaderHost(options = {}) {
         const tabsHtml = SETTINGS_TAB_DEFS.map(([id, label]) => {
             return `<button type="button" class="igs-settings-tab${tab === id ? ' is-active' : ''}" data-tab="${id}">${label}</button>`;
         }).join('');
+        const shellHtml = renderTemplate(getSettingsShellTemplate(), {
+            version: esc(options.version || '0.5.4'),
+            tabs: tabsHtml,
+            body,
+            settingsThemeSwitch: renderSettingsThemeSwitch(settingsTheme),
+        });
 
-        return {
+        const snapshot = {
             tab,
             imageSubTab,
             readerSubTab,
@@ -3065,12 +3380,7 @@ export function createIgsReaderHost(options = {}) {
                 requiredActions: Array.from((SETTINGS_PANEL_TAB_CONTRACT[id] || {}).requiredActions || []),
             })),
             activeContract: SETTINGS_PANEL_TAB_CONTRACT[tab],
-            html: `<div id="igs-unified-settings" data-igs-igs-ui="true" data-igs-settings-theme="${settingsTheme}">${renderTemplate(getSettingsShellTemplate(), {
-                version: esc(options.version || '0.5.4'),
-                tabs: tabsHtml,
-                body,
-                settingsThemeSwitch: renderSettingsThemeSwitch(settingsTheme),
-            })}</div>`,
+            html: `<div id="igs-unified-settings" data-igs-igs-ui="true" data-igs-settings-theme="${settingsTheme}">${shellHtml}</div>`,
             resultText: {
                 image: settingsState.asyncState.imageResult || '',
                 imageModels: settingsState.asyncState.imageModelsMessage || '',
@@ -3082,6 +3392,8 @@ export function createIgsReaderHost(options = {}) {
             },
             draft,
         };
+        settingsShellHtml.set(snapshot, { theme: settingsTheme, html: shellHtml });
+        return snapshot;
     }
 
     function renderSettingsBody(tab, draft, asyncState) {
@@ -3127,7 +3439,7 @@ export function createIgsReaderHost(options = {}) {
 
         if (tab === 'basic') {
             return renderTemplate(getSettingsTabTemplate('basic'), {
-                performancePresetBar: renderPerformancePresetBar(reader, { home: true, extraRows: renderWorldviewRow(worldviewAssets) + renderQualityRow(reader) }),
+                performancePresetBar: renderPerformancePresetBar(reader, { home: true, canUndo: Boolean(asyncState.perfPresetUndo), extraRows: renderWorldviewRow(worldviewAssets) + renderQualityRow(reader) }),
                 advancedFilterOpen: advancedOpen('source-filter'),
                 advancedRegexOpen: advancedOpen('virtual-regex'),
                 openModeField: `<div class="igs-segmented-field">${field(
@@ -3144,6 +3456,8 @@ export function createIgsReaderHost(options = {}) {
                 resetBasicSourceFilter: renderSectionResetButton('basic-source-filter'),
                 filterToggle: checkbox('bridge.sourceFilter.enabled', sourceFilter.enabled, '启用标签筛选'),
                 filterHidden: hiddenAttr(!sourceFilter.enabled),
+                // 低频设置：平时整块收成一行，摘要只说开没开。
+                filterBrief: sourceFilter.enabled ? '已启用' : '未启用',
                 filterOptionToggles: checkbox('bridge.sourceFilter.stripHtmlComments', sourceFilter.stripHtmlComments, '排除 HTML 注释')
                     + checkbox(
                         'bridge.sourceFilter.allowUntaggedFallback',
@@ -3184,13 +3498,16 @@ export function createIgsReaderHost(options = {}) {
                 nai: '使用你的 NAI Key 直接生成剧情 CG、素材和重画。',
                 dbgen: '提示词、画师串和 NAI Key 在数据库生图插件里设置。',
                 extension: '画风沿用智绘姬的设置；填写下方 NAI Key 后，智绘姬出图失败时会改用 NAI。',
+                baibai: '后端、画师串与尺寸沿用柏宝绘的设置；填写下方 NAI Key 后，柏宝绘出图失败时会改用 NAI。',
             };
             const contentNotes = {
                 nai: '当前图像来源：IGS 内置 NAI。',
                 dbgen: '当前图像来源：数据库生图插件。',
                 extension: '当前图像来源：智绘姬。',
+                baibai: '当前图像来源：柏宝绘。',
             };
             const openaiDisabled = auto.llm.source !== 'openai';
+            const llmReady = describeLlmReady(auto.llm);
             const autoTextarea = (path, value, placeholder) => `<textarea data-path="${esc(path)}" placeholder="${esc(placeholder)}">${esc(value)}</textarea>`;
             const imageSubTab = normalizeImageSubTab(asyncState.imageSubTab);
             const logSettings = normalizeImageJobLogSettings(bridge.imageJobLog);
@@ -3201,7 +3518,7 @@ export function createIgsReaderHost(options = {}) {
                 imageLogList: imageSubTab === 'logs' ? renderImageJobLogList() : '',
                 imageCgStatus: esc(asyncState.imageCgStatus || ''),
                 imageCgList: imageSubTab === 'cg' ? renderImageCgList() : '',
-                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬']], '图像来源')),
+                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ['baibai', '柏宝绘']], '图像来源')),
                 imageSourceNote: esc(sourceNotes[sourceMode]),
                 imageContentNote: esc(contentNotes[sourceMode]),
                 sourceNaiHidden: hiddenAttr(sourceMode === 'dbgen'),
@@ -3213,7 +3530,9 @@ export function createIgsReaderHost(options = {}) {
                 advancedAssetTemplatesOpen: advancedOpen('asset-templates'),
                 autoAssetOptionsHidden: hiddenAttr(!auto.assets.spriteEnabled && !auto.assets.backgroundEnabled),
                 assetSceneWarnHidden: hiddenAttr(!(auto.assets.spriteEnabled || auto.assets.backgroundEnabled) || Boolean(bridge.sceneAssets && bridge.sceneAssets.enabled)),
-                autoLlmNote: esc('用于规划剧情 CG 的画面，可沿用酒馆 API 或单独配置。'),
+                autoLlmNote: esc(sourceMode === 'dbgen'
+                    ? '负责规划剧情 CG 画面与素材补全的标签；表情差分、头像、立绘与服装提示词由数据库生图插件自己写。'
+                    : '负责规划剧情 CG 画面、素材补全的标签，以及表情差分、头像、立绘与服装提示词。可沿用酒馆 API 或单独配置。'),
                 adapterField: field('bridge.imageApi.externalAdapter', '识别范围', selectInput('bridge.imageApi.externalAdapter', imageApi.externalAdapter, [['auto', '自动检测'], ['chatu8', '仅智绘姬（st-chatu8）']])),
                 pollIntervalField: field('bridge.imageApi.pollIntervalMs', '等待新图：查询间隔（毫秒）', numberInput('bridge.imageApi.pollIntervalMs', imageApi.pollIntervalMs, 500, 30000)),
                 pollAttemptsField: field('bridge.imageApi.pollAttempts', '等待新图：查询次数', numberInput('bridge.imageApi.pollAttempts', imageApi.pollAttempts, 1, 240)),
@@ -3236,8 +3555,8 @@ export function createIgsReaderHost(options = {}) {
                 autoAssetSpriteTemplateField: field('bridge.autoIllustration.assets.templates.sprite', '人物正向提示词模板', autoTextarea('bridge.autoIllustration.assets.templates.sprite', auto.assets.templates.sprite, '必须包含 {tags}')),
                 autoAssetSpriteNegativeTemplateField: field('bridge.autoIllustration.assets.templates.spriteNegative', '人物负面提示词模板', autoTextarea('bridge.autoIllustration.assets.templates.spriteNegative', auto.assets.templates.spriteNegative, '不希望人物立绘出现的 tag')),
                 autoAssetNsfwExtraField: field('bridge.autoIllustration.assets.templates.nsfwExtra', 'NSFW 附加提示词', autoTextarea('bridge.autoIllustration.assets.templates.nsfwExtra', auto.assets.templates.nsfwExtra, 'NSFW 被拒后重试时追加的提示词')),
-                autoSharedHidden: hiddenAttr((!auto.nsfwEnabled && !auto.interludeEnabled && !auto.assets.spriteEnabled && !auto.assets.backgroundEnabled)
-                    || (sourceMode === 'dbgen' && !auto.nsfwEnabled && !auto.interludeEnabled)),
+                autoLlmWarn: esc(llmReady.error),
+                autoLlmWarnHidden: hiddenAttr(llmReady.ok),
                 // 物品图：独立开关（默认关闭，关闭时不读表、不联网）；背包格子图标是用户显示偏好。
                 itemImageFields: checkbox('bridge.itemImages.enabled', normalizeItemImageSettings(bridge.itemImages).enabled, '自动生成物品图')
                     + field('bridge.itemImages.inventoryIcon', '背包格子图标', selectInput('bridge.itemImages.inventoryIcon', normalizeItemImageSettings(bridge.itemImages).inventoryIcon, [['image', '生图'], ['svg', 'SVG']])),
@@ -3307,7 +3626,7 @@ export function createIgsReaderHost(options = {}) {
                     ? `<details class="igs-add-menu igs-asset-preset-apply"><summary class="igs-review-link is-primary">套用</summary><div class="igs-add-menu-list" role="menu">`
                         + menuItem(`preset-apply:${n}:card`, `套到本卡「${scopeState.assetScopeLabel}」`) + menuItem(`preset-apply:${n}:global`, '套到全局') + '</div></details>'
                     : `<button type="button" class="igs-review-link is-primary" data-action="preset-apply:${n}:global">套用</button>`;
-                return `<div class="igs-asset-preset-row"><span class="igs-asset-preset-name" title="${esc(name)}">${esc(name)}</span>${where}${apply}`
+                return `<div class="igs-asset-preset-row"><span class="igs-asset-preset-name" title="${esc(name)}">${esc(name)}</span>${where}${apply}<button type="button" class="igs-review-link" data-action="preset-overwrite:${n}" aria-label="用当前配置覆盖预设「${esc(name)}」">覆盖</button>`
                     + renderRowMenu([menuItem(`preset-export:${n}`, '导出文件'), menuItem(`preset-rename:${n}`, '重命名'), menuItem(`preset-delete:${n}`, '删除', ' is-danger')], `预设「${name}」的操作`)
                     + '</div>';
             };
@@ -3316,7 +3635,7 @@ export function createIgsReaderHost(options = {}) {
                 + `<div class="igs-asset-presets-body">${presetNames.map(presetRow).join('') || '<div class="igs-asset-presets-empty">还没有预设。把现在这一套存下来，以后可以套到别的角色卡。</div>'}`
                 + '<div class="igs-asset-presets-tools"><button type="button" class="igs-settings-action" data-action="preset-save">存为预设</button><button type="button" class="igs-settings-action" data-action="preset-import">导入预设</button></div></div></details>';
             const assetScopeBar = `<div class="igs-asset-scope-bar"><span class="igs-asset-scope-name">${cardKey ? `当前角色卡：${esc(scopeState.assetScopeLabel)}` : '没打开角色卡，素材都在全局'}</span>`
-                + (scopeState.assetScopeKind === 'card' && cardKey ? '<button type="button" class="igs-settings-action" data-action="asset-card-export">导出这张角色卡</button>' : '')
+                + (scopeState.assetScopeKind === 'card' && cardKey ? '<button type="button" class="igs-settings-action" data-action="asset-card-export">导出本卡素材</button>' : '')
                 + '<button type="button" class="igs-settings-action" data-action="asset-card-import">导入角色卡素材包</button></div>'
                 + presetSection;
             const disabled = !sceneAssets.enabled;
@@ -3325,9 +3644,13 @@ export function createIgsReaderHost(options = {}) {
             const assetFolders = loadAssetFoldersFor(storage, cardKey);
             const firstUrl = (values) => (values.map((v) => String(v || '').trim()).find(Boolean) || '');
             const generatedService = options.generatedAssets || null;
-            const resolveGenerated = (url) => (isGeneratedAssetUrl(url)
-                ? (generatedService && typeof generatedService.resolveUrl === 'function' ? generatedService.resolveUrl(url) : '')
-                : (url || ''));
+            // 设置页缩略图优先用 blob: 短地址，HTML 不再夹带整段 dataUrl。
+            const resolveGenerated = (url) => {
+                if (!isGeneratedAssetUrl(url)) return url || '';
+                if (!generatedService) return '';
+                if (typeof generatedService.resolveThumbUrl === 'function') return generatedService.resolveThumbUrl(url);
+                return typeof generatedService.resolveUrl === 'function' ? generatedService.resolveUrl(url) : '';
+            };
             const sceneListOptions = {
                 expandedSlots: asyncState.expandedSceneSlots instanceof Set ? asyncState.expandedSceneSlots : new Set(),
                 timeGroups: sceneAssets.timeGroups || [],
@@ -3363,6 +3686,7 @@ export function createIgsReaderHost(options = {}) {
                 state: assetFolders,
                 lead: scopeFilterBar('scenes'),
                 renderList: (subset) => renderSceneAssetList(subset, sceneListOptions),
+                rawOf: (name, value) => (typeof value === 'string' ? value : (value && value.url) || ''),
                 thumbOf: (name, value) => resolveGenerated(typeof value === 'string' ? value : firstUrl([value && value.url].concat(Object.values((value && value.times) || {}).map((t) => (typeof t === 'string' ? t : t && t.url))))),
             });
             const charListOptions = {
@@ -3403,12 +3727,13 @@ export function createIgsReaderHost(options = {}) {
             const waitingCount = outfitReview.length + moodReview.length + countGeneratedWaiting(generatedArgs);
             const reviewPane = `<div class="igs-settings-section igs-review-pane">`
                 + renderOutfitReviewList(outfitReview, sceneAssets.characterOutfits || {}, sceneAssets.characters || {})
-                + renderMoodReviewList(moodReview, sceneAssets.moodGroups)
+                + renderMoodReviewList(moodReview, sceneAssets.moodGroups, { busy: Boolean(asyncState.moodReviewClassifying) })
                 + renderGeneratedAssetPane(generatedArgs)
                 + `</div>`;
             const scenesPane = `<div class="igs-settings-section">
         <div class="igs-settings-section-head">
           <div class="igs-settings-subhead">背景场景</div>
+          <button type="button" class="igs-settings-action igs-asset-zip" data-action="asset-zip:scenes">下载本区素材</button>
           <details class="igs-add-menu" data-add-menu="scenes">
             <summary class="igs-btn-mgr-icon" title="新增背景" aria-label="新增背景">+</summary>
             <div class="igs-add-menu-list" role="menu">
@@ -3421,12 +3746,26 @@ export function createIgsReaderHost(options = {}) {
         <div class="igs-source-filter-note">开启后只认精确与别名命中的背景，不拿相近场景的图顶替；匹配不到就按缺失补画。</div>
         ${scenesHtml}
       </div>`;
+            const spriteEnhance = sceneAssets.spriteEnhance || {};
             const charactersPane = `<div class="igs-settings-section">
         <div class="igs-settings-section-head">
           <div class="igs-settings-subhead">角色立绘</div>
+          <button type="button" class="igs-settings-action igs-asset-zip" data-action="asset-zip:characters">下载本区素材</button>
           ${CHARACTER_ADD_MENU}
         </div>
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
+        ${field('readerSettings.spriteDefaultScale', '立绘默认高度', selectInput('readerSettings.spriteDefaultScale', reader.spriteDefaultScale || 100, [60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
+        <div class="igs-source-filter-note">没单独拖动调过的立绘按这个高度显示，自己上传的图大小不一时统一用它压一压；调过位置的立绘不受影响。</div>
+        ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强')}
+        <div class="igs-source-filter-note">开启后可能增加性能开销，手机上尤其明显。</div>
+        ${spriteEnhance.enabled === true ? `<div class="igs-settings-sub">
+          ${field('bridge.sceneAssets.spriteEnhance.mode', '效果', selectInput('bridge.sceneAssets.spriteEnhance.mode', spriteEnhance.mode || 'outline', [['outline', '硬描边'], ['shadow', '投影式']]))}
+          <div class="igs-sprite-enhance-options">
+            ${field('bridge.sceneAssets.spriteEnhance.color', '增强颜色', colorInput('bridge.sceneAssets.spriteEnhance.color', spriteEnhance.color || '#000000'))}
+            ${field('bridge.sceneAssets.spriteEnhance.strength', '增强浓淡', selectInput('bridge.sceneAssets.spriteEnhance.strength', spriteEnhance.strength ?? 20, [5, 10, 15, 20, 30, 40, 50].map((n) => [n, `${n}%`])))}
+            ${field('bridge.sceneAssets.spriteEnhance.size', '增强大小', selectInput('bridge.sceneAssets.spriteEnhance.size', spriteEnhance.size ?? 0.8, [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].map((n) => [n, `${n}px`])))}
+          </div>
+        </div>` : ''}
         ${checkbox('bridge.sceneAssets.moodFuzzyMatch', sceneAssets.moodFuzzyMatch, '情绪词模糊匹配')}
         <div class="igs-source-filter-note">词库里没有的相近情绪词也会自动归组（如「嘲弄」归入「嘲讽」）。可能归错，可在「待确认」页核对。</div>
         ${renderDnaCandidateBar(asyncState.dnaCandidate)}
@@ -3447,7 +3786,9 @@ export function createIgsReaderHost(options = {}) {
                     + checkbox('bridge.sceneAssets.promptAdaptive', sceneAssets.promptAdaptive !== false, '按需注入')
                     + '<div class="igs-source-filter-note">只在用得上时附完整说明。</div></details>',
                 wardrobeSection: renderWardrobe(scopedEntries('wardrobe'), { resolveUrl: resolveGenerated, scopeTag, focus: asyncState.wardrobeFocus || '', lead: scopeFilterBar('wardrobe') }),
-                moodSection: renderMoodGroupList(sceneAssets.moodGroups, { isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]) })
+                moodSection: checkbox('bridge.sceneAssets.moodAutoClassify', sceneAssets.moodAutoClassify === true, '自动归类（按各组已有的情绪，用副 API 把新情绪放进最合适的组）')
+                    + (asyncState.moodAutoStatus ? `<div class="igs-source-filter-note" data-mood-auto-status>${esc(asyncState.moodAutoStatus)}</div>` : '')
+                    + renderMoodGroupList(sceneAssets.moodGroups, { isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]) })
                     + '<div class="igs-settings-row"><button class="igs-settings-action" data-action="mood-apply-preset" type="button">套用预设词库</button><button class="igs-settings-action" data-action="reset-mood-groups" type="button">恢复默认词库</button></div>',
             };
             const sceneSubTabs = SCENE_SUBTAB_DEFS.map(([id, label]) => {
@@ -3479,7 +3820,8 @@ export function createIgsReaderHost(options = {}) {
         // 对话主题已取消预设选择，恒为自定义：自定义项始终可编辑（仅受场景素材开关 themeDisabled 控制）。
         const themeCustom = true;
         const displayTheme = classicDialog ? classicVnTheme : vnTheme;
-        const dialogBgEditable = !themeDisabled && !classicDialog;
+        // 背景色 / 不透明度只有默认皮肤的对话框会读；渐变纱、西式古典和插画皮肤都自带底色，显示了也改不动。
+        const dialogBgEditable = !themeDisabled && !classicDialog && !illustratedDialog && !gradientVeilDialog;
         const dialogHeightItems = [['null', '自适应'], [.05, '5%'], [.08, '8%'], [.12, '12%'], [.15, '15%'], [.18, '18%'], [.2, '20%'], [.25, '25%'], [.3, '30%'], [.35, '35%'], [.4, '40%']];
         const typewriter = normalizeTypewriterSettings(reader.typewriter);
         const stageShake = normalizeStageShakeSettings(reader.stageShake);
@@ -3500,9 +3842,9 @@ export function createIgsReaderHost(options = {}) {
             dialogTextEffectColorField: field('readerSettings.dialogTextEffectColor', '增强颜色', colorInput('readerSettings.dialogTextEffectColor', reader.dialogTextEffectColor)),
             dialogTextEffectStrengthField: field('readerSettings.dialogTextEffectStrength', '增强浓淡', selectInput('readerSettings.dialogTextEffectStrength', reader.dialogTextEffectStrength, [5, 10, 15, 20, 30, 40, 50].map((n) => [n, `${n}%`]))),
             dialogTextEffectSizeField: field('readerSettings.dialogTextEffectSize', '增强大小', selectInput('readerSettings.dialogTextEffectSize', reader.dialogTextEffectSize, [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].map((n) => [n, `${n}px`]))),
-            dialogSkinField: field('readerSettings.dialogSkin', '对话框风格', selectInput('readerSettings.dialogSkin', reader.dialogSkin, [['default', '默认'], ['western-classic', '西欧古典'], [DIALOG_SKIN_ELEGANT_EUROPEAN, '优雅欧式'], [DIALOG_SKIN_MAGIC_ACADEMY, '魔法星夜'], [DIALOG_SKIN_RETRO_JAPANESE, '复古日式'], [DIALOG_SKIN_QINGLV, '青绿山水'], [DIALOG_SKIN_ADVENTURE_JOURNEY, '冒险旅途'], [DIALOG_SKIN_PLANT_COFFEE, '植物咖啡'], [DIALOG_SKIN_WARM_PICTUREBOOK, '温暖绘本'], [DIALOG_SKIN_FAIRY_TALE, '童话小镇'], [DIALOG_SKIN_DAY_MINIMAL, '日间简约'], [DIALOG_SKIN_BLACK_WHITE_MANGA, '黑白漫画'], [DIALOG_SKIN_CUTE_PINK, '超可爱粉'], [DIALOG_SKIN_GRADIENT_VEIL, '渐变黑幕']])),
+            dialogSkinField: field('readerSettings.dialogSkin', '对话框风格', selectInput('readerSettings.dialogSkin', reader.dialogSkin, [['default', '默认'], ['western-classic', '西欧古典'], [DIALOG_SKIN_ELEGANT_EUROPEAN, '优雅欧式'], [DIALOG_SKIN_MAGIC_ACADEMY, '魔法星夜'], [DIALOG_SKIN_RETRO_JAPANESE, '复古日式'], [DIALOG_SKIN_QINGLV, '青绿山水'], [DIALOG_SKIN_ADVENTURE_JOURNEY, '冒险旅途'], [DIALOG_SKIN_PLANT_COFFEE, '植物咖啡'], [DIALOG_SKIN_WARM_PICTUREBOOK, '温暖绘本'], [DIALOG_SKIN_FAIRY_TALE, '童话小镇'], [DIALOG_SKIN_DAY_MINIMAL, '日间简约'], [DIALOG_SKIN_BLACK_WHITE_MANGA, '黑白漫画'], [DIALOG_SKIN_CUTE_PINK, '超可爱粉'], [DIALOG_SKIN_GRADIENT_VEIL, '渐变黑幕'], [DIALOG_SKIN_HORROR_GORE, '血色噩梦'], [DIALOG_SKIN_HORROR_PSYCH, '褪色病历']])),
             gradientVeilFields: gradientVeilDialog ? '<div class="igs-gradient-veil-settings">' + field('readerSettings.gradientVeil.color', '黑幕颜色', colorInput('readerSettings.gradientVeil.color', reader.gradientVeil.color)) + field('readerSettings.gradientVeil.heightPercent', '渐变高度', selectInput('readerSettings.gradientVeil.heightPercent', reader.gradientVeil.heightPercent, [30, 40, 50, 60, 70].map((n) => [n, `${n}%`]))) + field('readerSettings.gradientVeil.opacity', '最大不透明度', selectInput('readerSettings.gradientVeil.opacity', reader.gradientVeil.opacity, [.4, .55, .7, .85, 1].map((n) => [n, `${Math.round(n * 100)}%`]))) + field('readerSettings.gradientVeil.speakerStyle', '姓名样式', selectInput('readerSettings.gradientVeil.speakerStyle', reader.gradientVeil.speakerStyle, [['default', '默认主题'], ['plain-text', '纯文字']])) + '</div>' : '',
-            magicHouseField: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY ? field('readerSettings.magicHouse', resolveWorldview(bridge.sceneAssets) === 'magic' ? '学院配色' : '配色', selectInput('readerSettings.magicHouse', normalizeMagicHouse(reader.magicHouse), MAGIC_HOUSES.map((house) => [house.id, house.label]))) + (MAGIC_HOUSES.find((house) => house.id === normalizeMagicHouse(reader.magicHouse)).custom ? field('readerSettings.magicAccent', '装饰颜色', colorInput('readerSettings.magicAccent', normalizeMagicAccent(reader.magicAccent))) : '') : '',
+            magicHouseField: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY ? field('readerSettings.magicHouse', resolveWorldview(bridge.sceneAssets) === 'magic' ? '学院配色' : '配色', selectInput('readerSettings.magicHouse', normalizeMagicHouse(reader.magicHouse), MAGIC_HOUSES.map((house) => [house.id, house.label]))) + (MAGIC_HOUSES.find((house) => house.id === normalizeMagicHouse(reader.magicHouse)).custom ? field('readerSettings.magicAccent', '装饰颜色', colorInput('readerSettings.magicAccent', normalizeMagicAccent(reader.magicAccent))) : '') : reader.dialogSkin === DIALOG_SKIN_HORROR_GORE || reader.dialogSkin === DIALOG_SKIN_HORROR_PSYCH ? field('readerSettings.horrorDreadCap', '恐怖强度上限', selectInput('readerSettings.horrorDreadCap', normalizeHorrorDreadCap(reader.horrorDreadCap), HORROR_DREAD_LEVELS.map((n) => [n, HORROR_DREAD_CAP_LABELS[n]]))) : '',
             classicDialogWidthPercentField: classicDialog ? field('readerSettings.classicDialogWidthPercent', '电脑端宽度', selectInput('readerSettings.classicDialogWidthPercent', reader.classicDialogWidthPercent, [60, 70, 80, 90, 100].map((n) => [n, `${n}%`]))) : '',
             skinDialogScaleField: classicDialog || illustratedDialog ? field('readerSettings.skinDialogScale', '对话框高度', selectInput('readerSettings.skinDialogScale', reader.skinDialogScale, SKIN_DIALOG_SCALE_OPTIONS.map((n) => [n, n === 1 ? '原尺寸' : `${Math.round(n * 100)}%`]))) : '',
             optionFontSizeField: field('readerSettings.optionFontSize', '选项字体大小', selectInput('readerSettings.optionFontSize', reader.optionFontSize, [10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map((n) => [n, `${n}px`]))),
@@ -3517,9 +3859,12 @@ export function createIgsReaderHost(options = {}) {
             imgModeField: field('readerSettings.imgMode', '图像显示模式', selectInput('readerSettings.imgMode', reader.imgMode, [['adaptive', '自适应'], ['contain', '完整']])),
             imgBrightnessField: field('readerSettings.imgBrightness', '图片亮度', selectInput('readerSettings.imgBrightness', reader.imgBrightness, [50, 60, 70, 80, 88, 90, 100].map((n) => [n, `${n}%`]))),
             statusLineToggle: checkbox('readerSettings.showStatusLine', reader.showStatusLine, '显示对话框内状态行'),
-            backdropFilterToggle: checkbox('readerSettings.glassBackdropFilter', reader.glassBackdropFilter, '启用背景滤镜'),
+            backdropFilterToggle: checkbox('readerSettings.glassBackdropFilter', reader.glassBackdropFilter, '毛玻璃模糊'),
+            // 玻璃作用于工具栏、选项、数据库、地图和记录面板；对话框只有默认皮肤跟随，其余皮肤自带底色。
+            glassScopeNote: esc(dialogBgEditable
+                ? '工具栏、选项气泡、数据库、地图和记录面板都用这层玻璃，默认对话框也跟着它。'
+                : '工具栏、选项气泡、数据库、地图和记录面板都用这层玻璃；当前对话框皮肤自带底色，不受影响。'),
             advancedDialogSizeOpen: advancedOpen('dialog-size'),
-            advancedDialogBackgroundOpen: advancedOpen('dialog-background'),
             typewriterToggle: checkbox('readerSettings.typewriter.enabled', typewriter.enabled, '打字机'),
             playbackSpeed: field('readerSettings.typewriter.speed', '播放速度', segmentedInput('readerSettings.typewriter.speed', typewriter.speed, [['fast', '快'], ['medium', '中'], ['slow', '慢']], '播放速度'), '自动播放与打字机共用'),
             typewriterControls: typewriter.enabled ? `<div class="igs-settings-sub">${[
@@ -3557,13 +3902,22 @@ export function createIgsReaderHost(options = {}) {
             }) : '',
             weatherFxToggle: checkbox('readerSettings.weatherFx.enabled', weatherFx.enabled, '天气'),
             weatherFxSettings: weatherFx.enabled ? renderWeatherFxSettings(weatherFx) : '',
-            narrationFilterToggle: checkbox('readerSettings.statusHud.dimSpriteOnNarration', reader.statusHud && reader.statusHud.dimSpriteOnNarration !== false, '旁白时压暗立绘')
-                + field('readerSettings.cgHoldPages', '日常 CG 停留', selectInput('readerSettings.cgHoldPages', reader.cgHoldPages || 4, [[2, '2 页'], [3, '3 页'], [4, '4 页'], [6, '6 页'], [8, '8 页']]))
+            narrationFilterToggle: checkbox('readerSettings.statusHud.dimSpriteOnNarration', reader.statusHud && reader.statusHud.dimSpriteOnNarration !== false, '旁白时压暗立绘'),
+            cgHoldField: field('readerSettings.cgHoldPages', '日常 CG 停留', selectInput('readerSettings.cgHoldPages', reader.cgHoldPages || 4, [[2, '2 页'], [3, '3 页'], [4, '4 页'], [6, '6 页'], [8, '8 页']]))
                 + '<div class="igs-source-filter-note">非 NSFW 的插图至少停留这么多页，之后有新角色开口、换场景或到下一张图时回到立绘；NSFW 插图保持到下一张。</div>',
             sentencePagingToggle: checkbox('bridge.sentencePaging', Boolean(bridge.sentencePaging), '旁白按句号分页'),
             nsfwSpriteModeField: `<div class="igs-settings-field">${segmentedInput('readerSettings.statusHud.nsfwSpriteMode', normalizeStatusHudSettings(reader.statusHud).nsfwSpriteMode, [['show', '显示立绘'], ['hide', '隐藏立绘'], ['shade', '仅露脸剪影']], 'NSFW 场景立绘')}</div>`
                 + '<div class="igs-source-filter-note">仅露脸剪影：头部以下压成剪影。需要先在立绘编辑里标定头部，未标定的立绘整张显示为剪影。</div>',
             nsfwVeilLevelField: field('readerSettings.statusHud.nsfwVeilLevel', '黑幕强度', segmentedInput('readerSettings.statusHud.nsfwVeilLevel', (reader.statusHud && reader.statusHud.nsfwVeilLevel) || 'medium', [['light', '弱'], ['medium', '中'], ['strong', '强']], '黑幕强度')),
+            nsfwCgPortraitField: (() => {
+                const hud = normalizeStatusHudSettings(reader.statusHud);
+                return checkbox('readerSettings.statusHud.nsfwCgPortrait', hud.nsfwCgPortrait, 'CG 时对话框旁显示裸体头像')
+                    + '<div class="igs-source-filter-note">NSFW 挂 CG 时，在对话框左边显示说话人裸体立绘的头颈肩（到锁骨，下缘渐隐），跟着表情换；旁白时隐藏。只用衣柜里引用「裸体」的那套服装，没有就不显示。</div>'
+                    + (hud.nsfwCgPortrait
+                        ? field('readerSettings.statusHud.nsfwCgPortraitShift', '头像上下', selectInput('readerSettings.statusHud.nsfwCgPortraitShift', hud.nsfwCgPortraitShift, [[-30, '上移 3'], [-20, '上移 2'], [-10, '上移 1'], [0, '自动'], [10, '下移 1'], [20, '下移 2'], [30, '下移 3']]))
+                            + field('readerSettings.statusHud.nsfwCgPortraitZoom', '头像缩放', selectInput('readerSettings.statusHud.nsfwCgPortraitZoom', hud.nsfwCgPortraitZoom, [[80, '80%'], [90, '90%'], [100, '100%'], [115, '115%'], [130, '130%'], [150, '150%']]))
+                        : '');
+            })(),
             statusHudSection: buildStatusHudSettingsHtml(reader, options),
             optionBubbleToggle: checkbox('bridge.optionBubble.enabled', Boolean(bridge.optionBubble && bridge.optionBubble.enabled), '启用选项气泡'),
             optionBubbleHidden: hiddenAttr(!(bridge.optionBubble && bridge.optionBubble.enabled)),
@@ -3574,10 +3928,6 @@ export function createIgsReaderHost(options = {}) {
             themeNoteHidden: hiddenAttr(!themeDisabled),
             themeHidden: hiddenAttr(themeDisabled),
             dividerHidden: hiddenAttr(themeDisabled || classicDialog),
-            nameAlignField: field(`${themePath}.nameAlign`, '对齐', selectInput(`${themePath}.nameAlign`, displayTheme.nameAlign || 'left', [['left', '左对齐'], ['center', '居中'], ['indent', '首行缩进']], themeDisabled || !themeCustom)),
-            textAlignField: field(`${themePath}.textAlign`, '对齐', selectInput(`${themePath}.textAlign`, displayTheme.textAlign || 'left', [['left', '左对齐'], ['center', '居中'], ['indent', '首行缩进']], themeDisabled || !themeCustom)),
-            narrationAlignField: field(`${themePath}.narrationAlign`, '对齐', selectInput(`${themePath}.narrationAlign`, displayTheme.narrationAlign || 'left', [['left', '左对齐'], ['center', '居中'], ['indent', '首行缩进']], themeDisabled || !themeCustom)),
-            thoughtAlignField: field(`${themePath}.thoughtAlign`, '对齐', selectInput(`${themePath}.thoughtAlign`, displayTheme.thoughtAlign || 'left', [['left', '左对齐'], ['center', '居中'], ['indent', '首行缩进']], themeDisabled || !themeCustom)),
             dividerField: field(`${themePath}.dividerSymbol`, '样式', selectInput(`${themePath}.dividerSymbol`, displayTheme.dividerSymbol || 'none', [['gradient', '渐变线'], ['none', '无']], themeDisabled || classicDialog || !themeCustom)),
             nameFontField: field(`${themePath}.nameFont`, '字体', selectInput(`${themePath}.nameFont`, displayTheme.nameFont || 'inherit', DIALOG_FONT_OPTIONS, themeDisabled || !themeCustom)),
             textFontField: field(`${themePath}.textFont`, '字体', selectInput(`${themePath}.textFont`, displayTheme.textFont || 'inherit', DIALOG_FONT_OPTIONS, themeDisabled || !themeCustom)),
@@ -3593,14 +3943,16 @@ export function createIgsReaderHost(options = {}) {
         };
         if (readerSubTab === 'performance') {
             readerValues.performanceSections = renderPerformanceSettings(reader, { worldview: renderWorldviewRow(worldviewAssets), worldviewId: resolveWorldview(worldviewAssets),
+                canUndo: Boolean(asyncState.perfPresetUndo),
                 typewriter: readerValues.playbackSpeed + readerValues.typewriterToggle + readerValues.typewriterControls,
                 stageShake: [readerValues.stageShakeToggle, readerValues.stageShakeSettings],
                 weatherFx: [readerValues.weatherFxToggle, readerValues.weatherFxSettings],
                 chatShow: [readerValues.chatShowToggle, readerValues.chatShowSettings],
                 narrationFilter: readerValues.narrationFilterToggle,
+                cgHold: readerValues.cgHoldField,
                 sentencePaging: readerValues.sentencePagingToggle,
                 sentencePagingOn: Boolean(bridge.sentencePaging),
-                nsfw: readerValues.nsfwSpriteModeField + readerValues.nsfwVeilLevelField,
+                nsfw: readerValues.nsfwSpriteModeField + readerValues.nsfwVeilLevelField + readerValues.nsfwCgPortraitField,
             }, (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]));
         }
         return renderTemplate(getSettingsTabTemplate('reader'), {
@@ -4067,10 +4419,13 @@ export function createIgsReaderHost(options = {}) {
                     }
                     return;
                 }
-                if (actName.startsWith('sprite-preview:')) {
+                // 缩略图大图预览：URL 直接取 <img> 自己的 src，不在 data-action 里再嵌一份（dataUrl 动辄几百 KB）。
+                if (actName === 'sprite-preview' || actName.startsWith('sprite-preview:')) {
                     event.preventDefault();
-                    const url = decodeURIComponent(actName.slice('sprite-preview:'.length));
-                    showSpritePreviewOverlay(root, url);
+                    const url = actName === 'sprite-preview'
+                        ? String(action.getAttribute('src') || '')
+                        : decodeURIComponent(actName.slice('sprite-preview:'.length));
+                    if (url) showSpritePreviewOverlay(root, url);
                     return;
                 }
                 // 生图 › CG 库缩略图：按序号回查已读列表，用同一个预览层铺满显示大图。
@@ -4149,7 +4504,7 @@ export function createIgsReaderHost(options = {}) {
                 const avatars = assets.statusAvatars || (assets.statusAvatars = {});
                 if (Object.hasOwn(avatars, statusAvatarChar) || !['__proto__', 'constructor', 'prototype'].includes(statusAvatarChar)) {
                     avatars[statusAvatarChar] = target.value;
-                    state.activeSettings.snapshot.draft = cloneData(state.activeSettings.draft);
+                    state.activeSettings.snapshot.draft = state.activeSettings.draft;
                 }
                 return;
             }
@@ -4159,7 +4514,7 @@ export function createIgsReaderHost(options = {}) {
                 const houses = assets.characterHouses || (assets.characterHouses = {});
                 if (target.value) houses[charHouse] = target.value;
                 else delete houses[charHouse];
-                state.activeSettings.snapshot.draft = cloneData(state.activeSettings.draft);
+                state.activeSettings.snapshot.draft = state.activeSettings.draft;
                 return;
             }
             const wardrobeName = target.getAttribute('data-wardrobe-name');
@@ -4172,7 +4527,7 @@ export function createIgsReaderHost(options = {}) {
                 const entry = wardrobe[wardrobeName] && typeof wardrobe[wardrobeName] === 'object' && !Array.isArray(wardrobe[wardrobeName])
                     ? wardrobe[wardrobeName] : (wardrobe[wardrobeName] = { prompt: '' });
                 entry.prompt = target.value;
-                state.activeSettings.snapshot.draft = cloneData(state.activeSettings.draft);
+                state.activeSettings.snapshot.draft = state.activeSettings.draft;
                 return;
             }
             const dnaChar = target.getAttribute('data-dna-char');
@@ -4186,7 +4541,7 @@ export function createIgsReaderHost(options = {}) {
                     ? assets.characterDna : (assets.characterDna = {});
                 const entry = Object.hasOwn(dnaMap, dnaChar) && dnaMap[dnaChar] && typeof dnaMap[dnaChar] === 'object' ? dnaMap[dnaChar] : (dnaMap[dnaChar] = {});
                 entry[dnaField] = target.value;
-                state.activeSettings.snapshot.draft = cloneData(state.activeSettings.draft);
+                state.activeSettings.snapshot.draft = state.activeSettings.draft;
                 return;
             }
             const sceneBg = target.getAttribute('data-scene-bg');
@@ -4264,6 +4619,11 @@ export function createIgsReaderHost(options = {}) {
                 controller.invoke('worldview:' + String(event.target.value || ''));
                 return;
             }
+            const horrorKind = event.target && event.target.getAttribute ? event.target.getAttribute('data-horror-select') : null;
+            if (horrorKind === 'style' || horrorKind === 'gore') {
+                controller.invoke(`horror-${horrorKind}:` + String(event.target.value || ''));
+                return;
+            }
             const target = event.target;
             const path = event.target && event.target.getAttribute ? event.target.getAttribute('data-path') : '';
             if (event.target && event.target.type === 'range' && !/^readerSettings\.typewriter\.sound\./.test(path || '')) return;
@@ -4278,10 +4638,22 @@ export function createIgsReaderHost(options = {}) {
                 if (!(target && typeof menu.contains === 'function' && menu.contains(target))) menu.open = false;
             }
         }, true);
+        const pointerDown = () => { settingsPointerDown = true; };
+        const pointerUp = () => {
+            settingsPointerDown = false;
+            // 让这次点击先落到按钮上，再补刷搁着的缩略图。
+            (doc.defaultView || globalThis).setTimeout(flushDeferredImageRefresh, 0);
+        };
+        root.addEventListener('pointerdown', pointerDown, true);
+        root.addEventListener('pointerup', pointerUp, true);
+        root.addEventListener('pointercancel', pointerUp, true);
         // toggle 不冒泡，用捕获阶段记住「高级」折叠区的展开状态，避免重渲染后被收起。
         root.addEventListener('toggle', (event) => {
             const target = event.target;
-            if (target && target.classList && target.classList.contains('igs-add-menu')) placeRowMenu(target, doc.defaultView || globalThis);
+            if (target && target.classList && target.classList.contains('igs-add-menu')) {
+                placeRowMenu(target, doc.defaultView || globalThis);
+                if (!target.open) flushDeferredImageRefresh();
+            }
             const key = target && target.getAttribute ? target.getAttribute('data-advanced') : '';
             if (!key || !state.activeSettings || !state.activeSettings.asyncState) return;
             const asyncState = state.activeSettings.asyncState;
@@ -4554,13 +4926,27 @@ export function createIgsReaderHost(options = {}) {
     function updateMountedSettings(snapshot) {
         const current = state.activeSettings;
         if (!current || !current.dom || !current.dom.root) return;
+        // 输入弹窗期间保留真实输入节点；整页重建会反复关闭、唤起手机软键盘。
+        if (settingsDialogs.hasTextInput()) return;
         const container = current.dom.root;
         const prevBody = container.querySelector('.igs-settings-body');
         const scrollTop = prevBody ? prevBody.scrollTop : 0;
         const focus = captureSettingsFocus(container);
-        clearChildren(container);
-        container.innerHTML = snapshot.html;
-        current.dom.overlay = container.querySelector('#igs-unified-settings');
+        // 遮罩层带全屏 backdrop-filter 与焦散动画：重绘只换遮罩里的内容，遮罩节点本身留着，
+        // 免得每次改设置都重建一次全屏模糊合成层、焦散动画从头播。
+        // 兜底遮罩（宿主不解析 innerHTML 时手搭的）不复用，仍按旧路整块重建。
+        const prevOverlay = current.dom.overlayParsed && current.dom.overlay && current.dom.overlay.parentNode === container
+            ? current.dom.overlay : null;
+        const shell = settingsShellHtml.get(snapshot);
+        if (prevOverlay && shell) {
+            prevOverlay.setAttribute('data-igs-settings-theme', shell.theme);
+            prevOverlay.innerHTML = shell.html;
+        } else {
+            clearChildren(container);
+            container.innerHTML = snapshot.html;
+            current.dom.overlay = container.querySelector('#igs-unified-settings');
+            current.dom.overlayParsed = Boolean(current.dom.overlay);
+        }
         if (!current.dom.overlay) {
             current.dom.overlay = buildFallbackSettingsOverlay(container.ownerDocument || getRootDocument(options.global), snapshot, {
                 version: options.version,
@@ -4694,11 +5080,14 @@ export function createIgsReaderHost(options = {}) {
     }
 
     function normalizeSceneAssets(value) {
-        const normalized = cloneData(value || {});
+        // normalizeBridgeConfig already cloned the entire bridge before calling here.
+        // Re-cloning a large sceneAssets library on every settings redraw is redundant.
+        const normalized = value || {};
         normalized.enabled = normalizeBoolean(normalized.enabled, false);
         normalized.generated = normalizeGeneratedLibrary(normalized.generated);
         normalized.promptRule = normalizeScenePromptRule(normalized.promptRule);
         normalized.promptPlacement = normalizePromptPlacement(normalized.promptPlacement);
+        normalized.spriteEnhance = normalizeSpriteEnhance(normalized.spriteEnhance);
         normalized.promptAdaptive = normalized.promptAdaptive !== false;
         if (!normalized.scenes || typeof normalized.scenes !== 'object' || Array.isArray(normalized.scenes)) {
             normalized.scenes = {};
@@ -4770,6 +5159,7 @@ export function createIgsReaderHost(options = {}) {
         }
         normalized.unifiedSpriteLayout = normalizeBoolean(normalized.unifiedSpriteLayout, false);
         normalized.moodFuzzyMatch = normalizeBoolean(normalized.moodFuzzyMatch, false);
+        normalized.moodAutoClassify = normalizeBoolean(normalized.moodAutoClassify, false);
         normalizeAssetCards(normalized);
         return normalized;
     }
@@ -4814,6 +5204,7 @@ export function createIgsReaderHost(options = {}) {
             classicDialogWidthPercent: CLASSIC_DIALOG_WIDTH_PERCENT_DEFAULT,
             skinDialogScale: SKIN_DIALOG_SCALE_DEFAULT,
             magicHouse: MAGIC_HOUSE_DEFAULT,
+            horrorDreadCap: HORROR_DREAD_CAP_DEFAULT,
             magicAccent: MAGIC_ACCENT_DEFAULT,
             fontSize: 18,
             dialogFontWeight: null,
@@ -4832,6 +5223,7 @@ export function createIgsReaderHost(options = {}) {
             imgMode: 'adaptive',
             imgBrightness: 100,
             cgHoldPages: 4,
+            spriteDefaultScale: 100,
             showStatusLine: false,
             typewriter: { ...TYPEWRITER_DEFAULTS },
             stageShake: normalizeStageShakeSettings(null),
@@ -4854,6 +5246,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.classicDialogWidthPercent = normalizeClassicDialogWidthPercent(normalized.classicDialogWidthPercent);
         normalized.skinDialogScale = normalizeSkinDialogScale(normalized.skinDialogScale);
         normalized.magicHouse = normalizeMagicHouse(normalized.magicHouse);
+        normalized.horrorDreadCap = normalizeHorrorDreadCap(normalized.horrorDreadCap);
         normalized.magicAccent = normalizeMagicAccent(normalized.magicAccent);
         normalized.fontSize = normalizeFiniteNumber(normalized.fontSize, base.fontSize);
         normalized.dialogFontWeight = normalized.dialogFontWeight != null
@@ -4899,6 +5292,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.hiddenBtns = normalizeHiddenButtons(normalized.hiddenBtns);
         normalized.btnOrder = normalizeBtnOrder(normalized.btnOrder);
         normalized.spriteLayouts = normalizeSpriteLayouts(normalized.spriteLayouts);
+        normalized.spriteDefaultScale = normalizeSpriteDefaultScale(normalized.spriteDefaultScale);
         normalized.spriteHeads = normalizeSpriteHeads(normalized.spriteHeads);
         normalized.castSlotLayouts = normalizeSpriteLayouts(normalized.castSlotLayouts);
         // 对话主题（vnTheme）按模式存进 readerSettings。独立于 _v 门控处理，避免 schema 版本
@@ -5126,22 +5520,21 @@ function locateTextOffsetInSource(source, segText, from = 0) {
     return -1;
 }
 
-function resolveIllustrationMarkerImageUrl(imageState, slot) {
+function resolveBoundSlotImageUrl(imageState, slot) {
     const numericSlot = Number(slot);
     if (!Number.isInteger(numericSlot) || numericSlot < 1) return '';
     const targetIndex = numericSlot - 1;
-    const sources = [
-        imageState && imageState.slots,
-        imageState && imageState.images,
-        imageState && imageState.unboundImages,
-    ];
+    const unbound = new Set((Array.isArray(imageState.unboundImages) ? imageState.unboundImages : [])
+        .map((image) => String(image && image.url || '').trim())
+        .filter(Boolean));
+    const sources = [imageState.slots, imageState.images];
     for (const source of sources) {
         if (!Array.isArray(source)) continue;
         const exact = source.find((image) => Number(image && image.slotIndex) === targetIndex);
         const indexed = source[targetIndex];
         for (const image of [exact, indexed]) {
             const url = String(image && image.url || '').trim();
-            if (url) return url;
+            if (url && !unbound.has(url)) return url;
         }
     }
     return '';

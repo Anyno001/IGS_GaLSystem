@@ -1194,6 +1194,11 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     const written = buildExpressionDiffDescription('冬月', { positive: '1girl' }, ['喜悦'], null, { name: '泳装', words: ['泳衣'], ownImage: false, prompt: 'school swimsuit, one-piece' });
     assert.match(written, /服装提示词：\nschool swimsuit, one-piece/);
     assert.match(written, /不要沿用原装的衣服/);
+    assert.equal(written.includes('不要回避'), false);
+    const spicy = buildExpressionDiffDescription('冬月', { positive: '1girl' }, ['喜悦'], null, { name: '泳装', words: ['泳衣'], ownImage: false, prompt: 'school swimsuit, one-piece', nsfwBoost: true });
+    assert.match(spicy, /这套是色情服装/);
+    assert.match(spicy, /不要回避/);
+    assert.match(spicy, /不要改成普通/);
     assert.equal(written.includes('衣服按这些词来画'), false);
     const nude = buildExpressionDiffDescription('冬月', { positive: '1girl' }, ['喜悦'], null, { name: '裸体', words: ['全裸'], ownImage: false, prompt: 'completely nude', nude: true });
     assert.match(nude, /这一套是裸体/);
@@ -1296,10 +1301,13 @@ test('gate:assets:wardrobe-prompt-writes-once-and-does-not-paint', async () => {
     const nai = {
         describe: () => ({ via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
         writeDbgenPrompt: async (meta) => {
-            assert.match(meta.description, /浴衣/);
+            const spicy = meta.description.includes('情趣内衣');
+            assert.match(meta.description, spicy ? /情趣内衣/ : /浴衣/);
             assert.match(meta.description, /一套衣服，而不是角色，没有角色/);
             assert.match(meta.description, /从上到下写完整/);
             assert.match(meta.description, /不要只写其中一件/);
+            assert.equal(meta.description.includes('不要回避'), spicy);
+            assert.equal(meta.description.includes('这是色情服装'), spicy);
             assert.equal(meta.description.includes('冬月'), false);
             assert.equal(meta.description.includes('楼层'), false);
             return {
@@ -1320,6 +1328,8 @@ test('gate:assets:wardrobe-prompt-writes-once-and-does-not-paint', async () => {
     const written = await service.writeWardrobePrompt({ character: '冬月', outfit: '浴衣' });
     assert.deepEqual(written, { ok: true, prompt: 'yukata, floral pattern' });
     assert.equal(paints, 0);
+    const spicy = await service.writeWardrobePrompt({ character: '', outfit: '情趣内衣', nsfwBoost: true });
+    assert.equal(spicy.ok, true);
 });
 
 test('gate:assets:wardrobe-reference-paints-the-saved-prompt', async () => {
@@ -1328,7 +1338,14 @@ test('gate:assets:wardrobe-reference-paints-the-saved-prompt', async () => {
         describe: () => ({ via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
         writeDbgenPrompt: async () => { writes += 1; return { ok: false, error: '不该写词' }; },
         generateDbgenCaption: async (meta) => {
-            assert.equal(meta.caption.v4_prompt.caption.base_caption, 'yukata, floral pattern');
+            const caption = meta.caption.v4_prompt.caption.base_caption;
+            const spicy = caption.includes('不要回避');
+            if (spicy) {
+                assert.match(caption, /^yukata, floral pattern\n/);
+                assert.match(caption, /这是色情服装/);
+            } else {
+                assert.equal(caption, 'yukata, floral pattern');
+            }
             assert.equal(meta.transparent, true);
             return { ok: true, dataUrl: 'data:image/png;base64,QQ==', prompt: { positive: 'yukata, floral pattern', negative: '' } };
         },
@@ -1341,6 +1358,8 @@ test('gate:assets:wardrobe-reference-paints-the-saved-prompt', async () => {
     });
     const painted = await service.paintWardrobeReference({ prompt: 'yukata, floral pattern' });
     assert.deepEqual(painted, { ok: true, imageId: 'ref-1' });
+    const spicyPaint = await service.paintWardrobeReference({ prompt: 'yukata, floral pattern', nsfwBoost: true });
+    assert.equal(spicyPaint.ok, true);
     assert.equal(writes, 0);
     assert.equal(await service.resolveUrl('igs-gen:ref-1'), 'data:image/png;base64,QQ==');
 });
@@ -1404,6 +1423,107 @@ test('gate:assets:character-sprite-writes-from-dna-then-paints-default', async (
     assert.ok(html.includes('生成立绘'));
     const dnaOnly = renderDnaOnlyCharacterList({ 路人甲: { identity: '' } }, {});
     assert.ok(dnaOnly.includes('data-action="char-generate-sprite:%E8%B7%AF%E4%BA%BA%E7%94%B2"'));
+});
+
+test('gate:assets:character-sprite-honors-nai-and-extension-image-source', async () => {
+    for (const mode of ['nai', 'extension']) {
+        const calls = [];
+        const store = createMemoryGeneratedAssetStore();
+        const service = createAssetGenerationService({
+            messageHost: { getChatId: () => 'chat', readFloor: () => null, readPreviousAiTexts: () => [], on: () => () => {} },
+            llm: {}, store, matte: async (url, options) => { calls.push(['matte', options.alreadyTransparent]); return url; },
+            nai: {
+                describe: () => ({ mode, via: mode === 'extension' ? 'chatu8' : 'nai', ready: { ok: true } }),
+                writeDbgenPrompt: () => { throw new Error('non-dbgen must not request plugin prompt'); },
+                generate: async (slot, settings) => {
+                    calls.push(['generate', slot, settings]);
+                    return { ok: true, dataUrl: 'data:image/png;base64,QQ==', prompt: { positive: 'sprite', negative: '' } };
+                },
+            },
+            getSettings: () => ({ imageApi: { mode }, autoIllustration: {}, sceneAssets: {} }),
+            newId: () => `sprite-${mode}`,
+        });
+        const result = await service.generateCharacterSprite({ name: '冬月', dna: { identity: 'silver hair' } });
+        assert.equal(result.ok, true);
+        assert.equal(calls[0][0], 'generate');
+        assert.match(calls[0][1].scene, /silver hair/);
+        assert.equal(calls[1][1], mode === 'nai' ? calls[0][1].transparent : false);
+        assert.equal((await store.getImage(result.imageId)).dataUrl, 'data:image/png;base64,QQ==');
+    }
+});
+
+
+test('gate:assets:default-sprite-extension-failure-falls-back-through-image-backend', async () => {
+    const { createImageBackend } = await import('../src/generated-images/image-backend.js');
+    const calls = [];
+    const bridge = { imageApi: { mode: 'extension' }, autoIllustration: { nai: { apiKey: 'test-key' } } };
+    const image = 'data:image/png;base64,QQ==';
+    const backend = createImageBackend({
+        global: {}, getBridge: () => bridge,
+        nai: { generate: async (slot, config) => {
+            calls.push(['nai', slot, config.apiKey]);
+            return { ok: true, dataUrl: image };
+        } },
+        chatu8: { findHost: () => ({ win: {} }), request: async () => {
+            calls.push(['chatu8']);
+            return { ok: false, error: '绘图失败' };
+        } },
+    });
+    const store = createMemoryGeneratedAssetStore();
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'chat' }, llm: {}, nai: backend, store,
+        getSettings: () => ({ autoIllustration: bridge.autoIllustration, sceneAssets: {} }),
+        matte: async (url, options) => { calls.push(['matte', options.alreadyTransparent]); return url; },
+        newId: () => 'fallback-sprite',
+    });
+    const result = await service.generateCharacterSprite({ name: '冬月', dna: { identity: 'silver hair' } });
+    assert.deepEqual([result.ok, result.imageId], [true, 'fallback-sprite']);
+    assert.deepEqual(calls.map(([name]) => name), ['chatu8', 'nai', 'matte']);
+    assert.equal(calls[1][2], 'test-key');
+    assert.match(calls[1][1].scene, /silver hair/);
+    assert.equal(calls[2][1], false, '智绘姬失败后的 NAI 图片按非透明底抠图');
+    assert.equal((await store.getImage(result.imageId)).dataUrl, image);
+});
+
+test('gate:asset-upload:stored-records-hydrate-in-a-new-service-and-report-failure', async () => {
+    const image = 'data:image/png;base64,QQ==';
+    const store = createMemoryGeneratedAssetStore();
+    let next = 0;
+    const makeService = (assetStore = store) => createAssetGenerationService({
+        messageHost: { getChatId: () => 'chat' }, llm: {}, nai: {}, store: assetStore,
+        getSettings: () => ({ autoIllustration: {}, sceneAssets: {} }),
+        newId: () => `manual-${++next}`,
+    });
+    const first = makeService();
+    for (const type of ['sprite', 'background']) {
+        const imported = await first.importAssetImage(image, type);
+        assert.equal(imported.ok, true);
+        const record = await store.getImage(imported.imageId);
+        assert.equal(record.type, type);
+        assert.equal(record.dataUrl, image);
+        assert.equal(await first.getImageDataUrl(imported.imageId), image);
+        if (type === 'sprite') {
+            assert.equal(record.originalDataUrl, image);
+            assert.equal((await first.readStoredImage(imported.imageId)).revision, 1);
+        }
+        const reopened = makeService();
+        const ref = `igs-gen:${imported.imageId}`;
+        assert.equal(reopened.resolveUrl(ref), '', '新实例初次读取等待存储异步恢复');
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(reopened.resolveUrl(ref), image);
+    }
+    for (const bad of ['data:text/html;base64,QQ==', 'data:image/svg+xml;base64,QQ==', 'data:image/png;base64,???']) {
+        assert.equal((await first.importAssetImage(bad, 'sprite')).ok, false);
+    }
+    assert.equal((await first.importAssetImage(image, 'other')).ok, false);
+    const brokenStore = { ...store, async putImage() { throw Object.assign(new Error('quota'), { name: 'QuotaExceededError' }); } };
+    const failed = await makeService(brokenStore).importAssetImage(image, 'background');
+    assert.equal(failed.ok, false);
+    assert.match(failed.error, /空间不足/);
+    assert.equal(await store.getImage('manual-3'), null);
+    const deletionsFail = makeService({ ...store, async deleteImage() { throw new Error('blocked'); } });
+    assert.equal((await deletionsFail.deleteImages(['manual-1'])).reason, 'image-delete-failed');
+    assert.equal((await store.getImage('manual-1')).dataUrl, image);
 });
 
 test('gate:assets:floor-sprite-descriptions-carry-dna', async () => {
@@ -1510,7 +1630,7 @@ test('gate:dbgen:plugin-calls-time-out-instead-of-hanging', async () => {
     const { createImageBackend } = await import('../src/generated-images/image-backend.js');
     const never = () => new Promise(() => {});
     const NaiDbGen = { generate: never, generateSinglePrompt: never };
-    const backend = createImageBackend({ global: { NaiDbGen }, dbgenTimeouts: { write: 20, paint: 20 } });
+    const backend = createImageBackend({ global: { NaiDbGen }, getBridge: () => ({ imageApi: { mode: 'dbgen' } }), dbgenTimeouts: { write: 20, paint: 20 } });
     const caption = { v4_prompt: { caption: { base_caption: '1girl', char_captions: [] } } };
     const painted = await backend.generateDbgenCaption({ caption });
     assert.equal(painted.ok, false);
@@ -1583,4 +1703,47 @@ test('gate:assets:resume-button-shows-only-when-captions-wait-for-paint', async 
     const waiting = renderCharacterSlotTabs({ ...base, sceneAssets, expressionNotes: { 冬月: { 愤怒: { error: '已停止', caption } } } });
     assert.ok(waiting.includes('data-action="char-expression-resume:%E5%86%AC%E6%9C%88"'));
     assert.ok(waiting.includes('继续生图（1）'));
+});
+
+test('gate:asset-gen:image-cache-keeps-on-screen-thumbs-beyond-limit', async () => {
+    let t = 0;
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'chat', readFloor: () => null, readPreviousAiTexts: () => [], on: () => () => {} },
+        llm: {}, nai: {}, store: { getImage: async (id) => ({ dataUrl: `data:image/png;base64,${id}` }) },
+        getSettings: () => ({ autoIllustration: {}, sceneAssets: {} }),
+        clock: () => t,
+    });
+    const refs = Array.from({ length: 80 }, (_, i) => `igs-gen:p${i}`);
+    const missing = () => refs.filter((ref) => !service.resolveUrl(ref)).length;
+    assert.equal(missing(), 80);
+    await new Promise((resolve) => setImmediate(resolve));
+    t += 120;
+    assert.equal(missing(), 0, '一页 80 张缩略图读回后不能被上限挤掉再闪载入中');
+    t += 10000;
+    for (let i = 0; i < 5; i++) service.resolveUrl(`igs-gen:other${i}`);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(service.resolveUrl('igs-gen:p0'), '', '离开页面后旧图按上限回收');
+});
+
+test('gate:asset-gen:settings-thumbs-use-short-blob-urls-and-revoke-on-delete', async () => {
+    const created = [];
+    const revoked = [];
+    const store = createMemoryGeneratedAssetStore();
+    await store.putImage({ id: 't1', dataUrl: 'data:image/png;base64,QUJD' });
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'chat', readFloor: () => null, readPreviousAiTexts: () => [], on: () => () => {} },
+        llm: {}, nai: {}, store,
+        getSettings: () => ({ autoIllustration: {}, sceneAssets: {} }),
+        urlApi: { createObjectURL: () => { created.push(`blob:t${created.length}`); return created[created.length - 1]; }, revokeObjectURL: (url) => revoked.push(url) },
+        Blob: class { constructor(parts, opts) { this.parts = parts; this.type = opts.type; } },
+    });
+    assert.equal(service.resolveThumbUrl('igs-gen:t1'), '', '未读回时等待异步恢复');
+    await new Promise((resolve) => setImmediate(resolve));
+    const thumb = service.resolveThumbUrl('igs-gen:t1');
+    assert.equal(thumb, 'blob:t0');
+    assert.equal(service.resolveThumbUrl('igs-gen:t1'), thumb, '重绘复用同一个短地址，浏览器不重载不闪');
+    assert.equal(service.resolveUrl('igs-gen:t1'), 'data:image/png;base64,QUJD', '舞台等其他用途仍拿 dataUrl');
+    assert.equal(service.resolveThumbUrl('https://example.com/a.png'), 'https://example.com/a.png');
+    await service.deleteImages(['t1']);
+    assert.deepEqual(revoked, ['blob:t0']);
 });

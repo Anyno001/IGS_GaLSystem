@@ -9,22 +9,22 @@ export const PERFORMANCE_FEATURES = Object.freeze([
     Object.freeze({ key: 'camera', label: '镜头语言', group: 'stage', tier: 2 }),
     Object.freeze({ key: 'weatherFx', label: '天气', group: 'stage', tier: 2 }),
     Object.freeze({ key: 'stageShake', label: '震动', group: 'stage', tier: 2 }),
-    Object.freeze({ key: 'spriteMotion', label: '立绘活动', group: 'character', tier: 1 }),
-    Object.freeze({ key: 'spriteActions', label: '情绪动作', group: 'character', tier: 2 }),
-    Object.freeze({ key: 'mangaFx', label: '情绪符号', group: 'emotion', tier: 2 }),
-    Object.freeze({ key: 'heartbeatFx', label: '心跳脉动', group: 'emotion', tier: 2 }),
-    Object.freeze({ key: 'flashFx', label: '闪白耳鸣', group: 'emotion', tier: 3 }),
-    Object.freeze({ key: 'innerFx', label: '内心弹幕', group: 'emotion', tier: 3 }),
+    Object.freeze({ key: 'spriteMotion', label: '立绘活动', group: 'stage', tier: 1 }),
+    Object.freeze({ key: 'spriteActions', label: '情绪动作', group: 'stage', tier: 2 }),
+    Object.freeze({ key: 'mangaFx', label: '情绪符号', group: 'story', tier: 2 }),
+    Object.freeze({ key: 'heartbeatFx', label: '心跳脉动', group: 'story', tier: 2 }),
+    Object.freeze({ key: 'flashFx', label: '闪白耳鸣', group: 'special', tier: 3 }),
+    Object.freeze({ key: 'innerFx', label: '内心弹幕', group: 'special', tier: 3 }),
     Object.freeze({ key: 'titleCard', label: '标题卡', group: 'story', tier: 1 }),
     Object.freeze({ key: 'favorToast', label: '数值提示', group: 'story', tier: 2 }),
     Object.freeze({ key: 'itemFx', label: '获得物品', group: 'story', tier: 2 }),
-    Object.freeze({ key: 'fxTags', label: '演出标签', group: 'event', tier: 2 }),
-    Object.freeze({ key: 'dailyFx', label: '日常演出', group: 'event', tier: 2 }),
-    Object.freeze({ key: 'battleFx', label: '战斗', group: 'event', tier: 3 }),
-    Object.freeze({ key: 'chatShow', label: '线上交流', group: 'event', tier: 3 }),
-    Object.freeze({ key: 'liveFx', label: '直播间', group: 'event', tier: 3 }),
-    Object.freeze({ key: 'audienceFx', label: '观众弹幕', group: 'event', tier: 3 }),
-    Object.freeze({ key: 'romanceFx', label: '亲密演出', group: 'romance', tier: 3 }),
+    Object.freeze({ key: 'fxTags', label: '演出标签', group: 'story', tier: 2 }),
+    Object.freeze({ key: 'dailyFx', label: '日常演出', group: 'special', tier: 2 }),
+    Object.freeze({ key: 'battleFx', label: '战斗', group: 'special', tier: 3 }),
+    Object.freeze({ key: 'chatShow', label: '线上交流', group: 'special', tier: 3 }),
+    Object.freeze({ key: 'liveFx', label: '直播间', group: 'special', tier: 3 }),
+    Object.freeze({ key: 'audienceFx', label: '观众弹幕', group: 'special', tier: 3 }),
+    Object.freeze({ key: 'romanceFx', label: '亲密演出', group: 'special', tier: 3 }),
     Object.freeze({ key: 'fxSound', label: '演出音效', group: 'sound', tier: 2 }),
     Object.freeze({ key: 'ambientSound', label: '环境音', group: 'sound', tier: 2 }),
     Object.freeze({ key: 'uiSound', label: '界面音效', group: 'sound', tier: 2 }),
@@ -69,4 +69,31 @@ export function detectPerformancePreset(reader) {
     const found = PERFORMANCE_PRESETS.find(([, , level]) => PERFORMANCE_FEATURES
         .every(({ key, tier }) => (level === 0 && key === 'fxSound') || isPerformanceFeatureOn(reader, key) === (tier <= level)));
     return found ? found[0] : '';
+}
+
+export function performancePresetLabel(preset) {
+    const found = PERFORMANCE_PRESETS.find(([id]) => id === preset);
+    return found ? found[1] : '';
+}
+
+// 只有手工调成的自定义组合会被档位整体覆盖，先确认；同档位重按和档位之间切换没有可丢的细调，直接生效。
+export function shouldConfirmPerformancePreset(reader, preset) {
+    if (presetLevel(preset) == null) return false;
+    return detectPerformancePreset(reader && typeof reader === 'object' ? reader : {}) === '';
+}
+
+// 覆盖前记下每个演出的开关，误点档位后仍能还原自定义组合。
+export function capturePerformancePreset(reader) {
+    const src = plain(reader);
+    return Object.fromEntries(PERFORMANCE_FEATURES.map(({ key }) => [key, isPerformanceFeatureOn(src, key)]));
+}
+
+// 快照残缺时整体拒绝，避免草稿被写坏一半。
+export function restorePerformancePreset(reader, snapshot) {
+    if (!reader || typeof reader !== 'object' || !snapshot || typeof snapshot !== 'object') return false;
+    if (!PERFORMANCE_FEATURES.every(({ key }) => typeof snapshot[key] === 'boolean')) return false;
+    for (const { key } of PERFORMANCE_FEATURES) {
+        reader[key] = { ...plain(reader[key]), enabled: snapshot[key] };
+    }
+    return true;
 }

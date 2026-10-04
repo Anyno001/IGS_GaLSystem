@@ -117,7 +117,8 @@ function openSettingsScene() {
   };
   mem.setItem('igs_bridge_config', JSON.stringify({ sceneAssets: {
     enabled: true, promptRule: '规则', characterAliases: {}, moodGroups: [],
-    scenes: { 教室: { url: img, times: {} }, 走廊: { url: img, times: {} }, 海边: { url: img, times: {} }, 天台: { url: '', times: {} } },
+    // 带时间行和长名字，看窄屏挤不挤。
+    scenes: { 教室: { url: img, times: { '14:50': { url: img } } }, 走廊: { url: img, times: {} }, 海边: { url: img, times: { '黄昏': { url: img } } }, 天台: { url: '', times: {} }, 伦敦国王十字车站: { url: 'https://example.com/london.png', times: {} } },
     characters: { 林夏: { 普通: img, 微笑: img }, 陈屿: { 普通: img }, 路人: { 普通: '' } },
     characterDna: { 林夏: { identity: '黑色长发，琥珀色眼睛' } },
     wardrobe: { 校服: { prompt: 'white shirt, pleated skirt' }, 泳装: { prompt: '' } },
@@ -158,7 +159,10 @@ function openSettingsScene() {
     hostAdapter: { getCurrentMessage: async () => ({ id: 1, text: '素材设置预览。' }), typeAndSend: async () => ({ ok: true }) },
   });
   const mode = (q.get('size') || 'desktop').match(/^(mobile|short|tiny)$/) ? 'mobile' : 'pc';
-  const opened = settingsVn.openSettings({ tab: 'scene', mode });
+  // ?tab=basic|reader|image 打开别的设置页；?readersub= 切阅读器子页。
+  const opened = settingsVn.openSettings({ tab: q.get('tab') || 'scene', mode });
+  const readerSub = q.get('readersub');
+  if (readerSub) document.querySelector(`[data-reader-subtab="${CSS.escape(readerSub)}"]`)?.click();
   if (!opened || opened.ok === false) throw new Error('settings-scene: openSettings failed ' + JSON.stringify(opened));
   const subtab = q.get('subtab');
   if (subtab) document.querySelector(`[data-scene-subtab="${CSS.escape(subtab)}"]`)?.click();

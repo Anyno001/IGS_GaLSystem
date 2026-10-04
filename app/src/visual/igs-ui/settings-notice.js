@@ -31,7 +31,10 @@ export function describeSaveError(error) {
 export function describeSettingsFailure(result) {
     if (!result || typeof result !== 'object' || result.ok !== false) return '';
     if (result.thrown) return `操作失败：${describeSaveError(result.thrown)}`;
-    if (result.saveError || SAVE_FAILURE_REASONS.has(result.reason)) return `保存失败：${describeSaveError(result.saveError || result.message || result.reason)}`;
+    if (result.saveError || SAVE_FAILURE_REASONS.has(result.reason)) {
+        const detail = describeSaveError(result.saveError || result.message || result.reason);
+        return `保存失败：${detail}${result.rollbackFailed ? '。部分设置可能已写入，请勿关闭设置，检查后重试' : ''}`;
+    }
     return '';
 }
 
@@ -58,12 +61,13 @@ const SETTINGS_BUSY_LABELS = Object.freeze({
     'test-image': '测试中…',
     'fetch-llm-models': '拉取中…',
     'fetch-image-models': '拉取中…',
+    'mood-review-ai-classify': '分类中…',
 });
 
 export function settingsBusyLabel(action) {
     const name = String(action || '');
     if (SETTINGS_BUSY_LABELS[name]) return SETTINGS_BUSY_LABELS[name];
-    if (/^(?:char-generate-sprite|outfit-generate-nude|status-avatar-generate|(?:char|outfit)-expression-retry):/.test(name)) return '生图中';
+    if (/^(?:char-generate-sprite|outfit-generate-nude|status-avatar-generate|(?:char|outfit)-expression-retry|scene-variant-(?:set|retry)):/.test(name)) return '生图中';
     return '';
 }
 

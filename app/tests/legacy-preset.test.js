@@ -290,6 +290,33 @@ test('preset: 全局和存时那张卡分开记；套用各回各层，在别的
     assert.deepEqual(Object.keys(root.scenes), ['教室'], '删预设不动素材');
 });
 
+test('gate:preset:overwrite-confirmed-target-only-preserves-card-and-folder-snapshot', async () => {
+    const { ctx, draft, storage } = makeCtx({
+        confirms: [false, true],
+        sceneAssets: {
+            scenes: { 新场景: { url: 'new' } },
+            cards: { 'card:小雪': { scenes: { 小雪房间: { url: 'snow' } }, characters: {} } },
+        },
+    });
+    storage.setItem(LEGACY_PRESET_KEY, JSON.stringify({ version: 1, presets: { 旧预设: oldPreset(), 另一份: oldPreset() } }));
+    saveAssetFolders(storage, '', normalizeAssetFolders({ scenes: { folders: ['新'], assign: { 新场景: '新' } } }));
+    saveAssetFolders(storage, 'card:小雪', normalizeAssetFolders({ scenes: { folders: ['房间'], assign: { 小雪房间: '房间' } } }));
+    const before = storage.getItem(LEGACY_PRESET_KEY);
+    const command = `preset-overwrite:${encodeURIComponent('旧预设')}`;
+    await handleSettingsAction(command, ctx);
+    assert.equal(storage.getItem(LEGACY_PRESET_KEY), before, '取消时预设存储不变');
+    await handleSettingsAction(command, ctx);
+    const saved = loadLegacyPresets(storage);
+    assert.deepEqual(Object.keys(saved).sort(), ['另一份', '旧预设'].sort());
+    assert.deepEqual(saved.另一份, oldPreset(), '另一份不被覆盖');
+    assert.deepEqual(Object.keys(saved.旧预设.scenes), ['新场景']);
+    assert.deepEqual(Object.keys(saved.旧预设.scopeCards['card:小雪'].library.scenes), ['小雪房间']);
+    assert.equal(loadAssetFolders(storage, '旧预设').scenes.assign.新场景, '新');
+    assert.equal(loadAssetFolders(storage, '旧预设\u0001card:小雪').scenes.assign.小雪房间, '房间');
+    assert.deepEqual(Object.keys(draft.bridge.sceneAssets.scenes), ['新场景'], '覆盖预设不套用到当前素材');
+});
+
+
 test('preset: 旧版不分层的预设仍然选套到本卡或全局，整层替换', async () => {
     const { ctx, draft, storage } = makeCtx({
         confirms: [true, true],
@@ -302,4 +329,62 @@ test('preset: 旧版不分层的预设仍然选套到本卡或全局，整层替
     assert.deepEqual(Object.keys(root.scenes), ['海边'], '套到本卡不动全局');
     await handleSettingsAction(`preset-apply:${encodeURIComponent('现代')}:global`, ctx);
     assert.deepEqual(Object.keys(root.scenes).sort(), Object.keys(oldPreset().scenes).sort());
+});
+
+test('preset: 导出把引用的生成图一起打进压缩包，清了本机再导入，图和预设都回来', async () => {
+    const PNG = 'data:image/png;base64,iVBORw0KGgo=';
+    const JPG = 'data:image/jpeg;base64,/9j/4AAQ';
+    const { ctx, storage, alerts } = makeCtx({
+        prompts: ['HP', 'HP'],
+        sceneAssets: {
+            scenes: { 对角巷: { url: 'igs-gen:alley', times: { 上午: { url: 'igs-gen:alley' } } }, 外链: { url: 'https://img/x' } },
+            cards: { 'card:小雪': { characters: { 哪吒: { 默认: 'igs-gen:nezha', 丢了: 'igs-gen:gone' } } } },
+        },
+    });
+    const images = new Map([
+        ['alley', { id: 'alley', type: 'background', dataUrl: JPG, createdAt: 't' }],
+        ['nezha', { id: 'nezha', type: 'sprite', dataUrl: PNG, originalDataUrl: PNG, revision: 2 }],
+    ]);
+    ctx.options.generatedAssets = {
+        readStoredImage: async (id) => (images.has(id) ? structuredClone(images.get(id)) : null),
+        writeStoredImage: async (record) => { images.set(record.id, structuredClone(record)); return { ok: true }; },
+    };
+    let downloaded = null;
+    let picked = null;
+    const global = ctx.options.global;
+    global.Blob = Blob;
+    global.URL = { createObjectURL: (blob) => { downloaded = blob; return 'blob:x'; }, revokeObjectURL() {} };
+    global.document = {
+        body: { appendChild() {}, removeChild() {} },
+        createElement: (tag) => (tag === 'input'
+            ? { click() { setTimeout(() => { this.files = [picked]; this.onchange(); }); } }
+            : { click() {} }),
+    };
+    const RealFileReader = globalThis.FileReader;
+    globalThis.FileReader = class {
+        readAsArrayBuffer(file) { this.onload({ target: { result: file.bytes.buffer } }); }
+    };
+    try {
+        await handleSettingsAction('preset-save', ctx);
+        const result = await handleSettingsAction(`preset-export:${encodeURIComponent('HP')}`, ctx);
+        assert.equal(result.fileName, 'HP.zip');
+        assert.equal(result.images, 2);
+        assert.equal(result.missing, 1);
+        assert.match(alerts.at(-1), /1 张图在本机找不到/);
+
+        // 模拟清了浏览器数据：图和预设都没了。
+        images.clear();
+        storeLegacyPresets(storage, {});
+        storage.removeItem(LEGACY_PRESET_KEY);
+        picked = { name: 'HP.zip', bytes: new Uint8Array(await downloaded.arrayBuffer()) };
+        await handleSettingsAction('preset-import', ctx);
+        assert.equal(images.get('alley').dataUrl, JPG);
+        assert.equal(images.get('nezha').originalDataUrl, PNG, '原图也带回来');
+        assert.equal(images.get('nezha').revision, 2);
+        const back = loadLegacyPresets(storage).HP;
+        assert.equal(back.scenes.对角巷.url, 'igs-gen:alley');
+        assert.equal(back.scopeCards['card:小雪'].library.characters.哪吒.默认, 'igs-gen:nezha');
+    } finally {
+        globalThis.FileReader = RealFileReader;
+    }
 });

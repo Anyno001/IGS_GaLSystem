@@ -48,9 +48,16 @@ test('gate:performance-layout:groups-collapsed-with-summary-and-word-lists-hidde
     });
     for (const [id] of PERFORMANCE_GROUPS) assert.match(html, new RegExp(`<details data-advanced="perf-group-${id}">`));
     assert.match(html, /data-action="perf-preset:standard"/);
-    assert.match(html, /<b>情绪反应<\/b><span class="igs-perf-count is-on">1\/4<\/span><span class="igs-perf-brief">情绪符号<\/span>/);
-    assert.match(html, /<b>立绘<\/b><span class="igs-perf-count">0\/3<\/span>/);
-    assert.match(html, /<b>事件演出<\/b><span class="igs-perf-count">0\/6<\/span>/);
+    // 情绪、剧情提示、事件演出合进「情绪与提示」一张卡，组内用小标题分段。
+    assert.match(html, /<b>情绪与提示<\/b><span class="igs-perf-count is-on">1\/7<\/span><span class="igs-perf-brief">情绪符号<\/span>/);
+    assert.match(html, /<div class="igs-settings-subhead">情绪<\/div>[\s\S]*<div class="igs-settings-subhead">剧情提示<\/div>[\s\S]*<div class="igs-settings-subhead">事件演出<\/div>/);
+    // 镜头环境与立绘合成「画面」：5 个画面开关 + 立绘活动、情绪动作、多角色同屏。
+    assert.match(html, /<b>画面<\/b><span class="igs-perf-count">0\/8<\/span>/);
+    // 战斗、直播、线上交流、亲密这类只在特定剧情用的，收进「题材专属」，由用户自己勾；演出页不再有剧情题材胶囊。
+    assert.match(html, /<b>题材专属<\/b><span class="igs-perf-count">0\/8<\/span>/);
+    assert.doesNotMatch(html, /剧情题材|perf-type:/);
+    assert.match(html, /<details data-advanced="perf-group-rhythm"><summary><b>节奏与互动<\/b>/);
+    assert.equal(PERFORMANCE_GROUPS.length, 5);
     assert.match(html, /<details class="igs-settings-advanced igs-perf-more" data-advanced="perf-manga-words"><summary>自定义触发情绪<\/summary>/);
     assert.match(html, /data-advanced="perf-stage-shake"><summary>强度与触发情绪<\/summary><i data-shake-detail><\/i>/);
     assert.match(html, /data-tw/);
@@ -63,13 +70,13 @@ test('gate:performance-layout:capsule-counts-every-visible-switch', () => {
         narrationFilter: '<i data-dim></i>',
     });
     assert.match(html, /<b>文字<\/b><span class="igs-perf-count is-on">2\/5<\/span><span class="igs-perf-brief">双语台词、旁白按句号分页<\/span>/);
-    assert.match(html, /<b>立绘<\/b><span class="igs-perf-count is-on">1\/4<\/span><span class="igs-perf-brief">旁白时压暗立绘<\/span>/);
-    assert.match(html, /<b>剧情提示<\/b><span class="igs-perf-count is-on">1\/4<\/span>/);
+    assert.match(html, /<b>画面<\/b><span class="igs-perf-count is-on">1\/9<\/span><span class="igs-perf-brief">旁白时压暗立绘<\/span>/);
+    assert.match(html, /<b>情绪与提示<\/b><span class="igs-perf-count is-on">1\/7<\/span>/);
 });
 
 test('gate:performance-layout:remembers-open-sections', () => {
-    const html = renderPerformanceSettings({ mangaFx: { enabled: true } }, {}, (key) => key === 'perf-group-character' || key === 'perf-manga-words');
-    assert.match(html, /data-advanced="perf-group-character" open/);
+    const html = renderPerformanceSettings({ mangaFx: { enabled: true } }, {}, (key) => key === 'perf-group-story' || key === 'perf-manga-words');
+    assert.match(html, /data-advanced="perf-group-story" open/);
     assert.match(html, /data-advanced="perf-manga-words" open/);
     assert.doesNotMatch(html, /data-advanced="perf-group-text" open/);
 });
@@ -104,4 +111,135 @@ test('gate:perf-presets:basic-tab-renders-preset-bar-first', async () => {
     } finally {
         vn.destroy();
     }
+});
+
+// 档位条走的是 handleSettingsAction 的同步分支，这里按 legacy-preset.test.js 的写法直接注入 ctx.dialogs。
+function presetCtx(reader) {
+    const draft = { readerSettings: reader };
+    const state = { activeSettings: { draft, readerMode: 'pc', asyncState: {} } };
+    const ctx = {
+        state,
+        options: { global: {} },
+        dialogs: { confirm: async () => true },
+        closeSettings: () => ({ ok: true }),
+        persistSettingsDraft: () => ({ ok: true }),
+        rerenderSettings: () => ({ ok: true }),
+        buildRegexPreview: () => '',
+    };
+    return { ctx, state, reader, asyncState: state.activeSettings.asyncState };
+}
+
+test('gate:perf-presets:confirm-only-covers-hand-tuned-combination', async () => {
+    const { shouldConfirmPerformancePreset } = await import('../src/visual/igs-ui/performance-presets.js');
+    assert.equal(shouldConfirmPerformancePreset({}, 'standard'), false, '全新设置不算自定义');
+    const tuned = {};
+    applyPerformancePreset(tuned, 'standard');
+    tuned.typewriter = { ...tuned.typewriter, enabled: false };
+    assert.equal(detectPerformancePreset(tuned), '');
+    assert.equal(shouldConfirmPerformancePreset(tuned, 'full'), true, '手调过的组合切档要先确认');
+    assert.equal(shouldConfirmPerformancePreset(tuned, 'off'), true, '全部关闭同样是覆盖');
+    const exact = {};
+    applyPerformancePreset(exact, 'standard');
+    assert.equal(shouldConfirmPerformancePreset(exact, 'standard'), false, '同档位重按没有可丢的内容');
+    assert.equal(shouldConfirmPerformancePreset(exact, 'full'), false, '档位之间切换没有细调');
+    assert.equal(shouldConfirmPerformancePreset(tuned, 'bogus'), false, '未知档位不弹窗');
+});
+
+test('gate:perf-presets:cancel-keeps-custom-combination-and-confirm-overwrites', async () => {
+    const { handleSettingsAction } = await import('../src/visual/igs-ui/settings-actions.js');
+    const reader = {};
+    applyPerformancePreset(reader, 'standard');
+    reader.typewriter = { ...reader.typewriter, enabled: false };
+    const t = presetCtx(reader);
+    const before = JSON.parse(JSON.stringify(reader));
+    const asked = [];
+
+    t.ctx.dialogs.confirm = async (message) => { asked.push(message); return false; };
+    assert.notEqual((await handleSettingsAction('perf-preset:full', t.ctx)).ok, false);
+    assert.deepEqual(reader, before, '取消后草稿原样');
+    assert.equal(t.asyncState.perfPresetUndo, undefined, '取消不留下可撤销记录');
+    assert.match(asked[0], /自定义/, '只在自定义时才问');
+
+    t.ctx.dialogs.confirm = async () => true;
+    await handleSettingsAction('perf-preset:full', t.ctx);
+    assert.equal(detectPerformancePreset(reader), 'full');
+    assert.ok(t.asyncState.perfPresetUndo, '确认覆盖后留下快照');
+});
+
+test('gate:perf-presets:exact-preset-click-skips-the-dialog', async () => {
+    const { handleSettingsAction } = await import('../src/visual/igs-ui/settings-actions.js');
+    const reader = {};
+    applyPerformancePreset(reader, 'light');
+    const t = presetCtx(reader);
+    let asked = 0;
+    t.ctx.dialogs.confirm = async () => { asked += 1; return true; };
+    await handleSettingsAction('perf-preset:light', t.ctx);
+    assert.equal(asked, 0, '同档位重按不问');
+    await handleSettingsAction('perf-preset:full', t.ctx);
+    assert.equal(asked, 0, '档位之间切换不问');
+    assert.equal(detectPerformancePreset(reader), 'full');
+});
+
+test('gate:perf-presets:unknown-preset-writes-nothing', async () => {
+    const { handleSettingsAction } = await import('../src/visual/igs-ui/settings-actions.js');
+    const reader = {};
+    applyPerformancePreset(reader, 'standard');
+    const t = presetCtx(reader);
+    const before = JSON.parse(JSON.stringify(reader));
+    let asked = 0;
+    t.ctx.dialogs.confirm = async () => { asked += 1; return true; };
+    await handleSettingsAction('perf-preset:bogus', t.ctx);
+    assert.equal(asked, 0, '未知档位不弹窗');
+    assert.deepEqual(reader, before, '未知档位不写草稿');
+});
+
+test('gate:perf-presets:undo-restores-custom-combination', async () => {
+    const { handleSettingsAction } = await import('../src/visual/igs-ui/settings-actions.js');
+    const reader = {};
+    applyPerformancePreset(reader, 'standard');
+    reader.typewriter = { ...reader.typewriter, enabled: false };
+    const custom = JSON.parse(JSON.stringify(reader));
+    const t = presetCtx(reader);
+    t.ctx.dialogs.confirm = async () => true;
+
+    await handleSettingsAction('perf-preset:full', t.ctx);
+    assert.notDeepEqual(reader, custom, '覆盖后确实变了');
+    assert.equal(detectPerformancePreset(reader), 'full');
+
+    assert.notEqual((await handleSettingsAction('perf-preset-undo', t.ctx)).ok, false);
+    assert.deepEqual(reader, custom, '撤销回到自定义组合');
+    assert.equal(detectPerformancePreset(reader), '');
+    assert.equal(t.asyncState.perfPresetUndo, null, '撤销后入口收起');
+
+    const afterUndo = JSON.parse(JSON.stringify(reader));
+    await handleSettingsAction('perf-preset-undo', t.ctx);
+    assert.deepEqual(reader, afterUndo, '没有快照时撤销不改草稿');
+});
+
+test('gate:perf-presets:snapshot-round-trips-every-feature-including-fx-sound', async () => {
+    const { capturePerformancePreset, restorePerformancePreset } = await import('../src/visual/igs-ui/performance-presets.js');
+    const reader = { fxSound: { enabled: false, volume: 42 }, mangaFx: { enabled: true, speedLines: ['震惊'] } };
+    const snapshot = capturePerformancePreset(reader);
+    assert.equal(Object.keys(snapshot).length, PERFORMANCE_FEATURES.length);
+    assert.equal(snapshot.fxSound, false, '演出音效的默认开启特例也要记进快照');
+    applyPerformancePreset(reader, 'full');
+    assert.equal(restorePerformancePreset(reader, snapshot), true);
+    assert.equal(isPerformanceFeatureOn(reader, 'fxSound'), false);
+    assert.equal(isPerformanceFeatureOn(reader, 'mangaFx'), true);
+    assert.deepEqual(reader.mangaFx.speedLines, ['震惊'], '还原只动开关，细项保持');
+    assert.equal(reader.fxSound.volume, 42);
+    assert.equal(restorePerformancePreset(reader, { typewriter: true }), false, '残缺快照整体拒绝');
+    assert.equal(restorePerformancePreset(reader, null), false);
+    assert.equal(restorePerformancePreset(null, snapshot), false);
+});
+
+test('gate:perf-presets:undo-entry-renders-only-when-a-snapshot-exists', async () => {
+    const { renderPerformancePresetBar } = await import('../src/visual/igs-ui/performance-settings-layout.js');
+    const reader = {};
+    applyPerformancePreset(reader, 'standard');
+    assert.doesNotMatch(renderPerformancePresetBar(reader, { home: true }), /perf-preset-undo/);
+    assert.match(renderPerformancePresetBar(reader, { home: true, canUndo: true }), /data-action="perf-preset-undo"/);
+    const { renderPerformanceSettings } = await import('../src/visual/igs-ui/performance-settings-layout.js');
+    assert.match(renderPerformanceSettings(reader, { canUndo: true }), /data-action="perf-preset-undo"/);
+    assert.doesNotMatch(renderPerformanceSettings(reader, {}), /perf-preset-undo/);
 });

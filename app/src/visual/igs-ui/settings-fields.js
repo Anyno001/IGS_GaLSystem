@@ -4,7 +4,7 @@ import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
 import { STAGE_SHAKE_INTENSITIES } from './stage-shake-runtime.js';
 import { CHAT_SHOW_BUBBLE_RADIUS_LEVELS, CHAT_SHOW_DIM_LEVELS, CHAT_SHOW_PROMPT_RULE } from './chat-show-runtime.js';
 import { CHAT_SFX_PRESET_LABELS } from './chat-sfx.js';
-import { menuItem, renderCharacterSlotTabs, renderReviewCard, renderRowMenu } from './settings-outfit-fields.js';
+import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions } from './settings-outfit-fields.js';
 import { MAGIC_HOUSES, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { resolveCharacterMagicHouse } from './magic-house.js';
 
@@ -23,13 +23,7 @@ function storedImageId(url) {
     return raw.startsWith('igs-gen:') ? raw.slice('igs-gen:'.length) : '';
 }
 
-// 「下载 / 提示词」只进 ⋯ 菜单，行内不再单独放图标按钮。
-function storedImageDownloadItem(url, fileName) {
-    const id = storedImageId(url);
-    if (!id) return '';
-    return menuItem(`gen-asset-download:${encSeg(id)}:${encSeg(fileName)}`, '下载');
-}
-
+// 「提示词」只进 ⋯ 菜单；下载与上传成对外露（transferIcons）。
 function storedImagePromptItem(url) {
     const id = storedImageId(url);
     if (!id) return '';
@@ -37,7 +31,6 @@ function storedImagePromptItem(url) {
 }
 
 const STATUS_AVATAR_PLACEHOLDER_SVG = '<svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="9" r="3.4"/><path d="M5.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/></svg>';
-const STATUS_AVATAR_UPLOAD_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>';
 
 export function renderTemplate(template, values) {
     return String(template || '').replace(/\{\{(\w+)\}\}/g, (_, key) => {
@@ -209,7 +202,6 @@ export function renderSystemRoleSettings(settings, options = {}) {
         '<div class="igs-settings-row">',
         field(`${p}.font`, '字体', selectInput(`${p}.font`, s.font, fontItems, disabled)),
         `<label class="igs-settings-field"><span>颜色</span>${colorInput(`${p}.color`, s.color || options.narrationColor, disabled)}${colorNote}</label>`,
-        field(`${p}.align`, '对齐', selectInput(`${p}.align`, s.align, [['left', '左对齐'], ['center', '居中'], ['indent', '首行缩进']], disabled)),
         '</div>',
         checkbox(`${p}.showName`, s.showName, '显示角色名'),
         `<div class="igs-settings-field"><span>角色词池（这些发送者的台词用本样式；线上交流里显示为居中提示条；自动忽略【】等括号）</span><div class="igs-mood-word-list">${tags || '<div class="igs-scene-empty">暂无</div>'}<button type="button" class="igs-btn-mgr-icon" data-action="system-role-add-word" title="添加系统类角色">+</button></div></div>`,
@@ -253,8 +245,9 @@ export function renderSceneAssetList(scenes, options = {}) {
     return entries.map(([sceneName, sceneVal]) => {
         const sceneObj = typeof sceneVal === 'string' ? { url: sceneVal, times: {} } : (sceneVal || { url: '', times: {} });
         const sceneWords = Array.isArray(sceneObj.words) ? sceneObj.words : [];
+        const canVary = Boolean(storedImageId(sceneObj.url));
         const bgExpanded = expandedSlots.has('bg\x00' + sceneName);
-        const badge = (text) => `<span style="font-size:10px;opacity:.5;flex-shrink:0;margin-right:2px">${text}</span>`;
+        const badge = (text) => `<span class="igs-scene-badge">${text}</span>`;
         const timeEntries = Object.entries(sceneObj.times || {});
         const timeRows = timeEntries.map(([timeName, timeVal]) => {
             const timeObj = typeof timeVal === 'string' ? { url: timeVal, weathers: {} } : (timeVal || { url: '', weathers: {} });
@@ -263,45 +256,52 @@ export function renderSceneAssetList(scenes, options = {}) {
             const weatherRows = weatherEntries.map(([weatherName, weatherVal]) => {
                 const weatherObj = typeof weatherVal === 'string' ? { url: weatherVal } : (weatherVal || { url: '' });
                 const wExpanded = expandedSlots.has('weather\x00' + sceneName + '\x00' + timeName + '\x00' + weatherName);
-                const wBody = wExpanded ? renderSceneGroupExpansion('weather', weatherName, weatherObj.url || '', weatherGroups, options.resolveUrl) : '';
+                const wBody = wExpanded ? renderSceneGroupExpansion('weather', weatherName, weatherObj.url || '', weatherGroups, options.resolveUrl, sceneUrlField(weatherObj.url, `data-scene-weather-bg="${esc(sceneName)}" data-scene-time="${esc(timeName)}" data-scene-weather="${esc(weatherName)}"`, true)) : '';
                 return `<div class="igs-sprite-slot"><div class="igs-btn-mgr-row igs-scene-mood-row igs-scene-weather-row">`
+                    + sceneThumb(weatherObj.url, weatherName, options.resolveUrl)
                     + badge('天气')
                     + `<span class="igs-btn-mgr-label">${esc(weatherName)}</span>`
-                    + `<input class="igs-scene-url-input" data-scene-weather-bg="${esc(sceneName)}" data-scene-time="${esc(timeName)}" data-scene-weather="${esc(weatherName)}" value="${esc(weatherObj.url || '')}" placeholder="URL 或 data:image/...">`
+                    + sceneUrlField(weatherObj.url, `data-scene-weather-bg="${esc(sceneName)}" data-scene-time="${esc(timeName)}" data-scene-weather="${esc(weatherName)}"`)
+                    + transferIcons(weatherObj.url, `${sceneName}-${timeName}-${weatherName}-背景.png`, [`scene-pick-weather:${encSeg(sceneName)}:${encSeg(timeName)}:${encSeg(weatherName)}`, '上传天气背景图'])
                     + renderRowMenu([
                         menuItem(`scene-rename-weather:${encSeg(sceneName)}:${encSeg(timeName)}:${encSeg(weatherName)}`, '重命名'),
-                        storedImageDownloadItem(weatherObj.url, `${sceneName}-${timeName}-${weatherName}-背景.png`),
                         storedImagePromptItem(weatherObj.url),
+                        canVary ? menuItem(`scene-variant-retry:${encSeg(sceneName)}:${encSeg(timeName)}:${encSeg(weatherName)}`, storedImageId(weatherObj.url) ? '重新生成' : '按场景提示词生成') : '',
                         menuItem(`scene-remove-weather:${encSeg(sceneName)}:${encSeg(timeName)}:${encSeg(weatherName)}`, '删除', ' is-danger'),
                     ], `「${weatherName}」的操作`)
                     + `<button type="button" class="igs-btn-mgr-icon" data-action="scene-toggle-weather:${encSeg(sceneName)}:${encSeg(timeName)}:${encSeg(weatherName)}" title="展开/折叠">${wExpanded ? chevronUp : chevronDown}</button>`
                     + `</div>${wBody}</div>`;
             }).join('');
-            const timeBody = timeExpanded ? renderSceneGroupExpansion('time', timeName, timeObj.url || '', timeGroups, options.resolveUrl) : '';
+            const timeBody = timeExpanded ? renderSceneGroupExpansion('time', timeName, timeObj.url || '', timeGroups, options.resolveUrl, sceneUrlField(timeObj.url, `data-scene-time-bg="${esc(sceneName)}" data-scene-time="${esc(timeName)}"`, true)) : '';
             return `<div class="igs-scene-char-group igs-scene-time-group"><div class="igs-sprite-slot"><div class="igs-btn-mgr-row">`
+                + sceneThumb(timeObj.url, timeName, options.resolveUrl)
                 + badge('时间')
                 + `<span class="igs-btn-mgr-label">${esc(timeName)}</span>`
-                + `<input class="igs-scene-url-input" data-scene-time-bg="${esc(sceneName)}" data-scene-time="${esc(timeName)}" value="${esc(timeObj.url || '')}" placeholder="URL 或 data:image/...">`
+                + sceneUrlField(timeObj.url, `data-scene-time-bg="${esc(sceneName)}" data-scene-time="${esc(timeName)}"`)
+                + transferIcons(timeObj.url, `${sceneName}-${timeName}-背景.png`, [`scene-pick-time:${encSeg(sceneName)}:${encSeg(timeName)}`, '上传时间背景图'])
                 + renderRowMenu([
                     menuItem(`scene-rename-time:${encSeg(sceneName)}:${encSeg(timeName)}`, '重命名'),
-                    storedImageDownloadItem(timeObj.url, `${sceneName}-${timeName}-背景.png`),
                     storedImagePromptItem(timeObj.url),
+                    canVary ? menuItem(`scene-variant-retry:${encSeg(sceneName)}:${encSeg(timeName)}:`, storedImageId(timeObj.url) ? '重新生成' : '按场景提示词生成') : '',
                     menuItem(`scene-add-weather:${encSeg(sceneName)}:${encSeg(timeName)}`, '添加天气'),
                     menuItem(`scene-remove-time:${encSeg(sceneName)}:${encSeg(timeName)}`, '删除', ' is-danger'),
                 ], `「${timeName}」的操作`)
                 + `<button type="button" class="igs-btn-mgr-icon" data-action="scene-toggle-time:${encSeg(sceneName)}:${encSeg(timeName)}" title="展开/折叠">${timeExpanded ? chevronUp : chevronDown}</button>`
                 + `</div>${timeBody}</div>${weatherRows}</div>`;
         }).join('');
-        const bgBody = bgExpanded ? renderSceneBgExpansion(sceneName, sceneObj.url || '', sceneWords, options.resolveUrl) : '';
+        const bgBody = bgExpanded ? renderSceneBgExpansion(sceneName, sceneObj.url || '', sceneWords, options.resolveUrl, sceneUrlField(sceneObj.url, `data-scene-bg="${esc(sceneName)}"`, true)) : '';
         return `<div class="igs-scene-char-group"><div class="igs-sprite-slot"><div class="igs-btn-mgr-row">`
+            + sceneThumb(sceneObj.url, sceneName, options.resolveUrl)
             + badge('场景')
             + `<span class="igs-btn-mgr-label" style="font-weight:600">${esc(sceneName)}</span>`
             + scopeTag(options, 'scenes', sceneName)
-            + `<input class="igs-scene-url-input" data-scene-bg="${esc(sceneName)}" value="${esc(sceneObj.url || '')}" placeholder="URL 或 data:image/...">`
+            + sceneUrlField(sceneObj.url, `data-scene-bg="${esc(sceneName)}"`)
+            + (canVary ? `<button type="button" class="igs-btn-mgr-icon igs-slot-act" data-action="scene-variant-set:${encSeg(sceneName)}" title="按这张的提示词生成时间/天气差分" aria-label="时间/天气差分">${SLOT_ICONS.variants}</button>` : '')
+            + transferIcons(sceneObj.url, `${sceneName}-背景.png`, [`scene-pick-bg:${encSeg(sceneName)}`, '上传场景背景图'])
             + renderRowMenu([
+                canVary ? menuItem(`scene-variant-set:${encSeg(sceneName)}`, '时间/天气差分', ' igs-slot-act-menu') : '',
                 menuItem(`scene-rename-bg:${encSeg(sceneName)}`, '重命名'),
                 folderSelect(sceneName, { menu: true }),
-                storedImageDownloadItem(sceneObj.url, `${sceneName}-背景.png`),
                 storedImagePromptItem(sceneObj.url),
                 menuItem(`scene-add-time:${encSeg(sceneName)}`, '添加时间'),
                 menuItem(`scene-remove-bg:${encSeg(sceneName)}`, '删除场景', ' is-danger'),
@@ -311,30 +311,46 @@ export function renderSceneAssetList(scenes, options = {}) {
     }).join('');
 }
 
+// 行首固定一格 16:9 小图：存图、外链都显示，空着留同样大小的空格，名字和按钮列才对得齐。
+function sceneThumb(url, alt, resolveUrl) {
+    const shown = shownAssetUrl(url, resolveUrl);
+    return /^(?:https?:\/\/|data:image\/|blob:)/i.test(shown)
+        ? `<img loading="lazy" decoding="async" class="igs-scene-thumb" src="${esc(shown)}" alt="${esc(alt)}" data-action="sprite-preview" onerror="this.classList.add('igs-sprite-thumb-broken')">`
+        : '<span class="igs-scene-thumb is-empty" aria-hidden="true"></span>';
+}
+
+// 存图不放地址框；手填地址才有。inExpansion：展开区里的那份，只在窄屏显示（窄屏行内地址框都收起）。
+function sceneUrlField(url, attrs, inExpansion = false) {
+    const raw = String(url || '').trim();
+    if (storedImageId(raw)) return '';
+    const cls = inExpansion ? 'igs-scene-url-input igs-scene-url-expanded' : `igs-scene-url-input${raw ? ' is-filled' : ''}`;
+    return `<input class="${cls}" ${attrs} value="${esc(raw)}" placeholder="URL 或 data:image/...">`;
+}
+
 function shownAssetUrl(url, resolveUrl) {
     const raw = String(url || '').trim();
     if (!raw.startsWith('igs-gen:') || typeof resolveUrl !== 'function') return raw;
     try { return String(resolveUrl(raw) || ''); } catch (error) { return ''; }
 }
 
-function renderSceneBgExpansion(sceneName, url, words, resolveUrl) {
+function renderSceneBgExpansion(sceneName, url, words, resolveUrl, urlField = '') {
     const trimmedUrl = String(url || '').trim();
     const shown = shownAssetUrl(trimmedUrl, resolveUrl);
     const thumb = /^(?:https?:\/\/|data:image\/|blob:)/i.test(shown)
-        ? `<img class="igs-sprite-thumb" src="${esc(shown)}" alt="" data-action="sprite-preview:${encSeg(shown)}" onerror="this.classList.add('igs-sprite-thumb-broken')">`
+        ? `<img loading="lazy" decoding="async" class="igs-sprite-thumb" src="${esc(shown)}" alt="" data-action="sprite-preview" onerror="this.classList.add('igs-sprite-thumb-broken')">`
         : `<div class="igs-sprite-thumb igs-sprite-thumb-empty">${trimmedUrl ? '等待载入' : '未配置'}</div>`;
     const tags = words.map((alias) =>
         `<span class="igs-mood-word-tag">${esc(alias)}<button type="button" class="igs-mood-word-del" data-action="scene-remove-bg-word:${encSeg(sceneName)}:${encSeg(alias)}" title="删除别名">×</button></span>`
     ).join('');
     const wHtml = `<div class="igs-sprite-words"><div class="igs-source-filter-note">场景别名</div><div class="igs-mood-word-list">${tags || '<div class="igs-scene-empty">暂无别名</div>'}<button type="button" class="igs-btn-mgr-icon" data-action="scene-add-bg-word:${encSeg(sceneName)}" title="添加别名">+</button></div></div>`;
-    return `<div class="igs-sprite-slot-body">${thumb}${wHtml}</div>`;
+    return `<div class="igs-sprite-slot-body">${urlField}${thumb}${wHtml}</div>`;
 }
 
-function renderSceneGroupExpansion(type, label, url, groups, resolveUrl) {
+function renderSceneGroupExpansion(type, label, url, groups, resolveUrl, urlField = '') {
     const trimmedUrl = String(url || '').trim();
     const shown = shownAssetUrl(trimmedUrl, resolveUrl);
     const thumb = /^(?:https?:\/\/|data:image\/|blob:)/i.test(shown)
-        ? `<img class="igs-sprite-thumb" src="${esc(shown)}" alt="" data-action="sprite-preview:${encSeg(shown)}" onerror="this.classList.add('igs-sprite-thumb-broken')">`
+        ? `<img loading="lazy" decoding="async" class="igs-sprite-thumb" src="${esc(shown)}" alt="" data-action="sprite-preview" onerror="this.classList.add('igs-sprite-thumb-broken')">`
         : `<div class="igs-sprite-thumb igs-sprite-thumb-empty">${trimmedUrl ? '等待载入' : '未配置'}</div>`;
     const isTime = type === 'time';
     const addAction = isTime ? `time-add-word:${encSeg(label)}` : `weather-add-word:${encSeg(label)}`;
@@ -352,7 +368,7 @@ function renderSceneGroupExpansion(type, label, url, groups, resolveUrl) {
     } else {
         wHtml = `<div class="igs-sprite-words"><div class="igs-source-filter-note">「${esc(label)}」在${typeName}词库中无对应组。</div><button type="button" class="igs-settings-action" data-action="${createAction}">建为${typeName}组</button></div>`;
     }
-    return `<div class="igs-sprite-slot-body">${thumb}${wHtml}</div>`;
+    return `<div class="igs-sprite-slot-body">${urlField}${thumb}${wHtml}</div>`;
 }
 
 export function renderCharacterAssetList(characters, options = {}) {
@@ -372,7 +388,6 @@ export function renderCharacterAssetList(characters, options = {}) {
     const isOpen = typeof options.isOpen === 'function' ? options.isOpen : () => false;
     // 魔法星夜才显示学院行；未指定时按 DNA 自动识别，识别不出用全局配色。
     const magicHouse = options.magicHouse && typeof options.magicHouse === 'object' ? options.magicHouse : null;
-    const upload = STATUS_AVATAR_UPLOAD_ICON;
     const pencil = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
     const trash = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
     const chevronDown = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
@@ -387,20 +402,15 @@ export function renderCharacterAssetList(characters, options = {}) {
         const aliasesHtml = `<div class="igs-mood-word-list">${aliasTags}<button type="button" class="igs-btn-mgr-icon" data-action="scene-add-char-alias:${encSeg(charName)}" title="添加别名">+</button></div>`;
         const avatarUrl = String(statusAvatars[charName] || '').trim();
         const avatarPreview = avatarUrl
-            ? `<img class="igs-status-avatar-thumb" src="${esc(avatarUrl)}" alt="" onerror="this.classList.add('igs-sprite-thumb-broken')">`
+            ? `<img loading="lazy" decoding="async" class="igs-status-avatar-thumb" src="${esc(avatarUrl)}" alt="" onerror="this.classList.add('igs-sprite-thumb-broken')">`
             : `<span class="igs-status-avatar-thumb igs-status-avatar-empty" aria-hidden="true">${STATUS_AVATAR_PLACEHOLDER_SVG}</span>`;
-        const avatarHtml = `<div class="igs-char-info-value igs-status-avatar-row"><input class="igs-scene-url-input igs-status-avatar-url" data-status-avatar-char="${esc(charName)}" value="${esc(avatarUrl)}" placeholder="https://... 或 data:image/..."><button type="button" class="igs-btn-mgr-icon" data-action="status-avatar-pick:${encSeg(charName)}" title="上传头像">${upload}</button><button type="button" class="igs-settings-action igs-status-avatar-gen" data-action="status-avatar-generate:${encSeg(charName)}" title="按角色设定生成 Q 版头像">${avatarUrl ? '重画Q版' : '生成Q版'}</button>${avatarUrl ? `<button type="button" class="igs-btn-mgr-icon" data-action="status-avatar-clear:${encSeg(charName)}" title="清除头像">${trash}</button>` : ''}</div>`;
+        const avatarHtml = `<div class="igs-char-info-value igs-status-avatar-row"><input class="igs-scene-url-input igs-status-avatar-url" data-status-avatar-char="${esc(charName)}" value="${esc(avatarUrl)}" placeholder="https://... 或 data:image/...">${transferIcons(avatarUrl, `${charName}-头像.png`, [`status-avatar-pick:${encSeg(charName)}`, '上传头像'])}<button type="button" class="igs-settings-action igs-status-avatar-gen" data-action="status-avatar-generate:${encSeg(charName)}" title="按角色设定生成 Q 版头像">${avatarUrl ? '重画Q版' : '生成Q版'}</button>${avatarUrl ? `<button type="button" class="igs-btn-mgr-icon" data-action="status-avatar-clear:${encSeg(charName)}" title="清除头像">${trash}</button>` : ''}</div>`;
         const houseHtml = magicHouse ? renderCharacterHouseRow(charName, magicHouse) : '';
         const dna = Object.prototype.hasOwnProperty.call(dnaMap, charName) ? dnaMap[charName] : null;
         const dnaOpen = isOpen(`char-dna:${charName}`);
         const outfitForChar = Object.prototype.hasOwnProperty.call(outfitMap, charName) ? outfitMap[charName] : null;
         const outfitNames = outfitForChar && typeof outfitForChar === 'object' ? Object.keys(outfitForChar) : [];
         const activeOutfit = outfitNames.includes(outfitTabs[charName]) ? outfitTabs[charName] : '';
-        const baseMenuItems = [
-            menuItem(`char-generate-sprite:${encSeg(charName)}`, '生成立绘'),
-            String((moods && moods['默认']) || '').startsWith('igs-gen:') ? menuItem(`char-expression-set:${encSeg(charName)}`, '表情差分') : '',
-            menuItem(`scene-add-mood:${encSeg(charName)}`, '添加情绪'),
-        ];
         const expressionNotes = options.expressionNotes && typeof options.expressionNotes === 'object' ? options.expressionNotes[charName] : null;
         const moodEntries = Object.entries(moods || {});
         const moodRows = moodEntries.map(([mood, url]) => {
@@ -414,15 +424,17 @@ export function renderCharacterAssetList(characters, options = {}) {
             // 每格都留缩略图位置，名字才对得齐：生成图看解析结果，自填地址直接显示，没图放空位。
             const thumbUrl = imageId ? shown : rawUrl;
             const rowThumb = /^(?:https?:\/\/|data:image\/|blob:)/i.test(thumbUrl)
-                ? `<img class="igs-outfit-thumb" src="${esc(thumbUrl)}" alt="${esc(mood)}" data-action="sprite-preview:${encSeg(thumbUrl)}" onerror="this.classList.add('igs-sprite-thumb-broken')">`
+                ? `<img loading="lazy" decoding="async" class="igs-outfit-thumb" src="${esc(thumbUrl)}" alt="${esc(mood)}" data-action="sprite-preview" onerror="this.classList.add('igs-sprite-thumb-broken')">`
                 : `<span class="igs-outfit-thumb igs-outfit-thumb-empty" aria-hidden="true">${imageId ? '载入中' : ''}</span>`;
             const c = encSeg(charName);
             const m = encSeg(mood);
+            const acts = slotActions([
+                mood !== '默认' && (imageId || (note && note.error)) ? [`char-expression-retry:${c}:${m}`, '重新生成', 'retry'] : null,
+                mood === '默认' && rawUrl ? [`char-generate-sprite:${c}`, '重新生成', 'retry'] : null,
+            ]);
             const slotMenu = renderRowMenu([
                 canPrompt ? menuItem(`char-expression-prompt:${c}:${m}`, '提示词') : '',
-                imageId ? menuItem(`gen-asset-download:${encSeg(imageId)}:${encSeg(`${charName}-${mood}-立绘.png`)}`, '下载') : '',
-                mood !== '默认' && (imageId || (note && note.error)) ? menuItem(`char-expression-retry:${c}:${m}`, '重新生成') : '',
-                mood === '默认' && rawUrl ? menuItem(`char-generate-sprite:${c}`, '重新生成') : '',
+                ...acts.items,
                 menuItem(`scene-rename-mood:${c}:${m}`, '重命名'),
                 menuItem(`scene-remove-mood:${c}:${m}`, '删除', ' is-danger'),
             ], `「${mood}」的操作`);
@@ -430,6 +442,9 @@ export function renderCharacterAssetList(characters, options = {}) {
                 + rowThumb
                 + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
                 + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-char="${esc(charName)}" data-scene-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL 或 data:image/...">`)
+                // 重新生成放在最左，下载 / 上传固定在 ⋯ 前两列，有没有重新生成都对得齐。
+                + acts.inline
+                + transferIcons(rawUrl, `${charName}-${mood}-立绘.png`, [`scene-pick-mood:${c}:${m}`, `上传${mood}立绘`])
                 + slotMenu
                 + `<button type="button" class="igs-btn-mgr-icon" data-action="scene-toggle-mood:${c}:${m}" title="展开/折叠">${expanded ? chevronUp : chevronDown}</button>`
                 + `</div>`;
@@ -439,8 +454,7 @@ export function renderCharacterAssetList(characters, options = {}) {
         const slotArea = renderCharacterSlotTabs({
             charName,
             baseMoods: moodEntries.map(([mood]) => mood),
-            baseListHtml: `<div class="igs-outfit-panel"><div class="igs-btn-mgr-list">${moodRows || '<div class="igs-scene-empty">暂无情绪，点页签右边的 ⋯ 添加</div>'}</div></div>`,
-            baseMenuItems,
+            baseListHtml: `<div class="igs-outfit-panel"><div class="igs-btn-mgr-list">${moodRows || '<div class="igs-scene-empty">暂无情绪，点页签上的添加情绪图标</div>'}</div></div>`,
             outfits: outfitForChar,
             activeOutfit,
             expressionNotes: options.expressionNotes,
@@ -599,7 +613,7 @@ export function renderMoodGroupList(groups, options = {}) {
         + `</div>`;
 }
 
-export function renderMoodReviewList(items, groups) {
+export function renderMoodReviewList(items, groups, { busy = false } = {}) {
     const list = Array.isArray(items) ? items : [];
     const labels = storedMoodGroups(groups).map((group) => String(group.label || '').trim()).filter(Boolean);
     const rows = list.map((item) => {
@@ -616,6 +630,7 @@ export function renderMoodReviewList(items, groups) {
         key: 'mood',
         title: '情绪词',
         count: list.length,
+        headerAction: `<button type="button" class="igs-review-link" data-action="mood-review-ai-classify"${!list.length || busy ? ' disabled' : ''}${busy ? ' aria-busy="true"' : ''}${!list.length ? ' title="暂无待分类情绪词"' : ''}>${busy ? '分类中…' : 'AI 分类'}</button>`,
         hint: '词库里没有的情绪词。从已有情绪组里选一个加入，相近的组排在最前。',
         clearAction: 'mood-review-clear',
         body: rows ? `<div class="igs-review-list">${rows}</div>` : '',
@@ -629,7 +644,7 @@ function renderSpriteSlotExpansion(charName, mood, url, moodGroups, icons) {
         ? String(icons.resolveUrl(trimmedUrl) || '')
         : trimmedUrl;
     const thumb = shownUrl
-        ? `<img class="igs-sprite-thumb" src="${esc(shownUrl)}" alt="${esc(mood)}" data-action="sprite-preview:${encSeg(shownUrl)}" onerror="this.classList.add('igs-sprite-thumb-broken')">`
+        ? `<img loading="lazy" decoding="async" class="igs-sprite-thumb" src="${esc(shownUrl)}" alt="${esc(mood)}" data-action="sprite-preview" onerror="this.classList.add('igs-sprite-thumb-broken')">`
         : `<div class="igs-sprite-thumb igs-sprite-thumb-empty">${trimmedUrl ? '等待载入' : '未配置'}</div>`;
     const group = moodGroups.find((g) => g && g.label === mood);
     if (!group) return `<div class="igs-sprite-slot-body">${thumb}</div>`;
@@ -707,7 +722,7 @@ export function renderGeneratedAssetPane({ library = {}, temp = [], resolveUrl, 
     const tile = ({ url, name, type, status, adopt, adoptLabel, extra = [] }) => {
         const resolved = resolve(url);
         const img = resolved
-            ? `<img class="igs-gen-tile-img" src="${esc(resolved)}" alt="${esc(name)}" data-action="sprite-preview:${encSeg(resolved)}" onerror="this.classList.add('igs-sprite-thumb-broken')">`
+            ? `<img loading="lazy" decoding="async" class="igs-gen-tile-img" src="${esc(resolved)}" alt="${esc(name)}" data-action="sprite-preview" onerror="this.classList.add('igs-sprite-thumb-broken')">`
             : '<span class="igs-gen-tile-img igs-gen-tile-empty">等待载入</span>';
         return `<div class="igs-gen-tile${type === 'background' ? ' is-wide' : ''}">${img}`
             + `<div class="igs-gen-tile-meta"><b title="${esc(name)}">${esc(name)}</b><span>${type === 'background' ? '背景' : '立绘'} · ${esc(status)}</span></div>`

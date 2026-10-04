@@ -6,10 +6,12 @@ import { findDbgenApi } from '../../generated-images/image-backend.js';
 import { formatEditablePrompt, formatStoredPrompt, normalizeStoredPrompt, parseEditablePrompt } from '../../generated-images/generation-prompt.js';
 import { getNextSettingsTheme, normalizeSettingsTheme } from './settings-theme.js';
 import { DEFAULT_MOOD_GROUPS, MOOD_PRESET, moodPresetEntry, moodTierLabels, normalizeMoodGroups, resolvePresetGroup } from '../../scene/mood-groups.js';
+import { collectAssetZipEntries } from '../../scene/asset-zip.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
-import { buildCharacterCardPack, mergeLabelGroups, parseCharacterCardPack, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
+import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
-import { clearMoodReview, removeMoodReview } from '../../scene/mood-review-store.js';
+import { clearMoodReview, loadMoodReview, removeMoodReview, saveMoodReview } from '../../scene/mood-review-store.js';
+import { applyMoodAssignments, buildMoodClassificationRequest, parseMoodClassification, resolveSecondaryLlm } from '../../scene/mood-classify.js';
 import { SETTINGS_NOTICE_MS } from './settings-notice.js';
 import { normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
 import { normalizeStatusAvatars } from '../../data/shujuku/status-hud-model.js';
@@ -23,9 +25,11 @@ import { normalizeWeatherFxSettings } from './weather-fx-runtime.js';
 import { FX_SETTINGS_NORMALIZERS, FX_WORD_LIST_PATHS } from './fx-settings.js';
 import { ROMANCE_ACTIONS_MAX, normalizeRomanceFxSettings } from './romance-settings.js';
 import { META_GLOBAL_SCOPE, META_LINE_KINDS, META_LINES_MAX, normalizeMetaFxSettings } from './meta-settings.js';
-import { applyPerformancePreset } from './performance-presets.js';
+import { applyPerformancePreset, capturePerformancePreset, detectPerformancePreset, performancePresetLabel, restorePerformancePreset } from './performance-presets.js';
+import { applyPerformanceProfile, hasPerformanceProfile, profileDiff, profileFromReader } from './performance-profile.js';
 import { WORLDVIEWS, applyWorldview, resolveWorldview } from '../../scene/worldview.js';
-import { normalizeBgmSettings } from './scene-audio.js';
+import { normalizeHorrorGore, normalizeHorrorStyle } from '../../scene/horror.js';
+import { BGM_ACTION_RE, handleBgmSettingsAction } from './bgm-settings-actions.js';
 import { normalizeSpriteHeads } from './fx-anchor.js';
 import { formatImageJobLogText } from '../../generated-images/image-job-log.js';
 import { addGeneratedAssetToLibrary, bindGeneratedBackground, bindGeneratedSprite, collectGeneratedImageIds, generatedAssetIdOf, isGeneratedAssetUrl, normalizeGeneratedLibrary, removeGeneratedLibraryEntry, renameGeneratedLibraryEntry, setGeneratedExpressionNote } from '../../scene/asset-match.js';
@@ -57,6 +61,9 @@ function cloneImageDraft(draft) {
 
 const STATUS_AVATAR_MAX_BYTES = 512 * 1024;
 const STATUS_AVATAR_MIME = /^image\/(?:png|jpeg|jpg|webp|gif|bmp|svg\+xml)$/i;
+const ASSET_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
+const ASSET_UPLOAD_MIME = /^image\/(?:png|jpeg|webp|gif)$/i;
+
 
 function decodeSeg(value) {
     try { return decodeURIComponent(String(value == null ? '' : value)); }
@@ -74,8 +81,8 @@ function assetFolderScope(settingsState, options) {
 }
 
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
-const SCENE_ACTION = /^scene-(?:add|remove|rename|set|toggle)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)$/;
-const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle)-(?:char|char-alias|mood|mood-url|dna-char)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
+const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
+const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
 
 // 服装的适用场景可能指向另一边的场景：场景改名、删除时全局和本卡的服装都要跟上。
 function linkedCharacterOutfits(settingsState) {
@@ -622,6 +629,56 @@ function triggerDataUrlDownload(globalObj, dataUrl, fileName) {
     return { ok: true, fileName };
 }
 
+// 防手滑：删东西、清空、恢复默认、切演出档位和世界观之前先问一句。
+// 自带确认的动作（CG、预设、文件夹、角色设定、生成图库、情绪预设…）不在表里，免得问两遍；
+// 词条胶囊上的 × 删一个词，随手能加回来，也不问。
+const segs = (action, prefix) => action.slice(prefix.length).split(':').map(decodeSeg);
+const RISKY_ACTIONS = [
+    ['scene-remove-bg:', (a) => `删除场景「${segs(a, 'scene-remove-bg:')[0]}」？它下面的时间、天气背景会一起删掉。`],
+    ['scene-remove-time:', (a) => { const [scene, time] = segs(a, 'scene-remove-time:'); return `删除「${scene}」的时间「${time}」？它下面的天气背景会一起删掉。`; }],
+    ['scene-remove-weather:', (a) => { const [scene, time, weather] = segs(a, 'scene-remove-weather:'); return `删除「${scene}·${time}」的天气「${weather}」？`; }],
+    ['scene-remove-char:', (a) => `删除角色「${segs(a, 'scene-remove-char:')[0]}」？立绘、别名会一起删掉。`],
+    ['scene-remove-mood:', (a) => { const [name, mood] = segs(a, 'scene-remove-mood:'); return `删除「${name}」的「${mood}」立绘格？`; }],
+    ['scene-remove-outfit-mood:', (a) => { const [name, outfit, mood] = segs(a, 'scene-remove-outfit-mood:'); return `删除「${name}」「${outfit}」的「${mood}」立绘格？`; }],
+    ['scene-remove-outfit:', (a) => { const [name, outfit] = segs(a, 'scene-remove-outfit:'); return `删除「${name}」的服装「${outfit}」？这套的立绘、头像会一起删掉。`; }],
+    ['scene-clear-outfit-avatar:', () => '清除这套服装的头像？'],
+    ['status-avatar-clear:', (a) => `清除「${segs(a, 'status-avatar-clear:')[0]}」的状态栏头像？`],
+    ['wardrobe-remove:', (a) => `删除衣柜里的「${segs(a, 'wardrobe-remove:')[0]}」？`],
+    ['mood-remove-group:', (a) => `删除情绪组「${segs(a, 'mood-remove-group:')[0]}」？组里的情绪词会一起删掉。`],
+    ['chat-show-remove-contact:', () => '删除这个联系人？'],
+    ['bgm-track-remove:', () => '删除这首背景音乐？'],
+    ['romance-action-remove:', () => '删除这条亲密动作？'],
+    ['meta-line-remove:', () => '删除这条台词？'],
+    ['meta-scope-remove:', () => '删除这条生效范围？'],
+    ['remove-virtual-regex:', () => '删除这条正文格式化规则？'],
+    ['image-log-clear', () => '清空生图日志？'],
+    ['mood-review-clear', () => '清空待确认的情绪词？'],
+    ['reset-virtual-regex', () => '正文格式化恢复默认？现在的查找和替换会被覆盖。'],
+    ['reset-prompt-rule', () => '提示词规则恢复默认？现在改过的内容会被覆盖。'],
+    ['reset-mood-groups', () => '情绪分组恢复默认？自己加的组和词会被覆盖。'],
+    ['chat-show-reset-prompt', () => '线上交流提示词恢复默认？现在改过的内容会被覆盖。'],
+];
+
+// 当前演出开关是不是手调出来的自定义组合：有快速配置时看是否偏离配置，没有时看能否对上某一档。
+function isCustomPerformanceCombo(reader) {
+    if (hasPerformanceProfile(reader)) {
+        const diff = profileDiff(reader);
+        return Boolean(diff && (diff.added.length || diff.removed.length));
+    }
+    return detectPerformancePreset(reader) === '';
+}
+
+function riskyActionMessage(action, settingsState, editTarget) {
+    const worldview = /^worldview:([a-z-]+)$/.exec(action);
+    if (worldview) {
+        const found = WORLDVIEWS.find((item) => item.id === worldview[1]);
+        if (!found || resolveWorldview(draftAssetLibrary(settingsState, editTarget)) === found.id) return '';
+        return `切换到「${found.label}」世界观？演出用词、音效和界面会跟着换。`;
+    }
+    const hit = RISKY_ACTIONS.find(([prefix]) => (prefix.endsWith(':') ? action.startsWith(prefix) : action === prefix || action.startsWith(`${prefix}:`)));
+    return hit ? hit[1](action) : '';
+}
+
 export async function handleSettingsAction(action, ctx) {
     const {
         state,
@@ -638,12 +695,20 @@ export async function handleSettingsAction(action, ctx) {
     rememberAssetScope(settingsState, getSillyTavernContext(options.global || globalThis));
     const editTarget = assetEditTarget(normalizedAction);
     const dialogs = ctx.dialogs || createSettingsDialogs({ global: options.global || globalThis });
+    const risky = riskyActionMessage(normalizedAction, settingsState, editTarget);
+    if (risky && typeof dialogs.confirm === 'function' && !(await dialogs.confirm(risky))) return rerenderSettings();
     if (normalizedAction.startsWith('asset-filter:')) {
         const [collection, filter] = normalizedAction.slice('asset-filter:'.length).split(':');
         if (!SCOPED_COLLECTION_KINDS[collection]) return rerenderSettings();
         const filters = settingsState.asyncState.assetScopeFilter = { ...(settingsState.asyncState.assetScopeFilter || {}) };
         filters[collection] = filter === 'card' || filter === 'global' ? filter : 'all';
         return rerenderSettings();
+    }
+    // 一键下载本区素材：按当前「全部 · 本卡 · 全局」筛选，把列表里的图按目录打成一个 zip。
+    if (normalizedAction.startsWith('asset-zip:')) {
+        const collection = normalizedAction.slice('asset-zip:'.length);
+        if (collection !== 'characters' && collection !== 'scenes') return rerenderSettings();
+        return downloadAssetZip(settingsState, collection, options);
     }
     // 一键把本卡的场景 / 角色 / 衣柜提示词全放到全局，或把全局的全收进本卡。角色连同别名、DNA、服装、头像、生成图一起走。
     if (normalizedAction.startsWith('asset-move-all:')) {
@@ -702,7 +767,7 @@ export async function handleSettingsAction(action, ctx) {
     if (normalizedAction === 'asset-card-import') {
         return importCharacterCardPack(settingsState, options, dialogs, persistSettingsDraft, rerenderSettings);
     }
-    if (normalizedAction === 'preset-save' || normalizedAction === 'preset-import' || /^preset-(?:apply|rename|delete|export):/.test(normalizedAction)) {
+    if (normalizedAction === 'preset-save' || normalizedAction === 'preset-import' || /^preset-(?:apply|overwrite|rename|delete|export):/.test(normalizedAction)) {
         return handlePresetAction(normalizedAction, settingsState, options, dialogs, persistSettingsDraft, rerenderSettings);
     }
 
@@ -1054,6 +1119,87 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    if (normalizedAction.startsWith('scene-variant-set:') || normalizedAction.startsWith('scene-variant-retry:')) {
+        const single = normalizedAction.startsWith('scene-variant-retry:');
+        const parts = normalizedAction.slice(single ? 'scene-variant-retry:'.length : 'scene-variant-set:'.length).split(':').map(decodeSeg);
+        const sceneName = parts[0] || '';
+        const globalObj = options.global || globalThis;
+        const service = options.generatedAssets;
+        const sceneObj = (draftAssetLibrary(settingsState, editTarget).scenes || {})[sceneName];
+        const baseImageId = sceneObj && typeof sceneObj === 'object' ? generatedAssetIdOf(sceneObj.url) : '';
+        if (!baseImageId) return rerenderSettings();
+        if (!service || typeof service.generateSceneVariants !== 'function') {
+            return generationFailure(globalObj, dialogs, '场景差分当前不可用。', 'scene-variant-unavailable');
+        }
+        let variants;
+        if (single) {
+            variants = [{ time: parts[1] || '', weather: parts[2] || '' }];
+        } else {
+            const times = sceneObj.times && typeof sceneObj.times === 'object' ? sceneObj.times : {};
+            const groups = ensureTimeGroups(settingsState).map((g) => g && g.label).filter(Boolean);
+            const labels = groups.length ? groups : ['清晨', '白天', '黄昏', '夜晚'];
+            const missing = labels.filter((label) => !String((times[label] && times[label].url) || '').trim());
+            const message = `按「${sceneName}」的提示词画时间/天气差分，一行一张，不写词、直接出图。\n只写时间：「夜晚」；带天气：「夜晚·雨」。删掉不要的行。`;
+            const raw = typeof dialogs.edit === 'function'
+                ? await dialogs.edit(message, missing.join('\n'), { okLabel: '开始生成', cancelLabel: '取消' })
+                : await dialogs.prompt(message, missing.join('\n'));
+            if (raw == null) return rerenderSettings();
+            const seen = new Set();
+            variants = String(raw).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+                const [time = '', weather = ''] = line.split(/\s*[·・/|]\s*/).map((item) => item.trim());
+                return { time, weather };
+            }).filter((item) => {
+                const key = `${item.time}|${item.weather}`;
+                if (!item.time || seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+            if (!variants.length) return rerenderSettings();
+        }
+        const progress = startExpressionProgress(globalObj, `${sceneName}·时间天气`);
+        let result;
+        try {
+            result = await service.generateSceneVariants({ baseImageId, scene: sceneName, variants, onProgress: progress.onProgress });
+        } catch (error) {
+            result = { ok: false, error: errorText(error, '出图失败') };
+        }
+        const done = result && Array.isArray(result.items) ? result.items.filter((item) => item.ok && item.imageId) : [];
+        if (done.length) {
+            const live = (draftAssetLibrary(settingsState, editTarget).scenes || {})[sceneName];
+            if (live && typeof live === 'object') {
+                live.times = live.times && typeof live.times === 'object' ? live.times : {};
+                const timeGroups = ensureTimeGroups(settingsState);
+                const weatherGroups = ensureWeatherGroups(settingsState);
+                for (const item of done) {
+                    const url = `igs-gen:${item.imageId}`;
+                    const slot = live.times[item.time];
+                    const timeEntry = slot && typeof slot === 'object' ? slot : { url: typeof slot === 'string' ? slot : '', weathers: {} };
+                    timeEntry.weathers = timeEntry.weathers && typeof timeEntry.weathers === 'object' ? timeEntry.weathers : {};
+                    if (item.weather) timeEntry.weathers[item.weather] = { ...(typeof timeEntry.weathers[item.weather] === 'object' ? timeEntry.weathers[item.weather] : {}), url };
+                    else timeEntry.url = url;
+                    live.times[item.time] = timeEntry;
+                    if (!timeGroups.some((g) => g.label === item.time)) timeGroups.push({ label: item.time, words: [item.time] });
+                    if (item.weather && !weatherGroups.some((g) => g.label === item.weather)) weatherGroups.push({ label: item.weather, words: [item.weather] });
+                }
+                const persisted = persistGeneratedLibrary(persistSettingsDraft);
+                if (operationFailed(persisted)) {
+                    progress.end();
+                    return persisted;
+                }
+            }
+        }
+        const rendered = await rerenderSettings();
+        progress.end();
+        const failed = result && Array.isArray(result.items) ? result.items.filter((item) => !item.ok) : [];
+        if (!done.length) {
+            return generationFailure(globalObj, dialogs, `「${sceneName}」的时间/天气差分没画出来：${errorText(result && (result.error || (failed[0] && failed[0].error)), '未返回原因')}`, 'scene-variant-failed');
+        }
+        showGeneratedNotice(globalObj, failed.length
+            ? `「${sceneName}」画好 ${done.length} 张，${failed.length} 张失败：${failed[0].error}`
+            : `「${sceneName}」的时间/天气差分已换上（${done.length} 张）。`, failed.length ? '' : 'info');
+        return rendered;
+    }
+
     if (normalizedAction.startsWith('char-generate-sprite:')) {
         const name = decodeSeg(normalizedAction.slice('char-generate-sprite:'.length));
         const globalObj = options.global || globalThis;
@@ -1238,7 +1384,7 @@ export async function handleSettingsAction(action, ctx) {
         const dna = characterExpressionDna(sceneAssets, name);
         const nude = outfitMode && isBuiltinNudeOutfit(outfitEntry.wardrobe);
         const clothes = outfitMode && !nude ? resolveWardrobePrompt(draftEffectiveAssets(settingsState).wardrobe || {}, outfitEntry, outfitName) : null;
-        const outfit = outfitMode ? { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude } : null;
+        const outfit = outfitMode ? { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude, nsfwBoost: Boolean(!nude && clothes && clothes.nsfwBoost) } : null;
         if (retry && !mood) {
             endProgress();
             return rerenderSettings();
@@ -1573,7 +1719,36 @@ export async function handleSettingsAction(action, ctx) {
     const perfPresetAction = normalizedAction.match(/^perf-preset:([a-z]+)$/);
     if (perfPresetAction) {
         const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
-        applyPerformancePreset(readerDraft, perfPresetAction[1]);
+        const presetId = perfPresetAction[1];
+        const label = performancePresetLabel(presetId);
+        if (!label) return rerenderSettings();
+        // 只有会覆盖自定义组合时才确认（同档重按、档位之间切换直接生效）；确认后记下快照，可「撤销档位切换」。
+        if (isCustomPerformanceCombo(readerDraft)) {
+            const snapshot = {
+                switches: capturePerformancePreset(readerDraft),
+                profile: hasPerformanceProfile(readerDraft) ? JSON.parse(JSON.stringify(readerDraft.performanceProfile)) : null,
+            };
+            if (!await dialogs.confirm(`当前是自定义的演出组合，切到「${label}」档会按档位重设各演出的开关，细项设置保留。`, { okLabel: '覆盖' })) {
+                return rerenderSettings();
+            }
+            settingsState.asyncState.perfPresetUndo = snapshot;
+        }
+        // 有快速配置时，档位只换热闹程度；声音、亲密保留，「题材专属」开关不动。
+        if (hasPerformanceProfile(readerDraft)) {
+            applyPerformanceProfile(readerDraft, { ...profileFromReader(readerDraft), level: presetId }, { keepSpecial: true });
+        } else {
+            applyPerformancePreset(readerDraft, presetId);
+        }
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'perf-preset-undo') {
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        const snapshot = settingsState.asyncState.perfPresetUndo;
+        if (!snapshot || !restorePerformancePreset(readerDraft, snapshot.switches)) return rerenderSettings();
+        if (snapshot.profile) readerDraft.performanceProfile = snapshot.profile;
+        else delete readerDraft.performanceProfile;
+        settingsState.asyncState.perfPresetUndo = null;
         return rerenderSettings();
     }
 
@@ -1582,6 +1757,15 @@ export async function handleSettingsAction(action, ctx) {
         const bridgeDraft = settingsState.draft.bridge = settingsState.draft.bridge || {};
         const sceneAssets = draftAssetLibrary(settingsState, editTarget);
         applyWorldview(sceneAssets, worldviewAction[1]);
+        return rerenderSettings();
+    }
+
+    const horrorAction = normalizedAction.match(/^horror-(style|gore):([a-z0-9]+)$/);
+    if (horrorAction) {
+        settingsState.draft.bridge = settingsState.draft.bridge || {};
+        const sceneAssets = draftAssetLibrary(settingsState, editTarget);
+        if (horrorAction[1] === 'style') sceneAssets.horrorStyle = normalizeHorrorStyle(horrorAction[2]);
+        else sceneAssets.horrorGore = normalizeHorrorGore(horrorAction[2]);
         return rerenderSettings();
     }
 
@@ -1685,44 +1869,15 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
-    const bgmTrackAction = normalizedAction.match(/^bgm-track-(add|edit|remove)(?::(.*))?$/);
-    if (bgmTrackAction) {
-        const globalObj = options.global || globalThis;
-        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
-        const current = normalizeBgmSettings(readerDraft.bgm);
-        const id = decodeSeg(bgmTrackAction[2] || '');
-        const index = current.tracks.findIndex((track) => track.id === id);
-        if (bgmTrackAction[1] === 'remove') {
-            if (index < 0) return rerenderSettings();
-            current.tracks.splice(index, 1);
-        } else {
-            const ask = (message, fallback) => dialogs.prompt(message, fallback);
-            const existing = index >= 0 ? current.tracks[index] : null;
-            if (bgmTrackAction[1] === 'edit' && !existing) return rerenderSettings();
-            const url = await ask('音频直链（http/https）：', existing ? existing.url : '');
-            if (url == null || !String(url).trim()) return rerenderSettings();
-            const name = await ask('曲目名称：', existing ? existing.name : '');
-            if (name == null) return rerenderSettings();
-            const keywords = await ask('匹配关键词，用逗号或空格分隔（如 教室, 雨, 夜）；留空为默认曲：', existing ? existing.keywords.join(', ') : '');
-            if (keywords == null) return rerenderSettings();
-            const track = {
-                id: existing ? existing.id : `t${Date.now().toString(36)}`,
-                name: String(name).trim(),
-                url: String(url).trim(),
-                keywords: String(keywords).split(/[,，、\s]+/u).filter(Boolean),
-            };
-            if (existing) current.tracks[index] = track;
-            else current.tracks.push(track);
-            const normalized = normalizeBgmSettings(current);
-            if (normalized.tracks.length < current.tracks.length) {
-                if (typeof globalObj.alert === 'function') globalObj.alert('链接无效：只支持 http/https 音频直链。');
-                return rerenderSettings();
-            }
-            current.tracks = normalized.tracks;
-        }
-        readerDraft.bgm = current;
-        const persisted = persistSettingsDraft();
-        if (persisted.ok === false) return persisted;
+    if (BGM_ACTION_RE.test(normalizedAction)) {
+        const result = await handleBgmSettingsAction(normalizedAction, {
+            readerDraft: settingsState.draft.readerSettings = settingsState.draft.readerSettings || {},
+            dialogs,
+            persist: persistSettingsDraft,
+            global: options.global || globalThis,
+            worldview: resolveWorldview(settingsState.draft.bridge && settingsState.draft.bridge.sceneAssets),
+        });
+        if (result && result.ok === false) return result;
         return rerenderSettings();
     }
 
@@ -1754,6 +1909,73 @@ export async function handleSettingsAction(action, ctx) {
         readerDraft.weatherFx = current;
         const persisted = persistSettingsDraft();
         if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    const assetPick = /^scene-pick-(bg|time|weather|mood):(.+)$/.exec(normalizedAction);
+    if (assetPick) {
+        const kind = assetPick[1];
+        const parts = assetPick[2].split(':').map(decodeSeg);
+        if (parts.length !== (kind === 'bg' ? 1 : kind === 'weather' ? 3 : 2)
+            || parts.some((part) => !part || ['__proto__', 'constructor', 'prototype'].includes(part))) {
+            return { ok: false, reason: 'invalid-asset-slot' };
+        }
+        const globalObj = options.global || globalThis;
+        const service = options.generatedAssets;
+        if (!globalObj.document || !service || typeof service.importAssetImage !== 'function') {
+            return generationFailure(globalObj, dialogs, '图片上传当前不可用。', 'asset-upload-unavailable');
+        }
+        const initialDraft = settingsState.draft;
+        const library = draftAssetLibrary(settingsState, editTarget);
+        const scene = library.scenes && Object.hasOwn(library.scenes, parts[0]) ? library.scenes[parts[0]] : null;
+        const character = library.characters && Object.hasOwn(library.characters, parts[0]) ? library.characters[parts[0]] : null;
+        const time = scene && typeof scene === 'object' && scene.times && Object.hasOwn(scene.times, parts[1]) ? scene.times[parts[1]] : null;
+        const weather = time && typeof time === 'object' && time.weathers && Object.hasOwn(time.weathers, parts[2]) ? time.weathers[parts[2]] : null;
+        const owner = kind === 'mood' ? character : kind === 'bg' ? library.scenes : kind === 'time' ? scene && scene.times : time && time.weathers;
+        const key = kind === 'bg' ? parts[0] : kind === 'mood' ? parts[1] : kind === 'time' ? parts[1] : parts[2];
+        if (!owner || !Object.hasOwn(owner, key) || (kind === 'mood' && (!character || typeof character !== 'object'))) {
+            return { ok: false, reason: 'invalid-asset-slot' };
+        }
+        const before = owner[key];
+        const picked = await pickAssetImageFile(globalObj.document, globalObj);
+        if (state.activeSettings !== settingsState || settingsState.draft !== initialDraft) return { ok: false, reason: 'settings-closed' };
+        if (!picked) return rerenderSettings();
+        if (!picked.ok) return generationFailure(globalObj, dialogs,
+            picked.reason === 'too-large' ? '图片不能超过 8 MB。' : picked.reason === 'read-failed' ? '图片读取失败。' : '仅支持 PNG、JPEG、WebP 和 GIF 图片。',
+            'asset-upload-invalid');
+        if (owner[key] !== before) return { ok: false, reason: 'asset-slot-changed' };
+        let imported;
+        try {
+            imported = await service.importAssetImage(picked.dataUrl, kind === 'mood' ? 'sprite' : 'background');
+        } catch (error) {
+            imported = { ok: false, error: errorText(error, '图片保存失败') };
+        }
+        if (!imported || !imported.ok || !imported.imageId) {
+            return generationFailure(globalObj, dialogs, `图片上传失败：${errorText(imported && imported.error, '图片保存失败')}`, 'asset-upload-failed');
+        }
+        const discard = async () => {
+            if (typeof service.deleteImages !== 'function') return false;
+            try { return !operationFailed(await service.deleteImages([imported.imageId])); }
+            catch (error) { return false; }
+        };
+        if (state.activeSettings !== settingsState || settingsState.draft !== initialDraft) {
+            const cleaned = await discard();
+            return { ok: false, reason: 'settings-closed', rollbackFailed: !cleaned };
+        }
+        if (owner[key] !== before) {
+            const cleaned = await discard();
+            return { ok: false, reason: 'asset-slot-changed', rollbackFailed: !cleaned };
+        }
+        const url = `igs-gen:${imported.imageId}`;
+        owner[key] = kind === 'mood' ? url : typeof before === 'string' ? url : { ...before, url };
+        let persisted;
+        try { persisted = persistSettingsDraft(); }
+        catch (error) { persisted = { ok: false, reason: 'save-failed', saveError: error }; }
+        if (operationFailed(persisted)) {
+            owner[key] = before;
+            const cleaned = persisted && persisted.rollbackFailed ? false : await discard();
+            return { ...persisted, ok: false, reason: 'save-failed', rollbackFailed: Boolean((persisted && persisted.rollbackFailed) || !cleaned) };
+        }
         return rerenderSettings();
     }
 
@@ -2764,7 +2986,7 @@ export async function handleSettingsAction(action, ctx) {
         if (persisted.ok === false) return persisted;
         const looked = await dialogs.confirm(applyMoodPreset(groups)
             ? '已按预设整理词库：缺的组补齐、词挪回它该在的组，你自己加的组和词都在。'
-            : '词库已经是预设的样子了，没改。');
+            : '词库已经是预设的样子了。');
         return rerenderSettings();
     }
 
@@ -2830,6 +3052,64 @@ export async function handleSettingsAction(action, ctx) {
             if (persisted.ok === false) return persisted;
         }
         return rerenderSettings();
+    }
+
+    if (normalizedAction === 'mood-review-ai-classify') {
+        const globalObj = options.global || globalThis;
+        const storage = globalObj.localStorage;
+        const pending = loadMoodReview(storage);
+        const groups = ensureMoodGroups(settingsState);
+        const labels = groups.map((group) => String(group.label || '').trim()).filter(Boolean);
+        if (settingsState.asyncState.moodReviewClassifying) return { ok: false, reason: 'mood-classification-busy' };
+        if (!pending.length || !labels.length) return rerenderSettings();
+        if (typeof options.requestMoodClassification !== 'function') return generationFailure(globalObj, dialogs, '当前无法调用 AI 分类。', 'mood-classification-unavailable');
+        const originalAssets = settingsState.draft.bridge.sceneAssets;
+        const originalGroups = cloneData(groups);
+        settingsState.asyncState.moodReviewClassifying = true;
+        rerenderSettings();
+        let failure = '';
+        let count = 0;
+        let draftChanged = false;
+        try {
+            const words = pending.map((item) => item.word);
+            const llm = resolveSecondaryLlm(settingsState.draft.bridge.autoIllustration);
+            const raw = await options.requestMoodClassification(buildMoodClassificationRequest(groups, words), llm);
+            if (state.activeSettings !== settingsState) return { ok: false, reason: 'settings-closed' };
+            const results = parseMoodClassification(raw, words, labels);
+            const live = loadMoodReview(storage);
+            if (JSON.stringify(live) !== JSON.stringify(pending) || JSON.stringify(groups) !== JSON.stringify(originalGroups)) {
+                throw new Error('classification-input-changed');
+            }
+            const nextGroups = applyMoodAssignments(groups, results);
+            settingsState.draft.bridge.sceneAssets.moodGroups = nextGroups;
+            draftChanged = true;
+            const saved = persistSettingsDraft();
+            if (saved.ok === false) {
+                originalAssets.moodGroups = originalGroups;
+                settingsState.draft.bridge.sceneAssets.moodGroups = originalGroups;
+                return saved;
+            }
+            const cleared = saveMoodReview(storage, []);
+            if (cleared.ok === false) {
+                // 保存成功后宿主会用持久化快照替换 draft；旧引用与当前草稿都必须回滚。
+                originalAssets.moodGroups = originalGroups;
+                settingsState.draft.bridge.sceneAssets.moodGroups = originalGroups;
+                const rollback = persistSettingsDraft();
+                return rollback.ok === false ? rollback : cleared;
+            }
+            count = pending.length;
+        } catch (error) {
+            if (draftChanged) {
+                originalAssets.moodGroups = originalGroups;
+                settingsState.draft.bridge.sceneAssets.moodGroups = originalGroups;
+            }
+            failure = 'AI 分类失败：请检查模型连接或返回格式，情绪词未改动。';
+        } finally {
+            settingsState.asyncState.moodReviewClassifying = false;
+            if (state.activeSettings === settingsState) rerenderSettings();
+        }
+        if (failure) return generationFailure(globalObj, dialogs, failure, 'mood-classification-failed');
+        return { ok: true, count };
     }
 
     // 待确认情绪词从已有情绪组里选一个加入，加入后从列表移除。
@@ -3172,6 +3452,42 @@ function shrinkAvatarDataUrl(globalObj, dataUrl) {
     });
 }
 
+function pickAssetImageFile(doc, globalObj) {
+    return new Promise((resolve) => {
+        const input = doc.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/png,image/jpeg,image/webp,image/gif';
+        let done = false;
+        let timeoutId = null;
+        const finish = (result) => {
+            if (done) return;
+            done = true;
+            if (timeoutId !== null) clearTimeout(timeoutId);
+            resolve(result);
+        };
+        input.onchange = () => {
+            const file = input.files && input.files[0];
+            if (!file) return finish(null);
+            if (!ASSET_UPLOAD_MIME.test(String(file.type || ''))) return finish({ ok: false, reason: 'not-image' });
+            if (!Number.isFinite(file.size) || file.size > ASSET_UPLOAD_MAX_BYTES || file.size <= 0) return finish({ ok: false, reason: 'too-large' });
+            const Reader = globalObj.FileReader || globalThis.FileReader;
+            if (typeof Reader !== 'function') return finish({ ok: false, reason: 'read-failed' });
+            const reader = new Reader();
+            reader.onload = (event) => {
+                const dataUrl = String((event && event.target && event.target.result) || '');
+                if (!/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(dataUrl)
+                    || dataUrl.length > Math.ceil(ASSET_UPLOAD_MAX_BYTES / 3) * 4 + 64) return finish({ ok: false, reason: 'not-image' });
+                finish({ ok: true, dataUrl });
+            };
+            reader.onerror = () => finish({ ok: false, reason: 'read-failed' });
+            try { reader.readAsDataURL(file); } catch (error) { finish({ ok: false, reason: 'read-failed' }); }
+        };
+        input.oncancel = () => finish(null);
+        timeoutId = setTimeout(() => finish(null), 300000);
+        try { input.click(); } catch (error) { finish({ ok: false, reason: 'read-failed' }); }
+    });
+}
+
 function pickStatusAvatarFile(doc) {
     return new Promise((resolve) => {
         const input = doc.createElement('input');
@@ -3325,17 +3641,22 @@ async function handlePresetAction(action, settingsState, options, dialogs, persi
         if (!doc) return { ok: false, reason: 'no-document' };
         const file = await pickCardPackFile(doc);
         if (!file) return rerenderSettings();
-        let data = null;
-        try { data = JSON.parse(new TextDecoder().decode(file.bytes)); } catch (error) { data = null; }
+        const archive = isZipBytes(file.bytes) ? parsePresetArchive(file.bytes) : null;
+        let data = archive ? archive.preset : null;
+        if (!archive && !isZipBytes(file.bytes)) {
+            try { data = JSON.parse(new TextDecoder().decode(file.bytes)); } catch (error) { data = null; }
+        }
         if (!isLegacyPresetData(data)) {
-            alertFn('这个文件不是素材预设');
+            alertFn(isZipBytes(file.bytes) ? '这个压缩包不是素材预设（角色卡素材包请用「导入角色卡素材包」）' : '这个文件不是素材预设');
             return rerenderSettings();
         }
-        const name = await askName('导入预设，名字：', String(file.fileName || '').replace(/\.json$/i, '') || '导入的预设');
+        const name = await askName('导入预设，名字：', (archive && archive.name) || String(file.fileName || '').replace(/\.(?:json|zip)$/i, '') || '导入的预设');
         if (!name) return rerenderSettings();
         if (presets[name] && !await dialogs.confirm(`已经有预设「${name}」了，用文件里的覆盖它？`, { okLabel: '覆盖' })) return rerenderSettings();
+        const lost = archive ? await writePackImages(archive.images, options) : 0;
         const written = writeNamedPreset(storage, name, data);
         if (written.ok === false) return failed(written);
+        if (lost) alertFn(`预设已导入，有 ${lost} 张图没能存进本机。`);
         return rerenderSettings();
     }
 
@@ -3346,9 +3667,29 @@ async function handlePresetAction(action, settingsState, options, dialogs, persi
     const preset = presets[name];
     if (!preset) return rerenderSettings();
 
+    if (command === 'preset-overwrite') {
+        if (!await dialogs.confirm(`用现在的配置覆盖预设「${name}」？原预设内容将被替换。`, { okLabel: '覆盖' })) return rerenderSettings();
+        const written = writeNamedPreset(storage, name, layeredPresetFromRoot(root, { cardKey, cardLabel, readerSettings }));
+        if (written.ok === false) return failed(written);
+        saveAssetFolders(storage, folderScope(name, ''), loadAssetFolders(storage, ''));
+        if (cardKey) saveAssetFolders(storage, folderScope(name, cardKey), loadAssetFolders(storage, cardKey));
+        return rerenderSettings();
+    }
+
     if (command === 'preset-export') {
-        const bytes = new TextEncoder().encode(JSON.stringify(preset, null, 2));
-        return triggerBytesDownload(globalObj, bytes, `${sanitizeDownloadName(name)}.json`, 'application/json');
+        const fileBase = String(name).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim() || '素材预设';
+        const ids = collectGeneratedImageIds(preset);
+        if (!ids.length) {
+            const bytes = new TextEncoder().encode(JSON.stringify(preset, null, 2));
+            return triggerBytesDownload(globalObj, bytes, `${fileBase}.json`, 'application/json');
+        }
+        // 预设只记图片编号，图在本机；导出时把图一起打进压缩包，清了浏览器数据或换设备也能整套找回。
+        const { images, missing } = await readPackImages(ids, options);
+        const bytes = buildPresetArchive({ name, preset, images });
+        const downloaded = triggerBytesDownload(globalObj, bytes, `${fileBase}.zip`, 'application/zip');
+        if (downloaded.ok === false) return downloaded;
+        if (missing) alertFn(`已导出。有 ${missing} 张图在本机找不到，压缩包里没有这几张。`);
+        return { ...downloaded, images: images.length, missing };
     }
 
     if (command === 'preset-rename') {
@@ -3468,14 +3809,7 @@ async function exportCharacterCardPack(settingsState, options) {
     const root = (settingsState.draft.bridge && settingsState.draft.bridge.sceneAssets) || {};
     const effective = sceneAssetsForContext(root, getSillyTavernContext(globalObj));
     const library = cardLibrarySnapshot(effective);
-    const service = options.generatedAssets;
-    const images = [];
-    const missing = [];
-    for (const id of collectGeneratedImageIds(library)) {
-        const record = service && typeof service.readStoredImage === 'function' ? await service.readStoredImage(id) : null;
-        if (record && record.dataUrl) images.push(record);
-        else missing.push(id);
-    }
+    const { images, missing } = await readPackImages(collectGeneratedImageIds(library), options);
     const readerSettings = settingsState.draft.readerSettings || {};
     const names = cardCharacterNames(library);
     const bytes = buildCharacterCardPack({
@@ -3492,8 +3826,8 @@ async function exportCharacterCardPack(settingsState, options) {
     const fileName = `${String(characterName).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim() || '角色卡'}.zip`;
     const downloaded = triggerBytesDownload(globalObj, bytes, fileName, 'application/zip');
     if (downloaded.ok === false) return downloaded;
-    if (missing.length && globalObj.alert) globalObj.alert(`已导出。有 ${missing.length} 张图在本机找不到，压缩包里没有这几张。`);
-    return { ok: true, fileName, missing: missing.length };
+    if (missing && globalObj.alert) globalObj.alert(`已导出。有 ${missing} 张图在本机找不到，压缩包里没有这几张。`);
+    return { ok: true, fileName, missing };
 }
 
 async function importCharacterCardPack(settingsState, options, dialogs, persistSettingsDraft, rerenderSettings) {
@@ -3502,8 +3836,7 @@ async function importCharacterCardPack(settingsState, options, dialogs, persistS
     if (!doc) return { ok: false, reason: 'no-document' };
     const file = await pickCardPackFile(doc);
     if (!file) return rerenderSettings();
-    const zipped = file.bytes.length >= 2 && file.bytes[0] === 0x50 && file.bytes[1] === 0x4b;
-    if (!zipped) {
+    if (!isZipBytes(file.bytes)) {
         let data = null;
         try { data = JSON.parse(new TextDecoder().decode(file.bytes)); } catch (error) { data = null; }
         if (isLegacyPresetData(data)) {
@@ -3514,6 +3847,12 @@ async function importCharacterCardPack(settingsState, options, dialogs, persistS
         return rerenderSettings();
     }
     const pack = parseCharacterCardPack(file.bytes);
+    const presetArchive = pack ? null : parsePresetArchive(file.bytes);
+    if (presetArchive && isLegacyPresetData(presetArchive.preset)) {
+        await writePackImages(presetArchive.images, options);
+        const label = presetArchive.name || String(file.fileName || '').replace(/\.zip$/i, '') || '导入的预设';
+        return importLegacyPreset(settingsState, options, dialogs, persistSettingsDraft, rerenderSettings, presetArchive.preset, label);
+    }
     if (!pack) {
         if (globalObj.alert) globalObj.alert('这个压缩包不是角色卡素材包');
         return rerenderSettings();
@@ -3527,17 +3866,7 @@ async function importCharacterCardPack(settingsState, options, dialogs, persistS
         const confirmed = await dialogs.confirm(`导入会覆盖角色卡「${pack.characterName}」里现有的场景、角色和衣柜${extra}。继续？`);
         if (!confirmed) return rerenderSettings();
     }
-    const service = options.generatedAssets;
-    let failed = 0;
-    for (const image of pack.images) {
-        if (!service || typeof service.writeStoredImage !== 'function') { failed += 1; continue; }
-        try {
-            const written = await service.writeStoredImage(image);
-            if (!written || written.ok === false) failed += 1;
-        } catch (error) {
-            failed += 1;
-        }
-    }
+    const failed = await writePackImages(pack.images, options);
     ensureCardLibrary(root, key);
     root.cards[key] = cardLibrarySnapshot(pack.library);
     if (pack.worldview) applyWorldview(root.cards[key], pack.worldview);
@@ -3558,6 +3887,91 @@ async function importCharacterCardPack(settingsState, options, dialogs, persistS
     const extra = failed ? `有 ${failed} 张图没有写进本机。` : '';
     if (globalObj.alert) globalObj.alert(`已导入角色卡「${pack.characterName}」。打开同名角色卡就能用。${extra}`);
     return rerenderSettings();
+}
+
+function isZipBytes(bytes) {
+    return Boolean(bytes) && bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+}
+
+// 按编号从本机读出生成图（含原图、遮罩），读不到的计数。
+async function readPackImages(ids, options) {
+    const service = options.generatedAssets;
+    const images = [];
+    let missing = 0;
+    for (const id of ids) {
+        const record = service && typeof service.readStoredImage === 'function' ? await service.readStoredImage(id).catch(() => null) : null;
+        if (record && record.dataUrl) images.push(record);
+        else missing += 1;
+    }
+    return { images, missing };
+}
+
+// 包里的图写回本机，返回没写进去的张数。
+async function writePackImages(images, options) {
+    const service = options.generatedAssets;
+    let failed = 0;
+    for (const image of Array.isArray(images) ? images : []) {
+        try {
+            const written = service && typeof service.writeStoredImage === 'function' ? await service.writeStoredImage(image) : null;
+            if (!written || written.ok === false) failed += 1;
+        } catch (error) {
+            failed += 1;
+        }
+    }
+    return failed;
+}
+
+async function readAssetDataUrl(url, globalObj, service) {
+    if (/^data:image\//i.test(url)) return url;
+    if (isGeneratedAssetUrl(url)) {
+        if (!service || typeof service.getImageDataUrl !== 'function') return '';
+        try { return (await service.getImageDataUrl(generatedAssetIdOf(url))) || ''; } catch (error) { return ''; }
+    }
+    // 外链图跨域可能拿不到，拿不到就算缺一张，下载完一起说。
+    const fetchFn = globalObj.fetch || globalThis.fetch;
+    const Reader = globalObj.FileReader || globalThis.FileReader;
+    if (typeof fetchFn !== 'function' || !Reader) return '';
+    try {
+        const res = await fetchFn(url);
+        if (!res || !res.ok) return '';
+        const blob = await res.blob();
+        return await new Promise((resolve) => {
+            const reader = new Reader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => resolve('');
+            reader.readAsDataURL(blob);
+        });
+    } catch (error) {
+        return '';
+    }
+}
+
+async function downloadAssetZip(settingsState, collection, options) {
+    const globalObj = options.global || globalThis;
+    const asyncState = settingsState.asyncState || {};
+    const root = (settingsState.draft.bridge && settingsState.draft.bridge.sceneAssets) || {};
+    const assets = draftEffectiveAssets(settingsState);
+    const cardKey = String(asyncState.assetScopeKey || '');
+    const filter = cardKey && asyncState.assetScopeFilter ? asyncState.assetScopeFilter[collection] : '';
+    const names = Object.keys(assets[collection] || {}).filter((name) => (filter !== 'card' && filter !== 'global')
+        || (assetOwnerKey(root, cardKey, [collection], name) ? 'card' : 'global') === filter);
+    const listed = collectAssetZipEntries(assets, collection, names);
+    const kind = collection === 'characters' ? '角色' : '场景';
+    if (!listed.length) {
+        if (globalObj.alert) globalObj.alert(`这里还没有${kind}图片可以下载。`);
+        return { ok: false, reason: 'empty' };
+    }
+    const entries = [];
+    for (const item of listed) entries.push({ path: item.path, dataUrl: await readAssetDataUrl(item.url, globalObj, options.generatedAssets) });
+    const zip = buildImageZip(entries);
+    if (!zip.bytes) {
+        if (globalObj.alert) globalObj.alert(`${kind}图片一张都没读到，可能是外链图不允许下载。`);
+        return { ok: false, reason: 'no-images' };
+    }
+    const scope = filter === 'global' ? '全局' : (asyncState.assetScopeLabel || '全局');
+    const downloaded = triggerBytesDownload(globalObj, zip.bytes, `${String(`${scope}-${kind}素材`).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')}.zip`, 'application/zip');
+    if (downloaded.ok !== false && zip.skipped && globalObj.alert) globalObj.alert(`已下载 ${zip.count} 张。有 ${zip.skipped} 张没读到（外链图跨域或本机已删），没放进压缩包。`);
+    return { ...downloaded, images: zip.count, missing: zip.skipped };
 }
 
 function triggerBytesDownload(globalObj, bytes, fileName, type) {
