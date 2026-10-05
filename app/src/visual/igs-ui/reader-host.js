@@ -65,7 +65,7 @@ import { floorKeyOf } from '../../media/illustration-store.js';
 import { normalizeMoodGroups, resolveMoodGroup } from '../../scene/mood-groups.js';
 import { NSFW_COUNT_MAX, normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { describeLlmReady } from '../../generated-images/illustration/caption-writer.js';
-import { normalizeImageSourceMode, mergeLegacyNaiSettings } from '../../generated-images/image-backend.js';
+import { normalizeImageSourceMode, mergeLegacyNaiSettings, BAIBAI_ENABLED } from '../../generated-images/image-backend.js';
 import {
     getOriginalReaderHtml,
     getOriginalReaderSource,
@@ -3565,7 +3565,7 @@ export function createIgsReaderHost(options = {}) {
                 imageLogList: imageSubTab === 'logs' ? renderImageJobLogList() : '',
                 imageCgStatus: esc(asyncState.imageCgStatus || ''),
                 imageCgList: imageSubTab === 'cg' ? renderImageCgList() : '',
-                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ['baibai', '柏宝绘']], '图像来源')),
+                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ...(BAIBAI_ENABLED ? [['baibai', '柏宝绘']] : [])], '图像来源')),
                 imageSourceNote: esc(sourceNotes[sourceMode]),
                 imageContentNote: esc(contentNotes[sourceMode]),
                 sourceNaiHidden: hiddenAttr(sourceMode === 'dbgen'),

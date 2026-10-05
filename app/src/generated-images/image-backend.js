@@ -14,9 +14,12 @@ export const IMAGE_SOURCE_MODES = Object.freeze(['nai', 'dbgen', 'extension', 'b
 export const DBGEN_LABEL = '数据库生图插件';
 export const CHATU8_LABEL = '智绘姬';
 export const BAIBAI_LABEL = '柏宝绘';
+// 柏宝绘来源暂时屏蔽：选项不显示，已存成 baibai 的配置按默认来源（智绘姬）处理。恢复时改回 true。
+export const BAIBAI_ENABLED = false;
 
 export function normalizeImageSourceMode(value) {
     const mode = String(value || '').trim();
+    if (mode === 'baibai' && !BAIBAI_ENABLED) return 'extension';
     return IMAGE_SOURCE_MODES.includes(mode) ? mode : 'extension';
 }
 

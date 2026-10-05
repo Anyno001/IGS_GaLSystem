@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createImageBackend } from '../src/generated-images/image-backend.js';
+import { createImageBackend, BAIBAI_ENABLED } from '../src/generated-images/image-backend.js';
 import { parseCaptionSlots } from '../src/generated-images/illustration/caption-writer.js';
 
 function fakeBaibai({ supportsCharacters = false, fail = null } = {}) {
@@ -30,7 +30,7 @@ function backendWith(api, { apiKey = '' } = {}) {
 
 const slot = { scene: 'cafe, afternoon light', sceneUc: 'lowres', chars: [{ name: '阿黛尔', tags: '1girl, silver hair' }] };
 
-test('gate:baibai:joins-chars-and-skips-gallery', async () => {
+test('gate:baibai:joins-chars-and-skips-gallery', { skip: !BAIBAI_ENABLED }, async () => {
     const api = fakeBaibai();
     const { backend } = backendWith(api);
     assert.equal(backend.describe().via, 'baibai');
@@ -40,7 +40,7 @@ test('gate:baibai:joins-chars-and-skips-gallery', async () => {
     assert.deepEqual(api.calls[0], { prompt: 'cafe, afternoon light, 1girl, silver hair', negative: 'lowres', size: 'landscape', save: false });
 });
 
-test('gate:baibai:splits-characters-when-supported', async () => {
+test('gate:baibai:splits-characters-when-supported', { skip: !BAIBAI_ENABLED }, async () => {
     const api = fakeBaibai({ supportsCharacters: true });
     const { backend } = backendWith(api);
     await backend.generate(slot, { size: '832x1216' });
@@ -49,7 +49,7 @@ test('gate:baibai:splits-characters-when-supported', async () => {
     assert.equal(api.calls[0].size, 'portrait');
 });
 
-test('gate:baibai:falls-back-to-nai-or-reports', async () => {
+test('gate:baibai:falls-back-to-nai-or-reports', { skip: !BAIBAI_ENABLED }, async () => {
     const withKey = backendWith(fakeBaibai({ fail: 'boom' }), { apiKey: 'k' });
     const fallback = await withKey.backend.generate(slot, { apiKey: 'k' });
     assert.equal(fallback.via, 'nai');
@@ -85,7 +85,7 @@ test('gate:caption-writer:parses-numbered-slots', () => {
     assert.deepEqual(clothes.captions[0].caption.v4_prompt.caption.char_captions, []);
 });
 
-test('gate:caption-writer:non-dbgen-writes-with-llm-and-paints-with-source', async () => {
+test('gate:caption-writer:non-dbgen-writes-with-llm-and-paints-with-source', { skip: !BAIBAI_ENABLED }, async () => {
     const { backend, llmCalls, api } = llmBackend('baibai', { reply: '#1\nscene: 1girl, cowboy shot\nchar: silver hair, smile' });
     const written = await backend.writeDbgenPrompt({ description: '为角色「阿黛尔」写 1 份立绘表情差分。' });
     assert.equal(written.ok, true);
@@ -118,4 +118,13 @@ test('gate:caption-writer:nai-source-paints-caption-as-slot', async () => {
     assert.equal(naiCalls[0].slot.transparent, true);
     assert.deepEqual(naiCalls[0].slot.chars, [{ tags: 'smile', uc: '', x: 0.5, y: 0.5 }]);
     assert.equal(naiCalls[0].slot.sceneUc, 'blurry');
+});
+
+test('gate:baibai:blocked-source-is-never-called', { skip: BAIBAI_ENABLED }, async () => {
+    const api = fakeBaibai();
+    const { backend } = backendWith(api, { apiKey: 'k' });
+    assert.notEqual(backend.describe().mode, 'baibai');
+    const result = await backend.generate(slot, { size: '1216x832' });
+    assert.notEqual(result.via, 'baibai');
+    assert.equal(api.calls.length, 0);
 });

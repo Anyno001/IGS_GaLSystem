@@ -10421,7 +10421,7 @@ const { floorKeyOf } = require("src/media/illustration-store.js");
 const { normalizeMoodGroups, resolveMoodGroup } = require("src/scene/mood-groups.js");
 const { NSFW_COUNT_MAX, normalizeAutoIllustrationSettings } = require("src/generated-images/illustration/auto-illustration-settings.js");
 const { describeLlmReady } = require("src/generated-images/illustration/caption-writer.js");
-const { normalizeImageSourceMode, mergeLegacyNaiSettings } = require("src/generated-images/image-backend.js");
+const { normalizeImageSourceMode, mergeLegacyNaiSettings, BAIBAI_ENABLED } = require("src/generated-images/image-backend.js");
 const { getOriginalReaderHtml, getOriginalReaderSource, getOriginalReaderStyleText, ORIGINAL_READER_REQUIRED_SELECTORS, ORIGINAL_READER_STYLE_CONTRACT } = require("src/visual/igs-ui/original-reader-source.js");
 const { getSettingsShellTemplate } = require("src/visual/igs-ui/settings-shell.js");
 const { getSettingsStyleText } = require("src/visual/igs-ui/settings-style.js");
@@ -13774,7 +13774,7 @@ function createIgsReaderHost(options = {}) {
                 imageLogList: imageSubTab === 'logs' ? renderImageJobLogList() : '',
                 imageCgStatus: esc(asyncState.imageCgStatus || ''),
                 imageCgList: imageSubTab === 'cg' ? renderImageCgList() : '',
-                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ['baibai', '柏宝绘']], '图像来源')),
+                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ...(BAIBAI_ENABLED ? [['baibai', '柏宝绘']] : [])], '图像来源')),
                 imageSourceNote: esc(sourceNotes[sourceMode]),
                 imageContentNote: esc(contentNotes[sourceMode]),
                 sourceNaiHidden: hiddenAttr(sourceMode === 'dbgen'),
@@ -41257,8 +41257,11 @@ const IMAGE_SOURCE_MODES = Object.freeze(['nai', 'dbgen', 'extension', 'baibai']
 const DBGEN_LABEL = '数据库生图插件';
 const CHATU8_LABEL = '智绘姬';
 const BAIBAI_LABEL = '柏宝绘';
+// 柏宝绘来源暂时屏蔽：选项不显示，已存成 baibai 的配置按默认来源（智绘姬）处理。恢复时改回 true。
+const BAIBAI_ENABLED = false;
 function normalizeImageSourceMode(value) {
     const mode = String(value || '').trim();
+    if (mode === 'baibai' && !BAIBAI_ENABLED) return 'extension';
     return IMAGE_SOURCE_MODES.includes(mode) ? mode : 'extension';
 }
 
@@ -41693,6 +41696,7 @@ __igsDefine(exports, "IMAGE_SOURCE_MODES", () => IMAGE_SOURCE_MODES);
 __igsDefine(exports, "DBGEN_LABEL", () => DBGEN_LABEL);
 __igsDefine(exports, "CHATU8_LABEL", () => CHATU8_LABEL);
 __igsDefine(exports, "BAIBAI_LABEL", () => BAIBAI_LABEL);
+__igsDefine(exports, "BAIBAI_ENABLED", () => BAIBAI_ENABLED);
 __igsDefine(exports, "DBGEN_TIMEOUTS", () => DBGEN_TIMEOUTS);
 });
 __igsRegister("src/generated-images/dbgen-prompt.js", function(module, exports, require) {
