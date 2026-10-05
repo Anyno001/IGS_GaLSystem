@@ -2442,6 +2442,20 @@ test('gate:simulation:double-click-keeps-cg-and-skips-the-page-turn', async () =
     overlay.dispatchEvent({ type: 'dblclick', target: overlay });
     assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
 
+    assert.equal(opened.reader.snapshot.readerSettings.dblclickHideUi, true);
+    const settings = opened.reader.controller.openSettings('reader').controller;
+    settings.setValue('readerSettings.dblclickHideUi', false);
+    assert.equal(settings.close().ok, true);
+    overlay.dispatchEvent({ type: 'dblclick', target: overlay });
+    assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
+
+    // 关了双击隐藏：单击不再等双击，当场翻页。
+    const liveDialog = overlay.querySelector('#igs-dialog');
+    liveDialog.style.left = '0px';
+    liveDialog.style.width = '200px';
+    liveDialog.dispatchEvent({ type: 'click', target: liveDialog, clientX: 160, detail: 1 });
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 2');
+
     vn.destroy();
 });
 
