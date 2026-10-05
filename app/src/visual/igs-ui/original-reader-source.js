@@ -126,6 +126,8 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-head-marker::after{content:"";position:absolute;left:50%;top:50%;width:6px;height:6px;margin:-3px 0 0 -3px;border-radius:50%;background:#ffd23f;}
 .igs-head-edit-layer .igs-fx-symbol.is-preview{animation:none;opacity:.9;pointer-events:none;}
 #igs-click-layer{position:absolute;inset:0;cursor:pointer;z-index:3;}
+/* 双击看全 CG：收起对话框、状态栏、工具栏、选项、立绘。背景和演出层不动。 */
+#igs-overlay[data-igs-cg-only="1"] :is(#igs-dialog-layer,#igs-status-hud,#igs-toolbar-layer,#igs-option-layer,#igs-db-layer,#igs-toast,#igs-sprite,#igs-cast,#igs-sprite-edit-bar,#igs-asset-review,#igs-bg-blur,#igs-map-panel,#igs-record-panel,#igs-cg-gallery){display:none!important;pointer-events:none!important;}
 #igs-status-hud{position:absolute;z-index:8;top:14px;left:14px;pointer-events:none;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;column-gap:calc(6px * var(--igs-hud-scale,1));width:calc(340px * var(--igs-hud-scale,1));max-width:calc(100% - 28px);padding:calc(8px * var(--igs-hud-scale,1));border-radius:calc(10px * var(--igs-hud-scale,1));box-sizing:border-box;}
 #igs-status-hud.igs-hud-bg-dialog{background:color-mix(in srgb,var(--igs-dialog-bg,var(--igs-glass-bg,rgba(31,34,37,.62))) 50%,transparent);border-radius:calc(6px * var(--igs-hud-scale,1));}
 #igs-overlay.igs-toolbar-top #igs-status-hud{top:14px;}
@@ -194,10 +196,9 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-ctrl-bar{position:absolute;top:-50px;right:0;display:flex;align-items:flex-start;gap:6px;z-index:5;padding:6px;background:var(--igs-toolbar-bg,var(--igs-glass-bg,rgba(20,20,22,.62)));border:1px solid var(--igs-toolbar-border,rgba(255,255,255,.14));-webkit-backdrop-filter:var(--igs-toolbar-blur,none);backdrop-filter:var(--igs-toolbar-blur,none);border-radius:var(--igs-toolbar-radius,18px);box-shadow:var(--igs-toolbar-shadow,0 4px 24px rgba(0,0,0,.20));pointer-events:auto;transition:opacity .3s;}
 .igs-ctrl-bar.igs-hidden{opacity:0;pointer-events:none;}
 #igs-bar-btns{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;max-width:min(336px,calc(100vw - 112px));justify-content:flex-start;align-content:flex-start;}
-/* 顶部固定栏和楼层内嵌一样离顶边、左右各 14px，不贴边。 */
-#igs-overlay.igs-toolbar-top #igs-toolbar-layer{inset:14px 14px auto 14px;width:auto;height:auto;transform:none;}
-#igs-overlay.igs-toolbar-top .igs-ctrl-bar{position:static;top:auto;right:auto;width:100%;box-sizing:border-box;justify-content:space-between;align-items:flex-start;gap:1.5px;padding:0;background:transparent;border:0;border-radius:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;flex-wrap:nowrap;}
-#igs-overlay.igs-toolbar-top.igs-toolbar-expanded .igs-ctrl-bar{padding-left:56px;}
+/* 顶部固定栏贴右上角收成一团，不把按钮、菜单、关闭撑到屏幕两头。 */
+#igs-overlay.igs-toolbar-top #igs-toolbar-layer{inset:14px 14px auto auto;width:auto;max-width:calc(100% - 28px);height:auto;transform:none;}
+#igs-overlay.igs-toolbar-top .igs-ctrl-bar{position:static;top:auto;right:auto;width:auto;max-width:100%;box-sizing:border-box;justify-content:flex-end;align-items:flex-start;gap:1.5px;padding:0;background:transparent;border:0;border-radius:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;flex-wrap:nowrap;}
 #igs-overlay.igs-toolbar-top #igs-bar-btns{flex:0 1 auto;min-width:0;max-width:336px;justify-content:flex-start;align-content:flex-start;flex-wrap:wrap;overflow:visible;}
 #igs-overlay.igs-toolbar-top #igs-bar-btns.igs-bar-overflow{justify-content:flex-start;cursor:grab;}
 #igs-overlay.igs-toolbar-top #igs-bar-btns.igs-bar-dragging{cursor:grabbing;}
@@ -238,6 +239,8 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-image-spinner{width:32px;height:32px;border-width:3px;opacity:.7;}
 .igs-image-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:1;font-size:13px;color:rgba(255,255,255,.4);letter-spacing:.5px;}
 #igs-send-status{display:none;flex:1;align-items:center;gap:8px;padding:8px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:14px;font-size:13px;color:rgba(255,255,255,.55);letter-spacing:.3px;}
+#igs-overlay.igs-awaiting-reply #igs-send-status{display:flex;}
+#igs-overlay.igs-awaiting-reply #igs-input,#igs-overlay.igs-awaiting-reply #igs-send-btn{display:none;}
 #igs-settings{display:none;position:absolute;right:0;bottom:calc(100% + 10px);min-width:232px;background:rgba(16,16,20,.92);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(40px) saturate(180%);border-radius:18px;padding:16px 18px 14px;box-shadow:0 10px 40px rgba(0,0,0,.6);z-index:30;}
 #igs-toast{position:absolute;left:50%;top:calc(env(safe-area-inset-top,0px) + 64px);transform:translateX(-50%);z-index:40;display:flex;align-items:center;justify-content:center;min-width:160px;max-width:min(400px,calc(100% - 32px));min-height:38px;box-sizing:border-box;padding:8px 18px;border:0;border-radius:${IGS_UI_RADIUS.card};background:${igsUiSurface(IGS_UI_THICKNESS.thick)};-webkit-backdrop-filter:${IGS_UI_BLUR};backdrop-filter:${IGS_UI_BLUR};box-shadow:${IGS_UI_ELEVATION},${IGS_UI_EDGE_NIGHT};color:${IGS_UI_INK.primary};font-family:${IGS_UI_FONT_SANS};font-size:13px;font-weight:500;line-height:1.5;letter-spacing:.02em;text-align:center;text-shadow:none;-webkit-font-smoothing:antialiased;opacity:0;pointer-events:none;transition:opacity .2s ease;}
 ${TOAST_THEME_STYLE_TEXT}

@@ -20,6 +20,7 @@ import { applyTransparentGlassMaterial } from '../../styles/glass-material.js';
 import { resolveStatusHudScale, resolveStatusHudLocationScale, NSFW_VEIL_LEVEL_STYLE, normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
 import { computeLineHeight, igsDebug } from './reader-value-utils.js';
 import {
+    applySpriteDisplayScale,
     renderDialogueHtml,
     resolveActiveTheme,
     resolveSpriteLayout,
@@ -1010,7 +1011,9 @@ function applyAlignStyleImpl(element, align) {
 
 // 背景与立绘图地址可能是数 MB 的 data: URL；同值重写仍要重新解析整段 CSS，所以只在变化时写入。
 // 这三个节点的 backgroundImage 只由本文件写，记住上次写入值即可，不必回读样式。
+// 同时记住是哪一个素材地址画上去的，避免 CG 还没解码时把上一张场景背景留在画面上。
 const backgroundImageKeys = new WeakMap();
+const backgroundImageSources = new WeakMap();
 
 // 内嵌框只跟横竖尺寸走。横屏钉背景尺寸，竖屏钉对调后的尺寸。图的像素不参与。
 export function syncEmbeddedHostFrame(root, sizeText) {
@@ -1080,14 +1083,16 @@ export function watchEmbeddedFrameResize(overlay, frameState) {
     return unobserve;
 }
 
-function writeBackgroundImage(element, url) {
+function writeBackgroundImage(element, url, source = url) {
     const value = url ? `url("${url.replace(/"/g, '&quot;')}")` : '';
-    if (backgroundImageKeys.get(element) === value) return;
+    if (backgroundImageKeys.get(element) === value && backgroundImageSources.get(element) === source) return;
     backgroundImageKeys.set(element, value);
+    backgroundImageSources.set(element, source);
     element.style.backgroundImage = value;
 }
 
 const ROOT_TOGGLED_CLASSES = new Set(['igs-default-reader-chrome', 'igs-gradient-veil-active', 'igs-scene-nsfw']);
+const dialogPageTimers = new WeakMap();
 
 export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const materialDialog = isMaterialDialogSkin(snapshot.readerSettings);
@@ -1098,6 +1103,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     if (!materialDialog) rootClasses.push('igs-default-reader-chrome');
     if (gradientVeilDialog) rootClasses.push('igs-gradient-veil-active');
     if (nsfwVeilActive) rootClasses.push('igs-scene-nsfw');
+    if (current && current.awaitingReply) rootClasses.push('igs-awaiting-reply');
     const rootClassName = rootClasses.join(' ');
     if (root.className !== rootClassName) root.className = rootClassName;
     root.setAttribute('data-igs-igs-ui', 'true');
@@ -1138,7 +1144,13 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             else if (typeof root.style.removeProperty === 'function') root.style.removeProperty(prop);
         }
     }
+    const backgroundSource = String(snapshot.content.backgroundImage || '');
     const backgroundAssetUrl = resolveAssetUrl(snapshot.content.backgroundImage);
+    const cgActive = Boolean(snapshot.content && (snapshot.content.cgActive || snapshot.content.illustrationActive));
+    if (stageMotion && stageMotion.setAttribute) {
+        if (cgActive) stageMotion.setAttribute('data-igs-cg', '1');
+        else stageMotion.removeAttribute('data-igs-cg');
+    }
     if (current && typeof current === 'object') {
         // 渲染主路径每张快照刷新钉尺寸输入；宽度观察器跨阈值时按同一份输入重算。
         const frameState = current.embeddedFrame || (current.embeddedFrame = {});
@@ -1148,12 +1160,14 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     pinEmbeddedHostFrame(root, snapshot.readerSettings && snapshot.readerSettings._cgBackgroundSize, snapshot.mode);
 
     if (bg && backgroundAssetUrl) {
-        writeBackgroundImage(bg, backgroundAssetUrl);
+        writeBackgroundImage(bg, backgroundAssetUrl, backgroundSource);
         bg.setAttribute('data-igs-has-image', '1');
         removeImageLoadingSpinner(bg);
         removeImageEmptyPlaceholder(bg);
+    } else if (bg && backgroundSource && backgroundImageSources.get(bg) === backgroundSource && backgroundImageKeys.get(bg)) {
+        // 同一张还没解码出来：留着已经画上的这张。换了素材（比如场景背景换成 CG）就不能留。
     } else if (bg) {
-        writeBackgroundImage(bg, '');
+        writeBackgroundImage(bg, '', backgroundSource);
         bg.removeAttribute('data-igs-has-image');
         const expectsImage = snapshot.content.imageExpectedCount > 0
             && snapshot.content.imageBoundCount < snapshot.content.imageExpectedCount;
@@ -1170,11 +1184,6 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             removeImageLoadingSpinner(bg);
             removeImageEmptyPlaceholder(bg);
         }
-    }
-    const cgActive = Boolean(snapshot.content && (snapshot.content.cgActive || snapshot.content.illustrationActive));
-    if (stageMotion && stageMotion.setAttribute) {
-        if (cgActive) stageMotion.setAttribute('data-igs-cg', '1');
-        else stageMotion.removeAttribute('data-igs-cg');
     }
     if (!cgActive && bg && bg.style && typeof bg.style.removeProperty === 'function') {
         bg.style.removeProperty('filter');
@@ -1223,6 +1232,10 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const castSpeakerMood = snapshot.content.spriteMood || '';
     const castSpeakerOutfit = snapshot.content.spriteOutfit || '';
     const castSlotLayouts = snapshot.readerSettings.castSlotLayouts || {};
+    const presentSpriteLayout = (character, mood, outfit) => applySpriteDisplayScale(
+        resolveSpriteLayout(snapshot.readerSettings.spriteLayouts, snapshot.mode, character, mood, outfit, snapshot.readerSettings.spriteDefaultScale),
+        snapshot.readerSettings.spriteDisplayScale,
+    );
     const withCastSlot = (entry, character, outfit, slotIndex) => {
         const slotKey = slotIndex == null ? '' : castSlotKey(snapshot.mode, castLayout.count, slotIndex, spriteIdentity(character, outfit));
         const saved = slotKey ? castSlotLayouts[slotKey] : null;
@@ -1236,14 +1249,14 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         stageH: stageMotion.clientHeight,
         align: isCastAlignEnabled(snapshot),
         speaker: spriteAssetUrl ? withCastSlot({
-            ...resolveSpriteLayout(snapshot.readerSettings.spriteLayouts, snapshot.mode, castSpeakerKey, castSpeakerMood, castSpeakerOutfit, snapshot.readerSettings.spriteDefaultScale),
+            ...presentSpriteLayout(castSpeakerKey, castSpeakerMood, castSpeakerOutfit),
             ...(speakerSlotX != null ? { posX: speakerSlotX } : {}),
             url: spriteAssetUrl,
             order: Number.isFinite(snapshot.content.speakerCastOrder) ? snapshot.content.speakerCastOrder : Number.MAX_SAFE_INTEGER,
             head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, castSpeakerKey, castSpeakerMood, castSpeakerOutfit),
         }, castSpeakerKey, castSpeakerOutfit, castLayout.speakerSlot) : null,
         members: castLayout.members.map((m) => {
-            const layout = resolveSpriteLayout(snapshot.readerSettings.spriteLayouts, snapshot.mode, m.character, m.mood, m.outfit, snapshot.readerSettings.spriteDefaultScale);
+            const layout = presentSpriteLayout(m.character, m.mood, m.outfit);
             return withCastSlot({
                 character: m.character,
                 url: resolveAssetUrl(m.image),
@@ -1284,7 +1297,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             const spriteKey = snapshot.content.spriteCharacter || snapshot.content.speaker;
             const spriteMood = snapshot.content.spriteMood || '';
             const spriteOutfit = snapshot.content.spriteOutfit || '';
-            const layout = { ...resolveSpriteLayout(snapshot.readerSettings.spriteLayouts, snapshot.mode, spriteKey, spriteMood, spriteOutfit, snapshot.readerSettings.spriteDefaultScale) };
+            const layout = { ...presentSpriteLayout(spriteKey, spriteMood, spriteOutfit) };
             if (castPlan && castPlan.speaker) Object.assign(layout, { posX: castPlan.speaker.posX, posY: castPlan.speaker.posY, scale: castPlan.speaker.scale });
             else if (speakerSlotX != null) layout.posX = speakerSlotX;
             spriteEl.style.backgroundSize = spriteBackgroundSize(layout.scale);
@@ -1647,9 +1660,20 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             await current.controller.submit(input ? input.value : current.inputValue);
         });
     }
+    if (root && root.getAttribute && root.getAttribute('data-igs-cg-only-bound') !== '1') {
+        root.setAttribute('data-igs-cg-only-bound', '1');
+        root.addEventListener('dblclick', (event) => {
+            const target = event.target;
+            if (target && typeof target.closest === 'function' && target.closest('button,input,textarea,select,a,#igs-settings,#igs-map-panel,#igs-record-panel,#igs-cg-gallery')) return;
+            event.preventDefault();
+            if (root.getAttribute('data-igs-cg-only') === '1') root.removeAttribute('data-igs-cg-only');
+            else root.setAttribute('data-igs-cg-only', '1');
+        });
+    }
     if (clickLayer && !(clickLayer.dataset && clickLayer.dataset.igsBound)) {
         if (clickLayer.dataset) clickLayer.dataset.igsBound = '1';
         clickLayer.addEventListener('click', () => {
+            if (root && root.getAttribute && root.getAttribute('data-igs-cg-only') === '1') return;
             if (current.dragSuppressClick || (current.runtime && current.runtime.dragSuppressClick)) {
                 current.dragSuppressClick = false;
                 if (current.runtime) current.runtime.dragSuppressClick = false;
@@ -1693,11 +1717,23 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 ? dialog.getBoundingClientRect()
                 : { left: 0, width: 0 };
             const clientX = Number(event.clientX);
-            if (!Number.isFinite(clientX) || clientX < rect.left + rect.width / 2) {
-                if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction('prev');
-            } else {
-                if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction('next');
+            const action = !Number.isFinite(clientX) || clientX < rect.left + rect.width / 2 ? 'prev' : 'next';
+            const detail = Number(event.detail) || 0;
+            const win = dialog.ownerDocument && dialog.ownerDocument.defaultView;
+            const pending = dialogPageTimers.get(dialog);
+            if (pending && win && typeof win.clearTimeout === 'function') win.clearTimeout(pending);
+            if (detail >= 2) {
+                dialogPageTimers.delete(dialog);
+                return;
             }
+            const go = () => {
+                dialogPageTimers.delete(dialog);
+                if (root && root.getAttribute && root.getAttribute('data-igs-cg-only') === '1') return;
+                if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction(action);
+            };
+            // 真机单击带 detail=1，稍等以取消紧接着的双击。测试里的合成点击没有 detail，立即翻页。
+            if (detail === 1 && win && typeof win.setTimeout === 'function') dialogPageTimers.set(dialog, win.setTimeout(go, 280));
+            else go();
         });
     }
     if (dialog) {

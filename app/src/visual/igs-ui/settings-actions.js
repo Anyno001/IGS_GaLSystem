@@ -10,6 +10,7 @@ import { collectAssetZipEntries } from '../../scene/asset-zip.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
+import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { buildPageDiagnostic } from './page-diagnostic.js';
 import { clearMoodReview, loadMoodReview, removeMoodReview, saveMoodReview } from '../../scene/mood-review-store.js';
 import { applyMoodAssignments, buildMoodClassificationRequest, parseMoodClassification, resolveSecondaryLlm } from '../../scene/mood-classify.js';
@@ -399,6 +400,21 @@ async function askExpressionNote(dialogs, name, saved) {
     return current;
 }
 
+// 默认立绘的额外要求：长相、服装、姿势。按角色记着，下次预填。取消返回 null。
+async function askSpriteNote(dialogs, name, saved) {
+    const message = `「${name}」的立绘有没有要注意的点？\n比如长相、服装、姿势（可留空）\n例：银发红瞳，穿白裙；站姿放松，不要拿道具\n这条只影响这次写提示词，不影响已经画好的图。`;
+    const current = String(saved || '');
+    if (dialogs && typeof dialogs.edit === 'function') {
+        const raw = await dialogs.edit(message, current, { okLabel: '开始生成', cancelLabel: '取消' });
+        return raw == null ? null : String(raw);
+    }
+    if (dialogs && typeof dialogs.prompt === 'function') {
+        const raw = await dialogs.prompt(message, current);
+        return raw == null ? null : String(raw);
+    }
+    return current;
+}
+
 function nsfwEnabledForAssets(draft) {
     const bridge = draft && draft.bridge ? draft.bridge : {};
     const auto = bridge.autoIllustration && typeof bridge.autoIllustration === 'object' ? bridge.autoIllustration : {};
@@ -654,6 +670,7 @@ const RISKY_ACTIONS = [
     ['meta-scope-remove:', () => '删除这条生效范围？'],
     ['remove-virtual-regex:', () => '删除这条正文格式化规则？'],
     ['image-log-clear', () => '清空生图日志？'],
+    ['image-cache-clear', () => '清空浏览器里缓存的图片？酒馆上的原图还在，下次查看会重新下载。'],
     ['mood-review-clear', () => '清空待确认的情绪词？'],
     ['reset-virtual-regex', () => '正文格式化恢复默认？现在的查找和替换会被覆盖。'],
     ['reset-prompt-rule', () => '提示词规则恢复默认？现在改过的内容会被覆盖。'],
@@ -1227,6 +1244,9 @@ export async function handleSettingsAction(action, ctx) {
         if (!service || typeof service.generateCharacterSprite !== 'function') {
             return generationFailure(globalObj, dialogs, '立绘生成当前不可用。', 'sprite-generate-unavailable');
         }
+        const savedSpriteNotes = sceneAssets.characterSpriteNotes && typeof sceneAssets.characterSpriteNotes === 'object' ? sceneAssets.characterSpriteNotes : {};
+        const spriteNote = await askSpriteNote(dialogs, name, savedSpriteNotes[name]);
+        if (spriteNote === null) return rerenderSettings();
         const current = String((character && character['默认']) || '').trim();
         const progress = startExpressionProgress(globalObj, `${name}·默认立绘`);
         progress.onProgress({ phase: 'write' });
@@ -1243,7 +1263,7 @@ export async function handleSettingsAction(action, ctx) {
             return generationFailure(globalObj, dialogs, `「${name}」的默认立绘没画出来：${errorText(error, '未返回原因')}${current ? '\n原来那张没动。' : ''}`, 'sprite-generate-failed');
         };
         try {
-            result = await service.generateCharacterSprite({ name, dna, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, note: spriteNote, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -1252,6 +1272,10 @@ export async function handleSettingsAction(action, ctx) {
         const characters = { ...(liveAssets.characters || {}) };
         characters[name] = { ...(characters[name] || {}), '默认': `igs-gen:${result.imageId}` };
         liveAssets.characters = characters;
+        const spriteNotes = liveAssets.characterSpriteNotes && typeof liveAssets.characterSpriteNotes === 'object'
+            ? liveAssets.characterSpriteNotes : (liveAssets.characterSpriteNotes = {});
+        if (String(spriteNote || '').trim()) spriteNotes[name] = String(spriteNote).trim();
+        else delete spriteNotes[name];
         ensureCharacterAliases(settingsState, editTarget);
         const persisted = persistGeneratedLibrary(persistSettingsDraft);
         if (operationFailed(persisted)) {
@@ -2224,9 +2248,18 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    if (normalizedAction === 'image-cache-clear') {
+        await localImageCacheFor(options.global || globalThis).clear();
+        settingsState.asyncState.imageCgEntries = null;
+        settingsState.asyncState.imageCgLoading = false;
+        settingsState.asyncState.imageCgStatus = '已清空本地图片缓存。';
+        return rerenderSettings();
+    }
+
     // 生图 › CG 库「刷新」：丢弃已读列表，重绘时重新读取。
     if (normalizedAction === 'image-cg-refresh') {
         settingsState.asyncState.imageCgEntries = null;
+        settingsState.asyncState.imageCgLoading = false;
         settingsState.asyncState.imageCgSelected = new Set();
         settingsState.asyncState.imageCgStatus = '';
         return rerenderSettings();

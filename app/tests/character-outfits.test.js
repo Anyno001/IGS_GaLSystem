@@ -96,8 +96,9 @@ test('gate:outfits:wardrobe-rules-list-and-scope-tag', async () => {
     assert.match(filled, /src="data:image\/png;base64,QQ=="/);
     const empty = renderWardrobe({ 冬月星见日常: { prompt: '' } });
     assert.match(empty, new RegExp(`data-action="wardrobe-generate-prompt:${encodeURIComponent('冬月星见日常')}"`));
-    assert.match(empty, /<input class="igs-scene-url-input igs-wardrobe-prompt"/);
-    assert.doesNotMatch(empty, /<textarea/);
+    assert.match(empty, new RegExp(`data-action="wardrobe-prompt:${encodeURIComponent('冬月星见日常')}"`));
+    assert.match(empty, /igs-row-menu[\s\S]*wardrobe-prompt:/);
+    assert.doesNotMatch(empty, /<input|<textarea/);
     const hidden = renderWardrobe({ 裸体: { prompt: 'nude, nude' }, 校服: { prompt: '' } });
     assert.equal(hidden.includes('裸体'), false);
     assert.equal(hidden.includes('nude'), false);
@@ -113,7 +114,8 @@ test('gate:outfits:wardrobe-rules-list-and-scope-tag', async () => {
     });
     assert.match(tabs, /igs-wardrobe-pick/);
     assert.match(tabs, /scene-set-outfit-wardrobe-url:[^"]*%E8%A3%B8%E4%BD%93/);
-    assert.match(tabs, /outfit-generate-nude:/);
+    assert.match(tabs, /outfit-expression-set:/);
+    assert.doesNotMatch(tabs, /生成立绘|outfit-generate-nude:|char-generate-sprite:/);
     assert.equal(tabs.includes('scene-outfit-tab:%E5%86%AC%E6%9C%88:%E8%A3%B8%E4%BD%93'), false);
     assert.equal(tabs.includes('编辑提示词'), false);
 });

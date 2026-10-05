@@ -82,12 +82,13 @@ test('gate:simulation:virtual-regex-extra-rules-render-add-save-and-remove', asy
 
 test('gate:igs-ui:toolbar-top-first-row-aligns-with-toggle-and-close', () => {
     const css = getOriginalReaderStyleText();
-    // 外层不换行、顶部对齐：按钮第一行与收纳 / 关闭键同一行，收纳 / 关闭不会被挤到下一行。
-    assert.match(css, /#igs-overlay\.igs-toolbar-top \.igs-ctrl-bar\{[^}]*align-items:flex-start[^}]*flex-wrap:nowrap/);
+    // 外层不换行、靠右收成一团：按钮、收纳、关闭贴在一起，不再铺满整条。
+    assert.match(css, /#igs-overlay\.igs-toolbar-top \.igs-ctrl-bar\{[^}]*justify-content:flex-end[^}]*align-items:flex-start[^}]*flex-wrap:nowrap/);
+    assert.doesNotMatch(css, /#igs-overlay\.igs-toolbar-top \.igs-ctrl-bar\{[^}]*space-between/);
     // 按钮区限宽（约 8 个一行）提前换行，行内左对齐。
     assert.match(css, /#igs-overlay\.igs-toolbar-top #igs-bar-btns\{[^}]*max-width:336px[^}]*justify-content:flex-start[^}]*flex-wrap:wrap/);
-    // 和楼层内嵌一样离顶边、左右 14px，不贴边。
-    assert.match(css, /#igs-overlay\.igs-toolbar-top #igs-toolbar-layer\{inset:14px 14px auto 14px;/);
+    // 贴右上角，左右仍留 14px，窄屏不会撑出屏幕。
+    assert.match(css, /#igs-overlay\.igs-toolbar-top #igs-toolbar-layer\{inset:14px 14px auto auto;width:auto;max-width:calc\(100% - 28px\)/);
 });
 
 
@@ -896,7 +897,10 @@ test('gate:illustration:failed-cg-point-can-reroll-and-does-not-borrow-another-i
         const content = host.getState().activeReader.snapshot.content;
         assert.equal(content.illustrationSlot, 1);
         assert.equal(content.illustrationActive, false);
-        assert.equal(content.backgroundImage, 'https://example.com/room.png');
+        assert.equal(content.cgActive, true);
+        assert.equal(content.backgroundImage, '');
+        assert.equal(document.getElementById('igs-stage-motion').getAttribute('data-igs-cg'), '1');
+        assert.equal(document.getElementById('igs-bg').style.backgroundImage, '');
         const reroll = document.getElementById('igs-btn-reroll-cg');
         const clear = document.getElementById('igs-btn-clear-cg');
         assert.equal(reroll.disabled, false);
@@ -1165,6 +1169,45 @@ test('gate:illustration:reader-activates-only-after-marker-and-keeps-veil-withou
     const held = host.getState().activeReader.snapshot.content;
     assert.equal(held.illustrationActive, true);
     assert.equal(held.backgroundImage, imageUrl);
+    host.destroy();
+});
+
+test('gate:illustration:cg-page-keeps-cg-and-does-not-paint-scene-background', () => {
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const raw = '[igs-scene:Room|night|clear]\n[igs-img:1]\n这一页同时有背景和 CG。\n下一句。';
+    let imageUrl = '';
+    let trigger;
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({
+            bridge: {
+                sceneAssets: {
+                    enabled: true,
+                    scenes: { Room: { url: 'https://example.com/room.png', times: {} } },
+                    characters: {},
+                },
+            },
+            readerSettings: {},
+        }),
+        getIllustrationSource: () => ({ chatId: 'chat-1', messageId: 52, swipeId: 0, text: raw }),
+        getIllustrationUrl: () => imageUrl,
+        onIllustrationUpdated: (handler) => { trigger = handler; return () => {}; },
+    });
+    const opened = host.openReader({ messageId: 52, message: { id: 52, text: raw }, raw }, { mode: 'pc' });
+    assert.equal(opened.ok, true);
+    const content = () => host.getState().activeReader.snapshot.content;
+    const bg = document.getElementById('igs-bg');
+    assert.equal(content().backgroundImage, '');
+    assert.equal(content().cgActive, true);
+    assert.equal(bg.style.backgroundImage, '');
+    assert.equal(document.getElementById('igs-stage-motion').getAttribute('data-igs-cg'), '1');
+
+    imageUrl = 'data:image/png;base64,CG';
+    trigger({ chatId: 'chat-1', messageId: 52, swipeId: 0, slot: 1 });
+    assert.equal(content().backgroundImage, imageUrl);
+    assert.equal(content().illustrationActive, true);
+    assert.match(bg.style.backgroundImage, /base64,CG/);
+    assert.doesNotMatch(bg.style.backgroundImage, /room\.png/);
     host.destroy();
 });
 
@@ -2347,6 +2390,57 @@ test('gate:simulation:igs-ui-background-click-does-not-page-dialog-click-still-p
     dialog.style.width = '200px';
     dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160 });
     assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 2');
+
+    vn.destroy();
+});
+
+test('gate:simulation:double-click-keeps-cg-and-skips-the-page-turn', async () => {
+    const timers = [];
+    const document = createFakeDocument({
+        setTimeout(fn) {
+            timers.push(fn);
+            return timers.length;
+        },
+        clearTimeout(id) {
+            if (id) timers[id - 1] = null;
+        },
+    });
+    const latestMessage = {
+        id: 45,
+        text: '[角色: 艾莉]\n艾莉: 第一段。\n第二段。',
+    };
+    const vn = bootstrapIGS({
+        global: { document },
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => latestMessage,
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+
+    const opened = await vn.openLatestAvailable('pc');
+    const overlay = document.getElementById('igs-overlay');
+    const dialog = overlay.querySelector('#igs-dialog');
+    const button = overlay.querySelector('button');
+    dialog.style.left = '0px';
+    dialog.style.width = '200px';
+
+    assert.equal(opened.reader.snapshot.content.progress, '1 / 2');
+    button.dispatchEvent({ type: 'dblclick', target: button });
+    assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
+
+    dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160, detail: 1 });
+    dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160, detail: 2 });
+    overlay.dispatchEvent({ type: 'dblclick', target: dialog });
+    assert.equal(overlay.getAttribute('data-igs-cg-only'), '1');
+    assert.equal(overlay.querySelector('#igs-bg').id, 'igs-bg');
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '1 / 2');
+
+    for (const fn of timers) if (typeof fn === 'function') fn();
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '1 / 2');
+
+    overlay.dispatchEvent({ type: 'dblclick', target: overlay });
+    assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
 
     vn.destroy();
 });
@@ -3875,6 +3969,10 @@ test('gate:simulation:scene-sub-tab-switches-pane', async () => {
     assert.match(scenesView.snapshot.html, /古城/);
     const charsView = settings.switchSceneSubTab('characters');
     assert.match(charsView.snapshot.html, /统一角色立绘位置/);
+    assert.match(charsView.snapshot.html, /data-path="readerSettings\.spriteDisplayScale"/);
+    assert.match(charsView.snapshot.html, /立绘全局缩放/);
+    assert.match(charsView.snapshot.html, /立绘基准高度/);
+    assert.doesNotMatch(charsView.snapshot.html, /调过位置的立绘也一起变|调过位置的立绘不受影响/);
     assert.match(charsView.snapshot.html, /data-switch="bridge\.sceneAssets\.spriteEnhance\.enabled" aria-pressed="false"/);
     assert.match(charsView.snapshot.html, /可能增加性能开销/);
     assert.doesNotMatch(charsView.snapshot.html, /data-path="bridge\.sceneAssets\.spriteEnhance\.mode"/);
@@ -4357,6 +4455,198 @@ test('gate:simulation:igs-ui-embedded-stream-hides-new-floor-and-finishes-on-hos
     assert.equal(streamHost.querySelector('.igs-embedded-loading'), null);
     vn.destroy();
     assert.equal(streamingText.style.display, '');
+});
+
+test('gate:simulation:igs-ui-fullscreen-shows-reply-wait-and-opens-the-new-floor', async () => {
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const globalObject = document.defaultView;
+    const chat = document.createElement('div');
+    chat.id = 'chat';
+    document.body.appendChild(chat);
+    const initialElement = createFakeMessageElement(document, { messageId: 80, textContent: '上一轮正文。' });
+    chat.appendChild(initialElement);
+    let currentMessage = { id: 80, text: '上一轮正文。', visibleText: '上一轮正文。', element: initialElement };
+    const messages = new Map([[80, currentMessage]]);
+    const eventListeners = new Map();
+    const eventSource = {
+        on(name, handler) {
+            if (!eventListeners.has(name)) eventListeners.set(name, []);
+            eventListeners.get(name).push(handler);
+        },
+        off(name, handler) {
+            eventListeners.set(name, (eventListeners.get(name) || []).filter((item) => item !== handler));
+        },
+        emit(name) {
+            for (const handler of eventListeners.get(name) || []) handler();
+        },
+    };
+    const mutationObservers = [];
+    globalObject.MutationObserver = class {
+        constructor(handler) { this.handler = handler; mutationObservers.push(this); }
+        observe() {}
+        disconnect() {}
+    };
+    const timers = new Map();
+    let timerId = 0;
+    globalObject.setTimeout = (handler, delay) => {
+        timerId += 1;
+        timers.set(timerId, { handler, delay });
+        return timerId;
+    };
+    globalObject.clearTimeout = (id) => timers.delete(id);
+    globalObject.SillyTavern = {
+        getContext: () => ({
+            eventSource,
+            event_types: {
+                GENERATION_STARTED: 'generation_started',
+                GENERATION_ENDED: 'generation_ended',
+                GENERATION_STOPPED: 'generation_stopped',
+            },
+        }),
+    };
+    const vn = bootstrapIGS({
+        global: globalObject,
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => currentMessage,
+            getMessageById: async (id) => messages.get(Number(id)) || null,
+            typeAndSend: async () => {
+                eventSource.emit('generation_started');
+                return { ok: true };
+            },
+        },
+    });
+
+    const opened = await vn.openLatestAvailable('fullscreen');
+    const overlay = document.getElementById('igs-overlay');
+    assert.equal(opened.ok, true);
+    assert.match(opened.reader.snapshot.source.styleText, /#igs-overlay\.igs-awaiting-reply #igs-send-status\{display:flex/);
+
+    const sent = await opened.reader.controller.submit('下一句');
+    assert.equal(sent.ok, true);
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
+    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '已发送，等待 AI 回复…');
+    assert.equal(overlay.querySelector('#igs-toast').textContent, '');
+
+    const nextElement = createFakeMessageElement(document, { messageId: 81, textContent: '生成完成后的最终正文。' });
+    chat.appendChild(nextElement);
+    currentMessage = { id: 81, text: '生成完成后的最终正文。', visibleText: '生成完成后的最终正文。', element: nextElement };
+    messages.set(81, currentMessage);
+    for (const observer of mutationObservers) observer.handler([{ target: chat, addedNodes: [nextElement], removedNodes: [] }]);
+    eventSource.emit('generation_ended');
+    const stableTimer = Array.from(timers.entries()).find(([, timer]) => timer.delay === 800);
+    assert.ok(stableTimer);
+    timers.delete(stableTimer[0]);
+    stableTimer[1].handler();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), false);
+    assert.match(opened.reader.controller.getSnapshot().content.displayText, /生成完成后的最终正文/);
+    vn.destroy();
+});
+
+test('gate:simulation:igs-ui-fullscreen-send-keeps-the-current-page-until-the-new-floor', async () => {
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const globalObject = document.defaultView;
+    const chat = document.createElement('div');
+    chat.id = 'chat';
+    document.body.appendChild(chat);
+    const floorText = '第一页。\n第二页。';
+    const initialElement = createFakeMessageElement(document, { messageId: 90, textContent: floorText });
+    chat.appendChild(initialElement);
+    let currentMessage = { id: 90, text: floorText, visibleText: floorText, element: initialElement };
+    const messages = new Map([[90, currentMessage]]);
+    const eventListeners = new Map();
+    const eventSource = {
+        on(name, handler) {
+            if (!eventListeners.has(name)) eventListeners.set(name, []);
+            eventListeners.get(name).push(handler);
+        },
+        off(name, handler) {
+            eventListeners.set(name, (eventListeners.get(name) || []).filter((item) => item !== handler));
+        },
+        emit(name) {
+            for (const handler of eventListeners.get(name) || []) handler();
+        },
+    };
+    const mutationObservers = [];
+    globalObject.MutationObserver = class {
+        constructor(handler) { this.handler = handler; mutationObservers.push(this); }
+        observe() {}
+        disconnect() {}
+    };
+    const timers = new Map();
+    let timerId = 0;
+    globalObject.setTimeout = (handler, delay) => {
+        timerId += 1;
+        timers.set(timerId, { handler, delay });
+        return timerId;
+    };
+    globalObject.clearTimeout = (id) => timers.delete(id);
+    globalObject.SillyTavern = {
+        getContext: () => ({
+            eventSource,
+            event_types: {
+                GENERATION_STARTED: 'generation_started',
+                GENERATION_ENDED: 'generation_ended',
+                GENERATION_STOPPED: 'generation_stopped',
+            },
+        }),
+    };
+    const vn = bootstrapIGS({
+        global: globalObject,
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => currentMessage,
+            getMessageById: async (id) => messages.get(Number(id)) || null,
+            typeAndSend: async () => {
+                eventSource.emit('generation_started');
+                return { ok: true };
+            },
+        },
+    });
+
+    const opened = await vn.openLatestAvailable('fullscreen');
+    const overlay = document.getElementById('igs-overlay');
+    assert.equal(opened.ok, true);
+    assert.equal(opened.reader.controller.getSnapshot().content.segments.length >= 2, true);
+    await opened.reader.controller.invokeAction('next');
+    assert.equal(opened.reader.controller.getSnapshot().content.currentIndex, 1);
+    assert.match(opened.reader.controller.getSnapshot().content.displayText, /第二页/);
+
+    const sent = await opened.reader.controller.submit('下一句');
+    assert.equal(sent.ok, true);
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
+    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '已发送，等待 AI 回复…');
+    assert.equal(opened.reader.controller.getSnapshot().content.currentIndex, 1);
+
+    currentMessage = { ...currentMessage, visibleText: `${floorText}\n` };
+    messages.set(90, currentMessage);
+    for (const observer of mutationObservers) observer.handler([{ target: chat, addedNodes: [initialElement], removedNodes: [] }]);
+    const idleTimer = Array.from(timers.entries()).find(([, timer]) => timer.delay === 10000);
+    assert.ok(idleTimer);
+    timers.delete(idleTimer[0]);
+    idleTimer[1].handler();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
+    assert.equal(opened.reader.controller.getSnapshot().content.currentIndex, 1);
+    assert.match(opened.reader.controller.getSnapshot().content.displayText, /第二页/);
+
+    eventSource.emit('generation_ended');
+    const stableTimer = Array.from(timers.entries()).find(([, timer]) => timer.delay === 800);
+    assert.ok(stableTimer);
+    timers.delete(stableTimer[0]);
+    stableTimer[1].handler();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), false);
+    assert.equal(opened.reader.controller.getSnapshot().content.currentIndex, 1);
+    assert.match(opened.reader.controller.getSnapshot().content.displayText, /第二页/);
+    vn.destroy();
 });
 
 test('gate:simulation:igs-ui-embedded-turn-navigation-keeps-latest-host-and-does-not-jump', async () => {

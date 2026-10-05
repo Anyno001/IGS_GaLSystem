@@ -31,9 +31,11 @@ export async function requestBaibaiImage(api, slot = {}, options = {}) {
     if (!api) return { ok: false, error: '未检测到柏宝绘' };
     const status = readBaibaiStatus(api);
     if (status.configured === false) return { ok: false, error: `柏宝绘未就绪：${status.reason || '请先在柏宝绘配置出图渠道'}` };
-    const chars = (Array.isArray(slot.chars) ? slot.chars : []).filter((c) => c && String(c.tags || '').trim());
+    // floorTag：柏宝绘自己写在楼层里的词，角色已展开，整串作为 prompt，不再分角色。
+    const floorTag = options.floorTag && String(options.floorTag.tag || '').trim() ? options.floorTag : null;
+    const chars = floorTag ? [] : (Array.isArray(slot.chars) ? slot.chars : []).filter((c) => c && String(c.tags || '').trim());
     const split = status.supportsCharacters === true && chars.length > 0;
-    const prompt = split ? joinTags([slot.scene]) : joinTags([slot.scene, ...chars.map((c) => c.tags)]);
+    const prompt = floorTag ? joinTags([floorTag.tag]) : split ? joinTags([slot.scene]) : joinTags([slot.scene, ...chars.map((c) => c.tags)]);
     if (!prompt) return { ok: false, error: '没有可交给柏宝绘的提示词' };
     const m = String(options.size || '').match(/(\d+)\s*[x×*]\s*(\d+)/i);
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -43,6 +45,7 @@ export async function requestBaibaiImage(api, slot = {}, options = {}) {
     try {
         const result = await api.generate({
             prompt,
+            ...(floorTag && floorTag.nl && { nl: floorTag.nl }),
             ...(String(slot.sceneUc || '').trim() && { negative: String(slot.sceneUc).trim() }),
             ...(split && { characters: chars.map((c, index) => ({ name: String(c.name || `角色${index + 1}`), tag: String(c.tags).trim() })) }),
             size: m && Number(m[1]) > Number(m[2]) ? 'landscape' : 'portrait',

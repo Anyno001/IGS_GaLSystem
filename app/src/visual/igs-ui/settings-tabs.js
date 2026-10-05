@@ -149,11 +149,13 @@ const IMAGE_CG_TEMPLATE = `
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">CG 库</div>
     <div class="igs-source-filter-note">生成过的剧情 CG 和 NSFW 图都在这里，点缩略图看大图。</div>
+    <div class="igs-source-filter-grid">{{imageCacheCountField}}</div>
     <div class="igs-settings-row">
       <button class="igs-settings-action" data-action="image-cg-refresh" type="button">刷新</button>
       <button class="igs-settings-action" data-action="image-cg-select-all" type="button">全选</button>
       <button class="igs-settings-action" data-action="image-cg-delete-selected" type="button">删除选中</button>
       <button class="igs-settings-action" data-action="image-cg-delete-all" type="button">删除全部</button>
+      <button class="igs-settings-action" data-action="image-cache-clear" type="button">清空本地缓存</button>
       <button class="igs-settings-action" data-action="open-cg-gallery" type="button">收藏与隐藏</button>
     </div>
     <div class="igs-settings-result" data-result="image-cg">{{imageCgStatus}}</div>

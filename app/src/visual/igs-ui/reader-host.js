@@ -65,7 +65,7 @@ import { floorKeyOf } from '../../media/illustration-store.js';
 import { normalizeMoodGroups, resolveMoodGroup } from '../../scene/mood-groups.js';
 import { NSFW_COUNT_MAX, normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { describeLlmReady } from '../../generated-images/illustration/caption-writer.js';
-import { normalizeImageSourceMode, mergeLegacyNaiSettings, BAIBAI_ENABLED } from '../../generated-images/image-backend.js';
+import { normalizeImageSourceMode, mergeLegacyNaiSettings } from '../../generated-images/image-backend.js';
 import {
     getOriginalReaderHtml,
     getOriginalReaderSource,
@@ -162,6 +162,7 @@ import {
 } from './embedded-reader-runtime.js';
 import { buildReaderSourceSignature, createReaderSourceCache } from './reader-source-cache.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
+import { collectFloorAssetUrls } from './floor-asset-prefetch.js';
 import { createChatStreamObserver } from '../../host/chat-stream-observer.js';
 import { findAcuDice, formatCheckMessage, resolveDiceCommand } from '../../choices/dice-check.js';
 import { buildResultFxPlan, normalizeResultFxSettings, resultDetailOf } from './fx-result-model.js';
@@ -203,6 +204,7 @@ import {
     normalizeSettingsTab,
     normalizeSettingsValue,
     normalizeSpriteDefaultScale,
+    normalizeSpriteDisplayScale,
     normalizeSpriteLayouts,
     setPath,
 } from './settings-normalize.js';
@@ -223,6 +225,7 @@ import { renderSectionResetButton, sectionResetPlaceholders } from './settings-s
 import { createOnboardingController } from './onboarding-guide-controller.js';
 import { applyPerformanceProfile } from './performance-profile.js';
 import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLabel } from '../../generated-images/image-job-log.js';
+import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
 import { applyFxWorldview } from '../../scene/fx-era.js';
 import { resolveWorldview } from '../../scene/worldview.js';
 import { loadAssetFoldersFor } from './asset-folders.js';
@@ -321,7 +324,7 @@ export function createIgsReaderHost(options = {}) {
     const sourceCache = createReaderSourceCache({
         parse: (input) => buildIgsTextPayload(input.liveMessage, input.parseOptions),
     });
-    const imageResourceCache = createImageResourceCache(options.global || globalThis);
+    const imageResourceCache = createImageResourceCache(options.global || globalThis, { limit: 96 });
     let moodAutoTimer = 0;
     let moodAutoRunning = false;
     let moodAutoAgain = false;
@@ -335,8 +338,7 @@ export function createIgsReaderHost(options = {}) {
         getDocument: () => resolveEmbeddedDocument(state.activeReader),
         onActivity: () => handleChatStreamActivity(),
         onStable: () => handleChatStreamStable(),
-        // 硬超时是最后兜底：handleChatStreamStable 恒返回 true，原条件分支永不退出。
-        // 改为无条件强制退出，不再依赖主路径返回值。
+        // 硬超时无条件收起等待。全屏在新楼写完之前会让 onStable 返回 false，继续等。
         onTimeout: () => {
             exitEmbeddedLoading();
         },
@@ -357,6 +359,7 @@ export function createIgsReaderHost(options = {}) {
     // 否则 N 张图触发 N 次整页重绘、每次又带上已到的全部 dataUrl，开销随张数平方增长。
     const IMAGE_REFRESH_BATCH_MS = 120;
     let imageRefreshTimer = 0;
+    let floorAssetPlan = { key: '', urls: [] };
     let readerImageRefreshPending = false;
     let settingsImageRefreshPending = false;
     // 设置面板全屏盖住阅读器时不重绘后面的舞台，记一笔，关面板时补一次。
@@ -399,6 +402,7 @@ export function createIgsReaderHost(options = {}) {
             const settings = state.activeSettings;
             const imageLoaded = Boolean(detail && detail.reason === 'image-loaded');
             if (state.activeReader) {
+                if (imageLoaded) warmActiveFloorImages();
                 if (settings) readerStaleBehindSettings = true;
                 else if (imageLoaded) scheduleImageRefresh({ reader: true });
                 else rerenderActiveReader();
@@ -575,8 +579,9 @@ export function createIgsReaderHost(options = {}) {
             streamObserver.start();
             startEmbeddedStoryWatch();
         } else {
-            streamObserver.stop();
             stopEmbeddedStoryWatch();
+            if (nextMode === 'fullscreen') streamObserver.start();
+            else streamObserver.stop();
         }
 
         if (domState && domState.overlay) onboarding.syncInvite(domState.overlay);
@@ -608,12 +613,13 @@ export function createIgsReaderHost(options = {}) {
         }
         current.index = 0;
         current.inputValue = '';
+        current.awaitingReply = false;
         current.mountMessageId = replaceOptions.mountMessageId != null ? replaceOptions.mountMessageId : current.mountMessageId;
         current.mode = mode;
         current.snapshot = merged;
         updateMountedReader(merged);
         exitEmbeddedLoading();
-        if (isEmbeddedReaderMode(mode) && current.turnOffset === 0) startReaderImagePolling(current);
+        if ((isEmbeddedReaderMode(mode) || mode === 'fullscreen') && current.turnOffset === 0) startReaderImagePolling(current);
         return {
             ok: true,
             mode,
@@ -817,25 +823,85 @@ export function createIgsReaderHost(options = {}) {
         });
     }
 
+    function pageUsesAsset(content, source) {
+        if (!content || !source) return false;
+        if (content.backgroundImage === source || content.spriteImage === source || content.nsfwCgPortrait === source) return true;
+        if (content.fx && content.fx.foeImage === source) return true;
+        return Array.isArray(content.castSprites) && content.castSprites.some((member) => member && member.image === source);
+    }
+
+    function concreteReaderAssetUrl(url) {
+        const source = String(url || '').trim();
+        if (!source) return '';
+        if (!isGeneratedAssetUrl(source)) return source;
+        const generatedAssets = options.generatedAssets || null;
+        return generatedAssets && typeof generatedAssets.resolveUrl === 'function'
+            ? String(generatedAssets.resolveUrl(source) || '')
+            : '';
+    }
+
+    function warmActiveFloorImages(mountedSnapshot) {
+        const current = state.activeReader;
+        const payload = current && current.payload;
+        const snapshot = mountedSnapshot || (current && current.snapshot);
+        if (!payload || !snapshot) return;
+        const readerSettings = snapshot.readerSettings || {};
+        const liveMessage = (payload.message && payload.message.raw) || payload.message || payload.raw || '';
+        const source = String(payload.raw || (typeof liveMessage === 'string' ? liveMessage : '') || '');
+        const slots = snapshot.content && Array.isArray(snapshot.content.imageSlots) ? snapshot.content.imageSlots : [];
+        const key = `${firstDefined(payload.messageId, payload.message && payload.message.id, '')}:${source.length}:${slots.map((slot) => (slot && slot.url) || '').join('|')}`;
+        if (floorAssetPlan.key !== key) {
+            const sceneAssets = readerSettings._sceneAssets || null;
+            const generatedAssets = options.generatedAssets || null;
+            floorAssetPlan = {
+                key,
+                urls: collectFloorAssetUrls({
+                    source,
+                    sceneAssets,
+                    inheritedOutfits: payload.inheritedOutfits,
+                    inheritedScene: payload.inheritedSceneState,
+                    imageSlots: slots,
+                    systemRole: readerSettings.systemRole,
+                    readClues: (names) => collectOutfitClues(readStatusHudTablesSafe(), names),
+                    assetMatchCtx: {
+                        sceneAssets,
+                        generatedAssets: sceneAssets && sceneAssets.generated,
+                        strict: readerSettings._strictBackgroundMatch === true,
+                        tempBackground: generatedAssets ? generatedAssets.tempBackground : null,
+                        tempSceneTime: generatedAssets ? generatedAssets.tempSceneTime : null,
+                        tempSprite: generatedAssets ? generatedAssets.tempSprite : null,
+                    },
+                }),
+            };
+        }
+        for (const url of floorAssetPlan.urls) {
+            const concrete = concreteReaderAssetUrl(url);
+            if (concrete) imageResourceCache.load(concrete);
+        }
+    }
+
     function resolveReaderAssetUrl(url, current) {
         const source = String(url || '').trim();
         if (!source) return '';
         const ready = imageResourceCache.get(source);
         if (ready) return ready;
+        // data / blob 已经是本地像素。先原样画上，解码只为了预热缓存；
+        // 等解码完再补地址会先把背景清成空的，播 CG 时整屏闪一下。
+        const inline = /^(?:data:|blob:)/i.test(source);
         if (!current.assetLoadRequests.has(source)) {
             current.assetLoadRequests.add(source);
             const loading = imageResourceCache.load(source);
             const immediate = imageResourceCache.get(source);
             loading.then(() => {
                 current.assetLoadRequests.delete(source);
-                if (state.activeReader !== current) return;
+                if (inline || state.activeReader !== current) return;
                 const content = current.snapshot && current.snapshot.content;
-                if (!content || (content.backgroundImage !== source && content.spriteImage !== source)) return;
+                if (!pageUsesAsset(content, source)) return;
                 updateMountedReader(current.snapshot);
             });
             if (immediate) return immediate;
         }
-        return '';
+        return inline ? source : '';
     }
 
 
@@ -953,11 +1019,19 @@ export function createIgsReaderHost(options = {}) {
         return { ok: true };
     }
 
+    function tracksHostReply(mode) {
+        return isEmbeddedReaderMode(mode) || mode === 'fullscreen';
+    }
+
     function handleChatStreamActivity() {
         const current = state.activeReader;
-        if (!current || !isEmbeddedReaderMode(current.mode)) return;
-        syncEmbeddedStreamMount(current);
-        enterEmbeddedLoading();
+        if (!current || !tracksHostReply(current.mode)) return;
+        if (isEmbeddedReaderMode(current.mode)) {
+            syncEmbeddedStreamMount(current);
+            enterEmbeddedLoading();
+            return;
+        }
+        enterReplyWait(current);
     }
 
     function resolveEmbeddedDocument(current) {
@@ -1045,7 +1119,8 @@ export function createIgsReaderHost(options = {}) {
     // 流式 token 期间不解析正文、不收集图片，避免酒馆卡顿与页面抖动。
     async function handleChatStreamStable() {
         const current = state.activeReader;
-        if (!current || !isEmbeddedReaderMode(current.mode)) return true;
+        const embedded = Boolean(current && isEmbeddedReaderMode(current.mode));
+        if (!current || !tracksHostReply(current.mode)) return true;
         if (typeof options.getCurrentMessage !== 'function'
             || typeof options.openViewerFromMessage !== 'function') {
             exitEmbeddedLoading();
@@ -1057,8 +1132,19 @@ export function createIgsReaderHost(options = {}) {
             new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
         if (!message || message.id == null) {
+            if (current.mode === 'fullscreen' && current.awaitingReply && !streamObserver.hasGenerationSettled()) return false;
             exitEmbeddedLoading();
             return true;
+        }
+        // 全屏：用户还停在这一楼。正文比对稍有出入也不能重开，重开会把页码打回第一页并清掉等待提示。
+        // 生成没结束就继续等；结束了仍是这一楼，只收起提示，留在当前页。新楼写完再切过去。
+        if (current.mode === 'fullscreen' && current.awaitingReply) {
+            const newFloor = Number(message.id) !== Number(current.contentMessageId);
+            if (!streamObserver.hasGenerationSettled() || !newFloor) {
+                if (!streamObserver.hasGenerationSettled()) return false;
+                exitEmbeddedLoading();
+                return true;
+            }
         }
         const nextRaw = getMessagePrimaryText(message.raw || message);
         const nextVisible = String(message.visibleText || '');
@@ -1069,9 +1155,9 @@ export function createIgsReaderHost(options = {}) {
             exitEmbeddedLoading();
             return true;
         }
-        syncEmbeddedReaderMount(current, message);
         current.turnOffset = 0;
         current.mountMessageId = message.id;
+        if (embedded) syncEmbeddedReaderMount(current, message);
         try {
             await options.openViewerFromMessage(message.id, current.mode, {
                 replaceActive: true,
@@ -1085,6 +1171,21 @@ export function createIgsReaderHost(options = {}) {
             exitEmbeddedLoading();
         }
         return true;
+    }
+
+    function enterReplyWait(current) {
+        if (!current || current.mode !== 'fullscreen') return;
+        if (current.streamPhase !== 'streaming') {
+            current.imagePollToken += 1;
+            current.imagePolling = false;
+            current.streamBaselineRaw = String(current.mountBaselineRaw || '');
+            current.streamBaselineVisible = String(current.mountBaselineVisible || '');
+            streamObserver.prepareForReply();
+        }
+        current.streamPhase = 'streaming';
+        current.awaitingReply = true;
+        const overlay = current.dom && current.dom.overlay;
+        if (overlay && overlay.classList) overlay.classList.add('igs-awaiting-reply');
     }
 
     function enterEmbeddedLoading() {
@@ -1119,6 +1220,9 @@ export function createIgsReaderHost(options = {}) {
         current.streamBaselineRaw = '';
         current.streamBaselineVisible = '';
         current.streamPhase = 'idle';
+        current.awaitingReply = false;
+        const waitingOverlay = current.dom && current.dom.overlay;
+        if (waitingOverlay && waitingOverlay.classList) waitingOverlay.classList.remove('igs-awaiting-reply');
         if (moodAutoFloorWaiting && moodAutoFloorWaiting !== moodAutoFloorSent) {
             moodAutoFloorSent = moodAutoFloorWaiting;
             moodAutoFloorWaiting = '';
@@ -1155,14 +1259,25 @@ export function createIgsReaderHost(options = {}) {
             startEmbeddedStoryWatch();
             return;
         }
-        streamObserver.stop();
         stopEmbeddedStoryWatch();
-        exitEmbeddedLoading();
         if (current.dom.embeddedMount) {
+            const wasStreaming = current.streamPhase === 'streaming';
+            exitEmbeddedLoading();
             (doc.documentElement || doc.body).appendChild(root);
             teardownEmbeddedMount(current.dom.embeddedMount);
             current.dom.embeddedMount = null;
+            if (mode === 'fullscreen') {
+                streamObserver.start();
+                if (wasStreaming) enterReplyWait(current);
+            } else streamObserver.stop();
+            return;
         }
+        if (mode === 'fullscreen') {
+            streamObserver.start();
+            return;
+        }
+        streamObserver.stop();
+        exitEmbeddedLoading();
     }
 
     function createReaderController() {
@@ -1305,21 +1420,23 @@ export function createIgsReaderHost(options = {}) {
     async function submitReaderInput(text) {
         if (!state.activeReader) return { ok: false, reason: 'reader-not-open' };
         const embedded = isEmbeddedReaderMode(state.activeReader.mode);
-        if (embedded) {
-            enterEmbeddedLoading();
-        }
+        const fullscreen = state.activeReader.mode === 'fullscreen';
+        if (embedded) enterEmbeddedLoading();
+        else if (fullscreen) enterReplyWait(state.activeReader);
         const nextText = String(firstDefined(text, state.activeReader.inputValue, '') || '');
         const send = typeof options.typeAndSend === 'function'
             ? options.typeAndSend
             : async () => ({ ok: false, reason: 'missing-send-handler' });
         const result = await send(nextText);
-        if (embedded && result.ok === false) exitEmbeddedLoading();
-        else if (embedded) streamObserver.noteActivity();
+        if ((embedded || fullscreen) && result.ok === false) exitEmbeddedLoading();
+        else if (embedded || fullscreen) streamObserver.noteActivity();
         state.activeReader.inputValue = '';
         if (state.activeReader.dom && state.activeReader.dom.input) {
             state.activeReader.dom.input.value = '';
         }
-        writeToast(result.ok === false ? (result.reason || '发送失败') : '已发送');
+        if (!(fullscreen && result.ok !== false)) {
+            writeToast(result.ok === false ? (result.reason || '发送失败') : '已发送');
+        }
         return {
             ok: result.ok !== false,
             sent: result.ok !== false,
@@ -1625,7 +1742,8 @@ export function createIgsReaderHost(options = {}) {
         return list.map((e) => `<div class="igs-image-log-item is-${esc(e.level)}"><span class="igs-image-log-time">${esc(formatImageJobLogTime(e.at))}</span><span class="igs-image-log-level">${esc(imageJobLogLevelLabel(e.level))}</span><span class="igs-image-log-msg">${esc(e.message)}</span></div>`).join('');
     }
 
-    // 生图 › CG 库：列出已生成的剧情 CG（含 NSFW 图）与照片，点缩略图用预览层看大图。首次进入时异步读取，读完重绘一次。
+    const CG_DISPLAY_URL_RE = /^(?:data:image\/|https?:\/\/|blob:)/i;
+    // 生图 › CG 库：先列出条目，每张图自己读完就补上，不等这一页全部下完。
     function renderImageCgList() {
         const settings = state.activeSettings;
         const asyncState = settings && settings.asyncState;
@@ -1635,16 +1753,42 @@ export function createIgsReaderHost(options = {}) {
         if (!Array.isArray(asyncState.imageCgEntries)) {
             if (!asyncState.imageCgLoading) {
                 asyncState.imageCgLoading = true;
+                const gen = (asyncState.imageCgLoadGen || 0) + 1;
+                asyncState.imageCgLoadGen = gen;
+                const paint = () => {
+                    if (asyncState.imageCgLoadGen !== gen || state.activeSettings !== settings || asyncState.imageCgPaint) return;
+                    asyncState.imageCgPaint = true;
+                    Promise.resolve().then(() => {
+                        asyncState.imageCgPaint = false;
+                        if (asyncState.imageCgLoadGen === gen && state.activeSettings === settings) rerenderSettings();
+                    });
+                };
                 Promise.resolve()
-                    .then(() => service.loadPage({ limit: 60, showHidden: true }))
+                    .then(() => service.loadPage({ limit: 60, showHidden: true, deferImages: true }))
                     .then((page) => {
-                        asyncState.imageCgEntries = page && page.ok && Array.isArray(page.items) ? page.items : [];
+                        if (asyncState.imageCgLoadGen !== gen) return;
+                        const items = page && page.ok && Array.isArray(page.items) ? page.items : [];
+                        asyncState.imageCgEntries = items;
                         asyncState.imageCgStatus = page && page.ok ? '' : 'CG 读取失败';
-                    })
-                    .catch(() => { asyncState.imageCgEntries = []; asyncState.imageCgStatus = 'CG 读取失败'; })
-                    .then(() => {
                         asyncState.imageCgLoading = false;
-                        if (state.activeSettings === settings) rerenderSettings();
+                        paint();
+                        const read = typeof service.hydrateEntry === 'function' ? service.hydrateEntry.bind(service) : null;
+                        if (!read) return;
+                        for (const entry of items) {
+                            if (CG_DISPLAY_URL_RE.test(String(entry && entry.dataUrl || ''))) continue;
+                            read(entry).then((next) => {
+                                if (asyncState.imageCgLoadGen !== gen || !next) return;
+                                entry.dataUrl = String(next.dataUrl || '');
+                                paint();
+                            }).catch(() => {});
+                        }
+                    })
+                    .catch(() => {
+                        if (asyncState.imageCgLoadGen !== gen) return;
+                        asyncState.imageCgEntries = [];
+                        asyncState.imageCgStatus = 'CG 读取失败';
+                        asyncState.imageCgLoading = false;
+                        paint();
                     });
             }
             return '<div class="igs-scene-empty">正在读取…</div>';
@@ -1652,11 +1796,13 @@ export function createIgsReaderHost(options = {}) {
         const selected = asyncState.imageCgSelected instanceof Set ? asyncState.imageCgSelected : new Set();
         const tiles = asyncState.imageCgEntries.map((entry, index) => {
             const url = String((entry && entry.dataUrl) || '').trim();
-            if (!/^(?:data:image\/|https?:\/\/|blob:)/i.test(url)) return '';
+            const ready = CG_DISPLAY_URL_RE.test(url);
             const label = entry.kind === 'photo' ? '照片' : `第 ${entry.messageId} 楼`;
             const on = selected.has(entry.key);
-            // 大图按序号回查已读列表，避免把整段 data URL 再塞进 data-action。
-            return `<article class="igs-image-cg-tile"><label class="igs-image-cg-check"><input type="checkbox" data-action="image-cg-toggle:${index}" ${on ? 'checked' : ''} aria-label="选择${esc(label)}"></label><button type="button" class="igs-image-cg-view" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图"><img src="${esc(url)}" decoding="async" alt=""><span>${esc(label)}</span></button><button type="button" class="igs-image-cg-delete" data-action="image-cg-delete:${index}">删除</button></article>`;
+            const picture = ready
+                ? `<img src="${esc(url)}" decoding="async" alt="">`
+                : '<span class="igs-image-cg-pending"></span>';
+            return `<article class="igs-image-cg-tile"><label class="igs-image-cg-check"><input type="checkbox" data-action="image-cg-toggle:${index}" ${on ? 'checked' : ''} aria-label="选择${esc(label)}"></label><button type="button" class="igs-image-cg-view" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图">${picture}<span>${esc(label)}</span></button><button type="button" class="igs-image-cg-delete" data-action="image-cg-delete:${index}">删除</button></article>`;
         }).join('');
         return tiles || '<div class="igs-scene-empty">还没有生成过 CG</div>';
     }
@@ -3031,6 +3177,8 @@ export function createIgsReaderHost(options = {}) {
         const boundMarkerUrl = illustrationHit && !illustrationUrl
             ? resolveBoundSlotImageUrl(displayImageState, illustrationHit.slot)
             : '';
+        // 这一页挂了 CG。图还没从存储读回来时不要先铺场景背景，否则两张图先后写上同一层，对话框会跟着闪，最后往往只剩背景。
+        const cgWaiting = Boolean(illustrationHit) && !illustrationUrl && !boundMarkerUrl;
         if (illustrationUrl) {
             finalBackgroundImage = illustrationUrl;
             spriteImage = null;
@@ -3039,6 +3187,10 @@ export function createIgsReaderHost(options = {}) {
             finalBackgroundImage = boundMarkerUrl;
             spriteImage = null;
             backgroundMatch = { source: 'bound-slot' };
+        } else if (cgWaiting) {
+            finalBackgroundImage = '';
+            spriteImage = null;
+            backgroundMatch = { source: 'cg' };
         } else if (slotBoundUrl) {
             finalBackgroundImage = slotBoundUrl;
             spriteImage = null;
@@ -3054,7 +3206,7 @@ export function createIgsReaderHost(options = {}) {
             }
             spriteImage = null;
         }
-        const cgActive = Boolean(illustrationUrl);
+        const cgActive = Boolean(illustrationUrl || boundMarkerUrl || cgWaiting);
         // Per-segment classification from the formatted segment text itself.
         // Order matters: thought (*...*) is checked before dialogue ([名字]：) because
         // a thought segment looks like *[名字]：...* and would otherwise match dialogue.
@@ -3563,9 +3715,10 @@ export function createIgsReaderHost(options = {}) {
                 imageLogMaxEntriesField: field('bridge.imageJobLog.maxEntries', '自动清理：最多保留条数', numberInput('bridge.imageJobLog.maxEntries', logSettings.maxEntries, 50, 1000)),
                 imageLogStatus: esc(asyncState.imageLogStatus || ''),
                 imageLogList: imageSubTab === 'logs' ? renderImageJobLogList() : '',
+                imageCacheCountField: field('bridge.imageCache.maxCount', '本地缓存张数', numberInput('bridge.imageCache.maxCount', normalizeImageCacheCount(bridge.imageCache && bridge.imageCache.maxCount), 1, 2000)),
                 imageCgStatus: esc(asyncState.imageCgStatus || ''),
                 imageCgList: imageSubTab === 'cg' ? renderImageCgList() : '',
-                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ...(BAIBAI_ENABLED ? [['baibai', '柏宝绘']] : [])], '图像来源')),
+                imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS 内置 NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ['baibai', '柏宝绘']], '图像来源')),
                 imageSourceNote: esc(sourceNotes[sourceMode]),
                 imageContentNote: esc(contentNotes[sourceMode]),
                 sourceNaiHidden: hiddenAttr(sourceMode === 'dbgen'),
@@ -3803,8 +3956,8 @@ export function createIgsReaderHost(options = {}) {
           ${CHARACTER_ADD_MENU}
         </div>
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
-        ${field('readerSettings.spriteDefaultScale', '立绘默认高度', selectInput('readerSettings.spriteDefaultScale', reader.spriteDefaultScale || 100, [60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
-        <div class="igs-source-filter-note">没单独拖动调过的立绘按这个高度显示，自己上传的图大小不一时统一用它压一压；调过位置的立绘不受影响。</div>
+        ${field('readerSettings.spriteDisplayScale', '立绘全局缩放', selectInput('readerSettings.spriteDisplayScale', reader.spriteDisplayScale || 100, [50, 60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
+        ${field('readerSettings.spriteDefaultScale', '立绘基准高度', selectInput('readerSettings.spriteDefaultScale', reader.spriteDefaultScale || 100, [60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
         ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强')}
         <div class="igs-source-filter-note">开启后可能增加性能开销，手机上尤其明显。</div>
         ${spriteEnhance.enabled === true ? `<div class="igs-settings-sub">
@@ -4495,7 +4648,7 @@ export function createIgsReaderHost(options = {}) {
                     const cgEntries = cgAsync && Array.isArray(cgAsync.imageCgEntries) ? cgAsync.imageCgEntries : [];
                     const cgEntry = cgEntries[Number(actName.slice('image-cg-view:'.length))];
                     const cgUrl = cgEntry ? String(cgEntry.dataUrl || '').trim() : '';
-                    if (cgUrl) showSpritePreviewOverlay(root, cgUrl);
+                    if (CG_DISPLAY_URL_RE.test(cgUrl)) showSpritePreviewOverlay(root, cgUrl);
                     return;
                 }
                 event.preventDefault();
@@ -4750,6 +4903,7 @@ export function createIgsReaderHost(options = {}) {
     function updateMountedReader(snapshot) {
         const current = state.activeReader;
         if (!current) return;
+        warmActiveFloorImages(snapshot);
         current.autoPlayer?.setSpeed(snapshot.readerSettings?.typewriter?.speed);
         if (!current.dom || !current.dom.root) return;
         const refs = hydrateReaderMount(current.dom.root, snapshot);
@@ -5291,6 +5445,7 @@ export function createIgsReaderHost(options = {}) {
             imgBrightness: 100,
             cgHoldPages: 4,
             spriteDefaultScale: 100,
+            spriteDisplayScale: 100,
             showStatusLine: false,
             typewriter: { ...TYPEWRITER_DEFAULTS },
             stageShake: normalizeStageShakeSettings(null),
@@ -5362,6 +5517,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.btnOrder = normalizeBtnOrder(normalized.btnOrder);
         normalized.spriteLayouts = normalizeSpriteLayouts(normalized.spriteLayouts);
         normalized.spriteDefaultScale = normalizeSpriteDefaultScale(normalized.spriteDefaultScale);
+        normalized.spriteDisplayScale = normalizeSpriteDisplayScale(normalized.spriteDisplayScale);
         normalized.spriteHeads = normalizeSpriteHeads(normalized.spriteHeads);
         normalized.castSlotLayouts = normalizeSpriteLayouts(normalized.castSlotLayouts);
         // 对话主题（vnTheme）按模式存进 readerSettings。独立于 _v 门控处理，避免 schema 版本

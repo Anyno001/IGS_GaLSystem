@@ -255,18 +255,18 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
     })).join('');
     const o = encSeg(active);
     const metaKey = `outfit-meta:${charName}\u0001${active}`;
-    // 生成立绘和表情差分提到页签行上，不再埋在 ⋯ 里；其余操作仍在页签行末尾的「⋯」里。
+    // 生成立绘只留在原装。其它服装没有自己的立绘，只能出表情差分。
     const exprAction = active ? `outfit-expression-set:${c}:${o}` : `char-expression-set:${c}`;
     const notesMap = plain(expressionNotes);
     const pending = active
         ? pendingExpressionCaptions(notesMap[`${charName}\u0001${active}`], plain(map[active] && map[active].moods))
         : pendingExpressionCaptions(notesMap[charName], plain(plain(plain(sceneAssets).characters)[charName]));
     const resumeAction = active ? `outfit-expression-resume:${c}:${o}` : `char-expression-resume:${c}`;
-    const spriteAction = active && isBuiltinNudeOutfit(plain(map[active]).wardrobe)
-        ? `outfit-generate-nude:${c}:${o}`
-        : `char-generate-sprite:${c}`;
+    const spriteButton = active
+        ? ''
+        : `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="char-generate-sprite:${c}">生成立绘</button>`;
     const quickButtons = `<span class="igs-outfit-quick">`
-        + `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${spriteAction}">生成立绘</button>`
+        + spriteButton
         + `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${exprAction}">表情差分</button>`
         + (pending.length ? `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${resumeAction}" title="词已经写好，直接出图，不重写">继续生图（${pending.length}）</button>` : '')
         + `</span>`;
@@ -289,21 +289,22 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
 
 // 规则页的衣柜提示词。focus 是从服装面板跳过来的那一条，高亮显示。
 export function renderWardrobe(wardrobe, { resolveUrl, scopeTag, focus = '', lead = '' } = {}) {
-    const pencil = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
-    const trash = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
     const tag = typeof scopeTag === 'function' ? scopeTag : () => '';
     const rows = Object.entries(plain(wardrobe)).filter(([name]) => !isBuiltinNudeOutfit(name)).map(([name, entry]) => {
-        const prompt = entry && typeof entry.prompt === 'string' ? entry.prompt : '';
         const reference = entry && typeof entry.reference === 'string' ? entry.reference : '';
         const encoded = encSeg(name);
         const nsfwBoost = Boolean(entry && entry.nsfwBoost);
-        return `<div class="igs-wardrobe-item${name === focus ? ' is-focus' : ''}" data-wardrobe-item="${esc(name)}"><div class="igs-btn-mgr-row"><span class="igs-btn-mgr-label">${esc(name)}</span>${tag('wardrobe', name)}`
-            + `<input class="igs-scene-url-input igs-wardrobe-prompt" data-wardrobe-name="${esc(name)}" value="${esc(prompt)}" placeholder="提示词">`
-            + `<button type="button" class="igs-switch igs-wardrobe-nsfw${nsfwBoost ? ' is-on' : ''}" data-action="wardrobe-nsfw:${encoded}" aria-pressed="${nsfwBoost ? 'true' : 'false'}"><i></i><span>瑟瑟加强</span></button>`
-            + `<button type="button" class="igs-settings-action" data-action="wardrobe-generate-prompt:${encoded}">生成提示词</button>`
-            + `<button type="button" class="igs-settings-action" data-action="wardrobe-reference:${encoded}">生图参考</button>`
-            + `<button type="button" class="igs-btn-mgr-icon" data-action="wardrobe-rename:${encoded}" title="重命名">${pencil}</button>`
-            + `<button type="button" class="igs-btn-mgr-icon" data-action="wardrobe-remove:${encoded}" title="删除">${trash}</button></div>`
+        const menu = renderRowMenu([
+            menuItem(`wardrobe-prompt:${encoded}`, '提示词'),
+            menuItem(`wardrobe-generate-prompt:${encoded}`, '生成提示词'),
+            menuItem(`wardrobe-reference:${encoded}`, '生图参考'),
+            `<button type="button" class="igs-add-menu-item igs-wardrobe-nsfw${nsfwBoost ? ' is-on' : ''}" data-action="wardrobe-nsfw:${encoded}" role="menuitem" aria-pressed="${nsfwBoost ? 'true' : 'false'}">${nsfwBoost ? '关闭瑟瑟加强' : '瑟瑟加强'}</button>`,
+            menuItem(`wardrobe-rename:${encoded}`, '重命名'),
+            menuItem(`wardrobe-remove:${encoded}`, '删除', ' is-danger'),
+        ], `「${name}」的操作`);
+        return `<div class="igs-wardrobe-item${name === focus ? ' is-focus' : ''}" data-wardrobe-item="${esc(name)}"><div class="igs-btn-mgr-row">`
+            + `<button type="button" class="igs-btn-mgr-label igs-wardrobe-name" data-action="wardrobe-prompt:${encoded}" title="查看和修改提示词">${esc(name)}</button>${tag('wardrobe', name)}`
+            + `${menu}</div>`
             + (reference ? `<div class="igs-wardrobe-reference">${thumb(reference, `${name} 参考图`, '', resolveUrl)}</div>` : '')
             + `</div>`;
     }).join('');
@@ -455,13 +456,9 @@ img.igs-outfit-avatar{padding:0}
 .igs-wardrobe-group{display:flex;flex-direction:column;gap:6px;min-width:0}
 .igs-wardrobe-group+.igs-wardrobe-group{margin-top:4px;padding-top:12px;border-top:1px solid var(--igs-settings-line)}
 .igs-wardrobe-item{display:flex;flex-direction:column;min-width:0}
-.igs-wardrobe-item .igs-btn-mgr-row{height:auto;min-height:36px;flex-wrap:wrap}
-.igs-wardrobe-item .igs-btn-mgr-label{flex:0 1 auto;max-width:9em}
-.igs-wardrobe-prompt{flex:1;min-width:0;width:auto;height:26px}
-.igs-wardrobe-nsfw{height:26px;flex-shrink:0;padding:0 8px;font-size:12px;gap:6px}
-.igs-wardrobe-nsfw i{width:26px;height:16px}
-.igs-wardrobe-nsfw i:after{width:12px;height:12px}
-.igs-wardrobe-nsfw.is-on i:after{left:12px}
+.igs-wardrobe-item .igs-btn-mgr-row{flex-wrap:nowrap;height:36px}
+button.igs-wardrobe-name{flex:1;min-width:3em;max-width:none;height:36px;padding:0;border:0;background:transparent;font-family:inherit;font-size:12px;line-height:36px;color:var(--igs-settings-ink-2);text-align:left;cursor:pointer}
+.igs-wardrobe-nsfw.is-on{color:var(--igs-settings-accent)}
 .igs-wardrobe-reference{padding:0 8px 4px}
 .igs-wardrobe-item.is-focus{border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-highlight)}
 .igs-asset-scope-switch{display:inline-flex;flex-shrink:0;gap:2px;padding:2px;border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-field)}

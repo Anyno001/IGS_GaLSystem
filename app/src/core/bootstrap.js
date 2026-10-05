@@ -2,6 +2,7 @@ import { createPublicApi, attachPublicApi, detachPublicApi } from '../api/public
 import { createTavernHelperAdapter, getSillyTavernContext } from '../host/tavern-helper-adapter.js';
 import { sceneAssetsForContext } from '../scene/asset-scope.js';
 import { withTavernGeneratedAssetFiles, withTavernIllustrationFiles } from '../media/tavern-image-files.js';
+import { localImageCacheFor } from '../media/tavern-image-cache.js';
 import { createPresetRegistry } from '../presets/preset-registry.js';
 import { createInputChannel } from '../host/input-channel.js';
 import { parseSceneText } from '../scene/text-parser.js';
@@ -52,7 +53,7 @@ import { buildTagGrammar, DEPTH0_REMINDER, normalizePromptPlacement } from '../v
 import { detectPromptTriggers } from '../scene/prompt-triggers.js';
 import { collectPromptContext } from '../host/prompt-context.js';
 
-const IGS_VERSION = '0.34.45';
+const IGS_VERSION = '0.34.62';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
@@ -125,17 +126,18 @@ export function bootstrapIGS(options = {}) {
     });
     // CG 库与自动插图共用同一个插图存储实例。
     const illustrationStore = options.illustrationStore || withTavernIllustrationFiles(createIndexedDbIllustrationStore(globalObject), globalObject);
+    const readerModeNow = () => {
+        const snapshot = getUnifiedSettingsSnapshot() || {};
+        return String(snapshot.readerMode || (snapshot.bridge && snapshot.bridge.openMode) || 'pc');
+    };
     const illustrationService = options.illustrationService || createAutoIllustrationService({
         messageHost: illustrationMessageHost,
         llm: secondaryLlm,
         nai: imageBackend,
         store: illustrationStore,
         getSettings: () => readImageBridge().autoIllustration,
-        getReaderMode: () => {
-            const snapshot = getUnifiedSettingsSnapshot() || {};
-            return String(snapshot.readerMode || (snapshot.bridge && snapshot.bridge.openMode) || 'pc');
-        },
-        getViewport: () => readCgViewport(globalObject),
+        getReaderMode: readerModeNow,
+        getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
         events,
         random: options.random,
@@ -153,11 +155,8 @@ export function bootstrapIGS(options = {}) {
             const bridge = readImageBridge();
             return { autoIllustration: bridge.autoIllustration, sceneAssets: sceneAssetsNow(bridge.sceneAssets) };
         },
-        getReaderMode: () => {
-            const snapshot = getUnifiedSettingsSnapshot() || {};
-            return String(snapshot.readerMode || (snapshot.bridge && snapshot.bridge.openMode) || 'pc');
-        },
-        getViewport: () => readCgViewport(globalObject),
+        getReaderMode: readerModeNow,
+        getViewport: () => readCgViewport(globalObject, readerModeNow()),
         events,
         report: reportImageJob,
     });
@@ -354,14 +353,23 @@ export function bootstrapIGS(options = {}) {
                 if (typeof presetRegistry.hydrate === 'function') presetRegistry.hydrate();
                 events.emit('igs:legacy-settings-updated', cloneData(state.legacyIgs));
                 if (options.autoAttachMagicWand !== false) applyEntryConfig(resolveEntryConfig());
+                applyImageCacheLimit(state.config);
                 syncSceneAssetsInjectionWithRetry(1);
             },
         });
         void state.settingsSync.start();
     }
+    function applyImageCacheLimit(bridge) {
+        const cache = localImageCacheFor(globalObject);
+        if (cache && typeof cache.setMaxCount === 'function') {
+            void cache.setMaxCount(bridge && bridge.imageCache && bridge.imageCache.maxCount);
+        }
+    }
+
     state.status = 'ready';
     // 设置就绪后再按保留规则清理一次启动前遗留的旧日志。
     if (imageJobLog && typeof imageJobLog.prune === 'function') imageJobLog.prune();
+    applyImageCacheLimit((getUnifiedSettingsSnapshot() || {}).bridge);
     illustrationService.start();
     assetGenerationService.start();
     itemCg.itemImages.start();
@@ -543,6 +551,7 @@ export function bootstrapIGS(options = {}) {
         events.emit('igs:legacy-settings-updated', cloneData(state.legacyIgs));
         // 用户改了日志保留天数 / 条数后立即按新规则清理。
         if (imageJobLog && typeof imageJobLog.prune === 'function') imageJobLog.prune();
+        applyImageCacheLimit(nextBridge);
         syncSceneAssetsInjectionWithRetry(1);
         return {
             ok: true,
