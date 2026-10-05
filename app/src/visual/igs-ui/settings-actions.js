@@ -10,6 +10,7 @@ import { collectAssetZipEntries } from '../../scene/asset-zip.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
+import { buildPageDiagnostic } from './page-diagnostic.js';
 import { clearMoodReview, loadMoodReview, removeMoodReview, saveMoodReview } from '../../scene/mood-review-store.js';
 import { applyMoodAssignments, buildMoodClassificationRequest, parseMoodClassification, resolveSecondaryLlm } from '../../scene/mood-classify.js';
 import { SETTINGS_NOTICE_MS } from './settings-notice.js';
@@ -37,6 +38,7 @@ import { resolveCharacterDna } from '../../scene/character-dna.js';
 import { resolveCharacterKey } from '../../scene/scene-directives.js';
 import { normalizeCharacterDna, normalizeCharacterDnaMap, removeCharacterDna, renameCharacterDna } from '../../scene/character-dna.js';
 import { normalizeCharacterHouses } from './magic-house.js';
+import { normalizeCharacterVoice, normalizeCharacterVoices, normalizeVoiceBarkSettings, previewVoicePack, resolveCharacterVoice } from './voice-bark.js';
 import { handleOutfitAction } from './settings-outfit-actions.js';
 import { beginSettingsProgress, markSettingsButtonBusy, remountSettingsNotice } from './settings-notice.js';
 import { createSettingsDialogs } from './settings-dialog.js';
@@ -787,6 +789,20 @@ export async function handleSettingsAction(action, ctx) {
         if (reset.ok === false) return reset;
         const persisted = persistSettingsDraft();
         if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'copy-page-diagnostic') {
+        const text = buildPageDiagnostic(state.activeReader && state.activeReader.snapshot, { version: options.version, worldview: resolveWorldview(draftEffectiveAssets(settingsState)) });
+        if (!text) {
+            if (typeof dialogs.view === 'function') await dialogs.view('先打开阅读器翻到出问题的那一页，再从工具栏「设置」进来复制。');
+            return rerenderSettings();
+        }
+        const nav = (options.global || globalThis).navigator;
+        const copied = nav && nav.clipboard && typeof nav.clipboard.writeText === 'function'
+            ? await Promise.resolve(nav.clipboard.writeText(text)).then(() => true, () => false)
+            : false;
+        if (typeof dialogs.edit === 'function') await dialogs.edit(copied ? '已复制到剪贴板，不含台词正文。' : '复制失败，请手动全选下面的内容复制。', text, { okLabel: '关闭' });
         return rerenderSettings();
     }
 
@@ -2039,6 +2055,42 @@ export async function handleSettingsAction(action, ctx) {
         return rendered;
     }
 
+    // 角色学院、声线存在根素材库（和角色卡素材库分开），按主名记。
+    if (normalizedAction.startsWith('char-house:') || normalizedAction.startsWith('char-voice:')) {
+        const voice = normalizedAction.startsWith('char-voice:');
+        const parts = normalizedAction.slice(voice ? 'char-voice:'.length : 'char-house:'.length).split(':');
+        const field = voice ? parts.shift() : 'house';
+        const charName = decodeSeg(parts[0]);
+        const value = decodeSeg(parts[1]);
+        if (!charName || ['__proto__', 'constructor', 'prototype'].includes(charName)) return { ok: false, error: '角色名无效' };
+        const assets = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
+        if (voice) {
+            if (!['pack', 'pitch', 'speed'].includes(field)) return { ok: false, error: '未知的声线设置' };
+            const voices = assets.characterVoices = normalizeCharacterVoices(assets.characterVoices);
+            const entry = normalizeCharacterVoice(voices[charName]);
+            entry[field] = field === 'pack' ? value : Number(value);
+            const next = normalizeCharacterVoices({ [charName]: entry })[charName];
+            if (next) voices[charName] = next;
+            else delete voices[charName];
+        } else {
+            const houses = assets.characterHouses = normalizeCharacterHouses(assets.characterHouses);
+            if (value) houses[charName] = value;
+            else delete houses[charName];
+            assets.characterHouses = normalizeCharacterHouses(houses);
+        }
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
+    if (normalizedAction.startsWith('voice-bark-preview:')) {
+        const charName = decodeSeg(normalizedAction.slice('voice-bark-preview:'.length));
+        const voice = resolveCharacterVoice(draftEffectiveAssets(settingsState), charName);
+        if (!voice.pack) return { ok: false, error: '这个角色当前不发声：请先选一个声线' };
+        previewVoicePack(voice.pack.id, { pitch: voice.pitch, speed: voice.speed, volume: normalizeVoiceBarkSettings((settingsState.draft.readerSettings || {}).voiceBark).volume });
+        return { ok: true, previewed: voice.pack.id };
+    }
+
     if (normalizedAction.startsWith('status-avatar-clear:')) {
         const charName = decodeSeg(normalizedAction.slice('status-avatar-clear:'.length));
         const sceneAssets = draftAssetLibrary(settingsState, editTarget);
@@ -2761,6 +2813,9 @@ export async function handleSettingsAction(action, ctx) {
         if (settingsState.draft.bridge.sceneAssets.characterHouses && typeof settingsState.draft.bridge.sceneAssets.characterHouses === 'object') {
             delete settingsState.draft.bridge.sceneAssets.characterHouses[name];
         }
+        if (settingsState.draft.bridge.sceneAssets.characterVoices && typeof settingsState.draft.bridge.sceneAssets.characterVoices === 'object') {
+            delete settingsState.draft.bridge.sceneAssets.characterVoices[name];
+        }
         draftAssetLibrary(settingsState, editTarget).characterDna = removeCharacterDna(draftAssetLibrary(settingsState, editTarget).characterDna, name);
         if (draftAssetLibrary(settingsState, editTarget).characterOutfits && typeof draftAssetLibrary(settingsState, editTarget).characterOutfits === 'object') {
             delete draftAssetLibrary(settingsState, editTarget).characterOutfits[name];
@@ -2905,6 +2960,12 @@ export async function handleSettingsAction(action, ctx) {
             const rootAssets = settingsState.draft.bridge.sceneAssets;
             if (rootAssets && rootAssets !== sceneAssets && rootAssets.characterHouses && typeof rootAssets.characterHouses === 'object') {
                 rootAssets.characterHouses = reorderKey(rootAssets.characterHouses, oldName, newName);
+            }
+            // 角色声线和学院一样存在根素材库，按主名记。
+            for (const assets of new Set([sceneAssets, rootAssets])) {
+                if (assets && assets.characterVoices && typeof assets.characterVoices === 'object') {
+                    assets.characterVoices = reorderKey(assets.characterVoices, oldName, newName);
+                }
             }
             if (sceneAssets.characterDna && typeof sceneAssets.characterDna === 'object') {
                 sceneAssets.characterDna = dnaRename.map;
@@ -3748,6 +3809,7 @@ async function handlePresetAction(action, settingsState, options, dialogs, persi
         mergeAssetFolderScope(storage, isLayeredPreset(preset) ? folderScope(name, layer.key) : name, layer.key);
     }
     root.characterHouses = { ...(root.characterHouses || {}), ...cloneData(pack.characterHouses) };
+    root.characterVoices = { ...(root.characterVoices || {}), ...normalizeCharacterVoices(pack.characterVoices) };
     root.moodGroups = mergeLabelGroups(root.moodGroups, pack.moodGroups);
     root.timeGroups = mergeLabelGroups(root.timeGroups, pack.timeGroups);
     root.weatherGroups = mergeLabelGroups(root.weatherGroups, pack.weatherGroups);
@@ -3785,6 +3847,7 @@ async function importLegacyPreset(settingsState, options, dialogs, persistSettin
     mergeAssetFolderScope(globalObj.localStorage, label, dest);
     if (pack.worldview) applyWorldview(target, pack.worldview);
     root.characterHouses = { ...(root.characterHouses || {}), ...cloneData(pack.characterHouses) };
+    root.characterVoices = { ...(root.characterVoices || {}), ...normalizeCharacterVoices(pack.characterVoices) };
     root.moodGroups = mergeLabelGroups(root.moodGroups, pack.moodGroups);
     root.timeGroups = mergeLabelGroups(root.timeGroups, pack.timeGroups);
     root.weatherGroups = mergeLabelGroups(root.weatherGroups, pack.weatherGroups);

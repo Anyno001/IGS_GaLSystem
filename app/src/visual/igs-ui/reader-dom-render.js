@@ -26,10 +26,11 @@ import {
 } from './settings-normalize.js';
 import { applyReaderModeRuntime } from './reader-runtime.js';
 import { applyTypewriterEffect, cancelTypewriter } from './typewriter-runtime.js';
+import { applyVoiceBark } from './voice-bark.js';
 import { applyStageShakeEffect } from './stage-shake-runtime.js';
 import { applyFxToDom } from './fx-runtime.js';
 import { applyDanmakuToDom } from './danmaku-runtime.js';
-import { renderItemFx } from './fx-item-render.js';
+import { applyItemMentionMarkup, itemMentionsOf, renderItemFx, showItemMention } from './fx-item-render.js';
 import { renderBattleFx } from './fx-battle-render.js';
 import { renderDailyFx } from './fx-daily.js';
 import { peekSpriteHead, probeSpriteHead, resolveSpriteHead, spriteBackgroundSize, spriteWidthPercent } from './fx-anchor.js';
@@ -46,6 +47,7 @@ import { applyMetaFx } from './meta-runtime.js';
 import { applyCgPortrait } from './cg-portrait.js';
 import { applySceneAudio } from './scene-audio.js';
 import { applyBgmNoteToDom } from './bgm-note.js';
+import { isConfessionLine } from './bgm-library.js';
 import { applyTextFxMarkup, armTextFx, disarmTextFx } from './text-fx.js';
 import { fitBilingualRuby, normalizeBilingualSettings, renderBilingualHtml, resolveBilingualDisplay } from './bilingual-text.js';
 import { preloadDialogFonts, resolveDialogFontMetrics } from './dialog-theme-typography.js';
@@ -1397,7 +1399,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         const textType = snapshot.content.textType || 'narration';
         const textFxOn = Boolean(snapshot.readerSettings.textFx && snapshot.readerSettings.textFx.enabled);
         const bilingualDisplay = resolveBilingualDisplay(snapshot.readerSettings.bilingual, snapshot.readerSettings._bilingualDisplay);
-        const renderedHtml = applyTextFxMarkup(renderBilingualHtml(renderDialogueHtml(snapshot.content.displayText, theme, sceneAssetsEnabled), bilingualDisplay, normalizeBilingualSettings(snapshot.readerSettings.bilingual).layout), textFxOn);
+        const renderedHtml = applyItemMentionMarkup(applyTextFxMarkup(renderBilingualHtml(renderDialogueHtml(snapshot.content.displayText, theme, sceneAssetsEnabled), bilingualDisplay, normalizeBilingualSettings(snapshot.readerSettings.bilingual).layout), textFxOn), itemMentionsOf(snapshot));
         const textRenderKey = [snapshot.messageId, snapshot.content.currentIndex, textType, renderedHtml].join(':');
 
         typewriterTextType = textType === 'system' ? 'narration' : textType;
@@ -1544,7 +1546,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         });
     }
     // 亲密演出与 NSFW 仅露脸剪影：复用 fxSprite（布局 + 手动头部标定），编辑立绘时 fxSprite 为 null、不逼近不剪影。
-    const romanceResult = applyRomanceToDom(root, snapshot, { sprite: fxSprite, onMemory: ctx.onRomanceMemory });
+    const romanceResult = applyRomanceToDom(root, snapshot, { sprite: fxSprite, onMemory: ctx.onRomanceMemory, resolveAssetUrl });
     // Meta 互动：头部热区在亲密演出之后同步，心形快捷按钮已在前层时热区插到它下面。
     applyMetaFx(root, snapshot, { sprite: fxSprite, chatId: ctx.chatId, cast: castFxTargets });
     // NSFW 挂 CG 时对话框左侧的裸体头像（开关默认关，旁白页为空即撤下）。
@@ -1567,6 +1569,10 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             battle: Boolean(snapshot.content && snapshot.content.fx && snapshot.content.fx.battle),
             romance: Boolean(snapshot.content && snapshot.content.fx && snapshot.content.fx.romance),
             worldview: snapshot.readerSettings && snapshot.readerSettings._worldview,
+            // 留白：告白标签或说出口的告白台词让音乐停几页；按页计数，同一页重绘不重复算。
+            confess: Boolean(snapshot.content && snapshot.content.fx && snapshot.content.fx.confess),
+            confessText: typewriterTextType === 'dialogue' && isConfessionLine(snapshot.content && snapshot.content.text),
+            pageKey: `${snapshot.messageId}:${snapshot.content && snapshot.content.currentIndex}`,
         },
         active: true,
     });
@@ -1665,6 +1671,13 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         if (dialog.dataset) dialog.dataset.igsBound = '1';
         dialog.addEventListener('click', (event) => {
             if (current.hidden) return;
+            // 点亮的物品名：弹物品卡，不翻页、不跳过打字机。
+            const mention = event.target && event.target.closest && event.target.closest('.igs-item-mention');
+            if (mention && current.snapshot) {
+                event.preventDefault();
+                showItemMention(root, current.snapshot, mention.getAttribute('data-igs-item'), { resolveItemImage: ctx.resolveItemImage, theme: resolveActiveTheme(current.snapshot) });
+                return;
+            }
             if (event.target && event.target.closest && (
                 event.target.closest('.igs-controls')
                 || event.target.closest('#igs-ctrl-bar')
@@ -1722,6 +1735,23 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             horror: resolveHorrorTypewriterLevel(snapshot.readerSettings, resolveHorrorDread(snapshot.content.sceneDread, snapshot.readerSettings.horrorDreadCap)),
         });
         armTextFx(textEl, typewriter && typewriter.animated ? typewriter.revealDelay : null);
+    }
+    if (textEl && typewriterRenderKey) {
+        // 角色语气音：台词开头按情绪播一声「啊嗯哼」。去重只看消息与句序号，换主题、调字号等重绘不重播。
+        const content = snapshot.content;
+        applyVoiceBark(root, {
+            key: `${snapshot.messageId}:${content.currentIndex}`,
+            textType: typewriterTextType,
+            speaker: content.speaker || '',
+            mood: content.statusEmotion || (content.spriteCharacter === content.speaker ? content.spriteMood : '') || '',
+            phone: fxResult.phone === true,
+            nsfw: Boolean(content.sceneNsfw),
+            // 声像与力度：立绘就是说话人时按其位置分左右；亲密演出压成耳语时轻声贴耳。
+            posX: stageSprite && (!content.spriteCharacter || content.spriteCharacter === content.speaker) ? stageSprite.posX : undefined,
+            whisper: romanceResult.whisper === true,
+            // 场上角色的声线提前备好，第一次开口不用等下载。
+            cast: [content.speaker, content.spriteCharacter, ...(Array.isArray(content.castSprites) ? content.castSprites.map((m) => m && m.character) : [])],
+        }, snapshot.readerSettings.voiceBark, snapshot.readerSettings._sceneAssets);
     }
     if (toast) {
         toast.textContent = current.toastMessage || '';

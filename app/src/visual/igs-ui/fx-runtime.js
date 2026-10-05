@@ -18,6 +18,8 @@ import { ensureFxLayers, findFxLayers } from './fx-layer.js';
 import { playFxSfx } from './fx-sfx.js';
 import { ANCIENT_SYMBOL_PLACEMENT, ANCIENT_SYMBOL_SVG, MANGA_SYMBOL_SVG, pickFxAccent, speedLinesImage, warmSpeedLines } from './fx-symbols.js';
 import { FALLBACK_HEAD, HEAD_ASPECT, measureStage, peekSpriteHead, probeSpriteHead, resolveSymbolPlacement, waitSpriteHead } from './fx-anchor.js';
+import { planEatBeats } from './fx-eat-model.js';
+import { normalizeDailyFxSettings } from './fx-daily-model.js';
 
 export const FX_LIFETIME_MS = Object.freeze({
     symbol: 1000, speedLines: 700, heartbeat: 2400, flash: 800,
@@ -47,10 +49,14 @@ export function resolveCutinCrop(head, aspect, ratio = CUTIN_RATIO) {
     const round = (n) => Math.round(n * 100) / 100;
     return { size: round(k * 100), x: round(px), y: round(py) };
 }
-const RANGE_ATTRS = Object.freeze(['data-igs-fx-era', 'data-igs-fx-flashback', 'data-igs-fx-dream', 'data-igs-fx-letterbox', 'data-igs-fx-whisper', 'data-igs-fx-movie', 'data-igs-fx-lightsoff', 'data-igs-fx-umbrella', 'data-igs-fx-call', 'data-igs-fx-call-remote', 'data-igs-fx-call-sprite', 'data-igs-fx-motion', 'data-igs-fx-busy', 'data-igs-fx-presentation']);
-const CALL_PERSISTENT = '.igs-fx-call-badge, .igs-fx-eye-hold, .igs-fx-call-pip, .igs-fx-video';
+const RANGE_ATTRS = Object.freeze(['data-igs-fx-era', 'data-igs-fx-flashback', 'data-igs-fx-dream', 'data-igs-fx-letterbox', 'data-igs-fx-whisper', 'data-igs-fx-movie', 'data-igs-fx-lightsoff', 'data-igs-fx-umbrella', 'data-igs-fx-call', 'data-igs-fx-call-remote', 'data-igs-fx-call-sprite', 'data-igs-fx-call-split', 'data-igs-fx-motion', 'data-igs-fx-busy', 'data-igs-fx-presentation', 'data-igs-fx-eat']);
+// 进食分镜的立绘动作：挂在 #igs-stage-motion 上，时长与 fx-eat-style 的动画一致。
+const EAT_MOTION_ATTR = 'data-igs-fx-eat';
+const EAT_MOTION_MS = Object.freeze({ bite: 400, chew: 1100, hop: 520, shake: 480, dip: 760, sway: 1300 });
+const CALL_PERSISTENT = '.igs-fx-call-badge, .igs-fx-eye-hold, .igs-fx-call-pip, .igs-fx-video, .igs-fx-call-split';
 const VIDEO_CLOSE_MS = 520;
 const PIP_OUT_MS = 320;
+const SPLIT_OUT_MS = 420;
 const CALL_LOG_LIMIT = 64;
 // 来电屏停留时长按结局区分：拒接很快被按掉，未接要响满几轮才放弃。
 const CALL_SCREEN_MS = Object.freeze({ answer: 2400, missed: 3400, reject: 1700 });
@@ -166,6 +172,12 @@ export function planPageFx(snapshot, memory, baseline = favorBaseline, normalize
         if (pickFlash(emotion, settings.flashFx) && once(`flash:${emotionKey}`)) effects.push({ type: 'flash' });
     }
     if (!special) planTitle({ ...content, messageId }, settings.titleCard, memory, effects);
+    // 进食分镜：日常演出里开了「吃东西」时，本页的 eat 标签在说话人头部逐拍播放（不受情绪符号开关影响）。
+    const daily = normalizeDailyFxSettings(snapshot && snapshot.readerSettings && snapshot.readerSettings.dailyFx);
+    if (daily.enabled && daily.eat && !special && !content.sceneNsfw && hasSprite) {
+        const eat = (content.fx && Array.isArray(content.fx.daily) ? content.fx.daily : []).find((item) => item && item.type === 'eat' && item.food);
+        if (eat && once(`eat:${pageKey}:${eat.food}`)) effects.push({ type: 'eat', food: eat.food, reaction: eat.reaction || '' });
+    }
 
     if (settings.favorToast.enabled && content.statusHud && content.statusHud.character) {
         for (const change of diffFavorMetrics(baseline, content.statusHud.character, content.statusHud.metrics)) {
@@ -238,7 +250,7 @@ function setFlag(el, name, on, value = '1') {
 function getState(root, options) {
     let state = states.get(root);
     if (!state) {
-        state = { memory: createFxMemory(), timers: new Set(), sounds: [], pageKey: '', busy: 0, rangeBusy: false, busyOn: false, presentation: 0, presentationOn: false, motion: null, accent: null, callStart: null, timerKey: '', pipSig: '', pipLast: null, video: null, ring: null, logKey: '', callLog: new Map() };
+        state = { memory: createFxMemory(), timers: new Set(), sounds: [], pageKey: '', busy: 0, rangeBusy: false, busyOn: false, presentation: 0, presentationOn: false, motion: null, accent: null, callStart: null, timerKey: '', pipSig: '', pipLast: null, split: null, video: null, ring: null, logKey: '', callLog: new Map() };
         states.set(root, state);
     }
     state.schedule = typeof options.schedule === 'function' ? options.schedule : (fn, ms) => setTimeout(fn, ms);
@@ -302,6 +314,7 @@ function clearTransients(state, layers) {
     state.busy = 0;
     state.presentation = 0;
     syncPresentation(state);
+    if (layers.motion && typeof layers.motion.removeAttribute === 'function') layers.motion.removeAttribute(EAT_MOTION_ATTR);
     for (const layer of [layers.stage, layers.front]) {
         if (!layer) continue;
         for (const el of Array.from(layer.querySelectorAll('.igs-fx-transient'))) el.remove();
@@ -440,6 +453,7 @@ function playSymbol(effect, ctx, life, target) {
     const ancientSvg = ctx.ancient ? ANCIENT_SYMBOL_SVG[effect.kind] : '';
     if (ancientSvg) el.setAttribute('data-era', 'ancient');
     el.innerHTML = ancientSvg || MANGA_SYMBOL_SVG[effect.kind] || '';
+    if (effect.onoma) el.appendChild(node(doc, 'igs-fx-onoma', effect.onoma));
     // 陪衬反应的符号带 castTarget（与 options.cast 条目同结构），落在该陪衬的头部；否则落在说话人。
     if (effect.castTarget && effect.castTarget.character) el.setAttribute('data-igs-fx-cast', effect.castTarget.character);
     const source = effect.castTarget || options.sprite;
@@ -453,6 +467,22 @@ function playSymbol(effect, ctx, life, target) {
         if (states.get(root) !== state || state.pageKey !== plan.pageKey) return;
         showSymbol(el, effect, ctx, life, sprite, head);
     });
+}
+
+// 进食分镜：按节拍逐个弹出漫画符号（带拟声字），立绘跟着做小动作；翻页时随本页计时器一起收掉。
+function playEat(effect, ctx) {
+    const { state, layers, reduced } = ctx;
+    const motion = layers.motion;
+    for (const beat of planEatBeats(effect, { reduced })) {
+        track(state, () => {
+            playSymbol({ type: 'symbol', kind: beat.kind, onoma: beat.onoma }, ctx, beat.life);
+            if (!beat.motion || !motion || typeof motion.setAttribute !== 'function') return;
+            motion.setAttribute(EAT_MOTION_ATTR, beat.motion);
+            track(state, () => {
+                if (motion.getAttribute(EAT_MOTION_ATTR) === beat.motion) motion.removeAttribute(EAT_MOTION_ATTR);
+            }, EAT_MOTION_MS[beat.motion] || 600);
+        }, beat.at);
+    }
 }
 
 function speedLines(doc) {
@@ -495,6 +525,8 @@ function playEffect(effect, ctx) {
     const busy = BUSY_EFFECTS.has(effect.type);
     if (effect.type === 'symbol') {
         playSymbol(effect, ctx, life);
+    } else if (effect.type === 'eat') {
+        playEat(effect, ctx);
     } else if (effect.type === 'speedLines') {
         spawn(state, layers.stage, speedLines(doc), life, busy);
     } else if (effect.type === 'heartbeat') {
@@ -678,6 +710,63 @@ function syncCallPip(state, stage, doc, call, avatar, speaking, reduced) {
     if (pip.hidden !== !call) pip.hidden = !call;
 }
 
+// 分屏对方格：有立绘时显示对方最近一次说话时的立绘（带当前表情），还没开口时显示大头像。
+function fillSplitRemote(doc, panel, name, avatar, feed) {
+    clearChildren(panel);
+    const pic = node(doc, 'igs-fx-call-split-feed');
+    if (feed && pic.style) pic.style.backgroundImage = `url("${feed}")`;
+    panel.appendChild(pic);
+    if (!feed) {
+        const face = node(doc, 'igs-fx-call-split-face');
+        face.appendChild(callFace(doc, name, avatar));
+        panel.appendChild(face);
+    }
+    panel.appendChild(node(doc, 'igs-fx-call-split-name', name));
+    setFlag(panel, 'data-feed', Boolean(feed));
+}
+
+function buildSplit(stage, doc) {
+    const split = persistent(stage, doc, 'igs-fx-call-split');
+    split.appendChild(node(doc, 'igs-fx-call-split-shade'));
+    split.appendChild(node(doc, 'igs-fx-call-split-remote'));
+    split.appendChild(node(doc, 'igs-fx-call-split-edge'));
+    return split;
+}
+
+// 语音通话分屏：对方格从右侧横向滑入，与现场之间斜切分割；说话的一方亮起、格子变大，另一方压暗收窄。
+// 收起时常驻分屏立即隐藏，另放一个对方格替身向右滑出，翻页清理瞬时演出时替身一并收走。
+function syncCallSplit(state, stage, doc, call, key, avatar, sprite, remote, reduced) {
+    const existing = stage.querySelector('.igs-fx-call-split');
+    if (!call) {
+        if (existing && !existing.hidden) {
+            existing.hidden = true;
+            const last = state.split;
+            if (last && !reduced) {
+                const ghost = node(doc, 'igs-fx-call-split-out');
+                ghost.setAttribute('data-active', last.active);
+                const panel = node(doc, 'igs-fx-call-split-remote');
+                fillSplitRemote(doc, panel, last.name, last.avatar, last.feed);
+                ghost.appendChild(panel);
+                spawn(state, stage, ghost, SPLIT_OUT_MS);
+            }
+        }
+        state.split = null;
+        return;
+    }
+    const split = existing || buildSplit(stage, doc);
+    if (!state.split || state.split.key !== key) state.split = { key, name: call.name, avatar, feed: '', sig: '', active: '' };
+    if (remote && sprite && sprite.url) state.split.feed = String(sprite.url).replace(/"/g, '%22');
+    state.split.avatar = avatar;
+    const sig = `${call.name}\n${avatar}\n${state.split.feed}`;
+    if (state.split.sig !== sig) {
+        state.split.sig = sig;
+        fillSplitRemote(doc, split.querySelector('.igs-fx-call-split-remote'), call.name, avatar, state.split.feed);
+    }
+    state.split.active = remote ? 'remote' : 'local';
+    if (split.getAttribute('data-active') !== state.split.active) split.setAttribute('data-active', state.split.active);
+    if (split.hidden) split.hidden = false;
+}
+
 // 挂断记录：挂断所在页常驻一枚胶囊（对象 · 结局 · 时长），回翻该页仍在。
 // 时长只在第一次见到这条挂断时结算，且只取本楼层刚结束的那通电话。
 function syncCallLog(ctx) {
@@ -773,6 +862,9 @@ function syncCall(ctx, callSprite) {
     syncCallBadge(state, layers.front, doc, call, key, now);
     const avatar = call ? resolveAvatar(call.name, snapshot, options) : '';
     syncCallPip(state, layers.stage, doc, call && mode === 'voice' && callSprite === 'avatar' ? call : null, avatar, remote, reduced);
+    const split = call && mode === 'voice' && callSprite === 'split' ? call : null;
+    setFlag(layers.motion, 'data-igs-fx-call-split', Boolean(split), remote ? 'remote' : 'local');
+    syncCallSplit(state, layers.stage, doc, split, key, avatar, options.sprite, remote, reduced);
     syncVideoWindow(state, layers.stage, doc, call && mode === 'video' ? call : null, key, avatar, remote ? options.sprite : null);
     return remote;
 }

@@ -28,6 +28,10 @@ import { cancelSceneGrade } from './scene-grade.js';
 import { closeRomanceFx } from './romance-runtime.js';
 import { closeMetaFx } from './meta-runtime.js';
 import { normalizeRomanceFxSettings, resolveNsfwSpan } from './romance-settings.js';
+import { mergeItemEvents, normalizeItemFxSettings } from './fx-item-model.js';
+import { applyEatToItems } from './fx-eat-model.js';
+import { normalizeDailyFxSettings } from './fx-daily-model.js';
+import { normalizeItemName } from '../../data/shujuku/item-catalog.js';
 import { cancelDailyFx } from './fx-daily.js';
 import { cancelSceneAudio, skipBgmTrack } from './scene-audio.js';
 import { applyBgmNoteToDom, toggleBgmNote } from './bgm-note.js';
@@ -247,6 +251,7 @@ import {
 } from './classic-dialog-skin.js';
 import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_ACCENT_DEFAULT, MAGIC_HOUSES, MAGIC_HOUSE_DEFAULT, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { normalizeCharacterHouses } from './magic-house.js';
+import { VOICE_BARK_FREQUENCIES, normalizeCharacterVoices, normalizeVoiceBarkSettings } from './voice-bark.js';
 import { HORROR_DREAD_CAP_DEFAULT, HORROR_DREAD_CAP_LABELS, HORROR_DREAD_LEVELS, normalizeHorrorDreadCap } from './horror-dread.js';
 import { DIALOG_SKIN_QINGLV } from './dialog-theme-guofeng.js';
 import { DIALOG_SKIN_FAIRY_TALE } from './dialog-theme-fairytale.js';
@@ -614,6 +619,32 @@ export function createIgsReaderHost(options = {}) {
             controller: current.controller,
             replaced: true,
         };
+    }
+
+    // 物品演出：账本补上物品表变动的获得 / 失去，标出初次获得，并给正文点亮备好已知物品名。
+    const itemEventsShown = new Set();
+    function decorateItemFx(pageFx, payload, segments, index, directives, readerSettings) {
+        const ledger = options.itemLedger;
+        const itemFx = normalizeItemFxSettings(readerSettings && readerSettings.itemFx);
+        if (!ledger || !itemFx.enabled || !pageFx || !Array.isArray(pageFx.items)) return;
+        const messageId = Number(firstDefined(payload.messageId, payload.message && payload.message.id, null));
+        if (!Number.isInteger(messageId)) return;
+        const identity = state.activeReader && Number(state.activeReader.payload.messageId) === messageId && state.activeReader.illustrationIdentity
+            ? state.activeReader.illustrationIdentity : readIllustrationIdentity(messageId);
+        const chatId = identity && identity.chatId;
+        if (!chatId) return;
+        const tagItems = (directives || []).filter((d) => d.kind === 'item').map((d) => ({ action: d.args[0], name: d.args[1], description: d.args[2] || '' }));
+        ledger.noteTagItems(chatId, tagItems, messageId);
+        mergeItemEvents(pageFx, {
+            events: ledger.eventsFor(chatId, messageId, identity.swipeId),
+            segments,
+            index,
+            tagNames: new Set(tagItems.map((item) => normalizeItemName(item.name))),
+            shown: itemEventsShown,
+            floorKey: `${chatId}|${messageId}|${Number(identity.swipeId) || 0}`,
+        });
+        for (const item of pageFx.items) if (item.action === 'gain') item.first = ledger.isFirst(chatId, item.name, messageId);
+        if (itemFx.mention) pageFx.itemMentions = ledger.knownItems(chatId);
     }
 
     function readIllustrationIdentity(messageId) {
@@ -2860,6 +2891,7 @@ export function createIgsReaderHost(options = {}) {
             generatedAssets: sceneAssets && sceneAssets.generated,
             strict: readerSettings._strictBackgroundMatch === true,
             tempBackground: generatedAssets ? generatedAssets.tempBackground : null,
+            tempSceneTime: generatedAssets ? generatedAssets.tempSceneTime : null,
             tempSprite: generatedAssets ? generatedAssets.tempSprite : null,
         };
         const sceneDirectives = Array.isArray(extracted.sceneDirectives) ? extracted.sceneDirectives
@@ -2876,6 +2908,9 @@ export function createIgsReaderHost(options = {}) {
         let nsfwCgPortrait = '';
         let castSprites = [];
         let speakerCastOrder = null;
+        // 只给「复制本页诊断」用：记下立绘 / 背景这一页实际命中了哪一路。
+        let spriteMatch = null;
+        let backgroundMatch = null;
         const extractedSegmentImageSlots = Array.isArray(extracted.segmentImageSlots) ? extracted.segmentImageSlots : [];
         const rawSegmentSlotValue = extractedSegmentImageSlots[normalizedIndex];
         const segmentHasBoundSlot = rawSegmentSlotValue != null
@@ -2949,6 +2984,10 @@ export function createIgsReaderHost(options = {}) {
             fxOffset, fxPrevOffset, battleContext,
         );
         if (battleContext) pageFx.userName = battleUserName;
+        decorateItemFx(pageFx, payload, segments, normalizedIndex, fxDirectives, readerSettings);
+        // 食物被吃掉 / 喝掉：表格少了食物、AI 写「使用」食物、或本页有进食标签时，角落卡片换成吃掉 / 喝掉。
+        const dailyForEat = normalizeDailyFxSettings(readerSettings && readerSettings.dailyFx);
+        applyEatToItems(pageFx, { itemOn: normalizeItemFxSettings(readerSettings && readerSettings.itemFx).enabled, eatOn: dailyForEat.enabled && dailyForEat.eat });
         // 约定到期：payload 带近楼约定时（仅「约定」标签开启），按表名含「全局」的表的当前时间判定当天到期项；读不到则不提醒。
         if (Array.isArray(payload.promiseHistory) && payload.promiseHistory.length) {
             const promiseTables = readStatusHudTablesSafe();
@@ -2994,15 +3033,19 @@ export function createIgsReaderHost(options = {}) {
         if (illustrationUrl) {
             finalBackgroundImage = illustrationUrl;
             spriteImage = null;
+            backgroundMatch = { source: 'cg' };
         } else if (boundMarkerUrl) {
             finalBackgroundImage = boundMarkerUrl;
             spriteImage = null;
+            backgroundMatch = { source: 'bound-slot' };
         } else if (slotBoundUrl) {
             finalBackgroundImage = slotBoundUrl;
             spriteImage = null;
+            backgroundMatch = { source: 'slot' };
         } else if (sceneAssets && sceneAssets.enabled) {
             if (sceneStateForBg && sceneStateForBg.scene) {
                 const bgHit = resolveBackgroundAsset(sceneStateForBg, assetMatchCtx);
+                backgroundMatch = { source: bgHit.source, quality: bgHit.quality || '' };
                 finalBackgroundImage = resolveGenerated(bgHit.url);
                 finalBackgroundTimed = Boolean(finalBackgroundImage) && bgHit.timed === true;
             } else {
@@ -3183,6 +3226,7 @@ export function createIgsReaderHost(options = {}) {
                     : '');
                 const wantedOutfit = outfitFor(spriteChar);
                 const spriteHit = resolveSpriteAsset(spriteChar, spriteMood, assetMatchCtx, wantedOutfit);
+                spriteMatch = { character: spriteChar, mood: spriteMood || '', outfit: wantedOutfit || '', source: spriteHit.source, quality: spriteHit.quality || '', slot: spriteHit.slot || '' };
                 noteUnlistedMood(spriteHit, spriteMood, sceneAssets);
                 spriteImage = resolveGenerated(spriteHit.url) || null;
                 if (spriteImage) {
@@ -3305,6 +3349,8 @@ export function createIgsReaderHost(options = {}) {
                 backgroundImage: finalBackgroundImage,
                 backgroundTimed: finalBackgroundTimed,
                 spriteImage,
+                spriteMatch,
+                backgroundMatch,
                 castSprites,
                 speakerCastOrder,
                 images: cloneData(displayImageState.images),
@@ -3700,6 +3746,8 @@ export function createIgsReaderHost(options = {}) {
                 statusAvatars: sceneAssets.statusAvatars || {},
                 // 角色学院只在魔法世界观下有意义；其他世界观的魔法星夜只当星空框用，不显示这一行。
                 magicHouse: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY && resolveWorldview(worldviewAssets) === 'magic' ? { sceneAssets, fallback: reader.magicHouse } : null,
+                // 角色声线只在开了「角色语气音」时显示。
+                voice: normalizeVoiceBarkSettings(reader.voiceBark).enabled ? { sceneAssets } : null,
                 resolveUrl: resolveGenerated,
                 expressionNotes: normalizeGeneratedLibrary(sceneAssets.generated).expressionNotes,
                 folderSelect: (name, opts) => renderAssetFolderSelect('characters', name, assetFolders.characters, opts),
@@ -3825,6 +3873,7 @@ export function createIgsReaderHost(options = {}) {
         const dialogHeightItems = [['null', '自适应'], [.05, '5%'], [.08, '8%'], [.12, '12%'], [.15, '15%'], [.18, '18%'], [.2, '20%'], [.25, '25%'], [.3, '30%'], [.35, '35%'], [.4, '40%']];
         const typewriter = normalizeTypewriterSettings(reader.typewriter);
         const stageShake = normalizeStageShakeSettings(reader.stageShake);
+        const voiceBark = normalizeVoiceBarkSettings(reader.voiceBark);
         const chatShow = normalizeChatShowSettings(reader.chatShow);
         const systemRole = normalizeSystemRoleSettings(reader.systemRole);
         const weatherFx = normalizeWeatherFxSettings(reader.weatherFx);
@@ -3888,6 +3937,13 @@ export function createIgsReaderHost(options = {}) {
                     : '',
                 typewriter.mode === 'classic' ? '</details>' : '',
             ].join('')}</div>` : '',
+            voiceBarkToggle: checkbox('readerSettings.voiceBark.enabled', voiceBark.enabled, '角色语气音'),
+            // 台词开头按情绪播一声「啊、嗯、哼」；每个角色的声线在 素材 › 角色 › 角色设定 里选，默认按 DNA 性别自动分配。
+            voiceBarkControls: voiceBark.enabled ? `<div class="igs-settings-sub">${[
+                field('readerSettings.voiceBark.frequency', '播放时机', segmentedInput('readerSettings.voiceBark.frequency', voiceBark.frequency, VOICE_BARK_FREQUENCIES, '播放时机')),
+                field('readerSettings.voiceBark.volume', '音量', rangeInput('readerSettings.voiceBark.volume', voiceBark.volume, '语气音音量')),
+                `<div class="igs-source-filter-note">每个角色的声线在 素材 › 角色 › 角色设定 里选；没选的按 DNA 性别自动分配。旁白、心里话和亲密场景不发声；电话那头是听筒音色。语气音响起时打字音让开、背景音乐轻压一下。</div>`,
+            ].join('')}</div>` : '',
             stageShakeToggle: checkbox('readerSettings.stageShake.enabled', stageShake.enabled, '画面震动'),
             stageShakeSettings: stageShake.enabled ? renderStageShakeSettings(stageShake) : '',
             systemRoleFields: renderSystemRoleSettings(systemRole, {
@@ -3945,6 +4001,9 @@ export function createIgsReaderHost(options = {}) {
             readerValues.performanceSections = renderPerformanceSettings(reader, { worldview: renderWorldviewRow(worldviewAssets), worldviewId: resolveWorldview(worldviewAssets),
                 canUndo: Boolean(asyncState.perfPresetUndo),
                 typewriter: readerValues.playbackSpeed + readerValues.typewriterToggle + readerValues.typewriterControls,
+                // 语气音的开关、时机、音量对所有角色生效，放「声音」；每个角色的声线在 素材 › 角色 › 角色设定。
+                voiceBark: readerValues.voiceBarkToggle + readerValues.voiceBarkControls,
+                voiceBarkOn: normalizeVoiceBarkSettings(reader.voiceBark).enabled,
                 stageShake: [readerValues.stageShakeToggle, readerValues.stageShakeSettings],
                 weatherFx: [readerValues.weatherFxToggle, readerValues.weatherFxSettings],
                 chatShow: [readerValues.chatShowToggle, readerValues.chatShowSettings],
@@ -4508,15 +4567,6 @@ export function createIgsReaderHost(options = {}) {
                 }
                 return;
             }
-            const charHouse = target.getAttribute('data-char-house');
-            if (charHouse && !['__proto__', 'constructor', 'prototype'].includes(charHouse)) {
-                const assets = state.activeSettings.draft.bridge.sceneAssets;
-                const houses = assets.characterHouses || (assets.characterHouses = {});
-                if (target.value) houses[charHouse] = target.value;
-                else delete houses[charHouse];
-                state.activeSettings.snapshot.draft = state.activeSettings.draft;
-                return;
-            }
             const wardrobeName = target.getAttribute('data-wardrobe-name');
             if (wardrobeName) {
                 if (['__proto__', 'constructor', 'prototype'].includes(wardrobeName)) return;
@@ -4586,6 +4636,21 @@ export function createIgsReaderHost(options = {}) {
             const modelSync = event.target && event.target.getAttribute ? event.target.getAttribute('data-model-sync') : '';
             if (modelSync) {
                 controller.setValue(modelSync, event.target.value);
+                return;
+            }
+            // 角色学院 / 声线下拉：交给动作层写草稿并保存（input 监听不处理 SELECT）。
+            const charSelect = event.target && event.target.getAttribute ? event.target : null;
+            const charHouse = charSelect ? charSelect.getAttribute('data-char-house') : null;
+            if (charHouse) {
+                controller.invoke(`char-house:${encodeURIComponent(charHouse)}:${encodeURIComponent(charSelect.value || '')}`);
+                return;
+            }
+            const voiceField = !charSelect ? '' : charSelect.hasAttribute('data-char-voice') ? 'pack'
+                : charSelect.hasAttribute('data-char-voice-pitch') ? 'pitch'
+                    : charSelect.hasAttribute('data-char-voice-speed') ? 'speed' : '';
+            if (voiceField) {
+                const voiceChar = charSelect.getAttribute(voiceField === 'pack' ? 'data-char-voice' : `data-char-voice-${voiceField}`) || '';
+                controller.invoke(`char-voice:${voiceField}:${encodeURIComponent(voiceChar)}:${encodeURIComponent(charSelect.value || '')}`);
                 return;
             }
             // 素材「移到文件夹」只改本地界面归类，不写入设置草稿。
@@ -5131,6 +5196,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.characterDna = normalizeCharacterDnaMap(normalized.characterDna);
         normalized.characterOutfits = normalizeCharacterOutfits(normalized.characterOutfits);
         normalized.characterHouses = normalizeCharacterHouses(normalized.characterHouses);
+        normalized.characterVoices = normalizeCharacterVoices(normalized.characterVoices);
         normalized.wardrobe = normalizeWardrobe(normalized.wardrobe);
         normalized.moodGroups = normalizeMoodGroups(normalized.moodGroups);
         // init group arrays
@@ -5227,6 +5293,7 @@ export function createIgsReaderHost(options = {}) {
             showStatusLine: false,
             typewriter: { ...TYPEWRITER_DEFAULTS },
             stageShake: normalizeStageShakeSettings(null),
+            voiceBark: normalizeVoiceBarkSettings(null),
             chatShow: normalizeChatShowSettings(null),
             systemRole: normalizeSystemRoleSettings(null),
             weatherFx: normalizeWeatherFxSettings(null),
@@ -5281,6 +5348,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.showStatusLine = normalizeBoolean(normalized.showStatusLine, false);
         normalized.typewriter = normalizeTypewriterSettings(normalized.typewriter);
         normalized.stageShake = normalizeStageShakeSettings(normalized.stageShake);
+        normalized.voiceBark = normalizeVoiceBarkSettings(normalized.voiceBark);
         normalized.chatShow = normalizeChatShowSettings(normalized.chatShow);
         normalized.systemRole = normalizeSystemRoleSettings(normalized.systemRole);
         normalized.weatherFx = normalizeWeatherFxSettings(normalized.weatherFx);
