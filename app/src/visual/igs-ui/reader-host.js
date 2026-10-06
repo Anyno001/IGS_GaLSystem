@@ -5261,6 +5261,10 @@ export function createIgsReaderHost(options = {}) {
         readerSettings._ancientEra = worldview === 'ancient';
         readerSettings._worldview = worldview;
         readerSettings._sceneAssets = sceneAssets;
+        // 还没入库的生成立绘的 tag：立绘默认高度据此判断没有 DNA 的角色性别。
+        const generatedService = options.generatedAssets;
+        readerSettings._tempSpriteTags = generatedService && typeof generatedService.tempSpriteTags === 'function'
+            ? generatedService.tempSpriteTags() : {};
         readerSettings._sentencePaging = Boolean(bridge.sentencePaging);
         const bilingualOverride = state.bilingualDisplay;
         readerSettings._bilingualDisplay = bilingualOverride && bilingualOverride.base === normalizeBilingualSettings(readerSettings.bilingual).display ? bilingualOverride.value : '';

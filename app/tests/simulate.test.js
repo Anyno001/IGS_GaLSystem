@@ -3915,6 +3915,57 @@ test('gate:simulation:sprite-height-follows-gender-character-setting-and-manual-
     vn.destroy();
 });
 
+test('gate:simulation:sprite-height-of-pending-generated-sprite-follows-its-tags', async () => {
+    const document = createFakeDocument();
+    const storage = createMemoryStorage({
+        igs_bridge_config: JSON.stringify({
+            openMode: 'pc',
+            sceneAssets: { enabled: true, promptRule: 'rule', scenes: {}, characters: {} },
+        }),
+    });
+    // 「待确认」的生成立绘：不在角色库、没有 DNA，只有生成时的 tag。
+    const pending = { 神秘少女: '1girl, silver hair' };
+    const imageUrl = (url) => (String(url || '').startsWith('igs-gen:') ? 'data:image/png;base64,AAA' : String(url || ''));
+    const assetGenerationService = {
+        tempSprite: (name) => (pending[name] ? 'igs-gen:girl' : ''),
+        tempSpriteTags: () => ({ ...pending }),
+        tempBackground: () => '',
+        tempSceneTime: () => null,
+        resolveUrl: imageUrl,
+        resolveThumbUrl: imageUrl,
+        listTemp: () => [],
+        listReview: () => [],
+        processMessage: async () => ({ ok: false, reason: 'disabled' }),
+        start() {},
+        stop() {},
+    };
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        assetGenerationService,
+        hostAdapter: {
+            getCurrentMessage: async () => ({ id: 1, text: '<now_plot>\n<content>\n[igs-char:神秘少女|平静|你来了。]\n</content>\n</now_plot>' }),
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    const spriteSize = () => document.getElementById('igs-overlay').querySelector('#igs-sprite').style.backgroundSize;
+
+    const opened = await vn.openLatestAvailable('pc');
+    assert.equal(spriteSize(), 'auto 100%', '性别区分默认关闭：按基准高度');
+
+    const settings = (await opened.reader.controller.invokeAction('settings')).controller;
+    settings.setValue('readerSettings.spriteGenderScale.enabled', true);
+    settings.setValue('readerSettings.spriteGenderScale.male', 112);
+    settings.close();
+    assert.equal(spriteSize(), 'auto 90%', '1girl → 女性默认');
+
+    pending.神秘少女 = '1boy, short hair';
+    (await opened.reader.controller.invokeAction('settings')).controller.close();
+    assert.equal(spriteSize(), 'auto 112%', '1boy → 男性默认');
+
+    vn.destroy();
+});
+
 test('gate:simulation:reader-settings-saved-in-mobile-mode-read-back', async () => {
     // 回归锁：saveUnifiedSettings 曾按 readerMode 分桶存、却固定读 default 桶，
     // 导致移动端保存（含 spriteLayouts）读不回。统一到 default 桶后，

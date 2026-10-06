@@ -1,6 +1,6 @@
-// 立绘默认高度：没被「调整立绘」单独调过的立绘，先看角色自定义高度，再看性别默认高度（开关打开时按 DNA 判断），最后是立绘基准高度。
+// 立绘默认高度：没被「调整立绘」单独调过的立绘，先看角色自定义高度，再看性别默认高度（开关打开时按 DNA 判断；没有 DNA 时看生成立绘的 tag），最后是立绘基准高度。
 import { normalizeSpriteDefaultScale, normalizeSpriteGenderScale, normalizeSpriteHeight } from './settings-normalize.js';
-import { canonicalName, characterDnaGender } from './voice-bark.js';
+import { canonicalName, characterDnaGender, detectVoiceGender } from './voice-bark.js';
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const plain = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
@@ -29,6 +29,10 @@ export function resolveSpriteBaseScale(sceneAssets, readerSettings, character) {
     if (manual != null) return { characterScale: manual, defaultScale: base, source: 'manual' };
     const genders = normalizeSpriteGenderScale(reader.spriteGenderScale);
     if (!genders.enabled) return { characterScale: null, defaultScale: base, source: 'base' };
-    const gender = characterDnaGender(assets, name) || 'other';
+    // 待确认 / 仅本聊天的生成立绘没有 DNA，用生成时的 tag（第一个是 1girl / 1boy），由 reader-host 挂在 _tempSpriteTags。
+    const tempTags = plain(reader._tempSpriteTags) || {};
+    const gender = characterDnaGender(assets, name)
+        || detectVoiceGender(Object.hasOwn(tempTags, name) ? tempTags[name] : '')
+        || 'other';
     return { characterScale: null, defaultScale: genders[gender], source: gender };
 }

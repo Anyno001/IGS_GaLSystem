@@ -67,6 +67,20 @@ test('gate:sprite-height:resolve-uses-dna-gender-then-base', () => {
     assert.equal(resolveSpriteBaseScale(assets(), {}, '小林').defaultScale, 100);
 });
 
+test('gate:sprite-height:pending-sprites-without-dna-use-generation-tags', () => {
+    // 待确认 / 仅本聊天的生成立绘没有 DNA，reader-host 把生成时的 tag 挂在 _tempSpriteTags。
+    const on = { spriteGenderScale: { enabled: true } };
+    const reader = { ...on, _tempSpriteTags: { 神秘少女: '1girl, silver hair', 路人甲: '1boy, short hair', 无标签: 'standing, smile' } };
+    assert.equal(resolveSpriteBaseScale(assets(), reader, '神秘少女').source, 'female');
+    assert.equal(resolveSpriteBaseScale(assets(), reader, '路人甲').source, 'male');
+    assert.equal(resolveSpriteBaseScale(assets(), reader, '无标签').source, 'other');
+    assert.equal(resolveSpriteBaseScale(assets(), on, '神秘少女').source, 'other', '没有 tag 表时照旧归其他');
+    // 有 DNA 时 DNA 优先，tag 只兜底。
+    assert.equal(resolveSpriteBaseScale(assets(), { ...on, _tempSpriteTags: { 小林: '1girl' } }, '小林').source, 'male');
+    // 关掉性别区分时 tag 也不起作用。
+    assert.equal(resolveSpriteBaseScale(assets(), { ...reader, spriteGenderScale: { enabled: false } }, '神秘少女').source, 'base');
+});
+
 test('gate:sprite-height:resolve-prefers-character-setting', () => {
     const withManual = assets({ characterSpriteScales: { 爱丽: 123 } });
     assert.deepEqual(resolveSpriteBaseScale(withManual, {}, '爱丽'), { characterScale: 123, defaultScale: 100, source: 'manual' });

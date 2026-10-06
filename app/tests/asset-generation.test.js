@@ -250,6 +250,8 @@ test('gate:assets:service-generates-missing-assets-and-reviews', async () => {
     const review = service.listReview('chat-1|3|0');
     assert.deepEqual(review.map((r) => `${r.type}:${r.name}`), ['background:废弃工厂', 'sprite:神秘少女']);
     assert.equal(service.tempSprite('神秘少女'), 'igs-gen:img2');
+    // 待确认立绘的生成 tag 供立绘默认高度判断性别；背景不进这张表。
+    assert.deepEqual(service.tempSpriteTags(), { 神秘少女: '1girl, silver hair, black coat' });
     assert.equal(service.tempBackground('废弃工厂', '夜晚'), 'igs-gen:img1');
     assert.equal(service.resolveUrl('igs-gen:img2'), 'data:image/png;base64,AAA#matte');
     assert.equal((await service.processMessage(3)).reason, 'already-decided');
@@ -258,6 +260,7 @@ test('gate:assets:service-generates-missing-assets-and-reviews', async () => {
     await service.setStatus(review[0].key, 'discarded');
     assert.equal(service.listReview('chat-1|3|0').length, 0);
     assert.equal(service.tempSprite('神秘少女'), 'igs-gen:img2');
+    assert.deepEqual(service.tempSpriteTags(), { 神秘少女: '1girl, silver hair, black coat' }, '仅本聊天使用的立绘仍然算');
     assert.equal(service.tempBackground('废弃工厂', '夜晚'), '');
     assert.equal(await store.getImage('img1'), null);
     assert.ok(emitted.includes('generated'));
