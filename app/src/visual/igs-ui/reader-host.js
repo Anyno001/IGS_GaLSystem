@@ -21,6 +21,8 @@ import { parseTables } from '../../shujuku-panel/panel-model.js';
 import { applyDiceToHits } from '../../scene/battle-context.js';
 import { normalizeItemImageSettings } from '../../generated-images/illustration/item-image-settings.js';
 import { createCgGalleryPanel } from './cg-gallery-panel.js';
+import { cgReasonText } from '../../media/cg-library.js';
+import { createCgLibraryView } from './cg-library-view.js';
 import { cancelFxEffects } from './fx-runtime.js';
 import { cancelDanmaku } from './danmaku-runtime.js';
 import { cancelStageDirection } from './stage-direction-runtime.js';
@@ -223,7 +225,7 @@ import { createSettingsDialogs } from './settings-dialog.js';
 import { captureSettingsFocus, restoreSettingsFocus } from './settings-focus.js';
 import { renderSectionResetButton, sectionResetPlaceholders } from './settings-sections.js';
 import { createOnboardingController } from './onboarding-guide-controller.js';
-import { applyPerformanceProfile } from './performance-profile.js';
+import { applyPerformanceProfile, applyProfileDetails } from './performance-profile.js';
 import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLabel } from '../../generated-images/image-job-log.js';
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
 import { applyFxWorldview } from '../../scene/fx-era.js';
@@ -317,6 +319,7 @@ export function createIgsReaderHost(options = {}) {
             const draft = state.activeSettings.draft;
             draft.readerSettings = draft.readerSettings || {};
             applyPerformanceProfile(draft.readerSettings, answers);
+            applyProfileDetails(draft.readerSettings, answers);
             return { ok: true };
         },
     });
@@ -1742,69 +1745,77 @@ export function createIgsReaderHost(options = {}) {
         return list.map((e) => `<div class="igs-image-log-item is-${esc(e.level)}"><span class="igs-image-log-time">${esc(formatImageJobLogTime(e.at))}</span><span class="igs-image-log-level">${esc(imageJobLogLevelLabel(e.level))}</span><span class="igs-image-log-msg">${esc(e.message)}</span></div>`).join('');
     }
 
-    const CG_DISPLAY_URL_RE = /^(?:data:image\/|https?:\/\/|blob:)/i;
-    // 生图 › CG 库：先列出条目，每张图自己读完就补上，不等这一页全部下完。
+    // 生图 › CG 库：与工具栏面板共用 cg-library-view。目录一次拿全；缩略图到了只换那一格、状态行只改文字，不整页重画。
+    const cgAttr = (value) => (typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, ''));
+
+    function imageCgThumbHtml(view, entry) {
+        const tile = view.tileOf(entry.key);
+        if (tile.url) return `<img src="${esc(tile.url)}" decoding="async" alt="">`;
+        if (tile.state === 'failed') return `<span class="igs-image-cg-failed" title="${esc(tile.reason)}">读取失败，点一下重试</span>`;
+        return '<span class="igs-image-cg-pending"></span>';
+    }
+
+    function imageCgView(settings) {
+        const asyncState = settings.asyncState;
+        if (asyncState.imageCg) return asyncState.imageCg;
+        const service = options.cgGallery;
+        if (!service || typeof service.syncIndex !== 'function') return null;
+        let painting = false;
+        const live = () => state.activeSettings === settings && asyncState.imageCg === view;
+        const paint = () => {
+            if (painting) return;
+            painting = true;
+            Promise.resolve().then(() => { painting = false; if (live()) rerenderSettings(); });
+        };
+        const find = (selector) => {
+            const root = settings.dom && settings.dom.root;
+            return root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null;
+        };
+        const patchLine = () => {
+            const el = find('[data-image-cg-line]');
+            if (!el) return false;
+            const text = view.statusText();
+            el.textContent = text;
+            el.style.display = text ? '' : 'none';
+            return true;
+        };
+        const view = createCgLibraryView(service, {
+            onChange: (type, key) => {
+                if (!live()) return;
+                if (type === 'thumb') {
+                    const el = find(`[data-image-cg-thumb="${cgAttr(key)}"]`);
+                    const entry = view.find(key);
+                    if (el && entry) { el.innerHTML = imageCgThumbHtml(view, entry); patchLine(); return; }
+                    if (!entry && patchLine()) return;
+                }
+                if (type === 'status' && patchLine()) return;
+                paint();
+            },
+        });
+        asyncState.imageCg = view;
+        view.open({ showHidden: true });
+        return view;
+    }
+
     function renderImageCgList() {
         const settings = state.activeSettings;
-        const asyncState = settings && settings.asyncState;
-        if (!asyncState) return '';
-        const service = options.cgGallery;
-        if (!service || typeof service.loadPage !== 'function') return '<div class="igs-scene-empty">CG 库不可用</div>';
-        if (!Array.isArray(asyncState.imageCgEntries)) {
-            if (!asyncState.imageCgLoading) {
-                asyncState.imageCgLoading = true;
-                const gen = (asyncState.imageCgLoadGen || 0) + 1;
-                asyncState.imageCgLoadGen = gen;
-                const paint = () => {
-                    if (asyncState.imageCgLoadGen !== gen || state.activeSettings !== settings || asyncState.imageCgPaint) return;
-                    asyncState.imageCgPaint = true;
-                    Promise.resolve().then(() => {
-                        asyncState.imageCgPaint = false;
-                        if (asyncState.imageCgLoadGen === gen && state.activeSettings === settings) rerenderSettings();
-                    });
-                };
-                Promise.resolve()
-                    .then(() => service.loadPage({ limit: 60, showHidden: true, deferImages: true }))
-                    .then((page) => {
-                        if (asyncState.imageCgLoadGen !== gen) return;
-                        const items = page && page.ok && Array.isArray(page.items) ? page.items : [];
-                        asyncState.imageCgEntries = items;
-                        asyncState.imageCgStatus = page && page.ok ? '' : 'CG 读取失败';
-                        asyncState.imageCgLoading = false;
-                        paint();
-                        const read = typeof service.hydrateEntry === 'function' ? service.hydrateEntry.bind(service) : null;
-                        if (!read) return;
-                        for (const entry of items) {
-                            if (CG_DISPLAY_URL_RE.test(String(entry && entry.dataUrl || ''))) continue;
-                            read(entry).then((next) => {
-                                if (asyncState.imageCgLoadGen !== gen || !next) return;
-                                entry.dataUrl = String(next.dataUrl || '');
-                                paint();
-                            }).catch(() => {});
-                        }
-                    })
-                    .catch(() => {
-                        if (asyncState.imageCgLoadGen !== gen) return;
-                        asyncState.imageCgEntries = [];
-                        asyncState.imageCgStatus = 'CG 读取失败';
-                        asyncState.imageCgLoading = false;
-                        paint();
-                    });
-            }
-            return '<div class="igs-scene-empty">正在读取…</div>';
-        }
-        const selected = asyncState.imageCgSelected instanceof Set ? asyncState.imageCgSelected : new Set();
-        const tiles = asyncState.imageCgEntries.map((entry, index) => {
-            const url = String((entry && entry.dataUrl) || '').trim();
-            const ready = CG_DISPLAY_URL_RE.test(url);
+        if (!settings || !settings.asyncState) return '';
+        const view = imageCgView(settings);
+        if (!view) return '<div class="igs-scene-empty">CG 库不可用</div>';
+        const s = view.state;
+        const text = view.statusText();
+        const line = `<div class="igs-scene-empty" data-image-cg-line${text ? '' : ' style="display:none"'}>${esc(text)}</div>`;
+        const pager = s.list.length > s.entries.length || s.page > 0
+            ? `<div class="igs-settings-row"><button class="igs-settings-action" data-action="image-cg-page:prev" type="button" ${s.page <= 0 ? 'disabled' : ''}>上一页</button><span class="igs-image-cg-page">第 ${s.page + 1} / ${s.pages} 页 · 共 ${s.list.length} 张</span><button class="igs-settings-action" data-action="image-cg-page:next" type="button" ${s.page >= s.pages - 1 ? 'disabled' : ''}>下一页</button></div>`
+            : (s.list.length ? `<div class="igs-image-cg-page">共 ${s.list.length} 张</div>` : '');
+        const selected = settings.asyncState.imageCgSelected instanceof Set ? settings.asyncState.imageCgSelected : new Set();
+        const tiles = s.entries.map((entry, index) => {
             const label = entry.kind === 'photo' ? '照片' : `第 ${entry.messageId} 楼`;
             const on = selected.has(entry.key);
-            const picture = ready
-                ? `<img src="${esc(url)}" decoding="async" alt="">`
-                : '<span class="igs-image-cg-pending"></span>';
-            return `<article class="igs-image-cg-tile"><label class="igs-image-cg-check"><input type="checkbox" data-action="image-cg-toggle:${index}" ${on ? 'checked' : ''} aria-label="选择${esc(label)}"></label><button type="button" class="igs-image-cg-view" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图">${picture}<span>${esc(label)}</span></button><button type="button" class="igs-image-cg-delete" data-action="image-cg-delete:${index}">删除</button></article>`;
+            return `<article class="igs-image-cg-tile"><label class="igs-image-cg-check"><input type="checkbox" data-action="image-cg-toggle:${index}" ${on ? 'checked' : ''} aria-label="选择${esc(label)}"></label><button type="button" class="igs-image-cg-view" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图"><span class="igs-image-cg-pic" data-image-cg-thumb="${esc(entry.key)}">${imageCgThumbHtml(view, entry)}</span><span>${esc(label)}</span></button><button type="button" class="igs-image-cg-delete" data-action="image-cg-delete:${index}">删除</button></article>`;
         }).join('');
-        return tiles || '<div class="igs-scene-empty">还没有生成过 CG</div>';
+        const empty = s.phase === 'ready' && !s.entries.length ? '<div class="igs-scene-empty">还没有生成过 CG</div>' : '';
+        return pager + line + (tiles || empty);
     }
 
     async function handleSettingsAction(action) {
@@ -3955,21 +3966,22 @@ export function createIgsReaderHost(options = {}) {
           <button type="button" class="igs-settings-action igs-asset-zip" data-action="asset-zip:characters">下载本区素材</button>
           ${CHARACTER_ADD_MENU}
         </div>
-        ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
-        ${field('readerSettings.spriteDisplayScale', '立绘全局缩放', selectInput('readerSettings.spriteDisplayScale', reader.spriteDisplayScale || 100, [50, 60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
-        ${field('readerSettings.spriteDefaultScale', '立绘基准高度', selectInput('readerSettings.spriteDefaultScale', reader.spriteDefaultScale || 100, [60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
-        ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强')}
-        <div class="igs-source-filter-note">开启后可能增加性能开销，手机上尤其明显。</div>
-        ${spriteEnhance.enabled === true ? `<div class="igs-settings-sub">
-          ${field('bridge.sceneAssets.spriteEnhance.mode', '效果', selectInput('bridge.sceneAssets.spriteEnhance.mode', spriteEnhance.mode || 'outline', [['outline', '硬描边'], ['shadow', '投影式']]))}
-          <div class="igs-sprite-enhance-options">
-            ${field('bridge.sceneAssets.spriteEnhance.color', '增强颜色', colorInput('bridge.sceneAssets.spriteEnhance.color', spriteEnhance.color || '#000000'))}
-            ${field('bridge.sceneAssets.spriteEnhance.strength', '增强浓淡', selectInput('bridge.sceneAssets.spriteEnhance.strength', spriteEnhance.strength ?? 20, [5, 10, 15, 20, 30, 40, 50].map((n) => [n, `${n}%`])))}
-            ${field('bridge.sceneAssets.spriteEnhance.size', '增强大小', selectInput('bridge.sceneAssets.spriteEnhance.size', spriteEnhance.size ?? 0.8, [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].map((n) => [n, `${n}px`])))}
-          </div>
-        </div>` : ''}
         ${checkbox('bridge.sceneAssets.moodFuzzyMatch', sceneAssets.moodFuzzyMatch, '情绪词模糊匹配')}
         <div class="igs-source-filter-note">词库里没有的相近情绪词也会自动归组（如「嘲弄」归入「嘲讽」）。可能归错，可在「待确认」页核对。</div>
+        <details class="igs-settings-sub igs-settings-advanced" data-advanced="sprite-display"${asyncState.advancedOpen && asyncState.advancedOpen['sprite-display'] ? ' open' : ''}><summary>立绘显示：位置、缩放、高度、增强</summary>
+        ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
+        ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强')}
+        <div class="igs-source-filter-note">立绘增强可能增加性能开销，手机上尤其明显。</div>
+        <div class="igs-source-filter-grid">
+          ${field('readerSettings.spriteDisplayScale', '立绘全局缩放', selectInput('readerSettings.spriteDisplayScale', reader.spriteDisplayScale || 100, [50, 60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
+          ${field('readerSettings.spriteDefaultScale', '立绘基准高度', selectInput('readerSettings.spriteDefaultScale', reader.spriteDefaultScale || 100, [60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
+          ${spriteEnhance.enabled === true ? `
+          ${field('bridge.sceneAssets.spriteEnhance.mode', '效果', selectInput('bridge.sceneAssets.spriteEnhance.mode', spriteEnhance.mode || 'outline', [['outline', '硬描边'], ['shadow', '投影式']]))}
+          ${field('bridge.sceneAssets.spriteEnhance.color', '增强颜色', colorInput('bridge.sceneAssets.spriteEnhance.color', spriteEnhance.color || '#000000'))}
+          ${field('bridge.sceneAssets.spriteEnhance.strength', '增强浓淡', selectInput('bridge.sceneAssets.spriteEnhance.strength', spriteEnhance.strength ?? 20, [5, 10, 15, 20, 30, 40, 50].map((n) => [n, `${n}%`])))}
+          ${field('bridge.sceneAssets.spriteEnhance.size', '增强大小', selectInput('bridge.sceneAssets.spriteEnhance.size', spriteEnhance.size ?? 0.8, [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].map((n) => [n, `${n}px`])))}` : ''}
+        </div>
+        </details>
         ${renderDnaCandidateBar(asyncState.dnaCandidate)}
         ${charsHtml}
         ${renderDnaOnlyCharacterList(sceneAssets.characterDna || {}, sceneAssets.characters || {})}
@@ -4062,6 +4074,7 @@ export function createIgsReaderHost(options = {}) {
             imgModeField: field('readerSettings.imgMode', '图像显示模式', selectInput('readerSettings.imgMode', reader.imgMode, [['adaptive', '自适应'], ['contain', '完整']])),
             imgBrightnessField: field('readerSettings.imgBrightness', '图片亮度', selectInput('readerSettings.imgBrightness', reader.imgBrightness, [50, 60, 70, 80, 88, 90, 100].map((n) => [n, `${n}%`]))),
             statusLineToggle: checkbox('readerSettings.showStatusLine', reader.showStatusLine, '显示对话框内状态行') + checkbox('readerSettings.dblclickCgOnly', reader.dblclickCgOnly, '双击隐藏对话框'),
+            cinemaBarsToggle: checkbox('readerSettings.cinemaBars', reader.cinemaBars, '电影黑边（只盖背景，人物照常）'),
             backdropFilterToggle: checkbox('readerSettings.glassBackdropFilter', reader.glassBackdropFilter, '毛玻璃模糊'),
             // 玻璃作用于工具栏、选项、数据库、地图和记录面板；对话框只有默认皮肤跟随，其余皮肤自带底色。
             glassScopeNote: esc(dialogBgEditable
@@ -4641,14 +4654,21 @@ export function createIgsReaderHost(options = {}) {
                     if (url) showSpritePreviewOverlay(root, url);
                     return;
                 }
-                // 生图 › CG 库缩略图：按序号回查已读列表，用同一个预览层铺满显示大图。
+                // 生图 › CG 库：先用缩略图铺满，原图读到再换（预览已关就不再弹）；读失败的格子点一下重试。
                 if (actName.startsWith('image-cg-view:')) {
                     event.preventDefault();
-                    const cgAsync = state.activeSettings && state.activeSettings.asyncState;
-                    const cgEntries = cgAsync && Array.isArray(cgAsync.imageCgEntries) ? cgAsync.imageCgEntries : [];
-                    const cgEntry = cgEntries[Number(actName.slice('image-cg-view:'.length))];
-                    const cgUrl = cgEntry ? String(cgEntry.dataUrl || '').trim() : '';
-                    if (CG_DISPLAY_URL_RE.test(cgUrl)) showSpritePreviewOverlay(root, cgUrl);
+                    const cgView = state.activeSettings && state.activeSettings.asyncState && state.activeSettings.asyncState.imageCg;
+                    const cgEntry = cgView ? cgView.state.entries[Number(actName.slice('image-cg-view:'.length))] : null;
+                    if (!cgEntry) return;
+                    const cgTile = cgView.tileOf(cgEntry.key);
+                    if (cgTile.state === 'failed') { cgView.retry(cgEntry.key); return; }
+                    if (cgTile.url) showSpritePreviewOverlay(root, cgTile.url);
+                    else showSettingsNotice('正在读取原图…');
+                    cgView.readFull(cgEntry).then((result) => {
+                        const stillOpen = !cgTile.url || Boolean(root.querySelector && root.querySelector('#igs-sprite-preview-overlay'));
+                        if (result && result.ok) { if (stillOpen) showSpritePreviewOverlay(root, result.dataUrl); }
+                        else showSettingsNotice(`原图读取失败：${cgReasonText(result && result.reason)}`);
+                    });
                     return;
                 }
                 event.preventDefault();
@@ -5448,6 +5468,7 @@ export function createIgsReaderHost(options = {}) {
             spriteDisplayScale: 100,
             showStatusLine: false,
             dblclickCgOnly: false,
+            cinemaBars: false,
             typewriter: { ...TYPEWRITER_DEFAULTS },
             stageShake: normalizeStageShakeSettings(null),
             voiceBark: normalizeVoiceBarkSettings(null),
@@ -5504,6 +5525,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.imgBrightness = clampNumber(normalizeFiniteNumber(normalized.imgBrightness, base.imgBrightness), 10, 100);
         normalized.showStatusLine = normalizeBoolean(normalized.showStatusLine, false);
         normalized.dblclickCgOnly = normalizeBoolean(normalized.dblclickCgOnly, false);
+        normalized.cinemaBars = normalizeBoolean(normalized.cinemaBars, false);
         normalized.typewriter = normalizeTypewriterSettings(normalized.typewriter);
         normalized.stageShake = normalizeStageShakeSettings(normalized.stageShake);
         normalized.voiceBark = normalizeVoiceBarkSettings(normalized.voiceBark);

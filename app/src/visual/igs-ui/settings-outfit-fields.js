@@ -209,7 +209,7 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
         const acts = slotActions([
             imageId || (note && note.error) ? [`outfit-expression-retry:${c}:${o}:${encSeg(mood)}`, '重新生成', 'retry'] : null,
         ]);
-        const slotMenu = acts.inline + transferIcons(raw, `${charName}-${name}-${mood}-立绘.png`) + renderRowMenu([
+        const slotMenu = acts.inline + transferIcons(raw, `${charName}-${name}-${mood}-立绘.png`, [`scene-pick-outfit-mood:${c}:${o}:${encSeg(mood)}`, `上传${mood}立绘`]) + renderRowMenu([
             canPrompt ? menuItem(`outfit-expression-prompt:${c}:${o}:${encSeg(mood)}`, '提示词') : '',
             ...acts.items,
             menuItem(`scene-rename-outfit-mood:${c}:${o}:${encSeg(mood)}`, '重命名'),
@@ -221,7 +221,7 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
             + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
             + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-outfit-char="${esc(charName)}" data-scene-outfit="${esc(name)}" data-scene-outfit-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL 或 data:image/...">`)
             + (filled ? '' : `<span class="igs-outfit-hint">${esc(preview.label)}</span>`)
-            + slotMenu
+            + `<span class="igs-outfit-acts">${slotMenu}</span>`
             + `</div>`;
     }).join('');
     const missing = baseMoods.filter((mood) => mood !== OUTFIT_RESET && !Object.prototype.hasOwnProperty.call(moods, mood));
@@ -230,7 +230,7 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
         const preview = previewOf(sceneAssets, charName, mood, name);
         return `<div class="igs-outfit-slot is-fallback" data-outfit-fallback="${esc(mood)}">${thumb(preview.url, mood, ' is-ghost', resolveUrl)}`
             + `<span class="igs-btn-mgr-label">${esc(mood)}</span><span class="igs-outfit-hint">${esc(preview.label)}</span>`
-            + `<button type="button" class="igs-btn-mgr-icon" data-action="scene-add-outfit-mood:${c}:${o}:${encSeg(mood)}" title="给这套补上「${esc(mood)}」">+</button></div>`;
+            + `<span class="igs-outfit-acts"><button type="button" class="igs-btn-mgr-icon" data-action="scene-add-outfit-mood:${c}:${o}:${encSeg(mood)}" title="给这套补上「${esc(mood)}」">+</button></span></div>`;
     }).join('');
     const fillAll = missing.length > 1
         ? `<div class="igs-outfit-fill-all"><button type="button" class="igs-review-link" data-action="scene-outfit-copy-slots:${c}:${o}">缺的 ${missing.length} 格全部补上</button></div>`
@@ -302,13 +302,18 @@ export function renderWardrobe(wardrobe, { resolveUrl, scopeTag, focus = '', lea
             menuItem(`wardrobe-rename:${encoded}`, '重命名'),
             menuItem(`wardrobe-remove:${encoded}`, '删除', ' is-danger'),
         ], `「${name}」的操作`);
-        return `<div class="igs-wardrobe-item${name === focus ? ' is-focus' : ''}" data-wardrobe-item="${esc(name)}"><div class="igs-btn-mgr-row">`
+        const rowThumb = reference
+            ? thumb(reference, `${name} 参考图`, '', resolveUrl)
+            : '<span class="igs-outfit-thumb igs-outfit-thumb-empty" aria-hidden="true"></span>';
+        return `<div class="igs-sprite-slot igs-wardrobe-item${name === focus ? ' is-focus' : ''}" data-wardrobe-item="${esc(name)}"><div class="igs-btn-mgr-row igs-scene-mood-row">`
+            + rowThumb
             + `<button type="button" class="igs-btn-mgr-label igs-wardrobe-name" data-action="wardrobe-prompt:${encoded}" title="查看和修改提示词">${esc(name)}</button>${tag('wardrobe', name)}`
-            + `${menu}</div>`
-            + (reference ? `<div class="igs-wardrobe-reference">${thumb(reference, `${name} 参考图`, '', resolveUrl)}</div>` : '')
-            + `</div>`;
+            + `${menu}</div></div>`;
     }).join('');
-    return `<div class="igs-wardrobe-group">${lead ? `<div class="igs-asset-folder-bar">${lead}</div>` : ''}${rows || '<div class="igs-scene-empty">还没有衣柜提示词，点右上 + 添加</div>'}</div>`;
+    const body = rows
+        ? `<div class="igs-btn-mgr-list igs-wardrobe-list">${rows}</div>`
+        : '<div class="igs-scene-empty">还没有衣柜提示词，点右上 + 添加</div>';
+    return `<div class="igs-wardrobe-group">${lead ? `<div class="igs-asset-folder-bar">${lead}</div>` : ''}${body}</div>`;
 }
 
 // 待确认页的一块：标题、数量、一句说明、清空，下面是条目。三块（服装词 / 情绪词 / 刚生成的图）长得一样。
@@ -433,6 +438,7 @@ span.igs-char-dna-btn{display:inline-flex;color:var(--igs-settings-ink-3)}
 .igs-outfit-slot:last-child{border-bottom:0}
 .igs-outfit-slot>.igs-btn-mgr-label{flex:0 0 64px}
 .igs-outfit-slot .igs-scene-url-input{flex:0 1 160px;min-width:0;margin-right:auto}
+.igs-outfit-acts{display:flex;align-items:center;gap:inherit;margin-left:auto;flex-shrink:0}
 .igs-scene-mood-row .igs-scene-url-input{flex:0 1 160px}
 .igs-outfit-tab-icon{color:var(--igs-settings-ink-4)}
 .igs-asset-transfer.is-spacer{visibility:hidden;pointer-events:none}
@@ -455,12 +461,10 @@ img.igs-outfit-avatar{padding:0}
 .igs-outfit-fill{height:24px;padding:0 8px;font-size:11px}
 .igs-wardrobe-group{display:flex;flex-direction:column;gap:6px;min-width:0}
 .igs-wardrobe-group+.igs-wardrobe-group{margin-top:4px;padding-top:12px;border-top:1px solid var(--igs-settings-line)}
-.igs-wardrobe-item{display:flex;flex-direction:column;min-width:0}
-.igs-wardrobe-item .igs-btn-mgr-row{flex-wrap:nowrap;height:36px}
-button.igs-wardrobe-name{flex:1;min-width:3em;max-width:none;height:36px;padding:0;border:0;background:transparent;font-family:inherit;font-size:12px;line-height:36px;color:var(--igs-settings-ink-2);text-align:left;cursor:pointer}
+.igs-wardrobe-list{padding:0;background:transparent;border-radius:0}
+button.igs-wardrobe-name{min-width:0;padding:0;border:0;background:transparent;text-align:left;cursor:pointer}
 .igs-wardrobe-nsfw.is-on{color:var(--igs-settings-accent)}
-.igs-wardrobe-reference{padding:0 8px 4px}
-.igs-wardrobe-item.is-focus{border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-highlight)}
+.igs-wardrobe-item.is-focus>.igs-btn-mgr-row{background:var(--igs-settings-highlight)}
 .igs-asset-scope-switch{display:inline-flex;flex-shrink:0;gap:2px;padding:2px;border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-field)}
 .igs-scope-seg{display:inline-flex;align-items:center;height:22px;padding:0 8px;border:0;border-radius:var(--igs-settings-radius-small);background:transparent;color:var(--igs-settings-ink-4);font:inherit;font-size:11px;white-space:nowrap}
 button.igs-scope-seg{cursor:pointer}
