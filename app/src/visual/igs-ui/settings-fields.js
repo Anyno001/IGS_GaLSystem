@@ -8,6 +8,9 @@ import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderRev
 import { MAGIC_HOUSES, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { resolveCharacterMagicHouse } from './magic-house.js';
 import { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } from './voice-bark.js';
+import { SPRITE_HEIGHT_RANGE } from './settings-normalize.js';
+import { resolveSpriteBaseScale } from './sprite-height.js';
+import { hasCharacterSpriteLayout } from './sprite-key-migration.js';
 
 
 const encSeg = (value) => encodeURIComponent(String(value == null ? '' : value));
@@ -390,6 +393,7 @@ export function renderCharacterAssetList(characters, options = {}) {
     // 魔法星夜才显示学院行；未指定时按 DNA 自动识别，识别不出用全局配色。
     const magicHouse = options.magicHouse && typeof options.magicHouse === 'object' ? options.magicHouse : null;
     const voiceRow = options.voice && typeof options.voice === 'object' ? options.voice : null;
+    const heightRow = options.spriteHeight && typeof options.spriteHeight === 'object' ? options.spriteHeight : null;
     const pencil = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
     const trash = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
     const chevronDown = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
@@ -489,7 +493,7 @@ export function renderCharacterAssetList(characters, options = {}) {
                 voiceHtml,
             ].join(''))
             : '';
-        return `<div class="igs-scene-char-group igs-char-card${open ? ' is-open' : ''}">${head}${setup}${open ? `<div class="igs-char-body">${slotArea}</div>` : ''}</div>`;
+        return `<div class="igs-scene-char-group igs-char-card${open ? ' is-open' : ''}">${head}${setup}${open ? `<div class="igs-char-body">${heightRow ? renderCharacterSpriteHeightRow(charName, heightRow) : ''}${slotArea}</div>` : ''}</div>`;
     }).join('');
 }
 
@@ -530,6 +534,21 @@ function renderCharacterVoiceRow(charName, { sceneAssets }) {
         + `<select class="igs-asset-move" data-char-voice-pitch="${esc(charName)}" aria-label="声线音高" title="音高（半音）">${pitchOpts}</select>`
         + `<select class="igs-asset-move" data-char-voice-speed="${esc(charName)}" aria-label="声线语速" title="语速，不影响音高">${speedOpts}</select>`
         + `<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="voice-bark-preview:${encSeg(charName)}">试听</button></div>`;
+}
+
+const SPRITE_HEIGHT_SOURCE_LABELS = { female: '女性', male: '男性', other: '其他', base: '基准高度' };
+
+// 角色立绘高度（角色展开后放在立绘列表最上面）：留空跟随性别默认 / 基准高度；填了就固定这个角色的高度，「调整立绘」调过的表情仍按调整结果。
+function renderCharacterSpriteHeightRow(charName, { sceneAssets, reader }) {
+    const assets = sceneAssets && typeof sceneAssets === 'object' ? sceneAssets : {};
+    const manual = resolveSpriteBaseScale(assets, reader, charName);
+    const auto = manual.source === 'manual' ? resolveSpriteBaseScale({ ...assets, characterSpriteScales: {} }, reader, charName) : manual;
+    const autoText = `${SPRITE_HEIGHT_SOURCE_LABELS[auto.source]} ${auto.defaultScale}%`;
+    const placed = hasCharacterSpriteLayout(reader && reader.spriteLayouts, charName);
+    const hint = `留空＝自动（${autoText}）${placed ? '；用「调整立绘」调过的表情按调整结果' : ''}`;
+    return `<div class="igs-char-info-row igs-char-height-row"><span class="igs-char-info-label">立绘高度 %</span>`
+        + `<input class="igs-asset-move" type="number" min="${SPRITE_HEIGHT_RANGE[0]}" max="${SPRITE_HEIGHT_RANGE[1]}" step="1" data-char-height="${esc(charName)}" value="${manual.source === 'manual' ? esc(manual.characterScale) : ''}" placeholder="${esc(auto.defaultScale)}" aria-label="角色立绘高度（${SPRITE_HEIGHT_RANGE[0]}~${SPRITE_HEIGHT_RANGE[1]}）">`
+        + `<span class="igs-char-height-hint">${esc(hint)}</span></div>`;
 }
 
 const CHARACTER_DNA_FIELD_LABELS = [

@@ -3861,6 +3861,53 @@ test('gate:simulation:sprite-layout-save-survives-mode-mismatch', async () => {
     vn.destroy();
 });
 
+test('gate:simulation:sprite-height-follows-gender-character-setting-and-manual-layout', async () => {
+    const document = createFakeDocument();
+    const storage = createMemoryStorage({
+        igs_bridge_config: JSON.stringify({
+            openMode: 'pc',
+            sceneAssets: {
+                enabled: true,
+                promptRule: 'rule',
+                scenes: {},
+                characters: { Alice: { calm: 'https://example.com/alice-calm.png' } },
+                characterDna: { Alice: { identity: '1girl, silver hair' } },
+            },
+        }),
+    });
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => ({ id: 1, text: '<now_plot>\n<content>\n[igs-char:Alice|calm|Hello.]\n</content>\n</now_plot>' }),
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    const spriteSize = () => document.getElementById('igs-overlay').querySelector('#igs-sprite').style.backgroundSize;
+
+    const opened = await vn.openLatestAvailable('pc');
+    // 旧存档没有新设置：DNA 认出女性，按女性默认 90%。
+    assert.equal(spriteSize(), 'auto 90%');
+
+    const settings = (await opened.reader.controller.invokeAction('settings')).controller;
+    settings.setValue('readerSettings.spriteGenderScale.female', 84);
+    settings.close();
+    assert.equal(spriteSize(), 'auto 84%');
+
+    const reopened = (await opened.reader.controller.invokeAction('settings')).controller;
+    await reopened.invoke(`char-height:${encodeURIComponent('Alice')}:128`);
+    reopened.close();
+    assert.equal(spriteSize(), 'auto 128%');
+
+    // 「调整立绘」存下的位置仍然优先。
+    const manual = (await opened.reader.controller.invokeAction('settings')).controller;
+    manual.setValue('readerSettings.spriteLayouts', { 'pc::Alice::calm': { posX: 50, posY: 100, scale: 140 } });
+    manual.close();
+    assert.equal(spriteSize(), 'auto 140%');
+
+    vn.destroy();
+});
+
 test('gate:simulation:reader-settings-saved-in-mobile-mode-read-back', async () => {
     // 回归锁：saveUnifiedSettings 曾按 readerMode 分桶存、却固定读 default 桶，
     // 导致移动端保存（含 spriteLayouts）读不回。统一到 default 桶后，

@@ -386,6 +386,9 @@ export const OUTFIT_SETTINGS_STYLE_TEXT = `
 .igs-char-info-row>.igs-mood-word-list,.igs-char-info-value{flex:1;min-width:0}
 .igs-char-info-value{display:flex;align-items:center;gap:6px}
 .igs-char-info-label{flex:0 0 72px;font-size:12px;color:var(--igs-settings-ink-3)}
+.igs-char-info-row.igs-char-height-row{margin-bottom:6px}
+.igs-char-info-row.igs-char-height-row>.igs-asset-move{flex:0 0 76px;width:76px;cursor:text}
+.igs-char-height-hint{flex:1;min-width:0;font-size:12px;line-height:1.4;color:var(--igs-settings-ink-3)}
 .igs-char-info-row.is-block>.igs-char-info-label{flex:none}
 .igs-char-info .igs-dna-fields{margin-top:0}
 .igs-settings-section-actions{display:flex;align-items:center;gap:2px}

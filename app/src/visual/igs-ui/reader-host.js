@@ -207,11 +207,14 @@ import {
     normalizeSettingsValue,
     normalizeSpriteDefaultScale,
     normalizeSpriteDisplayScale,
+    normalizeSpriteGenderScale,
     normalizeSpriteLayouts,
     setPath,
+    SPRITE_HEIGHT_RANGE,
 } from './settings-normalize.js';
 import { clearReaderModeRuntime, exitDocumentFullscreen } from './reader-runtime.js';
 import { enterSpriteEditMode } from './sprite-edit.js';
+import { normalizeCharacterSpriteScales } from './sprite-height.js';
 import { enterCastSlotEdit } from './cast-slot-edit.js';
 import { createDbPanelController } from '../../shujuku-panel/panel-controller.js';
 import { createMapPanelController } from './map-panel.js';
@@ -3913,6 +3916,7 @@ export function createIgsReaderHost(options = {}) {
                 magicHouse: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY && resolveWorldview(worldviewAssets) === 'magic' ? { sceneAssets, fallback: reader.magicHouse } : null,
                 // 角色声线只在开了「角色语气音」时显示。
                 voice: normalizeVoiceBarkSettings(reader.voiceBark).enabled ? { sceneAssets } : null,
+                spriteHeight: { sceneAssets, reader },
                 resolveUrl: resolveGenerated,
                 expressionNotes: normalizeGeneratedLibrary(sceneAssets.generated).expressionNotes,
                 folderSelect: (name, opts) => renderAssetFolderSelect('characters', name, assetFolders.characters, opts),
@@ -3960,6 +3964,7 @@ export function createIgsReaderHost(options = {}) {
         ${scenesHtml}
       </div>`;
             const spriteEnhance = sceneAssets.spriteEnhance || {};
+            const spriteGenderScale = normalizeSpriteGenderScale(reader.spriteGenderScale);
             const charactersPane = `<div class="igs-settings-section">
         <div class="igs-settings-section-head">
           <div class="igs-settings-subhead">角色立绘</div>
@@ -3972,9 +3977,15 @@ export function createIgsReaderHost(options = {}) {
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
         ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强')}
         <div class="igs-source-filter-note">立绘增强可能增加性能开销，手机上尤其明显。</div>
+        ${checkbox('readerSettings.spriteGenderScale.enabled', spriteGenderScale.enabled, '按性别区分默认高度')}
+        <div class="igs-source-filter-note">按角色设定里的 DNA 判断男女，看不出或没填 DNA 的算「其他」；开着时基准高度只管没有角色名的立绘。用「调整立绘」调过的表情、单独填了立绘高度的角色、多人同屏里整体放大缩小过的显示模式，都以各自调好的大小为准。</div>
         <div class="igs-source-filter-grid">
           ${field('readerSettings.spriteDisplayScale', '立绘全局缩放', selectInput('readerSettings.spriteDisplayScale', reader.spriteDisplayScale || 100, [50, 60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
-          ${field('readerSettings.spriteDefaultScale', '立绘基准高度', selectInput('readerSettings.spriteDefaultScale', reader.spriteDefaultScale || 100, [60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
+          ${field('readerSettings.spriteDefaultScale', '立绘基准高度 %', numberInput('readerSettings.spriteDefaultScale', normalizeSpriteDefaultScale(reader.spriteDefaultScale), SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
+          ${spriteGenderScale.enabled ? `
+          ${field('readerSettings.spriteGenderScale.female', '女性默认高度 %', numberInput('readerSettings.spriteGenderScale.female', spriteGenderScale.female, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.male', '男性默认高度 %', numberInput('readerSettings.spriteGenderScale.male', spriteGenderScale.male, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.other', '其他默认高度 %', numberInput('readerSettings.spriteGenderScale.other', spriteGenderScale.other, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}` : ''}
           ${spriteEnhance.enabled === true ? `
           ${field('bridge.sceneAssets.spriteEnhance.mode', '效果', selectInput('bridge.sceneAssets.spriteEnhance.mode', spriteEnhance.mode || 'outline', [['outline', '硬描边'], ['shadow', '投影式']]))}
           ${field('bridge.sceneAssets.spriteEnhance.color', '增强颜色', colorInput('bridge.sceneAssets.spriteEnhance.color', spriteEnhance.color || '#000000'))}
@@ -4827,6 +4838,12 @@ export function createIgsReaderHost(options = {}) {
                 controller.invoke(`char-voice:${voiceField}:${encodeURIComponent(voiceChar)}:${encodeURIComponent(charSelect.value || '')}`);
                 return;
             }
+            // 角色立绘高度：输完（失焦或回车）才保存，打字途中不重绘。
+            const heightChar = charSelect ? charSelect.getAttribute('data-char-height') : null;
+            if (heightChar) {
+                controller.invoke(`char-height:${encodeURIComponent(heightChar)}:${encodeURIComponent(charSelect.value || '')}`);
+                return;
+            }
             // 素材「移到文件夹」只改本地界面归类，不写入设置草稿。
             const folderMoveKind = event.target && event.target.getAttribute ? event.target.getAttribute('data-asset-folder-move') : '';
             if (folderMoveKind) {
@@ -5372,6 +5389,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.characterOutfits = normalizeCharacterOutfits(normalized.characterOutfits);
         normalized.characterHouses = normalizeCharacterHouses(normalized.characterHouses);
         normalized.characterVoices = normalizeCharacterVoices(normalized.characterVoices);
+        normalized.characterSpriteScales = normalizeCharacterSpriteScales(normalized.characterSpriteScales);
         normalized.wardrobe = normalizeWardrobe(normalized.wardrobe);
         normalized.moodGroups = normalizeMoodGroups(normalized.moodGroups);
         // init group arrays
@@ -5465,6 +5483,7 @@ export function createIgsReaderHost(options = {}) {
             imgBrightness: 100,
             cgHoldPages: 4,
             spriteDefaultScale: 100,
+            spriteGenderScale: normalizeSpriteGenderScale(null),
             spriteDisplayScale: 100,
             showStatusLine: false,
             dblclickCgOnly: false,
@@ -5541,6 +5560,7 @@ export function createIgsReaderHost(options = {}) {
         normalized.btnOrder = normalizeBtnOrder(normalized.btnOrder);
         normalized.spriteLayouts = normalizeSpriteLayouts(normalized.spriteLayouts);
         normalized.spriteDefaultScale = normalizeSpriteDefaultScale(normalized.spriteDefaultScale);
+        normalized.spriteGenderScale = normalizeSpriteGenderScale(normalized.spriteGenderScale);
         normalized.spriteDisplayScale = normalizeSpriteDisplayScale(normalized.spriteDisplayScale);
         normalized.spriteHeads = normalizeSpriteHeads(normalized.spriteHeads);
         normalized.castSlotLayouts = normalizeSpriteLayouts(normalized.castSlotLayouts);

@@ -28,6 +28,7 @@ import {
 import { applyReaderModeRuntime } from './reader-runtime.js';
 import { applyTypewriterEffect, cancelTypewriter } from './typewriter-runtime.js';
 import { applyVoiceBark } from './voice-bark.js';
+import { resolveSpriteBaseScale } from './sprite-height.js';
 import { applyStageShakeEffect } from './stage-shake-runtime.js';
 import { applyFxToDom } from './fx-runtime.js';
 import { applyDanmakuToDom } from './danmaku-runtime.js';
@@ -1233,10 +1234,13 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const castSpeakerMood = snapshot.content.spriteMood || '';
     const castSpeakerOutfit = snapshot.content.spriteOutfit || '';
     const castSlotLayouts = snapshot.readerSettings.castSlotLayouts || {};
-    const presentSpriteLayout = (character, mood, outfit) => applySpriteDisplayScale(
-        resolveSpriteLayout(snapshot.readerSettings.spriteLayouts, snapshot.mode, character, mood, outfit, snapshot.readerSettings.spriteDefaultScale),
-        snapshot.readerSettings.spriteDisplayScale,
-    );
+    const presentSpriteLayout = (character, mood, outfit) => {
+        const height = resolveSpriteBaseScale(snapshot.readerSettings._sceneAssets, snapshot.readerSettings, character);
+        return applySpriteDisplayScale(
+            resolveSpriteLayout(snapshot.readerSettings.spriteLayouts, snapshot.mode, character, mood, outfit, height.defaultScale, height.characterScale),
+            snapshot.readerSettings.spriteDisplayScale,
+        );
+    };
     const withCastSlot = (entry, character, outfit, slotIndex) => {
         const slotKey = slotIndex == null ? '' : castSlotKey(snapshot.mode, castLayout.count, slotIndex, spriteIdentity(character, outfit));
         const saved = slotKey ? castSlotLayouts[slotKey] : null;
