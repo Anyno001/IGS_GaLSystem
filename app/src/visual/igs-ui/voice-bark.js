@@ -126,9 +126,14 @@ export function detectVoiceGender(text) {
 
 // 按主名查 DNA 判断性别（声线和立绘默认高度共用）；没有 DNA 或看不出时返回 ''。
 export function characterDnaGender(sceneAssets, name) {
+    return detectVoiceGender(characterDnaText(sceneAssets, name));
+}
+
+// 主名 DNA 里描述角色本身的文字（触发词、固定身份、默认外观；不含负面词）；没有 DNA 时为 ''。
+export function characterDnaText(sceneAssets, name) {
     const dnaMap = plainObject(sceneAssets && sceneAssets.characterDna) || {};
     const dna = name && hasOwn(dnaMap, name) ? plainObject(dnaMap[name]) : null;
-    return dna ? detectVoiceGender(`${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}`) : '';
+    return dna ? `${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}` : '';
 }
 
 function hashName(name) {

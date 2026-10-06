@@ -69,6 +69,8 @@ export function normalizeSettingsValue(path, value) {
         if (path === 'readerSettings.spriteGenderScale.enabled') return value === true || value === 'true' || value === 1 || value === '1';
         const genderHeight = path.match(/^readerSettings\.spriteGenderScale\.(female|male|other)$/);
         if (genderHeight) return normalizeSpriteHeight(value, SPRITE_GENDER_SCALE_DEFAULTS[genderHeight[1]]);
+        const ageShorter = path.match(/^readerSettings\.spriteGenderScale\.(elderShorter|childShorter)$/);
+        if (ageShorter) return normalizeSpriteShorter(value, SPRITE_GENDER_SCALE_DEFAULTS[ageShorter[1]]);
         if (path === 'readerSettings.spriteDisplayScale') return normalizeSpriteDisplayScale(value);
         if (path === 'readerSettings.dialogTextEffectStrength') return Math.max(5, Math.min(50, Number(value) || 20));
         if (path === 'readerSettings.dialogTextEffectSize') return [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].includes(Number(value)) ? Number(value) : 0.8;
@@ -191,7 +193,9 @@ export function normalizeSpriteDefaultScale(value) {
 
 // 设置里能填的立绘高度（基准高度、性别默认、角色自定义），单位是舞台高度百分比。
 export const SPRITE_HEIGHT_RANGE = Object.freeze([60, 150]);
-const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95 });
+// elderShorter / childShorter：老人、儿童比同性别默认高度矮多少（百分点）。
+const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95, elderShorter: 5, childShorter: 20 });
+export const SPRITE_SHORTER_RANGE = Object.freeze([0, 60]);
 
 // 留空或不是数字时用 fallback；超出范围夹到两端并取整。
 export function normalizeSpriteHeight(value, fallback = null) {
@@ -199,6 +203,13 @@ export function normalizeSpriteHeight(value, fallback = null) {
     const n = Number(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.round(Math.max(SPRITE_HEIGHT_RANGE[0], Math.min(SPRITE_HEIGHT_RANGE[1], n)));
+}
+
+export function normalizeSpriteShorter(value, fallback = 0) {
+    if (value == null || String(value).trim() === '') return fallback;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.round(Math.max(SPRITE_SHORTER_RANGE[0], Math.min(SPRITE_SHORTER_RANGE[1], n)));
 }
 
 export function normalizeSpriteGenderScale(value) {
@@ -209,6 +220,8 @@ export function normalizeSpriteGenderScale(value) {
         female: normalizeSpriteHeight(src.female, defaults.female),
         male: normalizeSpriteHeight(src.male, defaults.male),
         other: normalizeSpriteHeight(src.other, defaults.other),
+        elderShorter: normalizeSpriteShorter(src.elderShorter, defaults.elderShorter),
+        childShorter: normalizeSpriteShorter(src.childShorter, defaults.childShorter),
     };
 }
 

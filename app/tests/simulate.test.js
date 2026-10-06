@@ -3963,6 +3963,10 @@ test('gate:simulation:sprite-height-of-pending-generated-sprite-follows-its-tags
     (await opened.reader.controller.invokeAction('settings')).controller.close();
     assert.equal(spriteSize(), 'auto 112%', '1boy → 男性默认');
 
+    pending.神秘少女 = '1boy, old man, cane';
+    (await opened.reader.controller.invokeAction('settings')).controller.close();
+    assert.equal(spriteSize(), 'auto 107%', '老人：男性默认再矮 5');
+
     vn.destroy();
 });
 

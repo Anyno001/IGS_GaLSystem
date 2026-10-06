@@ -211,6 +211,7 @@ import {
     normalizeSpriteLayouts,
     setPath,
     SPRITE_HEIGHT_RANGE,
+    SPRITE_SHORTER_RANGE,
 } from './settings-normalize.js';
 import { clearReaderModeRuntime, exitDocumentFullscreen } from './reader-runtime.js';
 import { enterSpriteEditMode } from './sprite-edit.js';
@@ -3980,14 +3981,16 @@ export function createIgsReaderHost(options = {}) {
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
         ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强（手机较耗电）')}
         ${checkbox('readerSettings.spriteGenderScale.enabled', spriteGenderScale.enabled, '按性别区分默认高度')}
-        <div class="igs-source-filter-note">按 DNA 判断男女；调过的立绘和单独填了高度的角色不受影响。</div>
+        <div class="igs-source-filter-note">按 DNA（没有时看生成 tag）判断男女和老人、儿童；调过的立绘和单独填了高度的角色不受影响。</div>
         <div class="igs-source-filter-grid">
           ${field('readerSettings.spriteDisplayScale', '立绘全局缩放', selectInput('readerSettings.spriteDisplayScale', reader.spriteDisplayScale || 100, [50, 60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
           ${field('readerSettings.spriteDefaultScale', '立绘基准高度 %', numberInput('readerSettings.spriteDefaultScale', normalizeSpriteDefaultScale(reader.spriteDefaultScale), SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
           ${spriteGenderScale.enabled ? `
           ${field('readerSettings.spriteGenderScale.female', '女性默认高度 %', numberInput('readerSettings.spriteGenderScale.female', spriteGenderScale.female, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
           ${field('readerSettings.spriteGenderScale.male', '男性默认高度 %', numberInput('readerSettings.spriteGenderScale.male', spriteGenderScale.male, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
-          ${field('readerSettings.spriteGenderScale.other', '其他默认高度 %', numberInput('readerSettings.spriteGenderScale.other', spriteGenderScale.other, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}` : ''}
+          ${field('readerSettings.spriteGenderScale.other', '其他默认高度 %', numberInput('readerSettings.spriteGenderScale.other', spriteGenderScale.other, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.elderShorter', '老人比同性别矮', numberInput('readerSettings.spriteGenderScale.elderShorter', spriteGenderScale.elderShorter, SPRITE_SHORTER_RANGE[0], SPRITE_SHORTER_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.childShorter', '儿童比同性别矮', numberInput('readerSettings.spriteGenderScale.childShorter', spriteGenderScale.childShorter, SPRITE_SHORTER_RANGE[0], SPRITE_SHORTER_RANGE[1]))}` : ''}
           ${spriteEnhance.enabled === true ? `
           ${field('bridge.sceneAssets.spriteEnhance.mode', '效果', selectInput('bridge.sceneAssets.spriteEnhance.mode', spriteEnhance.mode || 'outline', [['outline', '硬描边'], ['shadow', '投影式']]))}
           ${field('bridge.sceneAssets.spriteEnhance.color', '增强颜色', colorInput('bridge.sceneAssets.spriteEnhance.color', spriteEnhance.color || '#000000'))}

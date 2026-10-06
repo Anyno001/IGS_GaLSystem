@@ -6,7 +6,7 @@ import {
     normalizeSpriteHeight,
     resolveSpriteLayout,
 } from '../src/visual/igs-ui/settings-normalize.js';
-import { normalizeCharacterSpriteScales, resolveSpriteBaseScale } from '../src/visual/igs-ui/sprite-height.js';
+import { detectSpriteAge, normalizeCharacterSpriteScales, resolveSpriteBaseScale } from '../src/visual/igs-ui/sprite-height.js';
 import { hasCharacterSpriteLayout } from '../src/visual/igs-ui/sprite-key-migration.js';
 import { legacyPresetToPack, presetFromAssets } from '../src/scene/legacy-preset.js';
 
@@ -29,15 +29,18 @@ test('gate:sprite-height:normalize-clamps-rounds-and-falls-back', () => {
 });
 
 test('gate:sprite-height:gender-defaults-are-90-100-95-and-off', () => {
-    assert.deepEqual(normalizeSpriteGenderScale(null), { enabled: false, female: 90, male: 100, other: 95 });
-    assert.deepEqual(normalizeSpriteGenderScale({ enabled: false, female: '', male: 300, other: 'x' }), { enabled: false, female: 90, male: 150, other: 95 });
-    assert.deepEqual(normalizeSpriteGenderScale({ female: 88 }), { enabled: false, female: 88, male: 100, other: 95 });
+    assert.deepEqual(normalizeSpriteGenderScale(null), { enabled: false, female: 90, male: 100, other: 95, elderShorter: 5, childShorter: 20 });
+    assert.deepEqual(normalizeSpriteGenderScale({ enabled: false, female: '', male: 300, other: 'x' }), { enabled: false, female: 90, male: 150, other: 95, elderShorter: 5, childShorter: 20 });
+    assert.deepEqual(normalizeSpriteGenderScale({ female: 88, elderShorter: '8', childShorter: 99 }), { enabled: false, female: 88, male: 100, other: 95, elderShorter: 8, childShorter: 60 });
 });
 
 test('gate:sprite-height:settings-paths-normalize-to-range', () => {
     assert.equal(normalizeSettingsValue('readerSettings.spriteDefaultScale', '45'), 60);
     assert.equal(normalizeSettingsValue('readerSettings.spriteDefaultScale', '123'), 123);
     assert.equal(normalizeSettingsValue('readerSettings.spriteDefaultScale', ''), 100);
+    assert.equal(normalizeSettingsValue('readerSettings.spriteGenderScale.elderShorter', ''), 5);
+    assert.equal(normalizeSettingsValue('readerSettings.spriteGenderScale.childShorter', '-3'), 0);
+    assert.equal(normalizeSettingsValue('readerSettings.spriteGenderScale.childShorter', '25.6'), 26);
     assert.equal(normalizeSettingsValue('readerSettings.spriteGenderScale.male', ''), 100);
     assert.equal(normalizeSettingsValue('readerSettings.spriteGenderScale.female', '130'), 130);
     assert.equal(normalizeSettingsValue('readerSettings.spriteGenderScale.other', '999'), 150);
@@ -53,10 +56,10 @@ test('gate:sprite-height:character-scales-keep-only-valid-entries', () => {
 
 test('gate:sprite-height:resolve-uses-dna-gender-then-base', () => {
     const reader = { spriteDefaultScale: 110, spriteGenderScale: { enabled: true } };
-    assert.deepEqual(resolveSpriteBaseScale(assets(), reader, '爱丽'), { characterScale: null, defaultScale: 90, source: 'female' });
-    assert.deepEqual(resolveSpriteBaseScale(assets(), reader, '小林'), { characterScale: null, defaultScale: 100, source: 'male' });
+    assert.deepEqual(resolveSpriteBaseScale(assets(), reader, '爱丽'), { characterScale: null, defaultScale: 90, source: 'female', age: '' });
+    assert.deepEqual(resolveSpriteBaseScale(assets(), reader, '小林'), { characterScale: null, defaultScale: 100, source: 'male', age: '' });
     // 没有 DNA 或看不出性别的算「其他」。
-    assert.deepEqual(resolveSpriteBaseScale(assets(), reader, '路人'), { characterScale: null, defaultScale: 95, source: 'other' });
+    assert.deepEqual(resolveSpriteBaseScale(assets(), reader, '路人'), { characterScale: null, defaultScale: 95, source: 'other', age: '' });
     // 别名按主名认。
     assert.equal(resolveSpriteBaseScale(assets(), reader, '小爱').source, 'female');
     // 没有角色名、或关掉性别区分时用基准高度。
@@ -79,6 +82,50 @@ test('gate:sprite-height:pending-sprites-without-dna-use-generation-tags', () =>
     assert.equal(resolveSpriteBaseScale(assets(), { ...on, _tempSpriteTags: { 小林: '1girl' } }, '小林').source, 'male');
     // 关掉性别区分时 tag 也不起作用。
     assert.equal(resolveSpriteBaseScale(assets(), { ...reader, spriteGenderScale: { enabled: false } }, '神秘少女').source, 'base');
+});
+
+test('gate:sprite-height:detect-age-reads-years-words-and-tags', () => {
+    // 明写的岁数优先：60 岁以上老人、12 岁以下儿童，写了成年岁数就不再看称呼。
+    assert.equal(detectSpriteAge('72岁，白发'), 'elder');
+    assert.equal(detectSpriteAge('8 years old'), 'child');
+    assert.equal(detectSpriteAge('25岁，被叫做萝莉'), '');
+    // 生成 tag 与中文称呼。
+    assert.equal(detectSpriteAge('1boy, old man, grey hair, beard'), 'elder');
+    assert.equal(detectSpriteAge('1girl, elderly, kimono'), 'elder');
+    assert.equal(detectSpriteAge('慈祥的老奶奶'), 'elder');
+    assert.equal(detectSpriteAge('1girl, child, twintails'), 'child');
+    assert.equal(detectSpriteAge('1boy, little boy, shorts'), 'child');
+    assert.equal(detectSpriteAge('小学生，背着书包'), 'child');
+    // 容易误判的写法都不算。
+    assert.equal(detectSpriteAge('1girl, mature female, teacher'), '');
+    assert.equal(detectSpriteAge('班主任老师，咖啡店老板'), '');
+    assert.equal(detectSpriteAge('1girl, elder sister, childhood friend'), '');
+    assert.equal(detectSpriteAge('爷爷是剑圣'), '');
+    assert.equal(detectSpriteAge(''), '');
+});
+
+test('gate:sprite-height:elder-and-child-are-shorter-than-same-gender', () => {
+    const on = { spriteGenderScale: { enabled: true } };
+    const withAge = assets({
+        characterDna: {
+            奶奶: { identity: '1girl, 慈祥的老奶奶' },
+            爷爷: { identity: '1boy, 70岁' },
+            小妹: { identity: '1girl, 小学生' },
+        },
+    });
+    assert.deepEqual(resolveSpriteBaseScale(withAge, on, '奶奶'), { characterScale: null, defaultScale: 85, source: 'female', age: 'elder' });
+    assert.deepEqual(resolveSpriteBaseScale(withAge, on, '爷爷'), { characterScale: null, defaultScale: 95, source: 'male', age: 'elder' });
+    assert.deepEqual(resolveSpriteBaseScale(withAge, on, '小妹'), { characterScale: null, defaultScale: 70, source: 'female', age: 'child' });
+    // 没有 DNA 时同样看待确认立绘的 tag。
+    const pending = { ...on, _tempSpriteTags: { 路过的老伯: '1boy, old man, cane' } };
+    assert.equal(resolveSpriteBaseScale(withAge, pending, '路过的老伯').defaultScale, 95);
+    // 矮多少可调，结果不低于 60。
+    const tuned = { spriteGenderScale: { enabled: true, female: 70, childShorter: 30 } };
+    assert.equal(resolveSpriteBaseScale(withAge, tuned, '小妹').defaultScale, 60);
+    // 开关关闭、或角色单独填了高度时，年龄不起作用。
+    assert.equal(resolveSpriteBaseScale(withAge, {}, '奶奶').defaultScale, 100);
+    const manual = assets({ ...withAge, characterSpriteScales: { 奶奶: 110 } });
+    assert.equal(resolveSpriteBaseScale(manual, on, '奶奶').characterScale, 110);
 });
 
 test('gate:sprite-height:resolve-prefers-character-setting', () => {
@@ -142,6 +189,8 @@ test('gate:sprite-height:settings-row-saves-renames-and-clears', async () => {
         assert.match(html, /data-path="readerSettings\.spriteGenderScale\.female" type="number" min="60" max="150" value="90"/);
         assert.match(html, /data-path="readerSettings\.spriteGenderScale\.male" type="number" min="60" max="150" value="100"/);
         assert.match(html, /data-path="readerSettings\.spriteGenderScale\.other" type="number" min="60" max="150" value="95"/);
+        assert.match(html, /老人比同性别矮<\/span><input data-path="readerSettings\.spriteGenderScale\.elderShorter" type="number" min="0" max="60" value="5"/);
+        assert.match(html, /儿童比同性别矮<\/span><input data-path="readerSettings\.spriteGenderScale\.childShorter" type="number" min="0" max="60" value="20"/);
 
         const name = encodeURIComponent('爱丽');
         // 角色收起时、角色设定面板里都没有这一行；点名字展开后在立绘列表最上面。
@@ -152,6 +201,11 @@ test('gate:sprite-height:settings-row-saves-renames-and-clears', async () => {
         assert.match(html, /<div class="igs-char-body"><div class="igs-char-info-row igs-char-height-row">/);
         assert.match(html, /data-char-height="爱丽" value="" placeholder="90"/);
         assert.match(html, /留空＝自动（女性 90%）/);
+        // 认出老人时提示里带上年龄档。
+        html = controller.setValue('bridge.sceneAssets.characterDna', { 爱丽: { identity: '1girl, 慈祥的老奶奶' } }).snapshot.html;
+        assert.match(html, /data-char-height="爱丽" value="" placeholder="85"/);
+        assert.match(html, /留空＝自动（女性 · 老人 85%）/);
+        controller.setValue('bridge.sceneAssets.characterDna', { 爱丽: { identity: '1girl' } });
 
         html = (await controller.invoke(`char-height:${name}:117`)).snapshot.html;
         assert.deepEqual(controller.getSnapshot().draft.bridge.sceneAssets.characterSpriteScales, { 爱丽: 117 });
