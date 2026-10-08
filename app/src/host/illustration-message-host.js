@@ -15,6 +15,15 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
         return String(ctx.chatId || '');
     }
 
+    // 「最新楼」= 后面还没有用户发言。平行事件、状态栏这类插件会在 AI 楼后面再插一条（常是隐藏的系统消息），
+    // 按「最后一条」判断会让这楼的立绘、场景、CG 全部不生成。
+    function isLatestTurn(chat, messageId) {
+        for (let i = messageId + 1; i < chat.length; i += 1) {
+            if (chat[i] && chat[i].is_user) return false;
+        }
+        return true;
+    }
+
     function readFloor(messageId) {
         const ctx = context();
         const msg = ctx && Array.isArray(ctx.chat) ? ctx.chat[messageId] : null;
@@ -24,7 +33,7 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
             messageId: Number(messageId),
             swipeId: Number.isInteger(msg.swipe_id) ? msg.swipe_id : 0,
             isAi: !msg.is_user && !msg.is_system,
-            isLatest: Number(messageId) === ctx.chat.length - 1,
+            isLatest: isLatestTurn(ctx.chat, Number(messageId)),
             text: typeof msg.mes === 'string' ? msg.mes : '',
         };
     }
@@ -48,6 +57,73 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
             if (hit && hit.name) names.push(hit.name);
         }
         return Array.from(new Set(names.map((n) => String(n || '').trim()).filter(Boolean)));
+    }
+
+    // 立绘写词的外貌参考：用户角色读人设描述，角色卡读描述，世界书只取关键词或标题含该名字的条目。
+    // 只在角色没登记 DNA 时调用，每人限字，不整本塞进副 LLM。
+    async function readCharacterLore(names = [], limits = {}) {
+        const ctx = context();
+        if (!ctx) return [];
+        const perName = Number(limits.perName) || 600;
+        const total = Number(limits.total) || 1800;
+        const flat = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+        const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
+        const entries = await readWorldInfoEntries(ctx, characters);
+        const out = [];
+        let used = 0;
+        for (const name of names.map((n) => String(n || '').trim()).filter(Boolean)) {
+            const parts = [];
+            if (name === ctx.name1) {
+                const persona = flat(ctx.powerUserSettings && ctx.powerUserSettings.persona_description);
+                if (persona) parts.push(`用户人设：${persona}`);
+            }
+            const card = characters.find((c) => c && c.name === name);
+            const description = flat(card && (card.description || (card.data && card.data.description)));
+            if (description) parts.push(`角色卡：${description}`);
+            for (const entry of entries) {
+                if (entryMentions(entry, name)) parts.push(`世界书：${flat(entry.content)}`);
+                if (parts.join(' ').length >= perName) break;
+            }
+            const text = parts.join('\n').slice(0, Math.min(perName, total - used));
+            if (!text) continue;
+            used += text.length;
+            out.push({ name, text });
+            if (used >= total) break;
+        }
+        return out;
+    }
+
+    async function readWorldInfoEntries(ctx, characters) {
+        const books = new Set();
+        const add = (name) => { if (typeof name === 'string' && name.trim()) books.add(name.trim()); };
+        add(ctx.chatMetadata && ctx.chatMetadata.world_info);
+        const card = ctx.characterId != null ? characters[ctx.characterId] : null;
+        add(card && card.data && card.data.extensions && card.data.extensions.world);
+        const helper = getTavernHelper(globalObject);
+        try {
+            const globals = helper && typeof helper.getGlobalWorldbookNames === 'function'
+                ? helper.getGlobalWorldbookNames()
+                : (helper && typeof helper.getLorebookSettings === 'function' ? (helper.getLorebookSettings() || {}).selected_global_lorebooks : []);
+            (Array.isArray(globals) ? globals : []).forEach(add);
+        } catch (error) { /* 读不到全局世界书就只用聊天与角色绑定的 */ }
+        const entries = [];
+        const embedded = card && card.data && card.data.character_book && card.data.character_book.entries;
+        if (Array.isArray(embedded)) entries.push(...embedded.map((e) => ({ key: e.keys, keysecondary: e.secondary_keys, comment: e.comment || e.name, content: e.content, disable: e.enabled === false })));
+        if (typeof ctx.loadWorldInfo === 'function') {
+            for (const book of books) {
+                try {
+                    const data = await ctx.loadWorldInfo(book);
+                    if (data && data.entries) entries.push(...Object.values(data.entries));
+                } catch (error) { /* 单本读取失败跳过 */ }
+            }
+        }
+        return entries.filter((e) => e && !e.disable && String(e.content || '').trim());
+    }
+
+    function entryMentions(entry, name) {
+        const keys = [].concat(entry.key || [], entry.keysecondary || []).map((k) => String(k || '').trim()).filter((k) => k.length >= 2 || k === name);
+        if (keys.some((k) => k === name || k.includes(name) || name.includes(k))) return true;
+        return String(entry.comment || '').includes(name);
     }
 
     function readPreviousAiTexts(messageId, count) {
@@ -148,7 +224,7 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
     }
 
     return {
-        getChatId, getUserName, getCharacterNames, readFloor, readPreviousAiTexts, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
+        getChatId, getUserName, getCharacterNames, readCharacterLore, readFloor, readPreviousAiTexts, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
         destroy() { while (cleanups.length) cleanups.pop()(); },
     };
 }

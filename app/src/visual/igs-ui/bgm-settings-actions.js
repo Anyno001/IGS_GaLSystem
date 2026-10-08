@@ -27,8 +27,15 @@ function parseMoods(value) {
     return out;
 }
 
-function alertOf(globalObj) {
-    return (message) => { if (typeof globalObj.alert === 'function') globalObj.alert(message); };
+function alertOf(dialogs, globalObj) {
+    return (message) => {
+        if (dialogs && typeof dialogs.alert === 'function') {
+            const pending = dialogs.alert(message);
+            if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+            return;
+        }
+        if (globalObj && typeof globalObj.alert === 'function') globalObj.alert(message);
+    };
 }
 
 // 名称、情绪、关键词三问；任一步取消返回 null。
@@ -67,7 +74,7 @@ async function choosePack(dialogs, worldview) {
 
 // 返回 { ok: false } 表示持久化失败，其余情况由调用方重绘设置页。
 export async function handleBgmSettingsAction(action, { readerDraft, dialogs, persist, global: globalObj = globalThis, worldview = 'modern' }) {
-    const alert = alertOf(globalObj);
+    const alert = alertOf(dialogs, globalObj);
     const current = normalizeBgmSettings(readerDraft.bgm);
     const [, verb, rest] = action.match(/^bgm-([a-z]+-[a-z]+)(?::(.*))?$/) || [];
     const id = decodeSeg(rest || '');
@@ -86,7 +93,7 @@ export async function handleBgmSettingsAction(action, { readerDraft, dialogs, pe
     } else if (verb === 'pack-remove') {
         const removed = removeDefaultBgm(current.tracks);
         if (!removed.removed) return null;
-        if (!await dialogs.confirm(`移除全部 ${removed.removed} 首默认曲目？你自己添加的曲目会保留。`, { okLabel: '移除' })) return null;
+        if (!await dialogs.confirm(`移除全部 ${removed.removed} 首默认曲目？自行添加的曲目会保留。`, { okLabel: '移除' })) return null;
         current.tracks = removed.tracks;
     } else if (verb === 'track-remove') {
         if (index < 0) return null;
@@ -129,7 +136,7 @@ export async function handleBgmSettingsAction(action, { readerDraft, dialogs, pe
 
     const normalized = normalizeBgmSettings(current);
     if (normalized.tracks.length < current.tracks.length) {
-        alert(verb === 'pack-download' ? '曲目数量已达上限，部分默认曲目没有加入。' : '链接无效：只支持 http/https 音频直链。');
+        alert(verb === 'pack-download' ? '曲目数量已达上限，部分默认曲目未能加入。' : '链接无效：只支持 http/https 音频直链。');
         if (verb !== 'pack-download') return null;
     }
     readerDraft.bgm = normalized;

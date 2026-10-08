@@ -4,12 +4,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { bootstrapIGS, createMemoryStorage, createPresetRegistry, PRESET_STORE_KEY } from '../src/index.js';
+import { writeLegacyIgsSettings } from '../src/storage/legacy-igs.js';
 import { createShujukuClient } from '../src/data/shujuku/client.js';
 import { createDbTabClickGuard, toShujukuApiRowIndex } from '../src/shujuku-panel/panel-controller.js';
 import { renderDbPanelInner, getDbPanelStyles } from '../src/shujuku-panel/panel-render.js';
 import { createImageResourceCache, createResourceCache } from '../src/media/resource-cache.js';
 import { buildIgsTextPayload } from '../src/scene/message-source.js';
 import { createIgsReaderHost } from '../src/visual/igs-ui/reader-host.js';
+import { createIllustrationMessageHost } from '../src/host/illustration-message-host.js';
+
+// 阅读器里的确认挂在遮罩上，不走浏览器 confirm。点「确定」后再等动作完成。
+async function acceptPageModal(doc, pending) {
+    let settled = false;
+    const done = Promise.resolve(pending).finally(() => { settled = true; });
+    for (let i = 0; i < 40 && !settled; i += 1) {
+        const modal = doc.querySelector('.igs-page-modal');
+        if (modal) {
+            modal.dispatchEvent({ type: 'click', target: { closest: () => ({ getAttribute: () => 'ok' }) } });
+            break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return done;
+}
 
 // 删除、清空、恢复默认、切世界观会先弹面板内的确认条：点「确定」后再等动作完成。
 async function invokeConfirmed(controller, doc, action) {
@@ -56,24 +73,64 @@ test('gate:simulation:virtual-regex-extra-rules-render-add-save-and-remove', asy
         const settings = opened.reader.controller.openSettings('regex').controller;
         let snapshot = settings.getSnapshot();
         assert.match(snapshot.html, /自定义规则（依上下顺序生效）/);
-        assert.deepEqual(snapshot.draft.bridge.virtualRegex.rules, []);
+        // 内置的 HTML 注释剥离规则随默认值一起下发（用户删掉后不会再长回来）。
+        const builtinRule = { pattern: '\\s*<!--[\\s\\S]*?-->\\s*\\n?', flags: 'g', replacement: '' };
+        assert.deepEqual(snapshot.draft.bridge.virtualRegex.rules, [builtinRule]);
 
         const added = await settings.invoke('add-virtual-regex');
         assert.equal(added.ok, true);
         snapshot = settings.getSnapshot();
         assert.match(snapshot.html, /data-path="bridge\.virtualRegex\.rules\.0\.pattern"/);
-        settings.setValue('bridge.virtualRegex.rules.0.pattern', 'foo');
-        settings.setValue('bridge.virtualRegex.rules.0.flags', 'g');
-        settings.setValue('bridge.virtualRegex.rules.0.replacement', 'bar');
-        assert.deepEqual(settings.getSnapshot().draft.bridge.virtualRegex.rules, [{ pattern: 'foo', flags: 'g', replacement: 'bar' }]);
+        settings.setValue('bridge.virtualRegex.rules.1.pattern', 'foo');
+        settings.setValue('bridge.virtualRegex.rules.1.flags', 'g');
+        settings.setValue('bridge.virtualRegex.rules.1.replacement', 'bar');
+        assert.deepEqual(settings.getSnapshot().draft.bridge.virtualRegex.rules, [builtinRule, { pattern: 'foo', flags: 'g', replacement: 'bar' }]);
         assert.equal(settings.close().ok, true);
-        assert.deepEqual(vn.getUnifiedSettings({ mode: 'pc' }).bridge.virtualRegex.rules, [{ pattern: 'foo', flags: 'g', replacement: 'bar' }]);
+        assert.deepEqual(vn.getUnifiedSettings({ mode: 'pc' }).bridge.virtualRegex.rules, [builtinRule, { pattern: 'foo', flags: 'g', replacement: 'bar' }]);
 
         const reopened = vn.openSettings({ tab: 'regex', mode: 'pc' }).controller;
-        const removed = await invokeConfirmed(reopened, document, 'remove-virtual-regex:0');
+        const removed = await invokeConfirmed(reopened, document, 'remove-virtual-regex:1');
         assert.equal(removed.ok, true);
+        assert.deepEqual(reopened.getSnapshot().draft.bridge.virtualRegex.rules, [builtinRule]);
+        assert.deepEqual(vn.getUnifiedSettings({ mode: 'pc' }).bridge.virtualRegex.rules, [builtinRule]);
+        assert.equal(reopened.close().ok, true);
+    } finally {
+        vn.destroy();
+    }
+});
+
+test('gate:simulation:virtual-regex-strips-html-comments-and-keeps-deleted-builtins-deleted', async () => {
+    const storage = createMemoryStorage();
+    const document = createFakeDocument();
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => ({ id: 1, text: '注释测试。' }),
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    try {
+        const opened = await vn.openLatestAvailable('pc');
+        const settings = opened.reader.controller.openSettings('regex').controller;
+        const builtinRule = { pattern: '\\s*<!--[\\s\\S]*?-->\\s*\\n?', flags: 'g', replacement: '' };
+
+        // 内置规则真的生效：注释整段消失，正文一个字不丢。
+        const cleaned = vn.getUnifiedSettings({ mode: 'pc' }).bridge.virtualRegex;
+        const { applyImmersiveGalgameSystemBodyFormat } = await import('../src/scene/message-source.js');
+        const formatted = applyImmersiveGalgameSystemBodyFormat(
+            '前文<!-- 这是给AI看的注释\n第二行 -->后文',
+            cleaned,
+        ).formattedRaw;
+        assert.equal(formatted, '前文后文');
+
+        // 用户删掉内置规则并保存后，重新打开不会又冒出来。
+        const removed = await invokeConfirmed(settings, document, 'remove-virtual-regex:0');
+        assert.equal(removed.ok, true);
+        assert.deepEqual(settings.getSnapshot().draft.bridge.virtualRegex.rules, []);
+        assert.equal(settings.close().ok, true);
+        const reopened = vn.openSettings({ tab: 'regex', mode: 'pc' }).controller;
         assert.deepEqual(reopened.getSnapshot().draft.bridge.virtualRegex.rules, []);
-        assert.deepEqual(vn.getUnifiedSettings({ mode: 'pc' }).bridge.virtualRegex.rules, []);
         assert.equal(reopened.close().ok, true);
     } finally {
         vn.destroy();
@@ -654,6 +711,24 @@ test('gate:simulation:nsfw-scene-hides-character-visuals-and-applies-neutral-vei
     vn.destroy();
 });
 
+test('gate:assets:reader-open-routes-service-notices-to-strip', async () => {
+    const document = createFakeDocument();
+    const raw = '[igs-scene:废弃工厂|夜晚|雨]\n雨声很大。';
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({ bridge: { sceneAssets: { enabled: true, scenes: {}, characters: {} } }, readerSettings: {} }),
+    });
+    try {
+        assert.equal(host.showImageNotice('error', '素材「教室」生成失败：超时'), false, '阅读器没开时交回 toastr');
+        host.openReader({ messageId: 39, message: { id: 39, text: raw }, raw }, { mode: 'pc' });
+        assert.equal(host.showImageNotice('error', '素材「教室」生成失败：超时'), true);
+        const strip = document.getElementById('igs-gen-strip');
+        assert.equal(strip.getAttribute('data-state'), 'failed');
+        assert.equal(strip.querySelector('.igs-gen-tip').textContent, '素材「教室」生成失败：超时');
+        assert.ok(!host.getState().activeReader.toastMessage, '不再弹阅读器旧提示');
+    } finally { host.destroy(); }
+});
+
 test('gate:assets:reader-manual-generation-feedback', async () => {
     const document = createFakeDocument();
     const raw = '[igs-scene:废弃工厂|夜晚|雨]\n雨声很大。';
@@ -675,7 +750,7 @@ test('gate:assets:reader-manual-generation-feedback', async () => {
         assert.ok(button, '阅读器必须有可点击的手动生图按钮');
         await overlay.parentNode.dispatchEvent({ type: 'click', target: button });
         assert.deepEqual(calls, [[39, { manual: true }]]);
-        assert.match(host.getState().activeReader.toastMessage, /已生成 1 项/);
+        assert.match(host.getState().activeReader.generationTip, /已生成 1 项/);
         assert.equal(logs.at(-1).level, 'success');
         for (const [next, text, level] of [
             [{ ok: false, reason: 'generation-failed' }, /补全素材失败/, 'error'],
@@ -686,7 +761,7 @@ test('gate:assets:reader-manual-generation-feedback', async () => {
         ]) {
             result = next;
             assert.equal(await opened.controller.invokeAction('generate-assets'), next);
-            assert.match(host.getState().activeReader.toastMessage, text);
+            assert.match(host.getState().activeReader.generationTip, text);
             assert.equal(logs.at(-1).level, level);
         }
     } finally { host.destroy(); }
@@ -731,13 +806,13 @@ test('gate:assets:reader-manual-retries-settled-floor', async () => {
         await overlay.parentNode.dispatchEvent({ type: 'click', target: button });
         assert.equal(calls, 1);
         assert.equal((await store.getFloor('chat-1|39|0')).status, 'failed');
-        assert.match(host.getState().activeReader.toastMessage, /补全素材失败/);
+        assert.match(host.getState().activeReader.generationTip, /补全素材失败/);
         assert.ok(logs.some((entry) => entry.message.includes('模拟 NAI 请求失败')));
         const retry = await opened.controller.invokeAction('generate-assets');
         assert.deepEqual([retry.ok, retry.count, calls], [true, 1, 2]);
         assert.equal((await store.getFloor('chat-1|39|0')).status, 'done');
         assert.equal(service.listReview('chat-1|39|0').length, 1);
-        assert.match(host.getState().activeReader.toastMessage, /已生成 1 项/);
+        assert.match(host.getState().activeReader.generationTip, /已生成 1 项/);
     } finally { host.destroy(); }
 });
 
@@ -763,7 +838,7 @@ test('gate:assets:reader-manual-rejects-ineligible-or-changed-floor', async () =
         ]) {
             floor = { ...initial, ...change };
             assert.equal((await opened.controller.invokeAction('generate-assets')).reason, reason);
-            assert.match(host.getState().activeReader.toastMessage, /已跳过/);
+            assert.match(host.getState().activeReader.generationTip, /已跳过/);
         }
         assert.equal(calls, 0);
     } finally { host.destroy(); }
@@ -905,7 +980,7 @@ test('gate:illustration:failed-cg-point-can-reroll-and-does-not-borrow-another-i
         const clear = document.getElementById('igs-btn-clear-cg');
         assert.equal(reroll.disabled, false);
         assert.equal(clear.disabled, true);
-        const result = await opened.controller.invokeAction('reroll-cg');
+        const result = await acceptPageModal(document, opened.controller.invokeAction('reroll-cg'));
         assert.equal(result.ok, true);
         assert.equal(calls.length, 1);
         assert.equal(calls[0].slot, 1);
@@ -1071,7 +1146,7 @@ test('gate:illustration:reader-clear-cg-removes-only-current-slot-and-rerenders'
         assert.equal(host.getState().activeReader.snapshot.content.illustrationActive, true);
         const readsBeforeClear = urlReads;
 
-        const result = await opened.controller.invokeAction('clear-cg');
+        const result = await acceptPageModal(document, opened.controller.invokeAction('clear-cg'));
 
         assert.deepEqual(clearCalls, [{ chatId: 'chat-1', messageId: 39, swipeId: 0, slot: 1 }]);
         assert.deepEqual(result, { ok: true, reason: 'cleared', removed: true, rendered: true });
@@ -1127,7 +1202,7 @@ test('gate:illustration:reader-clear-cg-delete-failure-keeps-current-and-reports
     try {
         const opened = host.openReader({ messageId: 41, message: { id: 41, text: raw }, raw }, { mode: 'pc' });
         const readsBeforeClear = urlReads;
-        const result = await opened.controller.invokeAction('clear-cg');
+        const result = await acceptPageModal(document, opened.controller.invokeAction('clear-cg'));
         assert.equal(result.ok, false);
         assert.equal(result.reason, 'storage-failed');
         assert.equal(urlReads, readsBeforeClear, '删除失败不得触发成功路径重绘');
@@ -1256,12 +1331,10 @@ test('gate:simulation:nsfw-scene-keeps-sprite-when-hide-toggle-off', async () =>
     assert.equal(overlay.classList.contains('igs-scene-nsfw'), true);
     assert.equal(sprite.style.display, 'block');
     assert.match(sprite.style.backgroundImage, /alice\.png/);
-    // 默认「仅露脸剪影」：立绘照常显示，由舞台属性驱动剪影；未标定头部时整张剪影。
+    // 默认「显示立绘」：NSFW 场景立绘原样显示，不加剪影。
     const stage = overlay.querySelector('#igs-stage-motion');
-    assert.equal(stage.getAttribute('data-igs-rm-shade'), '1');
-    assert.equal(stage.getAttribute('data-igs-rm-face'), null);
-    vn.destroy();
     assert.equal(stage.getAttribute('data-igs-rm-shade'), null);
+    vn.destroy();
 });
 test('gate:simulation:page-turn-skips-unchanged-root-class-and-background-writes', () => {
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
@@ -2362,11 +2435,11 @@ test('gate:simulation:igs-ui-enter-sends-and-shift-enter-does-not', async () => 
     vn.destroy();
 });
 
-test('gate:simulation:igs-ui-background-click-does-not-page-dialog-click-still-pages', async () => {
+test('gate:simulation:igs-ui-background-click-pages-forward-dialog-click-still-pages', async () => {
     const document = createFakeDocument();
     const latestMessage = {
         id: 44,
-        text: '[角色: 艾莉]\n艾莉: 第一段。\n第二段。',
+        text: '[角色: 艾莉]\n艾莉: 第一段。\n第二段。\n第三段。',
     };
     const vn = bootstrapIGS({
         global: { document },
@@ -2382,29 +2455,23 @@ test('gate:simulation:igs-ui-background-click-does-not-page-dialog-click-still-p
     const clickLayer = overlay.querySelector('#igs-click-layer');
     const dialog = overlay.querySelector('#igs-dialog');
 
-    assert.equal(opened.reader.snapshot.content.progress, '1 / 2');
+    assert.equal(opened.reader.snapshot.content.progress, '1 / 3');
+    // 单击对话框以外的画面推进到下一页。
     clickLayer.click();
-    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '1 / 2');
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 3');
 
+    // 点对话框仍照常翻页（第一下可能先放完打字机）。
     dialog.style.left = '0px';
     dialog.style.width = '200px';
     dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160 });
-    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 2');
+    if (vn.getState().igsUi.activeReader.snapshot.content.progress !== '3 / 3') dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160 });
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '3 / 3');
 
     vn.destroy();
 });
 
-test('gate:simulation:double-click-keeps-cg-and-skips-the-page-turn', async () => {
-    const timers = [];
-    const document = createFakeDocument({
-        setTimeout(fn) {
-            timers.push(fn);
-            return timers.length;
-        },
-        clearTimeout(id) {
-            if (id) timers[id - 1] = null;
-        },
-    });
+test('gate:simulation:right-click-hides-outside-the-dialog-only', async () => {
+    const document = createFakeDocument();
     const latestMessage = {
         id: 45,
         text: '[角色: 艾莉]\n艾莉: 第一段。\n第二段。',
@@ -2423,9 +2490,9 @@ test('gate:simulation:double-click-keeps-cg-and-skips-the-page-turn', async () =
     const button = overlay.querySelector('button');
 
     assert.equal(opened.reader.snapshot.content.progress, '1 / 2');
-    // 默认关：双击不收起对话框。
+    // 默认关：右键不收起对话框。
     assert.equal(opened.reader.snapshot.readerSettings.dblclickCgOnly, false);
-    overlay.dispatchEvent({ type: 'dblclick', target: overlay });
+    overlay.dispatchEvent({ type: 'contextmenu', target: overlay });
     assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
     const enable = opened.reader.controller.openSettings('reader').controller;
     enable.setValue('readerSettings.dblclickCgOnly', true);
@@ -2434,30 +2501,32 @@ test('gate:simulation:double-click-keeps-cg-and-skips-the-page-turn', async () =
     dialog.style.left = '0px';
     dialog.style.width = '200px';
 
-    button.dispatchEvent({ type: 'dblclick', target: button });
+    button.dispatchEvent({ type: 'contextmenu', target: button });
     assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
 
-    dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160, detail: 1 });
+    const text = dialog.querySelector('#igs-text');
+    dialog.dispatchEvent({ type: 'click', target: text, clientX: 160, detail: 1 });
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 2');
     dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160, detail: 2 });
-    overlay.dispatchEvent({ type: 'dblclick', target: dialog });
+    overlay.dispatchEvent({ type: 'contextmenu', target: text });
+    overlay.dispatchEvent({ type: 'contextmenu', target: dialog });
+    assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
+
+    overlay.dispatchEvent({ type: 'contextmenu', target: overlay });
     assert.equal(overlay.getAttribute('data-igs-cg-only'), '1');
     assert.equal(overlay.querySelector('#igs-bg').id, 'igs-bg');
-    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '1 / 2');
 
-    for (const fn of timers) if (typeof fn === 'function') fn();
-    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '1 / 2');
-
-    overlay.dispatchEvent({ type: 'dblclick', target: overlay });
+    overlay.dispatchEvent({ type: 'contextmenu', target: overlay });
     assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
 
     assert.equal(vn.getState().igsUi.activeReader.snapshot.readerSettings.dblclickCgOnly, true);
     const settings = opened.reader.controller.openSettings('reader').controller;
     settings.setValue('readerSettings.dblclickCgOnly', false);
     assert.equal(settings.close().ok, true);
-    overlay.dispatchEvent({ type: 'dblclick', target: overlay });
+    overlay.dispatchEvent({ type: 'contextmenu', target: overlay });
     assert.equal(overlay.getAttribute('data-igs-cg-only'), null);
 
-    // 关了双击隐藏：单击不再等双击，当场翻页。
+    // 关掉之后右键不再收起。点对话框仍按左右翻页；已经是最后一页，所以停在 2/2。
     const liveDialog = overlay.querySelector('#igs-dialog');
     liveDialog.style.left = '0px';
     liveDialog.style.width = '200px';
@@ -2954,13 +3023,14 @@ test('gate:simulation:igs-ui-toolbar-dock-top-fixes-bar-and-supports-collapse', 
     assert.equal(toggleResult.collapsed, false);
     assert.equal(collapsible.style.display, 'flex');
 
-    // 顶部固定模式：设置键移入固定区、退出键固定在 ctrl-bar 直属，导航键留在横滚按钮区。
+    // 顶部固定模式：设置键移入固定区、退出键固定在 ctrl-bar 直属；默认分两截，翻页键在对话框快捷栏，其余留在横滚按钮区。
     const pinned = overlay.querySelector('#igs-bar-pinned');
     const settingsBtn = overlay.querySelector('#igs-btn-settings');
     const closeBtn = toolbar.querySelector('[data-act="close"]');
     assert.equal(settingsBtn.parentNode, pinned);
     assert.equal(closeBtn.parentNode, toolbar);
-    assert.equal(overlay.querySelector('#igs-btn-next').parentNode, collapsible);
+    assert.equal(overlay.querySelector('#igs-btn-next').parentNode.id, 'igs-dialog-bar');
+    assert.equal(overlay.querySelector('#igs-btn-first-page').parentNode, collapsible);
     assert.equal(overlay.querySelector('#igs-btn-db-panel'), null);
 
     vn.destroy();
@@ -3211,11 +3281,49 @@ test('gate:simulation:unified-settings-merge-and-copy-isolation', () => {
         again.readerSettings.nested.marker = 'mutated snapshot';
         assert.equal(vn.getUnifiedSettings().bridge.sceneAssets.generated.expressionNotes.角色.开心.positive, 'new');
         assert.equal(vn.getUnifiedSettings().readerSettings.nested.marker, 'reader');
-        assert.equal(JSON.parse(storage.getItem('igs_bridge_config')).sceneAssets.generated.expressionNotes.角色.开心.positive, 'new');
+        assert.equal(JSON.parse(storage.getItem('igs_bridge_config')).sceneAssets.generated.expressionNotes, undefined, 'expressionNotes stripped from storage');
     } finally {
         vn.destroy();
     }
 });
+
+test('gate:simulation:storage-slim-bridge-strips-expressionNotes', () => {
+    const storage = createMemoryStorage();
+    const bridge = {
+        sceneAssets: {
+            enabled: true,
+            scenes: { 教室: { url: 'room.png' } },
+            generated: {
+                scenes: { 工厂: { url: 'igs-gen:bg1' } },
+                characters: { 冬月: { 默认: 'igs-gen:a' } },
+                characterAliases: {},
+                expressionNotes: { 冬月: { 喜悦: { positive: 'smile', negative: 'sad' } } },
+            },
+        },
+        imageApi: { provider: 'test' },
+    };
+    const result = writeLegacyIgsSettings(storage, {
+        bridge,
+        displayMode: 'pc',
+        readerMode: 'pc',
+        readerSettings: {},
+        readerSettingsByMode: { pc: {}, mobile: {}, default: {} },
+    });
+    assert.equal(result.ok, true);
+    // 返回的 legacy 对象保持完整
+    assert.equal(result.legacy.bridge.sceneAssets.generated.expressionNotes.冬月.喜悦.positive, 'smile',
+        'legacy return retains expressionNotes');
+    // localStorage 中的 bridge 不含 expressionNotes
+    const stored = JSON.parse(storage.getItem('igs_bridge_config'));
+    assert.equal(stored.sceneAssets.generated.expressionNotes, undefined,
+        'expressionNotes stripped from localStorage');
+    // 其他 generated 字段保留
+    assert.equal(stored.sceneAssets.generated.scenes.工厂.url, 'igs-gen:bg1');
+    assert.equal(stored.sceneAssets.generated.characters.冬月.默认, 'igs-gen:a');
+    // 非 generated 字段不受影响
+    assert.equal(stored.sceneAssets.scenes.教室.url, 'room.png');
+});
+
 
 test('gate:simulation:default-dialog-height-controls-floating-box', async () => {
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
@@ -3764,8 +3872,11 @@ test('gate:simulation:large-settings-draft-typing-does-not-copy-or-persist-per-c
         assert.equal(settings.close().ok, true);
         const saveMs = performance.now() - saveStart;
         const saved = JSON.parse(storage.getItem('igs_bridge_config'));
-        assert.equal(saved.sceneAssets.generated.expressionNotes.角色0.常态.positive, prompt);
-        assert.equal(saved.sceneAssets.generated.expressionNotes.角色499.常态.positive.length > 0, true);
+        assert.equal(saved.sceneAssets.generated.expressionNotes, undefined,
+            'expressionNotes stripped from storage for size (large draft)');
+        const mem = vn.getUnifiedSettings();
+        assert.equal(mem.bridge.sceneAssets.generated.expressionNotes.角色0.常态.positive, prompt);
+        assert.equal(mem.bridge.sceneAssets.generated.expressionNotes.角色499.常态.positive.length > 0, true);
         assert.ok(saved.autoIllustration.llm.apiKey === secret, 'latest key is saved without exposing its value in failure output');
         assert.ok(saved.autoIllustration.assets.templates.background === prompt.trim(), 'asset template is saved in its existing normalized form');
         assert.equal(JSON.parse(storage.getItem('igs-reader-settings-v9-default')).fontSize, 21);
@@ -4178,7 +4289,7 @@ test('gate:simulation:reader-sub-tab-switches-functional-pages', async () => {
     assert.match(interfaceView.snapshot.html, /工具栏位置/);
     assert.match(interfaceView.snapshot.html, /工具栏大小/);
     assert.match(interfaceView.snapshot.html, /按钮管理/);
-    assert.match(interfaceView.snapshot.html, /显示左上角状态栏/);
+    assert.match(interfaceView.snapshot.html, /显示状态栏/);
 
     settings.setValue('readerSettings.typewriter.enabled', true);
     settings.setValue('readerSettings.typewriter.speed', 'slow');
@@ -4371,7 +4482,8 @@ test('gate:simulation:igs-ui-embedded-keeps-compact-expanded-toolbar-when-top-do
 
     opened.reader.controller.toggleToolbar();
     assert.equal(collapsible.style.display, 'flex');
-    assert.equal(overlay.querySelector('#igs-btn-next').parentNode, collapsible);
+    assert.equal(overlay.querySelector('#igs-btn-next').parentNode.id, 'igs-dialog-bar');
+    assert.equal(overlay.querySelector('#igs-btn-first-page').parentNode, collapsible);
     assert.equal(overlay.querySelector('#igs-btn-settings').parentNode, collapsible);
     assert.match(opened.reader.snapshot.source.styleText, /\.igs-mode-embedded \.igs-ctrl-bar \.igs-icon-btn svg\{width:11px;height:11px;transform:scale\(1\.2\);transform-origin:center;\}/);
     vn.destroy();
@@ -4604,7 +4716,7 @@ test('gate:simulation:igs-ui-fullscreen-shows-reply-wait-and-opens-the-new-floor
     const sent = await opened.reader.controller.submit('下一句');
     assert.equal(sent.ok, true);
     assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
-    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '已发送，等待 AI 回复…');
+    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '正在生成…');
     assert.equal(overlay.querySelector('#igs-toast').textContent, '');
 
     const nextElement = createFakeMessageElement(document, { messageId: 81, textContent: '生成完成后的最终正文。' });
@@ -4622,6 +4734,177 @@ test('gate:simulation:igs-ui-fullscreen-shows-reply-wait-and-opens-the-new-floor
 
     assert.equal(overlay.classList.contains('igs-awaiting-reply'), false);
     assert.match(opened.reader.controller.getSnapshot().content.displayText, /生成完成后的最终正文/);
+    vn.destroy();
+});
+
+test('gate:simulation:igs-ui-web-mode-shows-reply-wait-and-opens-the-new-floor', async () => {
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const globalObject = document.defaultView;
+    const chat = document.createElement('div');
+    chat.id = 'chat';
+    document.body.appendChild(chat);
+    const initialElement = createFakeMessageElement(document, { messageId: 80, textContent: '上一轮正文。' });
+    chat.appendChild(initialElement);
+    let currentMessage = { id: 80, text: '上一轮正文。', visibleText: '上一轮正文。', element: initialElement };
+    const messages = new Map([[80, currentMessage]]);
+    const eventListeners = new Map();
+    const eventSource = {
+        on(name, handler) {
+            if (!eventListeners.has(name)) eventListeners.set(name, []);
+            eventListeners.get(name).push(handler);
+        },
+        off(name, handler) {
+            eventListeners.set(name, (eventListeners.get(name) || []).filter((item) => item !== handler));
+        },
+        emit(name) {
+            for (const handler of eventListeners.get(name) || []) handler();
+        },
+    };
+    const mutationObservers = [];
+    globalObject.MutationObserver = class {
+        constructor(handler) { this.handler = handler; mutationObservers.push(this); }
+        observe() {}
+        disconnect() {}
+    };
+    const timers = new Map();
+    let timerId = 0;
+    globalObject.setTimeout = (handler, delay) => {
+        timerId += 1;
+        timers.set(timerId, { handler, delay });
+        return timerId;
+    };
+    globalObject.clearTimeout = (id) => timers.delete(id);
+    globalObject.SillyTavern = {
+        getContext: () => ({
+            eventSource,
+            event_types: {
+                GENERATION_STARTED: 'generation_started',
+                GENERATION_ENDED: 'generation_ended',
+                GENERATION_STOPPED: 'generation_stopped',
+            },
+        }),
+    };
+    const vn = bootstrapIGS({
+        global: globalObject,
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => currentMessage,
+            getMessageById: async (id) => messages.get(Number(id)) || null,
+            typeAndSend: async () => {
+                eventSource.emit('generation_started');
+                return { ok: true };
+            },
+        },
+    });
+
+    const opened = await vn.openLatestAvailable('web');
+    const overlay = document.getElementById('igs-overlay');
+    assert.equal(opened.ok, true);
+    assert.match(opened.reader.snapshot.source.styleText, /#igs-overlay\.igs-awaiting-reply #igs-send-status\{display:flex/);
+
+    const sent = await opened.reader.controller.submit('下一句');
+    assert.equal(sent.ok, true);
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
+    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '正在生成…');
+    assert.equal(overlay.querySelector('#igs-toast').textContent, '');
+
+    const nextElement = createFakeMessageElement(document, { messageId: 81, textContent: '生成完成后的最终正文。' });
+    chat.appendChild(nextElement);
+    currentMessage = { id: 81, text: '生成完成后的最终正文。', visibleText: '生成完成后的最终正文。', element: nextElement };
+    messages.set(81, currentMessage);
+    for (const observer of mutationObservers) observer.handler([{ target: chat, addedNodes: [nextElement], removedNodes: [] }]);
+    eventSource.emit('generation_ended');
+    const stableTimer = Array.from(timers.entries()).find(([, timer]) => timer.delay === 800);
+    assert.ok(stableTimer);
+    timers.delete(stableTimer[0]);
+    stableTimer[1].handler();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), false);
+    assert.match(opened.reader.controller.getSnapshot().content.displayText, /生成完成后的最终正文/);
+    vn.destroy();
+});
+
+test('gate:simulation:igs-ui-comic-mode-keeps-reply-wait-after-hiding-input', async () => {
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const globalObject = document.defaultView;
+    const chat = document.createElement('div');
+    chat.id = 'chat';
+    document.body.appendChild(chat);
+    const initialElement = createFakeMessageElement(document, { messageId: 80, textContent: '上一轮正文。' });
+    chat.appendChild(initialElement);
+    let currentMessage = { id: 80, text: '上一轮正文。', visibleText: '上一轮正文。', element: initialElement };
+    const messages = new Map([[80, currentMessage]]);
+    const eventListeners = new Map();
+    const eventSource = {
+        on(name, handler) {
+            if (!eventListeners.has(name)) eventListeners.set(name, []);
+            eventListeners.get(name).push(handler);
+        },
+        off(name, handler) {
+            eventListeners.set(name, (eventListeners.get(name) || []).filter((item) => item !== handler));
+        },
+        emit(name) {
+            for (const handler of eventListeners.get(name) || []) handler();
+        },
+    };
+    const mutationObservers = [];
+    globalObject.MutationObserver = class {
+        constructor(handler) { this.handler = handler; mutationObservers.push(this); }
+        observe() {}
+        disconnect() {}
+    };
+    const timers = new Map();
+    let timerId = 0;
+    globalObject.setTimeout = (handler, delay) => {
+        timerId += 1;
+        timers.set(timerId, { handler, delay });
+        return timerId;
+    };
+    globalObject.clearTimeout = (id) => timers.delete(id);
+    globalObject.SillyTavern = {
+        getContext: () => ({
+            eventSource,
+            event_types: {
+                GENERATION_STARTED: 'generation_started',
+                GENERATION_ENDED: 'generation_ended',
+                GENERATION_STOPPED: 'generation_stopped',
+            },
+        }),
+    };
+    const vn = bootstrapIGS({
+        global: globalObject,
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => currentMessage,
+            getMessageById: async (id) => messages.get(Number(id)) || null,
+            typeAndSend: async () => {
+                eventSource.emit('generation_started');
+                return { ok: true };
+            },
+        },
+    });
+
+    const opened = await vn.openLatestAvailable('fullscreen');
+    const overlay = document.getElementById('igs-overlay');
+    assert.equal(opened.ok, true);
+    assert.match(opened.reader.snapshot.source.styleText, /#igs-overlay\.igs-awaiting-reply #igs-send-status\{display:flex/);
+
+    const comicSettings = opened.reader.controller.openSettings('reader').controller;
+    comicSettings.setValue('readerSettings.comicMode.enabled', true);
+    assert.equal(comicSettings.close().ok, true);
+    const sent = await opened.reader.controller.submit('下一句');
+    assert.equal(sent.ok, true);
+    assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
+    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '正在生成…');
+    // 漫画模式：输入框收起只靠标记 + 样式，等待提示那一行仍在输入栏里显示。
+    const controls = overlay.querySelector('.igs-controls');
+    assert.equal(controls.getAttribute('data-igs-comic-sent'), '1');
+    assert.notEqual(controls.style.display, 'none');
+    assert.match(opened.reader.snapshot.source.styleText + document.head.textContent, /:not\(\.igs-awaiting-reply\) #igs-dialog \.igs-controls\[data-igs-comic-sent="1"\]\{display:none!important;\}/);
+    assert.equal(overlay.querySelector('#igs-toast').textContent, '');
+
     vn.destroy();
 });
 
@@ -4697,7 +4980,7 @@ test('gate:simulation:igs-ui-fullscreen-send-keeps-the-current-page-until-the-ne
     const sent = await opened.reader.controller.submit('下一句');
     assert.equal(sent.ok, true);
     assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
-    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '已发送，等待 AI 回复…');
+    assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '正在生成…');
     assert.equal(opened.reader.controller.getSnapshot().content.currentIndex, 1);
 
     currentMessage = { ...currentMessage, visibleText: `${floorText}\n` };
@@ -5172,7 +5455,7 @@ test('gate:simulation:igs-ui-turn-navigation-switches-message-and_keeps_original
     assert.equal(prevTurnResult.moved, true);
     assert.equal(prevTurnResult.reader.snapshot.messageId, 8);
     assert.equal(prevTurnResult.reader.snapshot.content.progress, '1 / 2');
-    assert.deepEqual(jumped, [9, 8]);
+    assert.deepEqual(jumped, []);
     assert.equal(state.igsUi.activeReader.snapshot.messageId, 8);
 
     vn.destroy();
@@ -5209,7 +5492,7 @@ test('gate:simulation:igs-ui-turn-navigation-skips-user-messages', async () => {
     assert.equal(prevTurnResult.reader.snapshot.messageId, 7);
     assert.equal(nextTurnResult.ok, true);
     assert.equal(nextTurnResult.reader.snapshot.messageId, 9);
-    assert.deepEqual(jumped, [7, 9]);
+    assert.deepEqual(jumped, []);
 
     vn.destroy();
 });
@@ -5265,19 +5548,25 @@ test('gate:simulation:igs-ui-regen-gives-pending-feedback-and-reports-thrown-err
     assert.equal(opened.ok, true);
     const pending = opened.controller.invokeAction('regen');
     await Promise.resolve();
-    assert.equal(host.getState().activeReader.toastMessage, '生图中');
+    // 出图中不再盖常驻提示：对话框顶边的生成细线亮起，线上方弹一下小字。
+    const strip = document.getElementById('igs-overlay').querySelector('#igs-gen-strip');
+    assert.ok(strip);
+    assert.equal(strip.getAttribute('data-state'), 'busy');
+    assert.equal(strip.hasAttribute('hidden'), false);
+    assert.equal(strip.querySelector('.igs-gen-tip').textContent, '生图中…');
+    assert.notEqual(host.getState().activeReader.toastMessage, '生图中');
     const again = await opened.controller.invokeAction('regen');
     assert.equal(again.reason, 'regen-pending');
     assert.equal(calls, 1);
     release.reject(new Error('NAI 鉴权失败（401）'));
     const result = await pending;
     assert.equal(result.ok, false);
-    assert.match(host.getState().activeReader.toastMessage, /重新生图失败：NAI 鉴权失败/);
+    assert.match(host.getState().activeReader.generationTip, /重新生图失败：NAI 鉴权失败/);
     const retry = opened.controller.invokeAction('regen');
     await Promise.resolve();
     release.resolve({ ok: false, reason: 'provider-not-enabled' });
     await retry;
-    assert.match(host.getState().activeReader.toastMessage, /当前图像来源无法重画/);
+    assert.match(host.getState().activeReader.generationTip, /当前图像来源无法重画/);
     host.destroy();
 });
 
@@ -5470,7 +5759,7 @@ test('gate:simulation:igs-ui-builtin-nai-empty-endpoint-tests-and-regenerates-vi
         assert.equal(regen.ok, true, regen.reason);
         const reader = vn.getState().igsUi.activeReader;
         assert.match(reader.snapshot.content.backgroundImage, /^data:image\/png;base64,/);
-        assert.match(reader.toastMessage, /背景图已更新/);
+        assert.match(reader.generationTip, /背景图已更新/);
         assert.equal(server.calls.length, 2);
         assert.ok(server.calls.every(({ url }) => url === official));
         const body = JSON.parse(server.calls[1].init.body);
@@ -6007,7 +6296,7 @@ test('gate:simulation:igs-ui-generic-message-images-follow-image-tags-while-pagi
     vn.destroy();
 });
 
-test('gate:simulation:host-adapter-hide-state-skips-hidden-turns-in-real-bootstrap', async () => {
+test('gate:simulation:host-adapter-hide-state-keeps-hidden-ai-turns-readable-in-real-bootstrap', async () => {
     const document = createFakeDocument();
     const jumps = [];
     const messages = [
@@ -6039,8 +6328,10 @@ test('gate:simulation:host-adapter-hide-state-skips-hidden-turns-in-real-bootstr
 
     assert.equal(opened.reader.snapshot.messageId, 3);
     assert.equal(prevTurn.ok, true);
-    assert.equal(prevTurn.messageId, 1);
-    assert.deepEqual(jumps, ['/chat-jump 1']);
+    // 隐藏只是不发给模型，剧情照读：上一轮进到被隐藏的第 2 楼，玩家楼仍跳过。
+    assert.equal(prevTurn.messageId, 2);
+    // 切轮不再让酒馆跳楼。
+    assert.deepEqual(jumps, []);
 
     vn.destroy();
 });
@@ -7678,7 +7969,7 @@ test('gate:simulation:status-hud-settings-collapse-when-disabled-without-reading
     const html = settings.switchReaderSubTab('interface').snapshot.html;
 
     assert.match(html, /data-status-hud/);
-    assert.match(html, /显示左上角状态栏/);
+    assert.match(html, /显示状态栏/);
     assert.doesNotMatch(html, /状态栏大小/);
     assert.doesNotMatch(html, /头像圆角/);
     assert.doesNotMatch(html, /data-status-hud-tables/);
@@ -7716,11 +8007,11 @@ test('gate:simulation:status-hud-settings-expand-and-persist-table-selection', a
     settings.setValue('readerSettings.statusHud.enabled', true);
     settings.setValue('readerSettings.statusHud.showLocation', true);
     const enabled = settings.switchReaderSubTab('interface').snapshot.html;
-    assert.match(enabled, /显示左上角状态栏/);
+    assert.match(enabled, /显示状态栏/);
     assert.match(enabled, /显示情绪标签/);
     assert.match(enabled, /显示地点栏（仅旁白）/);
     assert.match(enabled, /显示更多的场景信息/);
-    assert.match(enabled, /显示左上角状态栏[\s\S]*显示情绪标签[\s\S]*显示地点栏（仅旁白）[\s\S]*显示更多的场景信息/);
+    assert.match(enabled, /显示状态栏[\s\S]*显示情绪标签[\s\S]*显示地点栏（仅旁白）[\s\S]*显示更多的场景信息/);
     assert.doesNotMatch(enabled, /毛玻璃模糊|旁白时压暗立绘|显示NSFW场景下的人物立绘/);
     assert.match(enabled, /头像圆角/);
     assert.match(enabled, /状态栏大小/);
@@ -7743,6 +8034,10 @@ test('gate:simulation:status-hud-settings-expand-and-persist-table-selection', a
     assert.match(performance, /旁白按句号分页[\s\S]*旁白时压暗立绘[\s\S]*显示立绘[\s\S]*隐藏立绘[\s\S]*仅露脸剪影/);
     assert.match(performance, /<span>黑幕强度<\/span>/);
     assert.doesNotMatch(performance, /NSFW场景立绘|NSFW黑幕强度|NSFW 场景立绘与黑幕/);
+    // 立绘三档、黑幕强度、裸体头像各自是一行的行头，不能挤进同一个横排行头。
+    assert.match(performance, /<div class="igs-perf-item-head"><div class="igs-settings-field"><div class="igs-segmented" role="radiogroup" aria-label="NSFW 场景立绘"/);
+    assert.match(performance, /<div class="igs-perf-item-head"><label class="igs-settings-field"><span>黑幕强度<\/span>/);
+    assert.match(performance, /<div class="igs-perf-item-head"><button type="button" class="igs-switch[^"]*" data-switch="readerSettings\.statusHud\.nsfwCgPortrait"/);
     const dialog = settings.switchReaderSubTab('dialog').snapshot.html;
     assert.match(dialog, /毛玻璃模糊/);
     assert.match(dialog, /显示对话框内状态行/);
@@ -7778,13 +8073,58 @@ test('gate:simulation:status-hud-settings-expand-and-persist-table-selection', a
     opened.reader.controller.openSettings('reader');
     settings.setValue('readerSettings.statusHud.enabled', false);
     const disabled = settings.switchReaderSubTab('interface').snapshot.html;
-    assert.match(disabled, /显示左上角状态栏/);
+    assert.match(disabled, /显示状态栏/);
     assert.doesNotMatch(disabled, /显示情绪标签/);
     assert.doesNotMatch(disabled, /显示地点栏/);
     assert.doesNotMatch(disabled, /显示更多的场景信息/);
     assert.doesNotMatch(disabled, /毛玻璃模糊|旁白时压暗立绘|显示NSFW场景下的人物立绘/);
     assert.match(settings.switchReaderSubTab('performance').snapshot.html, /旁白时压暗立绘/);
     assert.match(settings.switchReaderSubTab('dialog').snapshot.html, /显示对话框内状态行/);
+
+    vn.destroy();
+});
+
+test('gate:simulation:status-hud-position-switch-device-commit-reset-and-apply', async () => {
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const storage = createMemoryStorage();
+    storage.setItem('igs-reader-settings-v9-default', JSON.stringify({ statusHud: { enabled: true } }));
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => ({ id: 2, text: '旁白。' }),
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    const opened = await vn.openLatestAvailable('pc');
+    const hud = document.getElementById('igs-status-hud');
+    assert.equal(hud.hasAttribute('data-igs-hud-pos'), false, '没挪过位置的状态栏不挂属性');
+    const settings = (await opened.reader.controller.invokeAction('settings')).controller;
+    settings.switchTab('reader');
+    let html = settings.switchReaderSubTab('interface').snapshot.html;
+    assert.match(html, /显示状态栏[\s\S]*状态栏大小[\s\S]*data-hud-pos="pc"[\s\S]*显示的表格/, '位置栏排在大小 / 圆角之后、表格之前');
+    assert.match(html, /data-hud-pos-reset disabled>/);
+
+    settings.setValue('readerSettings.statusHud.position.pc.x', '87.6', { liveInput: true });
+    assert.deepEqual(settings.getSnapshot().draft.readerSettings.statusHud.position.pc, { x: 88, y: 0 });
+    await settings.invoke('status-hud-pos-device:mobile');
+    html = settings.getSnapshot().html;
+    assert.match(html, /data-hud-pos="mobile"/);
+    assert.match(html, /data-path="readerSettings\.statusHud\.position\.mobile\.y" data-hud-pos-axis="y" min="0" max="100" step="1" value="0"/);
+    settings.setValue('readerSettings.statusHud.position.mobile.y', 64, { liveInput: true });
+    await settings.invoke('status-hud-pos-device:pc');
+    assert.match(settings.getSnapshot().html, /data-path="readerSettings\.statusHud\.position\.pc\.x" data-hud-pos-axis="x" min="0" max="100" step="1" value="88"/);
+    await settings.invoke('status-hud-pos-reset:pc');
+    assert.deepEqual(settings.getSnapshot().draft.readerSettings.statusHud.position, { pc: { x: 0, y: 0 }, mobile: { x: 0, y: 64 } });
+    assert.equal((await settings.invoke('status-hud-pos-device:tablet')).ok, false);
+
+    assert.equal(settings.close().ok, true);
+    const persisted = JSON.parse(storage.getItem('igs-reader-settings-v9-default'));
+    assert.deepEqual(persisted.statusHud.position, { pc: { x: 0, y: 0 }, mobile: { x: 0, y: 64 } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(hud.hasAttribute('data-igs-hud-pos'), true, '关面板后阅读器按新位置挂上变量');
+    assert.equal(hud.style['--igs-hud-my'], '64');
+    assert.equal(hud.style['--igs-hud-x'], '0');
 
     vn.destroy();
 });
@@ -9043,7 +9383,7 @@ test('gate:assets:reader-cg-and-asset-buttons-are-independent', async () => {
         assert.ok(overlay.querySelector('[data-act="generate-assets"]'));
         assert.equal((await opened.controller.invokeAction('regen')).count, 2);
         assert.deepEqual([cgCalls.length, assetCalls.length], [1, 0], '画 CG 不应顺带补素材');
-        assert.match(host.getState().activeReader.toastMessage, /插图完成：已生成 2 张/);
+        assert.match(host.getState().activeReader.generationTip, /插图完成：已生成 2 张/);
         await opened.controller.invokeAction('generate-assets');
         assert.deepEqual([cgCalls.length, assetCalls.length], [1, 1], '补全素材不应顺带画 CG');
     } finally { host.destroy(); }
@@ -9548,4 +9888,148 @@ test('gate:simulation:settings-search-go-to-setting-opens-performance-group', as
     } finally {
         vn.destroy();
     }
+});
+
+test('gate:simulation:reading-progress-resume-modal-and-turn-index-panel', async () => {
+    const storage = createMemoryStorage();
+    storage.setItem('igs-reading:chat-ti', JSON.stringify({ last: { id: 2, page: 1, at: 1 }, far: { id: 2, page: 1, at: 1 } }));
+    const document = createFakeDocument();
+    const messages = [0, 2, 4].map((id) => ({ id, text: `[角色: 艾莉]\n艾莉: 第${id}楼第一句。\n第${id}楼第二句。` }));
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        illustrationMessageHost: { ...createIllustrationMessageHost({ document }), getChatId: () => 'chat-ti' },
+        hostAdapter: {
+            getCurrentMessage: async () => messages[2],
+            getMessageById: async (messageId) => messages.find((message) => message.id === Number(messageId)) || null,
+            getAdjacentMessage: async (messageId, delta) => {
+                const index = messages.findIndex((message) => message.id === Number(messageId));
+                return index < 0 ? null : messages[index + (delta < 0 ? -1 : 1)] || null;
+            },
+            listTurns: async () => messages,
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    const opened = await vn.openLatestAvailable('pc');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let overlay = document.getElementById('igs-overlay');
+    for (let i = 0; i < 20 && !document.querySelector('.igs-page-modal'); i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    const modal = document.querySelector('.igs-page-modal');
+    assert.ok(modal, '停在最新楼且上次读到别处时弹续读窗');
+    const modalText = modal.querySelector('.igs-page-modal-msg').textContent;
+    assert.match(modalText, /上次读到 2 楼 · 第 2 页/);
+    assert.match(modalText, /后面还有 1 楼没读/);
+    assert.equal(modal.querySelector('[data-igs-modal="ok"]').textContent, '续读 2 楼');
+    assert.equal(modal.querySelector('[data-igs-modal="cancel"]').textContent, '最新一层');
+    modal.dispatchEvent({ type: 'click', target: { closest: () => ({ getAttribute: () => 'cancel' }) } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(document.querySelector('.igs-page-modal'), null, '选「最新一层」后弹窗收起、留在最新楼');
+
+    const opening = opened.reader.controller.invokeAction('first-turn');
+    await opening;
+    overlay = document.getElementById('igs-overlay');
+    const panel = overlay.querySelector('#igs-turn-index');
+    assert.ok(panel, '目录按钮打开目录面板');
+    assert.match(panel.innerHTML, /最新 4 楼/);
+    assert.match(panel.innerHTML, /续读/);
+
+    await opened.reader.controller.invokeAction('first-turn');
+    assert.equal(document.getElementById('igs-overlay').querySelector('#igs-turn-index'), null, '再点一次关闭目录');
+
+    const saved = await opened.reader.controller.invokeAction('quick-save');
+    assert.equal(saved.ok, true);
+    assert.equal(JSON.parse(storage.getItem('igs-reading:chat-ti')).quick.id, 4);
+    vn.destroy();
+});
+
+test('gate:simulation:reading-progress-latest-chaser-sees-no-resume-bar', async () => {
+    const storage = createMemoryStorage();
+    // 上次读完了 2 楼，之后只多出最新的 4 楼：已追平，不该弹续读提示。
+    storage.setItem('igs-reading:chat-chase', JSON.stringify({ last: { id: 2, page: 1, at: 1 }, far: { id: 2, page: 1, at: 1 }, read: '0-2' }));
+    const document = createFakeDocument();
+    const messages = [0, 2, 4].map((id) => ({ id, text: `[角色: 艾莉]\n艾莉: 第${id}楼第一句。\n第${id}楼第二句。` }));
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        illustrationMessageHost: { ...createIllustrationMessageHost({ document }), getChatId: () => 'chat-chase' },
+        hostAdapter: {
+            getCurrentMessage: async () => messages[2],
+            getMessageById: async (messageId) => messages.find((message) => message.id === Number(messageId)) || null,
+            getAdjacentMessage: async () => null,
+            listTurns: async () => messages,
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    await vn.openLatestAvailable('pc');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(document.querySelector('.igs-page-modal'), null);
+    vn.destroy();
+});
+
+test('gate:simulation:reading-progress-offers-old-floor-after-jumping-back', async () => {
+    const storage = createMemoryStorage();
+    // 读到过最新的 4 楼，又跳回 2 楼后退出：中间都读过，但仍要问回 2 楼还是看最新。
+    storage.setItem('igs-reading:chat-back', JSON.stringify({ last: { id: 2, page: 1, at: 2 }, far: { id: 4, page: 1, at: 1 }, read: '0-4' }));
+    const document = createFakeDocument();
+    const messages = [0, 2, 4].map((id) => ({ id, text: `[角色: 艾莉]
+艾莉: 第${id}楼第一句。
+第${id}楼第二句。` }));
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        illustrationMessageHost: { ...createIllustrationMessageHost({ document }), getChatId: () => 'chat-back' },
+        hostAdapter: {
+            getCurrentMessage: async () => messages[2],
+            getMessageById: async (messageId) => messages.find((message) => message.id === Number(messageId)) || null,
+            getAdjacentMessage: async () => null,
+            listTurns: async () => messages,
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    await vn.openLatestAvailable('pc');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 20 && !document.querySelector('.igs-page-modal'); i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    const modal = document.querySelector('.igs-page-modal');
+    assert.ok(modal, '跳回旧楼后退出，下次打开要问');
+    assert.equal(modal.querySelector('[data-igs-modal="ok"]').textContent, '续读 2 楼');
+    modal.dispatchEvent({ type: 'click', target: { closest: () => ({ getAttribute: () => 'ok' }) } });
+    const shownId = () => {
+        const reader = vn.getState().igsUi.activeReader;
+        return reader ? Number(reader.contentMessageId != null ? reader.contentMessageId : reader.snapshot.messageId) : NaN;
+    };
+    for (let i = 0; i < 40 && shownId() !== 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(shownId(), 2, '选「续读」回到 2 楼');
+    vn.destroy();
+});
+
+test('gate:simulation:toolbar-split-moves-nav-buttons-under-dialog', async () => {
+    const storage = createMemoryStorage();
+    const document = createFakeDocument();
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage },
+        autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => ({ id: 8, text: '[角色: 艾莉]\n艾莉: 第一段。\n第二段。' }),
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    const opened = await vn.openLatestAvailable('fullscreen');
+    const overlay = () => document.getElementById('igs-overlay');
+    const parentOf = (id) => overlay().querySelector(`#igs-btn-${id}`).parentNode.id;
+    assert.equal(opened.reader.snapshot.readerSettings.toolbarSplit, 'split');
+    for (const id of ['first-turn', 'prev', 'next', 'auto-play', 'quick-save', 'quick-load']) assert.equal(parentOf(id), 'igs-dialog-bar', id);
+    assert.notEqual(parentOf('regen'), 'igs-dialog-bar');
+    assert.equal(overlay().querySelector('#igs-dialog-bar').hasAttribute('hidden'), false);
+
+    const settings = await opened.reader.controller.invokeAction('settings');
+    settings.controller.setValue('readerSettings.toolbarSplit', 'top');
+    await settings.controller.save?.();
+    vn.closeSettings?.();
+    const top = await vn.openLatestAvailable('fullscreen');
+    assert.equal(top.reader.snapshot.readerSettings.toolbarSplit, 'top');
+    assert.notEqual(parentOf('next'), 'igs-dialog-bar');
+    assert.equal(overlay().querySelector('#igs-btn-quick-save').style.display, 'none', '只用顶栏时快速存读档不挤进顶栏');
+    assert.equal(overlay().querySelector('#igs-dialog-bar').hasAttribute('hidden'), true);
+    vn.destroy();
 });

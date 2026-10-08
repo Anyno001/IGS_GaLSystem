@@ -39,33 +39,39 @@ import { createPromptInjector } from '../host/prompt-injector.js';
 import { createIllustrationMessageHost } from '../host/illustration-message-host.js';
 import { createSecondaryLlm } from '../host/secondary-llm.js';
 import { createImageBackend, mergeLegacyNaiSettings } from '../generated-images/image-backend.js';
+import { IMAGE_ACTIVITY_EVENT, trackImageActivity } from '../generated-images/generation-activity.js';
 import { createNaiOfficialClient } from '../generated-images/nai-official-client.js';
 import { createImageJobLog } from '../generated-images/image-job-log.js';
 import { createIndexedDbIllustrationStore } from '../media/illustration-store.js';
 import { createIndexedDbCgIndexStore } from '../media/cg-index-store.js';
+import { createAssetThumbnailer, createIndexedDbAssetThumbStore } from '../media/asset-thumb-store.js';
 import { withCgIndexSync } from '../media/cg-library.js';
 import { createAutoIllustrationService, ILLUSTRATION_PROGRESS_EVENT, ILLUSTRATION_UPDATED_EVENT, readCgViewport } from '../generated-images/illustration/auto-illustration-service.js';
 import { createAssetGenerationService, GENERATED_ASSET_UPDATED_EVENT } from '../generated-images/illustration/asset-generation-service.js';
 import { createItemAndCgServices } from './item-cg-services.js';
 import { createIndexedDbGeneratedAssetStore } from '../media/generated-asset-store.js';
 import { createAlphaMatte } from '../media/alpha-matte.js';
-import { buildCompactGroupsText, buildCompactMoodGroupsText, buildCompactSceneNamesText, buildMoodGroupsText, buildGroupsText, buildSceneGroupsText, MOOD_GROUPS_PLACEHOLDER, SCENE_GROUPS_PLACEHOLDER, TIME_GROUPS_PLACEHOLDER, WEATHER_GROUPS_PLACEHOLDER } from '../scene/mood-groups.js';
-import { buildOutfitGroupsText, buildScopedOutfitGroupsText, normalizeCharacterOutfits, OUTFIT_GROUPS_PLACEHOLDER } from '../scene/character-outfits.js';
+import { firstMoodWord, resolvePromptRuleContent, scenePromptRuleEnabled } from '../scene/prompt-rule-content.js';
 import { buildTagGrammar, DEPTH0_REMINDER, normalizePromptPlacement } from '../visual/igs-ui/tag-grammar.js';
 import { detectPromptTriggers } from '../scene/prompt-triggers.js';
 import { collectPromptContext } from '../host/prompt-context.js';
 
-const IGS_VERSION = '0.34.78';
+const IGS_VERSION = '0.35.2';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
 
-// 自动插图 / 素材补全的进度与失败原因：始终写控制台，失败与成功再按「显示提示弹窗」弹出。
-function createImageJobReporter(globalObject, getBridge, log) {
+// 自动插图 / 素材补全的进度与失败原因：始终写控制台；阅读器开着时交给对话框顶边的生成细线，
+// 没开时失败与成功再按「显示提示弹窗」弹酒馆 toastr。
+export function createImageJobReporter(globalObject, getBridge, log, getReaderNotice) {
     return (level, message) => {
         if (log && typeof log.add === 'function') log.add(level, message);
         const logger = level === 'error' ? console.warn : console.info;
         logger('[IGS 生图]', message);
+        try {
+            const readerNotice = typeof getReaderNotice === 'function' ? getReaderNotice() : null;
+            if (readerNotice && readerNotice(level, message)) return;
+        } catch (error) { /* 阅读器还没建好或细线出错时照旧弹 toastr */ }
         if (level === 'info') return;
         if ((getBridge() || {}).showToasts === false) return;
         const toastr = globalObject && globalObject.toastr;
@@ -116,8 +122,14 @@ export function bootstrapIGS(options = {}) {
         storage: storageLike,
         getSettings: () => ((getUnifiedSettingsSnapshot() || {}).bridge || {}).imageJobLog,
     });
-    const reportImageJob = options.reportImageJob || createImageJobReporter(globalObject, () => (getUnifiedSettingsSnapshot() || {}).bridge || {}, imageJobLog);
-    const imageBackend = options.imageBackend || createImageBackend({
+    const reportImageJob = options.reportImageJob || createImageJobReporter(
+        globalObject,
+        () => (getUnifiedSettingsSnapshot() || {}).bridge || {},
+        imageJobLog,
+        () => (app.igsUi && typeof app.igsUi.showImageNotice === 'function' ? app.igsUi.showImageNotice.bind(app.igsUi) : null),
+    );
+    // 所有出图（手动 / 自动，CG / 立绘 / 背景 / 物品）都经过这一层，开始和结束各发一次活动事件给阅读器的生成细线。
+    const imageBackend = trackImageActivity(options.imageBackend || createImageBackend({
         nai: naiOfficialClient,
         getBridge: readImageBridge,
         global: globalObject,
@@ -125,7 +137,7 @@ export function bootstrapIGS(options = {}) {
         report: (level, message) => {
             if (imageJobLog && typeof imageJobLog.add === 'function') imageJobLog.add(level, message);
         },
-    });
+    }), (event) => events.emit(IMAGE_ACTIVITY_EVENT, event));
     // CG 库与自动插图共用同一个插图存储实例；写入 / 删除槽位时顺手更新 CG 库目录。
     const cgIndexStore = options.cgIndexStore || createIndexedDbCgIndexStore(globalObject);
     const illustrationStore = options.illustrationStore || withCgIndexSync(withTavernIllustrationFiles(createIndexedDbIllustrationStore(globalObject), globalObject), cgIndexStore);
@@ -142,6 +154,7 @@ export function bootstrapIGS(options = {}) {
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
+        getSourceFilter: () => readImageBridge().sourceFilter,
         events,
         random: options.random,
         report: reportImageJob,
@@ -156,12 +169,15 @@ export function bootstrapIGS(options = {}) {
         matte: options.alphaMatte || createAlphaMatte(globalObject),
         getSettings: () => {
             const bridge = readImageBridge();
-            return { autoIllustration: bridge.autoIllustration, sceneAssets: sceneAssetsNow(bridge.sceneAssets) };
+            return { autoIllustration: bridge.autoIllustration, sceneAssets: sceneAssetsNow(bridge.sceneAssets), imageApi: bridge.imageApi };
         },
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
+        getSourceFilter: () => readImageBridge().sourceFilter,
         events,
         report: reportImageJob,
+        thumbStore: options.assetThumbStore !== undefined ? options.assetThumbStore : createIndexedDbAssetThumbStore(globalObject),
+        makeThumb: createAssetThumbnailer(globalObject),
     });
     const itemCg = createItemAndCgServices({
         globalObject,
@@ -227,6 +243,7 @@ export function bootstrapIGS(options = {}) {
         illustrations: illustrationService,
         onIllustrationUpdated: (handler) => events.on(ILLUSTRATION_UPDATED_EVENT, handler),
         onIllustrationProgress: (handler) => events.on(ILLUSTRATION_PROGRESS_EVENT, handler),
+        onImageActivity: (handler) => events.on(IMAGE_ACTIVITY_EVENT, handler),
         generatedAssets: assetGenerationService,
         // 遮罩修复编辑器的 AI 局部重绘：只经 describeEdit/edit 显式调用，不影响普通生成。
         imageEditBackend: imageBackend,
@@ -258,6 +275,7 @@ export function bootstrapIGS(options = {}) {
         },
         getAdjacentMessage: hasAdjacentMessageCapability() ? resolveAdjacentMessage : null,
         jumpToMessage: jumpToMessage,
+        listTurns: hasAdjacentMessageCapability() ? listReaderTurns : null,
         openViewerFromMessage(messageId, mode, openOptions = {}) {
             if (!publicApi || typeof publicApi.openViewerFromMessage !== 'function') {
                 return { ok: false, reason: 'public-api-not-ready', messageId, mode, openOptions };
@@ -583,7 +601,7 @@ export function bootstrapIGS(options = {}) {
             return { ok: true, reason: 'generation-type-skipped' };
         }
         const promptContext = collectPromptContext(resolveTavernContext(), { document: globalObject.document });
-        const sceneOn = Boolean(sceneAssets && sceneAssets.enabled && sceneAssets.promptRule);
+        const sceneOn = Boolean(sceneAssets && sceneAssets.enabled && scenePromptRuleEnabled(sceneAssets) && sceneAssets.promptRule);
         const grammar = buildTagGrammar({
             readerSettings,
             sceneRule: sceneOn ? resolvePromptRuleContent(sceneAssets, { compact: true, presentText: promptContext.presentText }) : '',
@@ -604,7 +622,7 @@ export function bootstrapIGS(options = {}) {
     // 关闭按需注入时的旧行为：各块完整拼接；未自定义的场景规则用改版前的长版原文。
     function injectLegacyPromptRules(sceneAssets, readerSettings, { ancient, eraRule, placement, metaDigestRule }) {
         const rules = [];
-        if (sceneAssets && sceneAssets.enabled && sceneAssets.promptRule) {
+        if (sceneAssets && sceneAssets.enabled && scenePromptRuleEnabled(sceneAssets) && sceneAssets.promptRule) {
             const promptRule = sceneAssets.promptRule === DEFAULT_SCENE_PROMPT_RULE ? LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3 : sceneAssets.promptRule;
             rules.push(resolvePromptRuleContent({ ...sceneAssets, promptRule }));
         }
@@ -639,44 +657,6 @@ export function bootstrapIGS(options = {}) {
         }
         const depth0Content = split ? [DEPTH0_REMINDER, metaDigestRule].filter(Boolean).join('\n\n') : '';
         return promptInjector.inject(rules.join('\n\n'), { placement, depth0Content });
-    }
-
-    function firstMoodWord(sceneAssets) {
-        const groups = sceneAssets && Array.isArray(sceneAssets.moodGroups) ? sceneAssets.moodGroups : [];
-        const group = groups.find((g) => g && Array.isArray(g.words) && g.words.some(Boolean));
-        return group ? String(group.words.find(Boolean)) : '';
-    }
-
-    function moodSlotWords(sceneAssets) {
-        const words = new Set();
-        for (const moods of Object.values((sceneAssets && sceneAssets.characters) || {})) {
-            if (moods && typeof moods === 'object') for (const word of Object.keys(moods)) words.add(word);
-        }
-        return words;
-    }
-
-    function resolvePromptRuleContent(sceneAssets, { compact = false, presentText = null } = {}) {
-        let rule = String(sceneAssets.promptRule || '');
-        if (rule.includes(MOOD_GROUPS_PLACEHOLDER)) {
-            const moods = compact ? buildCompactMoodGroupsText(sceneAssets.moodGroups, moodSlotWords(sceneAssets)) : buildMoodGroupsText(sceneAssets.moodGroups);
-            rule = rule.split(MOOD_GROUPS_PLACEHOLDER).join(moods);
-        }
-        if (rule.includes(SCENE_GROUPS_PLACEHOLDER)) {
-            rule = rule.split(SCENE_GROUPS_PLACEHOLDER).join(compact ? buildCompactSceneNamesText(sceneAssets.scenes) : buildSceneGroupsText(sceneAssets.scenes));
-        }
-        if (rule.includes(TIME_GROUPS_PLACEHOLDER)) {
-            rule = rule.split(TIME_GROUPS_PLACEHOLDER).join(compact ? buildCompactGroupsText(sceneAssets.timeGroups) : buildGroupsText(sceneAssets.timeGroups));
-        }
-        if (rule.includes(WEATHER_GROUPS_PLACEHOLDER)) {
-            rule = rule.split(WEATHER_GROUPS_PLACEHOLDER).join(compact ? buildCompactGroupsText(sceneAssets.weatherGroups) : buildGroupsText(sceneAssets.weatherGroups));
-        }
-        if (rule.includes(OUTFIT_GROUPS_PLACEHOLDER)) {
-            const outfits = normalizeCharacterOutfits(sceneAssets.characterOutfits);
-            rule = rule.split(OUTFIT_GROUPS_PLACEHOLDER).join(compact
-                ? buildScopedOutfitGroupsText(outfits, { presentText, characterAliases: sceneAssets.characterAliases })
-                : buildOutfitGroupsText(outfits));
-        }
-        return compact ? rule.replace(/\n{2,}/g, '\n').trim() : rule;
     }
 
     function syncSceneAssetsInjectionWithRetry(attempt) {
@@ -869,6 +849,13 @@ export function bootstrapIGS(options = {}) {
             if (isVisibleAiTurn(messages[index])) return messages[index];
         }
         return null;
+    }
+
+    async function listReaderTurns() {
+        if (typeof hostAdapter.listTurns === 'function') return hostAdapter.listTurns();
+        if (typeof hostAdapter.listMessages !== 'function') return [];
+        const messages = await hostAdapter.listMessages();
+        return Array.isArray(messages) ? messages.filter(isVisibleAiTurn) : [];
     }
 
     function hasAdjacentMessageCapability() {

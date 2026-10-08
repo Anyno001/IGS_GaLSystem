@@ -1,5 +1,6 @@
 import {
     DIALOG_FONT_CAVEAT,
+    DIALOG_FONT_CHILL_ROUND,
     DIALOG_FONT_CINZEL,
     DIALOG_FONT_CORMORANT,
     DIALOG_FONT_GREAT_VIBES,
@@ -33,6 +34,11 @@ export const DEFAULT_IMAGE_API = Object.freeze({
     requestTimeoutMs: 30000,
     pollIntervalMs: 2000,
     pollAttempts: 60,
+    dbgenSpriteTransparent: true,
+    cgModel: '',
+    spriteModel: '',
+    backgroundModel: '',
+    itemModel: '',
     promptPrefix: '',
     availableModels: [],
     modelsFetchedAt: '',
@@ -97,6 +103,7 @@ export const DIALOG_FONT_OPTIONS = Object.freeze([
     ['"FangSong","STFangsong",serif', '仿宋'],
     ['"Microsoft YaHei",sans-serif', '微软雅黑'],
     [DIALOG_FONT_ROUNDED, '有爱圆体'],
+    [DIALOG_FONT_CHILL_ROUND, '寒蝉全圆体'],
     [DIALOG_FONT_WENKAI, '霞鹜文楷'],
     [DIALOG_FONT_WENKAI_LITE, '霞鹜文楷 Lite'],
     [DIALOG_FONT_NEO_ZHISONG, '霞鹜新致宋'],
@@ -146,6 +153,8 @@ export const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.cgHoldPages',
     'readerSettings.showStatusLine',
     'readerSettings.dblclickCgOnly',
+    'readerSettings.titleScreen',
+    'readerSettings.dialogAutoHeight',
     'readerSettings.cinemaBars',
     'readerSettings.typewriter.enabled',
     'readerSettings.typewriter.speed',
@@ -161,6 +170,9 @@ export const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.pinnedBtns',
     'readerSettings.hiddenBtns',
     'readerSettings.btnOrder',
+    'readerSettings.toolbarSplit',
+    'readerSettings.dialogBarAlign',
+    'readerSettings.dialogBarBtns',
     'readerSettings.spriteLayouts',
     'readerSettings.spriteDefaultScale',
     'readerSettings.spriteGenderScale.enabled',
@@ -219,6 +231,11 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.imageApi.externalAdapter',
             'bridge.imageApi.pollIntervalMs',
             'bridge.imageApi.pollAttempts',
+            'bridge.imageApi.dbgenSpriteTransparent',
+            'bridge.imageApi.cgModel',
+            'bridge.imageApi.spriteModel',
+            'bridge.imageApi.backgroundModel',
+            'bridge.imageApi.itemModel',
             'bridge.autoIllustration.nsfwEnabled',
             'bridge.autoIllustration.nsfwCount',
             'bridge.autoIllustration.interludeEnabled',
@@ -274,11 +291,13 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
         requiredPaths: Object.freeze([
             'bridge.sceneAssets.enabled',
             'bridge.sceneAssets.promptRule',
+            'bridge.sceneAssets.promptRuleEnabled',
             'bridge.autoIllustration.assets.strictMatch',
         ]),
         requiredActions: Object.freeze([
             'reset-prompt-rule',
             'save-prompt-rule',
+            'copy-prompt-rule',
         ]),
     }),
     reader: Object.freeze({
@@ -288,6 +307,7 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
 });
 
 export const TOOLBAR_ACTIONS = Object.freeze([
+    ['first-turn', '目录 / 续读'],
     ['prev-turn', '上一轮'],
     ['first-page', '第一页'],
     ['prev', '上一页'],
@@ -295,6 +315,9 @@ export const TOOLBAR_ACTIONS = Object.freeze([
     ['last-page', '最后一页'],
     ['next-turn', '下一轮'],
     ['auto-play', '自动播放'],
+    ['tts-replay', '重听这句'],
+    ['quick-save', '快速存档'],
+    ['quick-load', '快速读档'],
     ['regen', '绘制 CG'],
     ['reroll-cg', '重画这张'],
     ['clear-cg', '清扫当前 CG'],
@@ -310,6 +333,13 @@ export const TOOLBAR_ACTIONS = Object.freeze([
 ]);
 
 export const DEFAULT_PINNED_TOOLBAR_BUTTONS = Object.freeze([]);
+// 工具栏分两截：翻页和读档类默认放对话框底部的快捷栏，顶栏只留生图、素材、画面和系统。
+export const TOOLBAR_SPLIT_MODES = Object.freeze(['split', 'top', 'dialog']);
+// 对话框下快捷栏的对齐：auto 为手机居中、电脑靠左。
+export const DIALOG_BAR_ALIGNS = Object.freeze(['auto', 'left', 'center', 'right']);
+export const DEFAULT_DIALOG_BAR_BUTTONS = Object.freeze(['first-turn', 'prev-turn', 'prev', 'auto-play', 'next', 'next-turn', 'quick-save', 'quick-load']);
+// 只在对话框快捷栏出现的按钮：选「只用顶栏」时不挤进顶栏（目录 › 存档里也能存读）。
+export const DIALOG_ONLY_BUTTONS = Object.freeze(['quick-save', 'quick-load']);
 export const READER_SETTINGS_SCHEMA_VERSION = '0.5.6';
 export const INITIAL_IMAGE_POLL_ATTEMPTS = 8;
 export const INITIAL_IMAGE_POLL_INTERVAL_MS = 250;
@@ -390,3 +420,7 @@ export const PROMPT_RULE_OUTFIT_HINT = '当前为自定义规则，未包含服�
 export function scenePromptRuleOutfitHint(rule) {
     return String(rule || '').includes('{{outfit_groups}}') ? '' : PROMPT_RULE_OUTFIT_HINT;
 }
+
+// 规则原文里的 {{mood_groups}} 等占位符酒馆不认识，所以提醒用「复制到酒馆预设」拿词表已展开的版本，而不是直接复制输入框。
+export const PROMPT_RULE_PRESET_HINT = '也可点击「复制到酒馆预设」，将词表已展开的完整规则粘贴到酒馆预设中使用；粘贴后请关闭上方开关，以免重复发送。';
+export const PROMPT_RULE_OFF_HINT = '自动注入已关闭，聊天模型将不再收到这段规则。请将「复制到酒馆预设」的内容粘贴到酒馆预设中，否则 AI 不会输出场景与台词标签，背景与立绘将无法切换；场景、表情或服装有变动后需重新复制。';

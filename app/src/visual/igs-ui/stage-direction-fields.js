@@ -46,7 +46,7 @@ function renderStageFields(s, more) {
         + checkbox(`${P}.camera.aiShots`, s.camera.aiShots, 'AI镜头指令'))
         + (s.camera.closeUp ? renderWordListField('camera.closeUpEmotions', '特写触发情绪', s.camera.closeUpEmotions) : '')
         + (s.camera.impact ? renderWordListField('camera.impactEmotions', '冲击触发情绪', s.camera.impactEmotions) : ''));
-    const cast = featureRow(more, 'stage-cast', `${P}.stageCast.enabled`, s.stageCast.enabled, '多角色同屏（实验）', '电脑3人、手机2人', checkbox(`${P}.stageCast.alignHeads`, s.stageCast.alignHeads, '按头部对齐大小与高度（需抠图或标定头部）')
+    const cast = featureRow(more, 'stage-cast', `${P}.stageCast.enabled`, s.stageCast.enabled, '多角色同屏（实验）', '电脑3人、手机2人', checkbox(`${P}.stageCast.alignHeads`, s.stageCast.alignHeads, '按腿对齐到底部（需抠图）')
         + checkbox(`${P}.stageCast.romanceDuo`, s.stageCast.romanceDuo, '亲密演出时保留同屏角色')
         + checkbox(`${P}.stageCast.castReact`, s.stageCast.castReact, '同屏角色反应')
         + checkbox(`${P}.stageCast.castStage`, s.stageCast.castStage, '同屏角色走位'));
@@ -94,7 +94,7 @@ function renderBgmTracks(bgm, more) {
     const packBlock = pack.length
         ? more('bgm-pack-tracks', `默认曲目 ${pack.length} 首（${counts}）`, `<div class="igs-bgm-tracks">${pack.map(renderTrackRow).join('')}</div>`
             + '<button type="button" class="igs-settings-action" data-action="bgm-pack-remove">移除全部默认曲目</button>'
-            + '<div class="igs-source-filter-note">音乐来自魔王魂（maou.audio）与OpenGameArt，按各自授权再配布；曲名和作者在地点栏的 ♪ 里可以看到。</div>')
+            + '<div class="igs-source-filter-note">音乐来自魔王魂（maou.audio）与OpenGameArt，按各自授权再配布；曲名与作者可在地点栏的 ♪ 中查看。</div>')
         : '';
     const ownBlock = own.length ? `<div class="igs-bgm-tracks">${own.map(renderTrackRow).join('')}</div>` : (pack.length ? '' : '<div class="igs-scene-empty">还没有曲目</div>');
     return packBlock + ownBlock;
@@ -107,7 +107,7 @@ function renderSoundFields(bgm, ambient, ui, master, more) {
         + grid('<button type="button" class="igs-settings-action" data-action="bgm-pack-download">下载默认曲目</button>'
             + '<button type="button" class="igs-settings-action" data-action="bgm-track-upload">上传本地音频</button>'
             + '<button type="button" class="igs-settings-action" data-action="bgm-track-add">添加音频直链</button>')
-        + '<div class="igs-source-filter-note">自己的曲目可勾情绪或填地点关键词（命中优先）；点地点栏的 ♪ 看曲名、换一首。</div>');
+        + '<div class="igs-source-filter-note">自行添加的曲目可勾选情绪或填写地点关键词（命中时优先播放）；点击地点栏的 ♪ 可查看曲名或切换曲目。</div>');
     const ambientBody = featureRow(more, 'ambient-kinds', `${P}.ambientSound.enabled`, ambient.enabled, '环境音', '鸟鸣、雨声、人声', field(`${P}.ambientSound.volume`, '环境音量', rangeInput(`${P}.ambientSound.volume`, ambient.volume, '环境音量'))
         + grid(AMBIENT_KINDS.map((kind) => checkbox(`${P}.ambientSound.${kind}`, ambient[kind], AMBIENT_LABELS[kind])).join('')));
     const uiBody = featureRow(more, 'ui-sound', `${P}.uiSound.enabled`, ui.enabled, '界面音效', '', field(`${P}.uiSound.volume`, '界面音量', rangeInput(`${P}.uiSound.volume`, ui.volume, '界面音量')));
@@ -126,6 +126,7 @@ function dailyKindsFor(worldview) {
 function renderDailyField(daily, more, worldview) {
     return featureRow(more, 'daily-kinds', `${P}.dailyFx.enabled`, daily.enabled, '日常演出', '做饭、拍照等小场面', grid(dailyKindsFor(worldview).map((kind) => checkbox(`${P}.dailyFx.${kind}`, daily[kind], DAILY_FX_LABELS[kind])).join('')
         + checkbox(`${P}.dailyFx.petals`, daily.petals, '樱花、落叶飘落')
+        + checkbox(`${P}.dailyFx.ambience`, daily.ambience, '车窗光影、浴室水汽')
         + checkbox(`${P}.dailyFx.photoAlbum`, daily.photoAlbum, '拍照存入CG库')));
 }
 

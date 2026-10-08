@@ -1,7 +1,7 @@
 import { LEGACY_READER_MODES, resolveLegacyReaderMode } from '../../storage/legacy-igs.js';
 import { buildNarrativeSegments } from '../../scene/image-slots.js';
 import { SETTINGS_TAB_ALIASES, SETTINGS_TAB_DEFS } from './settings-tabs.js';
-import { TOOLBAR_ACTIONS, VN_THEME_PRESETS } from './reader-host-constants.js';
+import { DEFAULT_DIALOG_BAR_BUTTONS, DIALOG_BAR_ALIGNS, TOOLBAR_ACTIONS, TOOLBAR_SPLIT_MODES, VN_THEME_PRESETS } from './reader-host-constants.js';
 import { esc, normalizeFiniteNumber } from './reader-value-utils.js';
 import { CLASSIC_DIALOG_THEME_DEFAULTS, isClassicDialogSkin, normalizeDialogSkin } from './classic-dialog-skin.js';
 import { getReferenceDialogTypography } from './dialog-theme-typography.js';
@@ -9,6 +9,7 @@ import { normalizeStageShakeSettings } from './stage-shake-runtime.js';
 import { normalizeRenderQualitySetting } from './render-quality.js';
 import { spriteIdentity } from '../../scene/character-outfits.js';
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
+import { normalizeStatusHudPercent } from '../../data/shujuku/status-hud-model.js';
 
 
 export function normalizeReaderMode(mode, bridge) {
@@ -47,8 +48,8 @@ export function normalizeSettingsValue(path, value) {
         if (/^readerSettings\.(titleCard|mangaFx|heartbeatFx|flashFx|favorToast|fxTags|fxSound)\.(enabled|onLocation|onTime|call|notify|flashback|dream|letterbox|sfx|eye)$/.test(path)) {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
-        if (/^readerSettings\.(sceneTransition|timeTint|spriteMotion|spriteActions|camera|stageCast|textFx|bilingual|clickWaitMark|bgm|ambientSound|uiSound)\.(enabled|moodTag|night|alignHeads|romanceDuo|castReact|castStage|breathing|castBreathing|castLean|speakBounce|enterExit|emotionFade|kenBurns|parallax|closeUp|aiShots|birds|rain|wind|insects|waves|crowd|thunder|stream|fire|snow|cicadas|frogs|chimes|bell|clock|drip|train|tavern|ship|traffic)$/.test(path)
-            || /^readerSettings\.dailyFx\.(enabled|petals|photoAlbum|timeskip|photo|letter|note|bell|broadcast|fireworks|touch|alarm|omikuji|receipt|tv)$/.test(path)
+        if (/^readerSettings\.(sceneTransition|timeTint|spriteMotion|spriteActions|camera|stageCast|textFx|bilingual|clickWaitMark|bgm|ambientSound|uiSound)\.(enabled|moodTag|night|alignHeads|romanceDuo|castReact|castStage|breathing|castBreathing|castLean|speakBounce|enterExit|emotionFade|kenBurns|parallax|closeUp|aiShots|birds|rain|wind|insects|waves|crowd|thunder|stream|fire|snow|cicadas|frogs|chimes|bell|clock|drip|train|tavern|ship|traffic|car|carriage|bath|underwater|space)$/.test(path)
+            || /^readerSettings\.dailyFx\.[a-zA-Z]+$/.test(path)
             || /^readerSettings\.(liveFx|audienceFx|innerFx)\.(enabled|muteOnNsfw|ambient|useThought)$/.test(path)
             || path === 'readerSettings.typewriter.punctuationPause'
             || path === 'readerSettings.typewriter.prosody') {
@@ -59,9 +60,18 @@ export function normalizeSettingsValue(path, value) {
             return Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.5;
         }
         if (/^readerSettings\.metaFx\.(enabled|poke|hover|reading|clock|festivals|digest)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
+        if (/^readerSettings\.comicMode\.(enabled|frame|keepPrev|tail)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
+        if (/^readerSettings\.(mangaBack\.enabled|crowdFx\.(enabled|react))$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
+        if (path === 'readerSettings.comicMode.palette') return value === 'color' ? 'color' : 'mono';
+        if (path === 'readerSettings.comicMode.line') return ['thin', 'medium', 'bold'].includes(value) ? value : 'medium';
+        if (path === 'readerSettings.comicMode.inputStyle') return value === 'plain' ? 'plain' : 'comic';
+        if (path === 'readerSettings.comicMode.gap') return ['near', 'medium', 'far'].includes(value) ? value : 'medium';
+        if (path === 'readerSettings.comicMode.inkMode') return value === 'custom' ? 'custom' : 'auto';
+        if (path === 'readerSettings.comicMode.inkColor') return /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#141414';
         if (path === 'readerSettings.metaFx.cooldownSec') return Number(value);
         if (path === 'readerSettings.metaFx.birthday') return String(value || '').trim();
         if (path === 'readerSettings.statusHud.nsfwCgPortraitShift' || path === 'readerSettings.statusHud.nsfwCgPortraitZoom') return Number(value);
+        if (/^readerSettings\.statusHud\.position\.(pc|mobile)\.[xy]$/.test(path)) return normalizeStatusHudPercent(value);
         if (path === 'readerSettings.dialogFontWeight') return [300, 400, 500, 700].includes(Number(value)) ? Number(value) : null;
         if (path === 'readerSettings.dialogTextEffect') return ['off', 'outline', 'shadow'].includes(value) ? value : 'off';
         if (path === 'readerSettings.dialogTextEffectColor') return /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#000000';
@@ -90,6 +100,7 @@ export function normalizeSettingsValue(path, value) {
     if (path === 'bridge.sceneAssets.spriteEnhance.size') return [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].includes(Number(value)) ? Number(value) : 0.8;
     if (path === 'bridge.sceneAssets.promptPlacement') return value === 'depth0' ? 'depth0' : 'system';
     if (path === 'bridge.sceneAssets.promptAdaptive') return !(value === false || value === 'false' || value === 0 || value === '0');
+    if (path === 'bridge.sceneAssets.promptRuleEnabled') return !(value === false || value === 'false' || value === 0 || value === '0');
     if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
         return value === true || value === 'true' || value === 1 || value === '1';
     }
@@ -104,6 +115,10 @@ export function normalizeSettingsValue(path, value) {
     }
     if (/^bridge\.imageApi\.(steps|requestTimeoutMs|pollIntervalMs|pollAttempts)$/.test(path)) {
         return Number(value);
+    }
+    if (/^bridge\.imageApi\.(sprite|background|item)Model$/.test(path)) return String(value || '').trim();
+    if (path === 'bridge.imageApi.dbgenSpriteTransparent') {
+        return !(value === false || value === 'false' || value === 0 || value === '0');
     }
     if (path === 'bridge.imageCache.maxCount') return normalizeImageCacheCount(value);
     return value;
@@ -149,6 +164,27 @@ export function normalizeHiddenButtons(value) {
     for (const id of Array.isArray(value) ? value : []) {
         const normalized = String(id || '').trim();
         if (!normalized || !allowed.has(normalized) || protected_.has(normalized) || output.includes(normalized)) continue;
+        output.push(normalized);
+    }
+    return output;
+}
+
+export function normalizeToolbarSplit(value) {
+    return TOOLBAR_SPLIT_MODES.includes(value) ? value : 'split';
+}
+
+export function normalizeDialogBarAlign(value) {
+    return DIALOG_BAR_ALIGNS.includes(value) ? value : 'auto';
+}
+
+// 没设过（不是数组）用默认那组；设成空数组表示快捷栏一个都不放。设置键不能挪。
+export function normalizeDialogBarButtons(value) {
+    if (!Array.isArray(value)) return Array.from(DEFAULT_DIALOG_BAR_BUTTONS);
+    const allowed = new Set(TOOLBAR_ACTIONS.map(([id]) => id));
+    const output = [];
+    for (const id of value) {
+        const normalized = String(id || '').trim();
+        if (!normalized || normalized === 'settings' || !allowed.has(normalized) || output.includes(normalized)) continue;
         output.push(normalized);
     }
     return output;

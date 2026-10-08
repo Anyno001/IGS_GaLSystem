@@ -1,4 +1,5 @@
-import { numberParagraphs, formatNumberedParagraphs, insertMarkers, insertMarkersAtAnchors, findAnchorInsertIndex } from './marker-placer.js';
+import { numberParagraphs, formatNumberedParagraphs, insertMarkers, insertMarkersAtAnchors, findAnchorInsertIndex, appendedTail, reattachTail, transplantMarkers } from './marker-placer.js';
+import { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } from './floor-body-length.js';
 import { buildPlannerUserPrompt } from './planner-prompt.js';
 import { requestWithSoftRetry, DEFAULT_ASSET_TEMPLATES } from './prompt-kit.js';
 import { parseIllustrationPlan } from './planner-parser.js';
@@ -6,6 +7,7 @@ import { normalizeAutoIllustrationSettings } from './auto-illustration-settings.
 import { floorKeyOf } from '../../media/illustration-store.js';
 import { resolveCharacterKey, stripIllustrationMarker, stripIllustrationMarkers } from '../../scene/scene-directives.js';
 import { buildCharacterDnaPromptParts, isCharacterDnaEmpty, mergePromptTags, resolveCharacterDna } from '../../scene/character-dna.js';
+import { CG_PIXEL_CAP, clampToPixelCap, fitCgSize, parseCgSize } from './cg-pixel-cap.js';
 
 const MARKER_RE = /(?:\[igs-img:\s*(\d+)\s*\]|<IMG>\s*(\d+)\s*<\/IMG>)/gi;
 
@@ -14,70 +16,33 @@ export const ILLUSTRATION_PROGRESS_EVENT = 'igs:illustration-progress';
 
 // 手机内嵌栏宽。框高是我们按尺寸钉出来的，不能拿高来判断横竖。
 export const EMBEDDED_PHONE_MAX_WIDTH = 640;
-const CG_SIZE_STEP = 64;
-// 出图接口通常不接受超过 1024×1024 像素的尺寸。
-const CG_PIXEL_CAP = 1024 * 1024;
 
-function parseCgSize(sizeText) {
-    const match = String(sizeText || '').trim().match(/^(\d+)\s*[xX×]\s*(\d+)$/);
-    if (!match) return null;
-    const width = Number(match[1]);
-    const height = Number(match[2]);
-    if (!(width > 0) || !(height > 0)) return null;
-    return { width, height };
-}
-
-// 在像素上限内找最接近目标比例的 64 倍数尺寸。面积至少要到上限的 85%，避免为了分毫不差把图画得很小。
-function fitCgSize(aspect, cap) {
-    const floor = cap * 0.85;
-    let relaxed = null;
-    let fitted = null;
-    const consider = (best, width, height) => {
-        const error = Math.abs(width / height - aspect) / aspect;
-        if (!best || error < best.error - 1e-9 || (Math.abs(error - best.error) <= 1e-9 && width * height > best.area)) {
-            return { width, height, error, area: width * height };
-        }
-        return best;
-    };
-    for (let width = CG_SIZE_STEP; width <= CG_PIXEL_CAP / CG_SIZE_STEP; width += CG_SIZE_STEP) {
-        const ideal = width / aspect;
-        const rounded = Math.max(CG_SIZE_STEP, Math.round(ideal / CG_SIZE_STEP) * CG_SIZE_STEP);
-        for (const height of [rounded - CG_SIZE_STEP, rounded, rounded + CG_SIZE_STEP]) {
-            if (height < CG_SIZE_STEP) continue;
-            const area = width * height;
-            if (area > cap) continue;
-            relaxed = consider(relaxed, width, height);
-            if (area >= floor) fitted = consider(fitted, width, height);
-        }
-    }
-    return fitted || relaxed;
-}
-
-// 全屏按窗口实际宽高比出图，两边都是 64 的倍数。没有量到窗口时沿用背景尺寸。
+// 全屏按窗口实际宽高比出图，两边都是 64 的倍数。没有量到窗口时沿用背景尺寸，但仍不得超过像素上限。
 export function cgSizeForAspect(backgroundSize, viewport) {
     const base = parseCgSize(backgroundSize) || { width: 1216, height: 832 };
-    const fallback = `${base.width}x${base.height}`;
+    const fallback = clampToPixelCap(`${base.width}x${base.height}`);
     const viewW = Number(viewport && viewport.width) || 0;
     const viewH = Number(viewport && viewport.height) || 0;
     if (!(viewW > 0) || !(viewH > 0)) return fallback;
     const budget = base.width * base.height;
-    const cap = budget >= CG_PIXEL_CAP * 0.9 ? CG_PIXEL_CAP : Math.min(CG_PIXEL_CAP, budget);
+    const cap = Math.min(CG_PIXEL_CAP, budget >= CG_PIXEL_CAP * 0.9 ? CG_PIXEL_CAP : budget);
     const fitted = fitCgSize(viewW / viewH, cap);
     return fitted ? `${fitted.width}x${fitted.height}` : fallback;
 }
 
-// 电脑、网页全屏用背景尺寸。手机模式和内嵌竖屏把宽高对调。
+// 电脑、网页用背景尺寸。手机模式和内嵌竖屏把宽高对调。
 // 全屏改按窗口实际比例出图，铺满时不再裁出屏幕。
 // 内嵌：正文栏或窗口不超过 640 像素，或触屏且窗口竖着拿，钉竖屏尺寸。
+// 不论哪种模式，发出去的总像素都不能超过上限。
 export function cgSizeForMode(backgroundSize, mode, viewport) {
     const landscape = String(backgroundSize || '').trim() || '1216x832';
     if (mode === 'fullscreen') return cgSizeForAspect(landscape, viewport);
     const usePortrait = mode === 'mobile' || (mode === 'embedded' && isPhoneEmbedded(viewport));
-    if (!usePortrait) return landscape;
+    if (!usePortrait) return clampToPixelCap(landscape);
     const match = landscape.match(/^(\d+)\s*[xX×]\s*(\d+)$/);
     // 背景尺寸本身填成竖的就直接用，不能再对调回横屏。
-    if (!match || Number(match[1]) <= Number(match[2])) return landscape;
-    return `${match[2]}x${match[1]}`;
+    if (!match || Number(match[1]) <= Number(match[2])) return clampToPixelCap(landscape);
+    return clampToPixelCap(`${match[2]}x${match[1]}`);
 }
 
 // 手机缩放、平板、折叠屏的正文栏可能量出超过 640。触屏且窗口竖着拿时同样钉竖屏。
@@ -235,6 +200,8 @@ export function createAutoIllustrationService(deps) {
     const random = deps.random || Math.random;
     const now = deps.now || (() => new Date().toISOString());
     const report = deps.report || (() => {});
+    const minBodyChars = Number.isFinite(Number(deps.minBodyChars)) ? Number(deps.minBodyChars) : MIN_AUTO_IMAGE_BODY_CHARS;
+    const sourceFilter = typeof deps.getSourceFilter === 'function' ? deps.getSourceFilter : () => undefined;
     const locks = new Map();
     const cache = new Map();
     const hydrated = new Set();
@@ -350,24 +317,32 @@ export function createAutoIllustrationService(deps) {
             progress(floor, { phase: 'done' });
             return { ok: false, reason: 'plan-failed', error };
         }
-        const latest = messageHost.readFloor(messageId);
-        if (!latest || !latest.isAi || !latest.isLatest || latest.chatId !== floor.chatId || latest.swipeId !== floor.swipeId || latest.text !== expected.text) {
+        const markedText = insertMarkersAtAnchors(floor.text, slots);
+        let merged = mergeIntoLatest(messageId, floor, expected, markedText);
+        if (!merged) {
             await store.putFloor(key, { ...base, status: 'stale', updatedAt: now() });
-            report('warn', `第 ${messageId} 楼在规划期间被修改或已不是最新楼层，本次放弃生图，下次渲染时重试`);
+            report('warn', `第 ${messageId} 楼在规划期间已经有了新回复，或正文被大幅改写、插图位置都找不到，本楼不出 CG；需要的话点「绘制 CG」重画`);
             progress(floor, { phase: 'done' });
             return { ok: false, reason: 'stale' };
         }
         await ensureRegexesOnce();
-        const writtenText = await messageHost.writeFloor(messageId, insertMarkersAtAnchors(floor.text, slots), expected);
+        let writtenText = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+        // 读和写之间又被插件改了一次：按最新正文重搬，最多再试两次。
+        for (let retry = 0; retry < 2 && writtenText && writtenText.reason === 'stale'; retry += 1) {
+            merged = mergeIntoLatest(messageId, floor, expected, markedText);
+            if (!merged) break;
+            writtenText = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+        }
+        const keptSlots = merged && merged.slots ? slots.filter((item) => merged.slots.includes(item.slot)) : slots;
         if (!writtenText || !writtenText.ok) {
             const stale = writtenText && writtenText.reason === 'stale';
             await store.putFloor(key, { ...base, status: stale ? 'stale' : 'failed', ...(!stale && { error: '无法写回楼层' }), updatedAt: now() });
-            report(stale ? 'warn' : 'error', `第 ${messageId} 楼${stale ? '在写回前被修改' : '无法写回插图标记'}，本次放弃生图`);
+            report(stale ? 'warn' : 'error', `第 ${messageId} 楼${stale ? '写回时一直被其他插件改动' : '无法写回插图标记'}，本楼不出 CG；需要的话点「绘制 CG」重画`);
             progress(floor, { phase: 'done' });
             return { ok: false, reason: stale ? 'stale' : 'write-failed' };
         }
-        report('info', `第 ${messageId} 楼已写入 ${slots.length} 个生成点，正在出图…`);
-        return paintDbgenCaptions(messageId, floor, key, s, base, slots);
+        report('info', `第 ${messageId} 楼已写入 ${keptSlots.length} 个生成点，正在出图…`);
+        return paintDbgenCaptions(messageId, floor, key, s, base, keptSlots);
     }
 
     async function paintDbgenCaptions(messageId, floor, key, s, base, slots) {
@@ -414,6 +389,23 @@ export function createAutoIllustrationService(deps) {
         };
     }
 
+    // 规划期间正文被其他插件改了：只在末尾追加时原样接上；别处改过就把标记按前后文搬到新正文，对不上的那张丢掉。
+    // 「最新楼」只看后面有没有用户发言，插件在后面另起的楼不影响写回。
+    // 返回 { text, latest, slots }，slots 为 null 表示全部保留；一张都放不下返回 null。
+    function mergeIntoLatest(messageId, floor, expected, markedText) {
+        const latest = messageHost.readFloor(messageId);
+        if (!latest || !latest.isAi || !latest.isLatest || latest.chatId !== floor.chatId || latest.swipeId !== floor.swipeId) return null;
+        const tail = appendedTail(expected.text, latest.text);
+        if (tail != null) {
+            if (tail) report('info', `第 ${messageId} 楼末尾被其他插件追加了内容，插图照常插在原文里`);
+            return { text: reattachTail(markedText, tail), latest, slots: null };
+        }
+        const moved = transplantMarkers(markedText, stripIllustrationMarkers(latest.text));
+        if (!moved.slots.length) return null;
+        report('info', `第 ${messageId} 楼在规划期间被其他插件改过，插图按前后文对到新正文上（${moved.slots.length} 张）`);
+        return { text: moved.text, latest, slots: moved.slots };
+    }
+
     async function run(messageId, floor, key, s, manual) {
         const previous = await store.getFloor(key);
         const marked = await markedSlots(key, floor.text);
@@ -425,6 +417,12 @@ export function createAutoIllustrationService(deps) {
         }
         if (marked.all.length) return { ok: true, reason: manual ? 'nothing-missing' : 'already-decided' };
         if (!manual && previous && SETTLED_STATUSES.has(previous.status)) return { ok: true, reason: 'already-decided' };
+        // 不记成已处理：用户点「继续」把这楼写长后，下次渲染照常规划。
+        const bodyChars = floorBodyLength(floor.text, sourceFilter());
+        if (!manual && bodyChars < minBodyChars) {
+            report('info', `第 ${messageId} 楼跳过：正文只有 ${bodyChars} 字，少于 ${minBodyChars} 字不自动生图`);
+            return { ok: true, reason: 'body-too-short' };
+        }
         // 柏宝绘 / 智绘姬开着自动写词时先等它把词写回本楼再规划；两边同时写回，IGS 会因正文已改放弃本楼。
         if (typeof nai.waitSourceFloorPrompts === 'function' && ['baibai', 'chatu8'].includes(backendReady().via)) {
             progress(floor, { phase: 'write' });
@@ -498,19 +496,26 @@ export function createAutoIllustrationService(deps) {
             for (const warning of bound.warnings) report('info', `第 ${messageId} 楼${warning}`);
         }
 
-        const latest = messageHost.readFloor(messageId);
-        if (!latest || !latest.isAi || !latest.isLatest || latest.chatId !== floor.chatId || latest.swipeId !== floor.swipeId || latest.text !== expected.text) {
+        const markedText = insertMarkers(floor.text, numbered.paragraphs, plan.slots);
+        let merged = mergeIntoLatest(messageId, floor, expected, markedText);
+        if (!merged) {
             await store.putFloor(key, { ...base, status: 'stale', updatedAt: now() });
-            report('warn', `第 ${messageId} 楼在规划期间被修改或已不是最新楼层（可能有其他插件改写了正文），本次放弃生图，下次渲染时重试`);
+            report('warn', `第 ${messageId} 楼在规划期间已经有了新回复，或正文被大幅改写、插图位置都找不到，本楼不出 CG；需要的话点「绘制 CG」重画`);
             progress(floor, { phase: 'done' });
             return { ok: false, reason: 'stale' };
         }
         await ensureRegexesOnce();
-        const written = await messageHost.writeFloor(messageId, insertMarkers(floor.text, numbered.paragraphs, plan.slots), expected);
+        let written = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+        for (let retry = 0; retry < 2 && written && written.reason === 'stale'; retry += 1) {
+            merged = mergeIntoLatest(messageId, floor, expected, markedText);
+            if (!merged) break;
+            written = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+        }
+        if (merged && merged.slots) plan.slots = plan.slots.filter((slot) => merged.slots.includes(Number(slot.slot)));
         if (!written || !written.ok) {
             const stale = written && written.reason === 'stale';
             await store.putFloor(key, { ...base, status: stale ? 'stale' : 'failed', ...(!stale && { error: '无法写回楼层' }), updatedAt: now() });
-            report(stale ? 'warn' : 'error', `第 ${messageId} 楼${stale ? '在写回前被修改' : '无法写回插图标记'}，本次放弃生图`);
+            report(stale ? 'warn' : 'error', `第 ${messageId} 楼${stale ? '写回时一直被其他插件改动' : '无法写回插图标记'}，本楼不出 CG；需要的话点「绘制 CG」重画`);
             progress(floor, { phase: 'done' });
             return { ok: false, reason: stale ? 'stale' : 'write-failed' };
         }
@@ -545,7 +550,7 @@ export function createAutoIllustrationService(deps) {
             progress(floor, { phase: 'paint', done: index + 1, total: requests.length });
             let result;
             const size = cgSize(s);
-            const meta = { messageId, slot: request.slot, description: request.description || request.scene, size };
+            const meta = { messageId, slot: request.slot, description: request.description || request.scene, size, imageKind: 'cg' };
             try { result = await nai.generate(request, { ...s.nai, size }, meta); }
             catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
             if (result && result.ok) succeeded += 1;

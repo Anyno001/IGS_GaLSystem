@@ -19,6 +19,8 @@ const FEATURE_ALIASES = Object.freeze({
     立绘活动: ['呼吸', '动起来', '登场'],
     情绪动作: ['跳', '抖', '动作'],
     情绪符号: ['漫画', '集中线', '符号', '汗'],
+    漫画背景: ['花背景', '气场', '石化', '风化', '反转', '速度线', '漩涡'],
+    人群剪影: ['人群', '路人', '围观', '剪影', '鼓掌'],
     心跳脉动: ['心跳', '心动'],
     闪白耳鸣: ['闪白', '耳鸣', '震惊'],
     内心弹幕: ['心声', '弹幕'],
@@ -41,18 +43,27 @@ const FEATURE_ALIASES = Object.freeze({
 // 演出档位之外、藏在折叠区里的细项：label 是界面上的原文，aliases 是用户可能输入的说法。
 // target 不写时在「阅读器 › 演出」；写了就按 target 跳到别的分页。
 const EXTRA_ENTRIES = Object.freeze([
+    { id: 'comic-mode', label: '漫画演出模式', group: 'text', open: ['perf-comic-mode'], aliases: ['漫画', '对话泡', '气泡', '竖排', '黑白', '漫画模式', '吹き出し'] },
     { id: 'cinema-bars', label: '电影黑边', group: 'stage', open: [], aliases: ['黑边', '宽银幕', '上下黑条'] },
     { id: 'cg-hold', label: '日常CG停留', group: 'rhythm', open: [], aliases: ['cg', '插图', '停留', '几页'] },
     { id: 'render-quality', label: '画质 / 省电模式', aliases: ['卡', '卡顿', '发热', '耗电', '低画质', '省电', '掉帧'], location: '基础 › 一键档位', target: { tab: 'basic', open: [] } },
     { id: 'image-count', label: '检测图像数量', aliases: ['图片数量', '图不对', '少图', '多图'], location: '基础 › 标签解析', target: { tab: 'basic', open: ['source-filter'] } },
     { id: 'body-format', label: '正文格式化', aliases: ['正则', '格式', '分页不对', '乱码'], location: '基础 › 正文格式化', target: { tab: 'basic', open: ['body-format'] } },
     { id: 'toolbar-dock', label: '工具栏位置', aliases: ['工具栏', '按钮', '顶部', '紧贴对话框'], location: '阅读器 › 界面 › 工具栏', target: { tab: 'reader', readerSubTab: 'interface', open: [] } },
+    { id: 'status-hud-position', label: '状态栏位置', aliases: ['状态栏', 'hud', '头像', '左上角', '挡住', '挪位置'], location: '阅读器 › 界面 › 状态栏', target: { tab: 'reader', readerSubTab: 'interface', open: [] } },
     { id: 'sprite-scale', label: '立绘缩放与高度', aliases: ['立绘太大', '立绘太小', '缩放', '高度', '人物大小'], location: '素材 › 角色 › 立绘设置', target: { tab: 'scene', sceneSubTab: 'characters', open: ['sprite-display'] } },
+    { id: 'dialog-skin', label: '对话框风格', aliases: ['皮肤', '对话框样式', '换皮', '科幻', '末日', '全息', '废土', '本卡皮肤'], location: '阅读器 › 对话框 › 风格', target: { tab: 'reader', readerSubTab: 'dialog', open: [] } },
+    { id: 'title-screen', label: '开场先显示主界面', aliases: ['主界面', '标题画面', '开始菜单', '开场白', '第0层', '选择世界观'], location: '阅读器 › 对话框 › 风格', target: { tab: 'reader', readerSubTab: 'dialog', open: [] } },
     { id: 'text-effect', label: '文字增强', aliases: ['描边', '看不清', '投影', '字看不清'], location: '阅读器 › 文字 › 排版', target: { tab: 'reader', readerSubTab: 'text', open: [] } },
     { id: 'camera-kenburns', label: '背景缓慢推镜', group: 'stage', open: ['perf-camera'], aliases: ['推镜', '背景移动', '镜头'] },
     { id: 'camera-parallax', label: '鼠标视差', group: 'stage', open: ['perf-camera'], aliases: ['视差', '镜头'] },
     { id: 'camera-closeup', label: '情绪特写', group: 'stage', open: ['perf-camera'], aliases: ['特写', '放大', '镜头'] },
     { id: 'camera-impact', label: '情绪冲击推近', group: 'stage', open: ['perf-camera'], aliases: ['冲击', '推近', '镜头', '音效'] },
+    { id: 'kind-models', label: '按类型单独指定模型', aliases: ['模型', 'CG模型', '剧情CG', '立绘模型', '背景模型', '物品模型', '不同模型', '分类型模型'], location: '生图 › 图像来源', target: { tab: 'image', imageSubTab: 'source', open: ['kind-models'] } },
+    { id: 'dbgen-sprite-transparent', label: '立绘透明底', aliases: ['透明底', '透明背景', 'v4.5', '数据库生图', '白底', '白色背景'], location: '生图 › 图像来源', target: { tab: 'image', imageSubTab: 'source', open: [] } },
+    { id: 'purge-asset-cache', label: '清除素材缓存', aliases: ['清缓存', '缓存', '缩略图', '图片不更新', '占空间', '清空'], location: '生图 › CG 库', target: { tab: 'image', imageSubTab: 'cg', open: [] } },
+    { id: 'generate-assets', label: '生成立绘 / 背景 / 物品开关', aliases: ['不生成立绘', '不生成背景', '不生成物品', '关闭物品图', '素材补全', '生成立绘', '生成背景', '生成物品图'], location: '生图 › 内容', target: { tab: 'image', imageSubTab: 'content', open: [] } },
+    { id: 'prompt-rule-inject', label: '自动注入格式规则', aliases: ['格式规则', '规则提示词', '提示词', '注入', '关闭注入', '酒馆预设', '复制提示词', '复制到预设'], location: '素材 › 规则', target: { tab: 'scene', sceneSubTab: 'rules', open: [] } },
 ]);
 
 function normalize(value) {
@@ -144,5 +155,5 @@ export function renderSettingsSearchResults(query, index = SETTINGS_SEARCH_INDEX
     if (results.length) return results.map(item).join('');
     const guesses = suggestSettings(query, index);
     if (guesses.length) return `<div class="igs-settings-search-hint">你是否在找：</div>${guesses.map(item).join('')}`;
-    return '<div class="igs-settings-search-empty">没有找到相关设置，换个说法试试。</div>';
+    return '<div class="igs-settings-search-empty">未找到相关设置，可尝试换一种说法。</div>';
 }

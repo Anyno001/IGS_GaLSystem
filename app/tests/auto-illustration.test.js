@@ -356,7 +356,7 @@ test('gate:illustration:message-host-rejects-stale-floor-before-helper-write', a
         TavernHelper: { setChatMessages: async () => { writes++; } },
     });
     const expected = host.readFloor(0);
-    ctx.chat.push({ mes: 'next', is_user: false });
+    ctx.chat.push({ mes: 'next', is_user: true });
     assert.equal((await host.writeFloor(0, 'updated', expected)).reason, 'stale');
     ctx.chat.pop();
     ctx.chat[0].swipe_id = 1;
@@ -423,8 +423,49 @@ function makeFakes({ text, isLatest = true, llmReply = REPLY, naiResult, setting
     } };
     const nai = { generate: async () => { calls.nai++; return naiResult || { ok: true, dataUrl: 'data:image/png;base64,AAAA' }; } };
     const events = { emit: (type, payload) => calls.events.push({ type, payload }) };
-    return { calls, messageHost, llm, nai, events, getSettings: () => settings };
+    // 这批用例的正文都只有几个字，专测流程；「少于 50 字不自动生图」单独测。
+    return { calls, messageHost, llm, nai, events, getSettings: () => settings, minBodyChars: 0 };
 }
+
+const LONG_LINE = '她靠在窗边，看着外面的雨一点点停下来，城市的灯光一盏接一盏地亮起。';
+
+test('gate:illustration:skips-auto-when-body-under-50-chars', async () => {
+    const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
+    const { createMemoryIllustrationStore } = await import('../src/media/illustration-store.js');
+    const reports = [];
+    const fakes = makeFakes({ text: NSFW_TEXT, settings: { nsfwEnabled: true } });
+    const service = createAutoIllustrationService({ ...fakes, minBodyChars: undefined, store: createMemoryIllustrationStore(), report: (level, msg) => reports.push(msg) });
+    assert.equal((await service.processMessage(5)).reason, 'body-too-short');
+    assert.match(reports.join('\n'), /第 5 楼跳过：正文只有 9 字，少于 50 字不自动生图/);
+    // 思考、状态栏写得再长也不算正文。
+    fakes.messageHost.setText(`<thinking>${LONG_LINE.repeat(3)}</thinking>\n${NSFW_TEXT}`);
+    assert.equal((await service.processMessage(5)).reason, 'body-too-short');
+    fakes.messageHost.setText(`<content>\n${NSFW_TEXT}\n</content>\n<Status_block>${LONG_LINE.repeat(3)}</Status_block>`);
+    assert.equal((await service.processMessage(5)).reason, 'body-too-short');
+    assert.equal(fakes.calls.llm, 0, '正文只有几个字时不规划、不生图');
+    // 跳过不记成已处理：同一楼「继续」写长后照常规划。
+    fakes.messageHost.setText(`${NSFW_TEXT}\n${LONG_LINE.repeat(2)}`);
+    assert.notEqual((await service.processMessage(5)).reason, 'body-too-short');
+    assert.ok(fakes.calls.llm > 0, '正文够长照常规划');
+    const manual = makeFakes({ text: NSFW_TEXT, settings: { nsfwEnabled: true } });
+    await createAutoIllustrationService({ ...manual, minBodyChars: undefined, store: createMemoryIllustrationStore() }).processMessage(5, { manual: true });
+    assert.ok(manual.calls.llm > 0, '手动生成不看字数');
+});
+
+test('gate:illustration:body-length-follows-reader-source-filter', async () => {
+    const { floorBodyLength } = await import('../src/generated-images/illustration/floor-body-length.js');
+    // 台词 / 心理只数说出口的那句，角色名、表情、服装栏和指令不算。
+    assert.equal(floorBodyLength('[igs-scene:卧室|夜晚|晴]\n[igs-char:艾莉|微笑|你好。]\n[igs-thought:艾莉|平静|校服|好困。]\n[igs-fx:shake]\n她笑了。'), 10);
+    assert.equal(floorBodyLength('【igs-char：艾莉｜微笑｜你好。】\n[igs-img:1]\n<IMG>2</IMG>'), 3);
+    // 保留标签在就只数里面；在但为空就是 0；整楼没有保留标签时退回去掉排除块后的全文。
+    assert.equal(floorBodyLength(`<thinking>${LONG_LINE}</thinking>\n<content>\n短。\n</content>\n<Status_block>${LONG_LINE}</Status_block>`), 2);
+    assert.equal(floorBodyLength(`<content>\n\n</content>\n${LONG_LINE}`), 0);
+    assert.equal(floorBodyLength(`<thinking>${LONG_LINE}</thinking>\n短。`), 2);
+    assert.equal(floorBodyLength(`<bbi_image>1girl, rain</bbi_image>\nimage###1girl###\n短。`), 2);
+    // 用户改过正文过滤规则时跟着改。
+    assert.equal(floorBodyLength(`<story>短。</story>\n${LONG_LINE}`, { textIncludeTags: 'story' }), 2);
+    assert.equal(floorBodyLength(`<thinking>${LONG_LINE}</thinking>`, { enabled: false }), LONG_LINE.length);
+});
 
 test('gate:illustration:service-disabled-makes-no-calls', async () => {
     const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
@@ -493,8 +534,23 @@ test('gate:illustration:cg-size-swaps-on-mobile', async () => {
     assert.equal(cgSizeForMode('1216x832', 'fullscreen', { width: 1280, height: 720 }), '1344x768');
     assert.equal(cgSizeForMode('1216x832', 'fullscreen', { width: 1920, height: 1080 }), '1344x768');
     assert.equal(cgSizeForMode('640x640', 'fullscreen', { width: 1920, height: 1080 }), '832x448');
+    const pixels = (size) => size.split('x').map(Number).reduce((a, b) => a * b, 1);
+    assert.equal(cgSizeForMode('1216x832', 'fullscreen', { width: 1728, height: 576 }), '1728x576');
+    assert.equal(pixels(cgSizeForMode('1216x832', 'fullscreen', { width: 1728, height: 576 })), 995328);
+    assert.ok(pixels(cgSizeForMode('1920x1088', 'fullscreen', { width: 3440, height: 1440 })) <= 1048576);
+    assert.ok(pixels(cgSizeForMode('1920x1088', 'fullscreen')) <= 1048576);
+    assert.ok(pixels(cgSizeForMode('2048x2048', 'fullscreen', { width: 21, height: 9 })) <= 1048576);
     assert.equal(cgSizeForMode('1216x832', 'web'), '1216x832');
     assert.equal(cgSizeForMode('1216x832', 'mobile'), '832x1216');
+    assert.ok(pixels(cgSizeForMode('1920x1088', 'pc')) <= 1048576);
+    assert.ok(pixels(cgSizeForMode('1920x1088', 'web')) <= 1048576);
+    assert.ok(pixels(cgSizeForMode('1920x1088', 'mobile')) <= 1048576);
+    assert.ok(pixels(cgSizeForMode('2048x1536', 'embedded', { width: 1280, height: 720 })) <= 1048576);
+    const { buildNaiV4Request } = await import('../src/generated-images/request-builders/nai-v4-builder.js');
+    for (const size of ['1920x1088', '1536x1024', '2048x2048', '832x1216']) {
+        const body = buildNaiV4Request({ scene: 'room' }, { size });
+        assert.ok(body.parameters.width * body.parameters.height <= 1048576, size);
+    }
     assert.equal(cgSizeForMode('', 'mobile'), '832x1216');
     assert.equal(cgSizeForMode('1216x832', 'embedded', { width: 390, height: 844 }), '832x1216');
     assert.equal(cgSizeForMode('1216x832', 'embedded', { width: 390, height: 220 }), '832x1216');
@@ -530,6 +586,7 @@ test('gate:illustration:dbgen-cg-calls-only-the-plugin-prompt-and-generate-apis'
         messageHost, llm, nai, events: { emit() {} },
         store: createMemoryIllustrationStore(),
         getSettings: () => ({ nsfwEnabled: true, nsfwCount: 1 }),
+        minBodyChars: 0,
     });
     const result = await service.processMessage(5);
     assert.equal(result.reason, 'done');
@@ -612,6 +669,33 @@ test('gate:illustration:service-stale-text-aborts', async () => {
     assert.equal((await store.getFloor('c1|5|0')).status, 'stale');
 });
 
+test('gate:illustration:service-tail-append-during-planning-still-writes', async () => {
+    const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
+    const { createMemoryIllustrationStore } = await import('../src/media/illustration-store.js');
+    const fake = makeFakes({ text: NSFW_TEXT, settings: { nsfwEnabled: true } });
+    const tail = '\n\n<parallel>与此同时，另一边……</parallel>';
+    fake.llm.request = async () => { fake.messageHost.setText(NSFW_TEXT + tail); return REPLY; };
+    const store = createMemoryIllustrationStore();
+    const result = await createAutoIllustrationService({ ...fake, store }).processMessage(5);
+    assert.equal(result.ok, true);
+    assert.equal(fake.calls.writes.length, 1);
+    assert.ok(fake.calls.writes[0].includes('[igs-img:1]'));
+    assert.ok(fake.calls.writes[0].endsWith(tail), '追加的平行事件原样保留在末尾');
+    assert.ok(fake.calls.writes[0].indexOf('[igs-img:1]') < fake.calls.writes[0].indexOf('<parallel>'));
+});
+
+test('gate:illustration:appended-tail-only-accepts-pure-append', async () => {
+    const { appendedTail, reattachTail } = await import('../src/generated-images/illustration/marker-placer.js');
+    assert.equal(appendedTail('甲\n乙', '甲\n乙'), '');
+    assert.equal(appendedTail('甲\n乙', '甲\n乙\n丙'), '\n丙');
+    assert.equal(appendedTail('甲\n乙\n', '甲\n乙\n\n丙'), '\n\n丙', '原文结尾空白被改写也算追加');
+    assert.equal(appendedTail('甲\n乙', '甲\n改\n丙'), null);
+    assert.equal(appendedTail('甲\n乙', '前\n甲\n乙'), null);
+    assert.equal(appendedTail('', '丙'), null);
+    assert.equal(reattachTail('[igs-img:1]\n甲\n', '\n丙'), '[igs-img:1]\n甲\n丙');
+    assert.equal(reattachTail('甲', ''), '甲');
+});
+
 test('gate:illustration:service-stale-when-new-floor-arrives-during-planning', async () => {
     const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
     const { createMemoryIllustrationStore } = await import('../src/media/illustration-store.js');
@@ -646,7 +730,7 @@ test('gate:illustration:service-stale-during-regex-setup-skips-write-and-nai', a
     const store = createMemoryIllustrationStore();
     const result = await createAutoIllustrationService({ messageHost: host, store,
         llm: { request: async () => REPLY }, nai: { generate: async () => { naiCalls++; } },
-        getSettings: () => ({ nsfwEnabled: true }),
+        getSettings: () => ({ nsfwEnabled: true }), minBodyChars: 0,
     }).processMessage(5);
     assert.equal(result.reason, 'stale');
     assert.equal((await store.getFloor('c1|5|0')).status, 'stale');
@@ -728,6 +812,7 @@ test('gate:illustration:failed-floor-retries-and-reports-real-error', async () =
         nai: { generate: async (slot) => { naiCalls.push(slot); return { ok: true, dataUrl: 'data:image/png;base64,x' }; } },
         getSettings: () => ({ nsfwEnabled: true, llm: { source: 'openai', endpoint: 'https://llm.example/v1', model: 'm', prompts: { illustration: 'CUSTOM' } } }),
         report: (level, message) => reports.push({ level, message }),
+        minBodyChars: 0,
     });
     const first = await svc.processMessage(1);
     assert.equal(first.reason, 'plan-failed');
@@ -900,4 +985,38 @@ test('数据库生图 CG：单人且上下文唯一角色时 DNA 并进 char cap
     const pair = bindCharacterDnaToCaption(caption(2), assets, ['小雪'], 2);
     assert.equal(pair.caption.v4_prompt.caption.char_captions[0].char_caption, 'smile');
     assert.equal(pair.warnings.length, 1);
+});
+
+// 平行事件插件在 AI 楼后面另插一条（隐藏的系统消息或旁白楼）：这楼仍算最新楼，立绘、场景、CG 照常生成；用户发言后才不算。
+test('gate:illustration:message-host-latest-ignores-plugin-floors-after-ai', async () => {
+    const { createIllustrationMessageHost } = await import('../src/host/illustration-message-host.js');
+    const ctx = { chatId: 'c1', chat: [{ mes: 'u', is_user: true }, { mes: 'ai', is_user: false }, { mes: '平行事件', is_user: false, is_system: true }, { mes: '旁白', is_user: false }] };
+    const host = createIllustrationMessageHost({ SillyTavern: { getContext: () => ctx } });
+    assert.equal(host.readFloor(1).isLatest, true);
+    ctx.chat.push({ mes: '下一句', is_user: true });
+    assert.equal(host.readFloor(1).isLatest, false);
+});
+
+// 规划期间正文开头 / 中间被插了内容：标记按前后文搬到新正文，照常出图；对不上的那张丢掉。
+test('gate:illustration:service-mid-edit-during-planning-transplants-markers', async () => {
+    const { createAutoIllustrationService } = await import('../src/generated-images/illustration/auto-illustration-service.js');
+    const { createMemoryIllustrationStore } = await import('../src/media/illustration-store.js');
+    const fake = makeFakes({ text: NSFW_TEXT, settings: { nsfwEnabled: true } });
+    const head = '<parallel>与此同时，另一边……</parallel>\n';
+    fake.llm.request = async () => { fake.messageHost.setText(head + NSFW_TEXT); return REPLY; };
+    const store = createMemoryIllustrationStore();
+    const result = await createAutoIllustrationService({ ...fake, store }).processMessage(5);
+    assert.equal(result.ok, true);
+    assert.equal(fake.calls.writes.length, 1);
+    assert.ok(fake.calls.writes[0].startsWith(head), '插件插的内容原样保留');
+    assert.ok(fake.calls.writes[0].includes('\n[igs-img:1]\n二段。'));
+    assert.equal(fake.calls.nai, 1);
+});
+
+test('gate:illustration:transplant-markers-follows-context', async () => {
+    const { transplantMarkers } = await import('../src/generated-images/illustration/marker-placer.js');
+    const moved = transplantMarkers('甲段落一句。\n[igs-img:1]\n乙段落二句。\n丙三。\n[igs-img:2]', '【平行事件】别处。\n甲段落一句。\n乙段落二句改过。\n丙三。\n<状态栏>');
+    assert.deepEqual(moved.slots, [1, 2]);
+    assert.equal(moved.text, '【平行事件】别处。\n甲段落一句。\n[igs-img:1]\n乙段落二句改过。\n丙三。\n[igs-img:2]\n<状态栏>');
+    assert.deepEqual(transplantMarkers('甲。\n[igs-img:1]\n乙。', '完全不同的内容').slots, []);
 });

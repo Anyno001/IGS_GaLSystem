@@ -50,10 +50,10 @@ test('gate:performance-layout:groups-collapsed-with-summary-and-word-lists-hidde
     assert.match(html, /data-action="perf-preset:standard"/);
     // 情绪、剧情提示、事件演出合进「情绪与提示」一张卡，组内用小标题分段。
     // 组标题旁是固定概括 + 计数，不再罗列已开启的功能名。
-    assert.match(html, /<b>情绪与提示<\/b><span class="igs-perf-count is-on">1\/7<\/span><span class="igs-perf-brief">情绪 · 提示 · 事件<\/span>/);
+    assert.match(html, /<b>情绪与提示<\/b><span class="igs-perf-count is-on">1\/8<\/span><span class="igs-perf-brief">情绪 · 提示 · 事件<\/span>/);
     assert.match(html, /<div class="igs-settings-subhead">情绪<\/div>[\s\S]*<div class="igs-settings-subhead">剧情提示<\/div>[\s\S]*<div class="igs-settings-subhead">事件演出<\/div>/);
     // 镜头环境与立绘合成「画面」：5 个画面开关 + 立绘活动、情绪动作、多角色同屏。
-    assert.match(html, /<b>画面<\/b><span class="igs-perf-count">0\/8<\/span>/);
+    assert.match(html, /<b>画面<\/b><span class="igs-perf-count">0\/9<\/span>/);
     // 战斗、直播、线上交流、亲密这类只在特定剧情用的，收进「题材专属」，由用户自己勾；演出页不再有剧情题材胶囊。
     assert.match(html, /<b>题材专属<\/b><span class="igs-perf-count">0\/8<\/span>/);
     assert.doesNotMatch(html, /剧情题材|perf-type:/);
@@ -74,9 +74,9 @@ test('gate:performance-layout:capsule-counts-every-visible-switch', () => {
         sentencePaging: '<i data-paging></i>', sentencePagingOn: true,
         narrationFilter: '<i data-dim></i>',
     });
-    assert.match(html, /<b>文字<\/b><span class="igs-perf-count is-on">2\/5<\/span><span class="igs-perf-brief">打字机 · 字效 · 双语<\/span>/);
-    assert.match(html, /<b>画面<\/b><span class="igs-perf-count is-on">1\/9<\/span><span class="igs-perf-brief">镜头 · 天气 · 立绘<\/span>/);
-    assert.match(html, /<b>情绪与提示<\/b><span class="igs-perf-count is-on">1\/7<\/span>/);
+    assert.match(html, /<b>文字<\/b><span class="igs-perf-count is-on">2\/6<\/span><span class="igs-perf-brief">打字机 · 字效 · 双语<\/span>/);
+    assert.match(html, /<b>画面<\/b><span class="igs-perf-count is-on">1\/10<\/span><span class="igs-perf-brief">镜头 · 天气 · 立绘<\/span>/);
+    assert.match(html, /<b>情绪与提示<\/b><span class="igs-perf-count is-on">1\/8<\/span>/);
 });
 
 // 角色语气音对所有角色生效，摆在「声音」卡并计入胶囊；不跟打字机挤在「文字」里。
@@ -90,6 +90,29 @@ test('gate:performance-layout:voice-bark-lives-in-sound-group', () => {
     assert.match(sound.slice(0, sound.indexOf('perf-group-rhythm')), /data-voice-bark/);
     const text = html.slice(html.indexOf('data-advanced="perf-group-text"'), html.indexOf('data-advanced="perf-group-stage"'));
     assert.doesNotMatch(text, /data-voice-bark/);
+});
+
+// 行头是横排的：NSFW 显示的几项要各占一行，整串塞进一个行头会把立绘三档挤成一条缝。
+test('gate:performance-layout:nsfw-display-options-get-one-row-each', () => {
+    const html = renderPerformanceSettings({}, {
+        nsfwSprite: '<i data-nsfw-sprite></i>',
+        nsfwVeil: '<i data-nsfw-veil></i>',
+        nsfwCgPortrait: ['<i data-cg-portrait></i>', '<i data-cg-portrait-detail></i>'],
+    }, (key) => key === 'perf-nsfw-cg-portrait');
+    const romance = html.slice(html.indexOf('<div class="igs-settings-subhead">亲密</div>'));
+    assert.match(romance, /<div class="igs-perf-item"><div class="igs-perf-item-head"><i data-nsfw-sprite><\/i><\/div><\/div><div class="igs-perf-item"><div class="igs-perf-item-head"><i data-nsfw-veil><\/i><\/div><\/div>/);
+    assert.match(romance, /<div class="igs-perf-item"><div class="igs-perf-item-head"><i data-cg-portrait><\/i><button type="button" class="igs-perf-item-more is-open" data-action="ui-toggle-open:perf-nsfw-cg-portrait"[^>]*><\/button><\/div><div class="igs-perf-item-body"><i data-cg-portrait-detail><\/i><\/div><\/div>/);
+});
+
+// 挂在某个开关下的子项（如节律音效挂在节律演出下）要保留缩进；只有整段细项包在一层 sub 里时才去掉，免得双重缩进。
+test('gate:performance-layout:nested-sub-options-keep-their-indent', async () => {
+    const { getSettingsStyleText } = await import('../src/visual/igs-ui/settings-style.js');
+    const css = getSettingsStyleText();
+    assert.ok(css.includes('.igs-perf-item-body>.igs-settings-sub:only-child{margin-left:0;padding-left:0;border-left:0}'));
+    assert.ok(!css.includes('.igs-perf-item-body>.igs-settings-sub{'));
+    const { renderRomanceFxFields } = await import('../src/visual/igs-ui/romance-fields.js');
+    const body = renderRomanceFxFields({ romanceFx: { enabled: true, rhythm: true } });
+    assert.match(body, /<div class="igs-perf-item-body">[\s\S]*data-switch="readerSettings\.romanceFx\.rhythm"[^>]*>[\s\S]*?<\/button><div class="igs-settings-sub">[\s\S]*data-switch="readerSettings\.romanceFx\.rhythmSound"/);
 });
 
 test('gate:performance-layout:remembers-open-sections', () => {

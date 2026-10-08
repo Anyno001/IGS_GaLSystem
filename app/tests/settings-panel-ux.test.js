@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSettingsDialogs } from '../src/visual/igs-ui/settings-dialog.js';
+import { createIgsModal } from '../src/visual/igs-ui/igs-modal.js';
 import { captureSettingsFocus, restoreSettingsFocus, settingsFocusSelector } from '../src/visual/igs-ui/settings-focus.js';
 import {
     SETTINGS_SECTIONS, buildSettingsExport, parseSettingsImport, renderSectionResetButton, resetSettingsSection, settingsSectionPaths,
@@ -277,8 +278,8 @@ test('gate:expression-set:fills-groups-that-have-no-image', async () => {
     const missingTier8 = moodTierLabels(8).filter((mood) => mood !== '喜悦' && mood !== '愤怒');
     const character = await handleSettingsAction('char-expression-set:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(character.ok, true);
-    assert.match(asks[0], new RegExp(`这一档还有 ${missingTier8.length} 张没画：${missingTier8.join('、')}`));
-    assert.match(asks[0], /已有的 2 张不动/);
+    assert.match(asks[0], new RegExp(`这一档还有 ${missingTier8.length} 张尚未生成：${missingTier8.join('、')}`));
+    assert.match(asks[0], /已有的 2 张保持不变/);
     assert.deepEqual(seen[0], missingTier8);
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['喜悦'], 'igs-gen:old-joy');
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['愤怒'], 'https://kept.example/a.png');
@@ -290,9 +291,68 @@ test('gate:expression-set:fills-groups-that-have-no-image', async () => {
     const outfit = await handleSettingsAction('outfit-expression-set:%E5%86%AC%E6%9C%88:%E6%97%A5%E5%B8%B8', ctx);
     assert.equal(outfit.ok, true);
     const missingOutfit = moodTierLabels(8).filter((mood) => mood !== '喜悦');
-    assert.match(asks[1], new RegExp(`这一档还有 ${missingOutfit.length} 张没画：${missingOutfit.join('、')}`));
+    assert.match(asks[1], new RegExp(`这一档还有 ${missingOutfit.length} 张尚未生成：${missingOutfit.join('、')}`));
     assert.equal(draft.bridge.sceneAssets.characterOutfits['冬月']['日常'].moods['喜悦'], 'igs-gen:old-outfit');
     assert.equal(draft.bridge.sceneAssets.characterOutfits['冬月']['日常'].moods['愤怒'], 'igs-gen:new-愤怒');
+});
+
+// 新衣服（睡衣这类）还没有自己的图：档位里多一项「1 张」，只画这套的「平和」，所有表情共用；整套差分之后照它画；不改角色记住的档位。
+test('gate:expression-set:new-outfit-can-paint-one-default-first', async () => {
+    const caption = {
+        v4_prompt: { caption: { base_caption: '1girl', char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
+    };
+    const asks = [];
+    const seen = [];
+    const choose = [];
+    const promptIds = [];
+    let pick = '1';
+    const draft = {
+        bridge: {
+            sceneAssets: {
+                characters: { 冬月: { 默认: 'igs-gen:def' } },
+                characterOutfits: { 冬月: { 泳装: { words: [], moods: {} } } },
+                characterMoodTiers: { 冬月: 12 },
+            },
+        },
+        readerSettings: {},
+    };
+    const ctx = {
+        state: { activeSettings: { draft, asyncState: {} } },
+        options: {
+            global: { alert() {}, document: { getElementById() { return null; } } },
+            generatedAssets: {
+                getImagePrompt: async (id) => { promptIds.push(id); return { positive: '1girl', negative: 'lowres', caption }; },
+                generateExpressionSet: async (input) => {
+                    seen.push(input.moods.slice());
+                    return { ok: true, items: input.moods.map((mood) => ({ mood, ok: true, imageId: `new-${mood}` })) };
+                },
+            },
+        },
+        persistSettingsDraft: () => ({ ok: true }),
+        rerenderSettings: () => ({ ok: true }),
+        dialogs: {
+            choose: async (title, choices, current) => { choose.push({ title, values: choices.map((c) => c.value), current }); return pick; },
+            confirm: async (message) => { asks.push(message); return true; },
+        },
+    };
+    const action = 'outfit-expression-set:%E5%86%AC%E6%9C%88:%E6%B3%B3%E8%A3%85';
+    assert.equal((await handleSettingsAction(action, ctx)).ok, true);
+    assert.deepEqual(choose[0].values, ['1', '8', '12', '16', '20']);
+    assert.equal(choose[0].current, '1', '新衣服默认选「1 张」');
+    assert.deepEqual(seen[0], ['平和']);
+    assert.match(asks[0], /给「冬月」的服装「泳装」画 1 张「平和」/);
+    const outfit = draft.bridge.sceneAssets.characterOutfits['冬月']['泳装'];
+    assert.equal(outfit.moods['平和'], 'igs-gen:new-平和');
+    assert.deepEqual(Object.keys(outfit.moods), ['平和']);
+    assert.equal(draft.bridge.sceneAssets.characterMoodTiers['冬月'], 12, '不改记住的档位');
+    // 有了自己的图：不再出「1 张」，整套差分以这张为底图，已有的平和不重画。
+    pick = '8';
+    promptIds.length = 0;
+    assert.equal((await handleSettingsAction(action, ctx)).ok, true);
+    assert.deepEqual(choose[1].values, ['8', '12', '16', '20']);
+    assert.equal(promptIds[0], 'new-平和');
+    assert.deepEqual(seen[1], moodTierLabels(8).filter((mood) => mood !== '平和'));
 });
 
 test('gate:expression-set:repaints-failed-slots-without-rewriting-prompts', async () => {
@@ -354,8 +414,8 @@ test('gate:expression-set:repaints-failed-slots-without-rewriting-prompts', asyn
     draft.bridge.sceneAssets.generated = { expressionNotes: { 冬月: { 愤怒: { error: '出图失败', caption: failed } } } };
     const mixed = await handleSettingsAction('char-expression-set:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(mixed.ok, true);
-    assert.match(asks[1], /只补画：愤怒/);
-    assert.match(asks[1], new RegExp(`要先写提示词：${mixedTier8.join('、')}`));
+    assert.match(asks[1], /将直接补画：愤怒/);
+    assert.match(asks[1], new RegExp(`需先编写提示词：${mixedTier8.join('、')}`));
     assert.deepEqual(painted[1], ['愤怒']);
     assert.deepEqual(written, [mixedTier8]);
 });
@@ -405,7 +465,7 @@ test('gate:character-sprite:generates-default-from-the-character-page', async ()
     draft.bridge.sceneAssets.characters['冬月']['默认'] = 'https://kept.example/a.png';
     const replaced = await handleSettingsAction('char-generate-sprite:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(replaced.ok, true);
-    assert.match(asks[1], /现在这张会被换掉/);
+    assert.match(asks[1], /当前这张将被替换/);
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['默认'], 'igs-gen:made-1');
 
     const dnaOnly = await handleSettingsAction('char-generate-sprite:%E8%B7%AF%E4%BA%BA%E7%94%B2', ctx);
@@ -523,10 +583,70 @@ test('gate:settings-dialog:falls-back-to-native-dialogs-without-a-mounted-panel'
     const dialogs = createSettingsDialogs({ getContainer: () => null, global: globalObj });
     assert.equal(await dialogs.confirm('删掉？'), false);
     assert.equal(await dialogs.prompt('名称：', '旧名'), '新名');
+    assert.equal(await dialogs.alert('看一下'), true);
     assert.deepEqual(calls, [['confirm', '删掉？'], ['prompt', '名称：', '旧名']]);
+    globalObj.alert = (msg) => { calls.push(['alert', msg]); };
+    assert.equal(await dialogs.alert('看一下'), true);
+    assert.deepEqual(calls.at(-1), ['alert', '看一下']);
     const bare = createSettingsDialogs({ getContainer: () => null, global: {} });
     assert.equal(await bare.confirm('删掉？'), true, 'no confirm available keeps the old proceed behaviour');
     assert.equal(await bare.prompt('名称：'), null);
+});
+
+test('gate:settings-dialog:alert-stays-inside-the-panel', async () => {
+    const panel = makePanel();
+    const native = [];
+    const dialogs = createSettingsDialogs({
+        getContainer: () => panel.container,
+        global: { alert: (message) => native.push(message), confirm: () => { throw new Error('native confirm'); }, prompt: () => { throw new Error('native prompt'); } },
+    });
+    const pending = dialogs.alert('文件夹已存在');
+    const bar = panel.overlay.querySelector('.igs-settings-dialog');
+    assert.equal(bar.getAttribute('role'), 'alertdialog');
+    assert.equal(bar.querySelector('[data-settings-dialog="cancel"]'), null);
+    bar.querySelector('[data-settings-dialog="ok"]').dispatch('click');
+    assert.equal(await pending, true);
+    assert.deepEqual(native, []);
+});
+
+test('gate:page-modal:confirm-and-alert-do-not-call-the-browser', async () => {
+    const doc = makeDoc();
+    doc.head = makeEl(doc, 'head');
+    doc.getElementById = (id) => doc.head.querySelector(`#${id}`) || doc.body.querySelector(`#${id}`);
+    const native = { alert() { throw new Error('alert'); }, confirm() { throw new Error('confirm'); }, prompt() { throw new Error('prompt'); }, document: doc };
+    const modal = createIgsModal({ getHost: () => doc.body, global: native });
+    const pending = modal.confirm('清扫当前这张 CG？');
+    const box = doc.body.querySelector('.igs-page-modal');
+    assert.ok(box);
+    assert.equal(modal.isOpen(), true);
+    box.querySelector('[data-igs-modal="cancel"]').dispatch('click');
+    assert.equal(await pending, false);
+    assert.equal(modal.isOpen(), false);
+
+    const alerted = modal.alert('图片过大');
+    doc.body.querySelector('[data-igs-modal="ok"]').dispatch('click');
+    assert.equal(await alerted, true);
+    assert.equal(doc.body.querySelector('.igs-page-modal'), null);
+});
+
+test('gate:page-modal:transformed-host-does-not-become-the-screen', async () => {
+    const doc = makeDoc();
+    doc.documentElement = makeEl(doc, 'html');
+    doc.documentElement.appendChild(doc.body);
+    doc.head = makeEl(doc, 'head');
+    doc.documentElement.appendChild(doc.head);
+    doc.getElementById = (id) => doc.documentElement.querySelector(`#${id}`);
+    const host = makeEl(doc, 'div');
+    host.style = { transform: 'translateX(-50%)' };
+    doc.body.appendChild(host);
+    const modal = createIgsModal({ getHost: () => host, global: { document: doc } });
+    const pending = modal.confirm('确认？');
+    assert.equal(host.querySelector('.igs-page-modal'), null);
+    const box = doc.documentElement.querySelector('.igs-page-modal');
+    assert.ok(box);
+    assert.equal(box.parentNode, doc.documentElement);
+    box.querySelector('[data-igs-modal="ok"]').dispatch('click');
+    assert.equal(await pending, true);
 });
 
 test('gate:settings-focus:restores-focused-field-and-caret-after-innerhtml-rebuild', () => {
@@ -796,8 +916,8 @@ test('gate:expression-retry:failed-paint-reports-without-throwing-while-panel-op
     };
     const result = await handleSettingsAction('char-expression-retry:%E5%86%AC%E6%9C%88:%E5%96%9C%E6%82%A6', ctx);
     assert.equal(result.ok, true);
-    assert.match(shown[0], /「冬月」的「喜悦」没画出来：出图超时（3 分钟）/);
-    assert.match(shown[0], /原来那张没动/);
+    assert.match(shown[0], /「冬月」的「喜悦」未能生成：出图超时（3 分钟）/);
+    assert.match(shown[0], /原有图片保持不变/);
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['喜悦'], 'igs-gen:joy');
 
     // 别的弹窗正开着时改走底部提示条，这条路径要用到 remountSettingsNotice。
@@ -807,7 +927,7 @@ test('gate:expression-retry:failed-paint-reports-without-throwing-while-panel-op
     const barred = await handleSettingsAction('char-expression-retry:%E5%86%AC%E6%9C%88:%E5%96%9C%E6%82%A6', ctx);
     assert.equal(barred.ok, true);
     assert.equal(shown.length, 1, 'no second dialog over the open one');
-    assert.match(notices.map((el) => el.textContent).join(' '), /「冬月」的「喜悦」没画出来/);
+    assert.match(notices.map((el) => el.textContent).join(' '), /「冬月」的「喜悦」未能生成/);
 });
 
 test('gate:expression-set:custom-groups-only-when-asked', async () => {
@@ -850,7 +970,7 @@ test('gate:expression-set:custom-groups-only-when-asked', async () => {
         return { asks, seen };
     };
     const skipped = await run(false);
-    assert.match(skipped.asks[0], /另有 2 个自建情绪组还没图：旧组乙、旧组丙/);
+    assert.match(skipped.asks[0], /另有 2 个自建情绪组尚无图片：旧组乙、旧组丙/);
     assert.match(skipped.asks[1], /生成「冬月」的 20 张表情差分/);
     assert.equal(skipped.seen[0].length, 20);
     const taken = await run(true);
@@ -907,7 +1027,7 @@ test('gate:status-avatar:generates-a-chibi-avatar-and-default-slot-can-regenerat
     assert.equal(seen[0].dna.identity, 'black hair');
     assert.equal(draft.bridge.sceneAssets.statusAvatars['冬月'], 'data:image/png;base64,QUJD');
     await handleSettingsAction('status-avatar-generate:%E5%86%AC%E6%9C%88', ctx);
-    assert.match(asks[1], /现在的头像会被换掉/);
+    assert.match(asks[1], /当前头像将被替换/);
     const html = renderCharacterAssetList({ 冬月: { 默认: 'igs-gen:def', 喜悦: '' } }, { isOpen: () => true, statusAvatars: draft.bridge.sceneAssets.statusAvatars });
     assert.ok(html.includes('data-action="status-avatar-generate:%E5%86%AC%E6%9C%88"'));
     assert.ok(html.includes('重画Q版'));
@@ -987,14 +1107,14 @@ test('gate:regenerate:failure-pops-a-panel-dialog-with-the-reason', async () => 
         dialogs: { confirm: async () => true, view: async (message) => { views.push(message); return true; }, isOpen: () => false },
     };
     await handleSettingsAction('char-expression-retry:%E5%86%AC%E6%9C%88:%E5%96%9C%E6%82%A6', ctx);
-    assert.match(views[0], /「冬月」的「喜悦」没画出来/);
+    assert.match(views[0], /「冬月」的「喜悦」未能生成/);
     assert.match(views[0], /出图超时（3 分钟）/);
-    assert.match(views[0], /原来那张没动/);
+    assert.match(views[0], /原有图片保持不变/);
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['喜悦'], 'igs-gen:joy', 'old image is kept');
 
     const sprite = await handleSettingsAction('char-generate-sprite:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(sprite.ok, false);
-    assert.match(views[1], /默认立绘没画出来：插件没有响应/);
+    assert.match(views[1], /默认立绘未能生成：插件没有响应/);
 
     // 用户正在答别的对话框时不顶掉它，改走提示条（这里面板没开，退回 alert）。
     const alerts = [];
@@ -1003,4 +1123,59 @@ test('gate:regenerate:failure-pops-a-panel-dialog-with-the-reason', async () => 
     await handleSettingsAction('char-generate-sprite:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(views.length, 2);
     assert.match(alerts[0], /插件没有响应/);
+});
+
+test('gate:character-sprite:one-click-user-protagonist-from-tavern-persona', async () => {
+    const seen = [];
+    const notes = [];
+    const storage = new Map();
+    const draft = { bridge: { sceneAssets: {} }, readerSettings: {} };
+    const ctx = {
+        state: { activeSettings: { draft, asyncState: {} } },
+        options: {
+            global: {
+                alert() {},
+                localStorage: { getItem: (k) => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => storage.set(k, v) },
+                SillyTavern: { getContext: () => ({ name1: '阿澈', powerUserSettings: { persona_description: '  银发蓝眼，\n二十岁，{{user}}是个怕生的大学生  ' } }) },
+            },
+            generatedAssets: {
+                generateCharacterSprite: async (input) => { seen.push(input); return { ok: true, imageId: 'made-me' }; },
+            },
+        },
+        persistSettingsDraft: () => ({ ok: true }),
+        rerenderSettings: () => ({ ok: true }),
+        dialogs: {
+            confirm: async () => true,
+            edit: async (message, current) => { notes.push([message, current]); return current; },
+        },
+    };
+    const result = await handleSettingsAction('scene-add-user-char', ctx);
+    assert.equal(result.ok, true);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].name, '阿澈');
+    assert.match(notes[0][1], /银发蓝眼/);
+    assert.match(notes[0][1], /阿澈是个怕生的大学生/);
+    assert.doesNotMatch(notes[0][1], /\{\{user\}\}/);
+    assert.ok(draft.bridge.sceneAssets.characterDna['阿澈']);
+    assert.equal(draft.bridge.sceneAssets.characters['阿澈']['默认'], 'igs-gen:made-me');
+    assert.equal(draft.bridge.sceneAssets.characterSpriteNotes['阿澈'], notes[0][1]);
+    const folders = JSON.parse(storage.get('igs-asset-folders-v1'));
+    const scopeState = folders.scopes[''];
+    assert.ok(scopeState.characters.folders.includes('主角'));
+    assert.equal(scopeState.characters.assign['阿澈'], '主角');
+
+    // 已经登记过的主角再点一次：不重复登记 DNA，沿用已有资料。
+    draft.bridge.sceneAssets.characterDna['阿澈'] = { identity: '银发', defaultAppearance: '', negative: '', triggerWords: '' };
+    const again = await handleSettingsAction('scene-add-user-char', ctx);
+    assert.equal(again.ok, true);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].dna.identity, '银发');
+
+    // 酒馆没设用户名时停下，只提示不生成。
+    const alerts = [];
+    ctx.options.global.alert = (message) => alerts.push(message);
+    ctx.options.global.SillyTavern = { getContext: () => ({ name1: '', powerUserSettings: {} }) };
+    await handleSettingsAction('scene-add-user-char', ctx);
+    assert.equal(seen.length, 2);
+    assert.match(alerts[0], /没读到酒馆的用户名/);
 });

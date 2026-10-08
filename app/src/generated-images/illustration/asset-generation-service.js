@@ -1,4 +1,5 @@
 import { numberParagraphs } from './marker-placer.js';
+import { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } from './floor-body-length.js';
 import { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } from './asset-prompt.js';
 import { requestWithSoftRetry } from './prompt-kit.js';
 import { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } from './auto-illustration-settings.js';
@@ -52,6 +53,8 @@ export function createAssetGenerationService(deps) {
     const { messageHost, llm, nai, store, getSettings, events } = deps;
     const matte = deps.matte || (async (dataUrl) => dataUrl);
     const now = deps.now || (() => new Date().toISOString());
+    const minBodyChars = Number.isFinite(Number(deps.minBodyChars)) ? Number(deps.minBodyChars) : MIN_AUTO_IMAGE_BODY_CHARS;
+    const sourceFilter = typeof deps.getSourceFilter === 'function' ? deps.getSourceFilter : () => undefined;
     const report = deps.report || (() => {});
     const newId = deps.newId || (() => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`);
     const locks = new Map();
@@ -65,6 +68,14 @@ export function createAssetGenerationService(deps) {
     const BlobCtor = deps.Blob || globalThis.Blob;
     const canThumbUrl = Boolean(urlApi && typeof urlApi.createObjectURL === 'function' && BlobCtor);
     const thumbUrls = new Map();
+    // 有小图库（thumbStore + makeThumb）时，设置页缩略图是 160 宽小图，生成一次存起来，原图不进内存；
+    // 没有时（测试、老环境）退回旧做法：把已读回的原图转成 blob 短地址。
+    const thumbStore = deps.thumbStore || null;
+    const makeThumb = typeof deps.makeThumb === 'function' ? deps.makeThumb : null;
+    const smallThumbs = Boolean(thumbStore && makeThumb && canThumbUrl);
+    const thumbIds = new Map();
+    const pendingThumbs = new Set();
+    const THUMB_LIMIT = 800;
     let tempChatId = '';
     let tempRecords = new Map();
     let tempLoading = null;
@@ -72,10 +83,14 @@ export function createAssetGenerationService(deps) {
 
     const readSettings = () => {
         const raw = getSettings ? getSettings() || {} : {};
+        const imageApi = raw.imageApi && typeof raw.imageApi === 'object' ? raw.imageApi : {};
         return {
             auto: normalizeAutoIllustrationSettings(raw.autoIllustration),
             strict: isStrictBackgroundMatch(raw.autoIllustration),
             sceneAssets: raw.sceneAssets && typeof raw.sceneAssets === 'object' ? raw.sceneAssets : {},
+            // 没写过这个开关时沿用旧行为：数据库生图的立绘打开透明底。
+            dbgenSpriteTransparent: imageApi.dbgenSpriteTransparent !== false,
+            spriteModel: String(imageApi.spriteModel || '').trim(),
         };
     };
 
@@ -94,17 +109,25 @@ export function createAssetGenerationService(deps) {
         const url = thumbUrls.get(id);
         if (!url) return;
         thumbUrls.delete(id);
+        thumbIds.delete(url);
         try { if (typeof urlApi.revokeObjectURL === 'function') urlApi.revokeObjectURL(url); } catch (error) { /* 已失效 */ }
+    }
+
+    // 图的内容变了（抠图、导入覆盖）或删了：内存和小图库里的旧小图都作废。
+    function invalidateThumb(id) {
+        dropThumb(id);
+        if (smallThumbs) thumbStore.remove([id]).catch(() => {});
     }
 
     function forgetImage(id) {
         images.delete(id);
         imageUsedAt.delete(id);
-        dropThumb(id);
+        // 小图独立于原图缓存：原图被挤出内存时小图照样留着；旧做法的 blob 就是原图，要一起放掉。
+        if (!smallThumbs) dropThumb(id);
     }
 
     function touchImage(id, dataUrl) {
-        if (images.get(id) !== dataUrl) dropThumb(id);
+        if (smallThumbs ? images.has(id) && images.get(id) !== dataUrl : images.get(id) !== dataUrl) invalidateThumb(id);
         images.delete(id);
         images.set(id, dataUrl);
         imageUsedAt.set(id, clock());
@@ -196,9 +219,53 @@ export function createAssetGenerationService(deps) {
         return new BlobCtor([bytes], { type: m[1] });
     }
 
-    // 设置页缩略图取图：返回 blob: 短地址，内存里已有图就当场转好，不多等一轮重绘；
-    // 还没从存储读回返回空串，读回后发 image-loaded。环境不支持 blob 地址时退回 dataUrl。
+    function setThumbUrl(id, dataUrl) {
+        let blob = null;
+        try { blob = dataUrlToBlob(dataUrl); } catch (error) { blob = null; }
+        if (!blob) return false;
+        dropThumb(id);
+        const url = urlApi.createObjectURL(blob);
+        thumbUrls.set(id, url);
+        thumbIds.set(url, id);
+        while (thumbUrls.size > THUMB_LIMIT) dropThumb(thumbUrls.keys().next().value);
+        return true;
+    }
+
+    // 小图：先查小图库；没有就读一次原图缩成小图存进去（比原图小两个数量级）。缩不了（图本来就小）直接用原图。
+    async function loadSmallThumb(id) {
+        let dataUrl = '';
+        try { dataUrl = await thumbStore.get(id); } catch (error) { dataUrl = ''; }
+        if (!dataUrl) {
+            const full = images.get(id) || (normalizeGeneratedImageRecord(await store.getImage(id)) || {}).dataUrl || '';
+            if (!full) return;
+            let small = '';
+            try { small = await makeThumb(full); } catch (error) { small = ''; }
+            if (small) {
+                try { await thumbStore.put(id, small); } catch (error) { /* 存不下就只在这次打开里用 */ }
+            }
+            dataUrl = small || full;
+        }
+        if (setThumbUrl(id, dataUrl)) emit({ imageId: id, reason: 'image-loaded' });
+    }
+
+    // 点缩略图看大图时用：小图地址 → 图片编号，好去读原图。
+    function thumbSourceId(url) {
+        return thumbIds.get(String(url || '')) || '';
+    }
+
+    // 设置页缩略图取图：返回 blob: 短地址，已有就当场给，不多等一轮重绘；
+    // 还没准备好返回空串，好了发 image-loaded。环境不支持 blob 地址时退回 dataUrl。
     function resolveThumbUrl(url) {
+        if (isGeneratedAssetUrl(url) && smallThumbs) {
+            const id = generatedAssetIdOf(url);
+            const ready = thumbUrls.get(id);
+            if (ready) return ready;
+            if (!pendingThumbs.has(id)) {
+                pendingThumbs.add(id);
+                loadSmallThumb(id).catch(() => {}).finally(() => pendingThumbs.delete(id));
+            }
+            return '';
+        }
         if (!isGeneratedAssetUrl(url) || !canThumbUrl) return resolveUrl(url);
         const id = generatedAssetIdOf(url);
         const dataUrl = images.get(id);
@@ -269,18 +336,25 @@ export function createAssetGenerationService(deps) {
     async function generateItem(item, s, floor, floorKey) {
         const isSprite = item.need.type === 'sprite';
         // 智绘姬 / 柏宝绘出图不保证透明底：走它们时按浅灰底模板出图并抠图，不信任 NAI 模型的原生透明能力。
-        // 数据库生图的立绘默认要透明底，不看沉浸式插件自己填的 NAI 模型。
+        // 数据库生图的立绘默认打开透明底，可在图像来源里关掉（V4.5 没有原生透明底）。
         const plannedVia = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
+        const dbgenTransparent = plannedVia === 'dbgen' && s.dbgenSpriteTransparent !== false;
         const transparent = isSprite && plannedVia !== 'chatu8' && plannedVia !== 'baibai'
-            && (plannedVia === 'dbgen' || supportsNaiTransparentBackground(s.auto.nai.model));
-        const slot = buildAssetSlot(item, { transparent, templates: s.auto.assets.templates, positiveContext: s.auto.nai.artistPrefix });
+            && (dbgenTransparent || (plannedVia !== 'dbgen' && supportsNaiTransparentBackground(s.spriteModel || s.auto.nai.model)));
+        const slot = buildAssetSlot(item, {
+            transparent,
+            whiteBackground: isSprite && plannedVia === 'dbgen' && !dbgenTransparent,
+            templates: s.auto.assets.templates,
+            positiveContext: s.auto.nai.artistPrefix,
+        });
         const size = isSprite ? s.auto.assets.spriteSize : backgroundSize(s);
         // 数据库生图：描述只说明画什么。正负模板随 userPrompts 传出，出图前合并进最终 caption。
         const userPrompts = { positive: slot.scene, negative: slot.sceneUc };
         const meta = {
-            messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need), userPrompts,
+            messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need, { transparent: dbgenTransparent }), userPrompts,
             skipRecall: true,
-            ...(isSprite && plannedVia === 'dbgen' && { transparent: true }),
+            imageKind: isSprite ? 'sprite' : 'background',
+            ...(dbgenTransparent && { transparent: true }),
         };
         let result;
         try { result = await nai.generate(slot, { ...s.auto.nai, size }, meta); } catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
@@ -328,7 +402,7 @@ export function createAssetGenerationService(deps) {
         } else {
             let result;
             try {
-                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed() });
+                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed(), imageKind: 'background' });
             } catch (error) {
                 result = { ok: false, error: `出图失败：${(error && error.message) || error}` };
             }
@@ -379,6 +453,7 @@ export function createAssetGenerationService(deps) {
                     result = await nai.generateDbgenCaption({
                         caption,
                         size: backgroundSize(s),
+                        imageKind: 'background',
                         messageId: floor.messageId,
                         userPrompts: { positive: slot.scene, negative: slot.sceneUc },
                     });
@@ -417,6 +492,7 @@ export function createAssetGenerationService(deps) {
     async function generateSpriteBatch(items, s, floor, floorKey) {
         const records = [];
         let stopError = '';
+        const transparent = s.dbgenSpriteTransparent !== false;
         const putSpriteRecord = async (item, result) => {
             const key = tempAssetKeyOf(floor.chatId, item.need);
             const base = {
@@ -427,7 +503,7 @@ export function createAssetGenerationService(deps) {
             let record;
             if (result && result.ok && result.dataUrl) {
                 const imageId = newId();
-                const image = await buildSpriteImageRecord(imageId, result.dataUrl, true, base.createdAt);
+                const image = await buildSpriteImageRecord(imageId, result.dataUrl, transparent, base.createdAt);
                 const prompt = normalizeStoredPrompt(result.prompt);
                 if (prompt) image.prompt = prompt;
                 const saved = await putImageWithQuotaFallback(image);
@@ -450,7 +526,7 @@ export function createAssetGenerationService(deps) {
             let written;
             try {
                 written = await nai.writeDbgenPrompt({
-                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need)),
+                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need), { transparent }),
                     messageId: floor.messageId,
                 });
             } catch (error) {
@@ -466,7 +542,7 @@ export function createAssetGenerationService(deps) {
                 const item = batch[index];
                 const found = captions.find((entry) => Number(entry.slotId) === index + 1);
                 const caption = found && found.caption;
-                const slot = buildAssetSlot(item, { transparent: true, templates: s.auto.assets.templates });
+                const slot = buildAssetSlot(item, { transparent, whiteBackground: !transparent, templates: s.auto.assets.templates });
                 const prompts = expressionSpritePrompts(slot.scene, slot.sceneUc);
                 let result;
                 if (!caption) {
@@ -476,8 +552,9 @@ export function createAssetGenerationService(deps) {
                         result = await nai.generateDbgenCaption({
                             caption: applyCharacterDnaToCaption(caption, item.need && item.need.dna),
                             size: s.auto.assets.spriteSize,
+                            imageKind: 'sprite',
                             messageId: floor.messageId,
-                            transparent: true,
+                            ...(transparent && { transparent: true }),
                             userPrompts: { positive: prompts.positive, negative: prompts.negative },
                         });
                     } catch (error) {
@@ -494,19 +571,42 @@ export function createAssetGenerationService(deps) {
         // 失败或中途刷新残留的 planning 不算处理完，下次渲染时重试。
         const previous = await store.getFloor(key);
         if (!manual && previous && previous.status === 'done') return { ok: true, reason: 'already-decided' };
+        // 不记成已处理：用户点「继续」把这楼写长后，下次渲染照常补素材。
+        const bodyChars = floorBodyLength(floor.text, sourceFilter());
+        if (!manual && bodyChars < minBodyChars) {
+            report('info', `第 ${messageId} 楼跳过素材补全：正文只有 ${bodyChars} 字，少于 ${minBodyChars} 字不自动生图`);
+            return { ok: true, reason: 'body-too-short' };
+        }
         await loadTempRecords(floor.chatId);
         const numbered = numberParagraphs(floor.text);
         const match = matchContext(
             s,
             messageHost.getCharacterNames ? messageHost.getCharacterNames() : [],
         );
+        // 命中的 igs-gen 图先记下，查一遍图片本体还在不在；丢了的按缺图重算，否则一直「已有素材」却显示不出来。
+        const probed = new Set();
+        const lost = new Set();
+        match.isMissingImage = (url) => { probed.add(url); return lost.has(url); };
         // 背景按本楼实际缺的张数生成，不跟立绘共用每层上限。已生成的在匹配时剔掉。
-        const backgroundNeeds = s.auto.assets.backgroundEnabled
-            ? collectAssetNeeds({ scenes: numbered.scenes, characters: [] }, match, { background: true, sprite: false })
-            : [];
-        const spriteNeeds = s.auto.assets.spriteEnabled
-            ? collectAssetNeeds({ scenes: [], characters: numbered.characters }, match, { background: false, sprite: true, limit: s.auto.assets.maxPerFloor })
-            : [];
+        const collectNeeds = () => [
+            s.auto.assets.backgroundEnabled
+                ? collectAssetNeeds({ scenes: numbered.scenes, characters: [] }, match, { background: true, sprite: false })
+                : [],
+            s.auto.assets.spriteEnabled
+                ? collectAssetNeeds({ scenes: [], characters: numbered.characters }, match, { background: false, sprite: true, limit: s.auto.assets.maxPerFloor })
+                : [],
+        ];
+        let [backgroundNeeds, spriteNeeds] = collectNeeds();
+        for (const url of probed) {
+            const id = generatedAssetIdOf(url);
+            if (images.has(id)) continue;
+            const record = await store.getImage(id).catch(() => null);
+            if (!record || !record.dataUrl) lost.add(url);
+        }
+        if (lost.size) {
+            report('warn', `第 ${messageId} 楼有 ${lost.size} 张已登记素材的图片找不到了，按缺图重新生成`);
+            [backgroundNeeds, spriteNeeds] = collectNeeds();
+        }
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
@@ -543,10 +643,15 @@ export function createAssetGenerationService(deps) {
             try {
                 const previousText = messageHost.readPreviousAiTexts(messageId, s.auto.llm.contextFloors)
                     .map(toReadableText).join('\n').slice(-1500);
+                // 没登记 DNA 的角色补酒馆里的外貌参考（用户人设、角色卡、世界书），DNA 仍优先。
+                const loreNames = needs.filter((need) => need.type === 'sprite' && !need.dna).map((need) => need.name);
+                const lore = loreNames.length && typeof messageHost.readCharacterLore === 'function'
+                    ? await messageHost.readCharacterLore(loreNames).catch(() => [])
+                    : [];
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
-                    user: buildAssetPlannerUserPrompt({ needs, readableText: toReadableText(floor.text).slice(0, 6000), previousText }),
+                    user: buildAssetPlannerUserPrompt({ needs, readableText: toReadableText(floor.text).slice(0, 6000), previousText, lore }),
                     parse: (reply) => parseAssetPlan(reply, needs),
                 }, s.auto.llm);
             } catch (error) {
@@ -664,6 +769,7 @@ export function createAssetGenerationService(deps) {
         if (!store || typeof store.updateImage !== 'function') return { ok: false, reason: 'update-unsupported' };
         const result = await store.updateImage(imageId, expectedRevision, patch, now());
         if (!result || !result.ok) return result || { ok: false, reason: 'update-failed' };
+        invalidateThumb(imageId);
         rememberImage(imageId, result.record.dataUrl);
         emit({ imageId, reason: 'matte-edited', revision: result.record.revision });
         return { ok: true, revision: result.record.revision };
@@ -675,6 +781,7 @@ export function createAssetGenerationService(deps) {
             try {
                 await store.deleteImage(id);
                 forgetImage(id);
+                invalidateThumb(id);
             } catch (error) { failed = true; }
         }
         return failed ? { ok: false, reason: 'image-delete-failed' } : { ok: true };
@@ -694,22 +801,29 @@ export function createAssetGenerationService(deps) {
     function expressionPaintMeta() {
         const s = readSettings();
         const via = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
-        const transparent = via === 'dbgen' || (via === 'nai' && supportsNaiTransparentBackground(s.auto.nai.model));
+        const dbgenTransparent = via === 'dbgen' && s.dbgenSpriteTransparent !== false;
+        const transparent = dbgenTransparent || (via === 'nai' && supportsNaiTransparentBackground(s.spriteModel || s.auto.nai.model));
         const slot = buildAssetSlot(
             { need: { type: 'sprite', name: '' }, tags: '', uc: '' },
-            { transparent, templates: s.auto.assets.templates, positiveContext: s.auto.nai.artistPrefix },
+            {
+                transparent,
+                whiteBackground: via === 'dbgen' && !dbgenTransparent,
+                templates: s.auto.assets.templates,
+                positiveContext: s.auto.nai.artistPrefix,
+            },
         );
         const prompts = expressionSpritePrompts(slot.scene, slot.sceneUc);
         return {
             size: s.auto.assets.spriteSize,
+            imageKind: 'sprite',
             userPrompts: { positive: prompts.positive, negative: prompts.negative },
             transparent,
         };
     }
 
-    // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。
-    async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false } = {}) {
-        const upright = uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw }), dna)) || caption;
+    // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
+    async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false } = {}) {
+        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw }), dna)) || caption);
         const meta = expressionPaintMeta();
         let painted;
         try {
@@ -731,6 +845,7 @@ export function createAssetGenerationService(deps) {
         const image = await buildSpriteImageRecord(imageId, painted.dataUrl, meta.transparent, createdAt);
         const prompt = normalizeStoredPrompt(painted.prompt) || promptFromCaption(upright);
         if (prompt) image.prompt = prompt;
+        if (exact) image.promptEdited = true;
         await putImageWithQuotaFallback(image);
         rememberImage(imageId, image.dataUrl);
         return { mood, ok: true, imageId, prompt, name };
@@ -774,7 +889,7 @@ export function createAssetGenerationService(deps) {
                 let written;
                 try {
                     written = await nai.writeDbgenPrompt({
-                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw }),
+                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, transparent: readSettings().dbgenSpriteTransparent !== false }),
                     });
                 } catch (error) {
                     const message = (error && error.message) || '写提示词失败';
@@ -802,8 +917,6 @@ export function createAssetGenerationService(deps) {
                         pending = [];
                         break;
                     }
-                    painted += 1;
-                    reportExpressionProgress(onProgress, { phase: 'paint', done: painted, total: labels.length, mood: pending[i] });
                     const slot = captions.find((item) => Number(item && item.slotId) === i + 1);
                     const caption = slot && slot.caption;
                     if (!caption) {
@@ -811,6 +924,9 @@ export function createAssetGenerationService(deps) {
                         items.push({ mood: pending[i], ok: false, error: '写提示词没有返回这一份' });
                         continue;
                     }
+                    // 漏写的那份第二轮补画才算一张，不然补写后 done 会超过 total（14/9）。
+                    painted += 1;
+                    reportExpressionProgress(onProgress, { phase: 'paint', done: painted, total: labels.length, mood: pending[i] });
                     const result = await paintExpressionCaption(name, pending[i], caption, paintDna, paint);
                     items.push(result);
                 }
@@ -843,13 +959,13 @@ export function createAssetGenerationService(deps) {
 
     // 单张重画：有这一格的提示词就不再写词（写词要等插件的模型，单张也得几十秒），
     // 直接叠上当前的表情、衣服、DNA 硬合再出图；显式换一颗随机种子——不传种子时插件用自己的配置，固定种子会画出同一张。
-    async function generateExpressionImage({ name, mood, caption, basePrompt, dna, outfit, note, nsfw, onProgress } = {}) {
+    async function generateExpressionImage({ name, mood, caption, exact = false, basePrompt, dna, outfit, note, nsfw, onProgress } = {}) {
         const label = String(mood || '').trim();
         if (!label) return { ok: false, error: '没有表情' };
         if (caption) {
             reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: label });
             const look = expressionLookTags(basePrompt, outfit);
-            const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true });
+            const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true, exact: exact === true });
             return { ok: true, items: [item] };
         }
         return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, onProgress });
@@ -881,7 +997,7 @@ export function createAssetGenerationService(deps) {
             }
             let painted;
             try {
-                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed });
+                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed, imageKind: 'background' });
             } catch (error) {
                 painted = { ok: false, error: (error && error.message) || '出图失败' };
             }
@@ -923,6 +1039,7 @@ export function createAssetGenerationService(deps) {
             painted = await nai.generateDbgenCaption({
                 caption: applyCharacterDnaToCaption(written.caption, dna),
                 size: AVATAR_SIZE,
+                imageKind: 'sprite',
                 userPrompts: { positive: AVATAR_POSITIVE, negative: AVATAR_NEGATIVE },
             });
         } catch (error) {
@@ -932,17 +1049,25 @@ export function createAssetGenerationService(deps) {
         return { ok: true, dataUrl: painted.dataUrl };
     }
 
-    // 设置页主动出一张默认立绘：一定先让 LLM 重写提示词，再出图。不拿已有提示词直接画，也不经过楼内补图。
-    async function generateCharacterSprite({ name, dna, nude = false, note = '', onProgress } = {}) {
+    // 设置页主动出一张默认立绘：先让 LLM 写提示词，再出图，不经过楼内补图。
+    // 格子里已有图的「重新生成」带着那张图的 caption 进来：不写词，换一颗新种子直接画。
+    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
+        if (caption) {
+            if (!nai || typeof nai.generateDbgenCaption !== 'function') return { ok: false, error: '当前图像来源不能画立绘' };
+            reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: '默认' });
+            const repainted = await paintExpressionCaption(who, '默认', caption, dna, { seed: randomSeed(), exact: exact === true });
+            if (!repainted.ok) return { ok: false, error: repainted.error || '出图失败', prompt: repainted.prompt };
+            return { ok: true, imageId: repainted.imageId, prompt: repainted.prompt };
+        }
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
             return { ok: false, error: '当前图像来源不能写立绘' };
         }
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '默认' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note }) });
+            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, transparent: readSettings().dbgenSpriteTransparent !== false }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -1005,11 +1130,13 @@ export function createAssetGenerationService(deps) {
         return { ok: true, prompt: text };
     }
 
+    // edited：用户在「提示词」里改过并保存。重画时照原样用，不再叠情绪 / 衣服 / DNA。
     async function getImagePrompt(id) {
         const key = String(id || '');
         if (!key || !store || typeof store.getImage !== 'function') return null;
         const record = await store.getImage(key);
-        return normalizeStoredPrompt(record && record.prompt);
+        const prompt = normalizeStoredPrompt(record && record.prompt);
+        return prompt && record.promptEdited === true ? { ...prompt, edited: true } : prompt;
     }
 
     async function saveImagePrompt(id, prompt) {
@@ -1021,7 +1148,7 @@ export function createAssetGenerationService(deps) {
         }
         const record = await store.getImage(key);
         if (!record) return { ok: false, error: '找不到这张立绘' };
-        await store.putImage({ ...record, prompt: stored });
+        await store.putImage({ ...record, prompt: stored, promptEdited: true });
         return { ok: true, prompt: stored };
     }
 
@@ -1033,7 +1160,7 @@ export function createAssetGenerationService(deps) {
     }
 
     async function importAssetImage(dataUrl, type) {
-        if (!['sprite', 'background'].includes(type) || !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(String(dataUrl || ''))) {
+        if (!['sprite', 'background', 'avatar'].includes(type) || !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(String(dataUrl || ''))) {
             return { ok: false, error: '图片格式不受支持' };
         }
         const imageId = newId();
@@ -1056,12 +1183,13 @@ export function createAssetGenerationService(deps) {
         if (!key || !store || typeof store.putImage !== 'function') return { ok: false, error: '图片存不了' };
         const stored = { ...image, id: key };
         await store.putImage(stored);
+        invalidateThumb(key);
         if (stored.dataUrl) rememberImage(key, stored.dataUrl);
         return { ok: true };
     }
 
     return {
-        processMessage, resolveUrl, resolveThumbUrl, tempBackground, tempSceneTime, tempSprite, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
+        processMessage, resolveUrl, resolveThumbUrl, thumbSourceId, tempBackground, tempSceneTime, tempSprite, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
         generateExpressionSet, generateExpressionImage, paintExpressionCaptions, generateSceneVariants, generateCharacterSprite, generateCharacterAvatar, writeWardrobePrompt, paintWardrobeReference,
         getEditableImage, saveMatteEdit,
         getRecord: (key) => currentTempRecords().get(key) || null,

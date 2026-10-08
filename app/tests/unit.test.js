@@ -986,7 +986,8 @@ test('gate:igs-ui:excluded-yuan-inline-formatting-controls-do-not-create-blank-p
     const opened = host.openReader({ message: { text: raw }, sourceFilter }, { mode: 'pc' });
     assert.equal(opened.ok, true);
     const segments = opened.snapshot.content.segments;
-    assert.equal(segments.length, 2);
+    // 心理和后面同一行的旁白各占一页（以前「**怎么回事？**又醒了。」挤在一页）。
+    assert.deepEqual(segments, ['醒来。', '**怎么回事？**', '又醒了。']);
     assert.equal(segments.join('').includes('日本語'), false);
     assert.equal(segments.join('').includes('李家主宅卧室|早晨|晴]'), false);
     assert.equal(segments.every((segment) => /[^\s\u200B-\u200D\u2060-\u2064]/u.test(segment)), true);
@@ -3359,6 +3360,30 @@ test('gate:host:tavern-helper-adapter-uses-hide-state-fallback-for-hidden-messag
     assert.equal(current.id, 2);
 });
 
+test('gate:host:tavern-helper-adapter-lists-hidden-ai-floors-for-reading', async () => {
+    const messages = [
+        { message_id: 0, message: '开场白', role: 'assistant', is_hidden: true },
+        { message_id: 1, message: '玩家', role: 'user', is_hidden: true },
+        { message_id: 2, message: '旁白', role: 'system' },
+        { message_id: 3, message: '注释', role: 'assistant', extra: { type: 'comment' } },
+        { message_id: 4, message: '可见楼层', role: 'assistant' },
+    ];
+    const adapter = createTavernHelperAdapter({
+        TavernHelper: {
+            getLastMessageId: () => 4,
+            getChatMessages(_range, options = {}) {
+                if (options.hide_state === 'hidden') return [{ message_id: 0 }, { message_id: 1 }];
+                return messages;
+            },
+        },
+        document: { querySelectorAll: () => [] },
+    });
+
+    assert.deepEqual((await adapter.listTurns()).map((turn) => turn.id), [0, 4]);
+    assert.equal((await adapter.getAdjacentMessage(4, -1)).id, 0);
+    assert.equal((await adapter.getCurrentMessage()).id, 4);
+});
+
 test('gate:host:tavern-helper-adapter-falls-back-to-sillytavern-context-chat', async () => {
     const adapter = createTavernHelperAdapter({
         SillyTavern: {
@@ -3847,14 +3872,20 @@ test('gate:scene:character-assets-render-status-avatar-row', () => {
 });
 
 test('gate:scene:scene-assets-indent-without-horizontal-overflow', () => {
-    const html = renderSceneAssetList({
+    const scenes = {
         旧城: {
             url: '',
             times: {
                 夜晚: { url: '', weathers: { 雨天: { url: '' } } },
             },
         },
-    });
+    };
+    // 时间 / 天气行默认收起，场景行上只有「1 个时间 · 1 个天气」。
+    const collapsed = renderSceneAssetList(scenes);
+    assert.match(collapsed, /data-action="scene-toggle-times:%E6%97%A7%E5%9F%8E" aria-expanded="false">1 个时间 · 1 个天气<\/button>/);
+    assert.doesNotMatch(collapsed, /igs-scene-time-group/);
+    const html = renderSceneAssetList(scenes, { expandedSlots: new Set(['times\x00旧城']) });
+    assert.match(html, /aria-expanded="true">1 个时间 · 1 个天气/);
     assert.match(html, /class="igs-scene-char-group igs-scene-time-group"/);
     assert.match(html, /class="igs-btn-mgr-row igs-scene-mood-row igs-scene-weather-row"/);
     assert.doesNotMatch(html, /style="margin-left:(?:16|32)px"/);
@@ -4506,6 +4537,33 @@ test('gate:generated-images:sprite-slot-merges-character-dna-in-fixed-order', as
     const plainPrompt = buildAssetPlannerUserPrompt({ needs: [{ type: 'sprite', name: '爱丽' }], readableText: '正文' });
     assert.ok(!plainPrompt.includes('【角色 DNA】'));
     assert.ok(!plainPrompt.includes('固定身份'));
+    assert.ok(!plainPrompt.includes('【角色设定参考】'));
+    const lorePrompt = buildAssetPlannerUserPrompt({ needs: [{ type: 'sprite', name: '爱丽' }], readableText: '正文', lore: [{ name: '爱丽', text: '世界书：银发蓝眼' }] });
+    assert.ok(lorePrompt.includes('【角色设定参考】'));
+    assert.ok(lorePrompt.includes('爱丽：世界书：银发蓝眼'));
+});
+
+test('gate:generated-images:sprite-lore-reads-persona-card-and-matching-worldinfo', async () => {
+    const { createIllustrationMessageHost } = await import('../src/host/illustration-message-host.js');
+    const ctx = {
+        name1: '我',
+        powerUserSettings: { persona_description: '黑色短发，戴眼镜' },
+        characterId: 0,
+        characters: [{ name: '爱丽', description: '金发双马尾', data: { extensions: { world: '书A' } } }],
+        chatMetadata: {},
+        loadWorldInfo: async (book) => (book === '书A' ? { entries: {
+            1: { key: ['爱丽'], content: '爱丽常穿红色斗篷' },
+            2: { key: ['魔王'], content: '魔王是黑龙' },
+            3: { key: ['爱丽'], content: '已关闭条目', disable: true },
+        } } : null),
+    };
+    const host = createIllustrationMessageHost({ SillyTavern: { getContext: () => ctx } });
+    const lore = await host.readCharacterLore(['我', '爱丽', '路人']);
+    assert.equal(lore.length, 2);
+    assert.match(lore[0].text, /用户人设：黑色短发/);
+    assert.match(lore[1].text, /角色卡：金发双马尾/);
+    assert.match(lore[1].text, /红色斗篷/);
+    assert.doesNotMatch(lore[1].text, /黑龙|已关闭/);
 });
 
 
@@ -4965,7 +5023,7 @@ test('gate:igs-ui:sprite-matte-editor-mount-readonly-draw-cancel-and-save', asyn
     let result = { ok: false, reason: 'stale-revision', message: '已在别处被修改' };
     const editor = makeEditor(() => result, saves);
     const saved = [];
-    const mounted = mountMatteEditor(doc, editor, { onSaved: (r) => saved.push(r) });
+    const mounted = mountMatteEditor(doc, editor, { onSaved: (r) => saved.push(r), confirm: () => win.confirmAnswer });
     assert.equal(doc.head.children.filter((c) => c.id === 'igs-matte-editor-style').length, 1);
     const canvas = mounted.root.children[2].children[0];
     assert.equal(canvas.tagName, 'CANVAS');
@@ -4999,7 +5057,7 @@ test('gate:igs-ui:sprite-matte-editor-mount-readonly-draw-cancel-and-save', asyn
 
     // 另一个会话：确认取消后关闭，未发生保存。
     const saves2 = [];
-    const other = mountMatteEditor(doc, makeEditor(() => ({ ok: true }), saves2));
+    const other = mountMatteEditor(doc, makeEditor(() => ({ ok: true }), saves2), { confirm: () => win.confirmAnswer });
     other.root.children[2].children[0].fire('pointerdown', { clientX: 1, clientY: 1, pointerId: 2 });
     other.root.children[2].children[0].fire('pointerup', {});
     win.confirmAnswer = true;

@@ -6,6 +6,7 @@ import { findChatu8Host, requestChatu8Image } from './chatu8-client.js';
 import { findBaibaiApi, requestBaibaiImage } from './baibai-client.js';
 import { waitFloorPromptTags } from './floor-prompt-tags.js';
 import { writeCaptionsWithLlm } from './illustration/caption-writer.js';
+import { clampPixelPair } from './illustration/cg-pixel-cap.js';
 
 // 生图来源：nai = IGS 内置 NAI；dbgen = 数据库生图插件（window.NaiDbGen）；
 // extension = 智绘姬：剧情 CG、素材与物品图经智绘姬的出图事件生成，剧情 CG 优先用它写在楼层里的词；
@@ -75,8 +76,7 @@ function describeResultError(result, fallback) {
 function parseSize(size) {
     const m = String(size || '').match(/(\d+)\s*[x×*]\s*(\d+)/i);
     if (!m) return null;
-    const round64 = (v) => Math.max(64, Math.round(Number(v) / 64) * 64);
-    return { width: round64(m[1]), height: round64(m[2]) };
+    return clampPixelPair(Number(m[1]), Number(m[2]));
 }
 
 async function blobToDataUrl(blob, mimeType, globalObject) {
@@ -164,6 +164,15 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         return { mode, via: 'nai', ownPrompts: false, ready: { ok: true } };
     }
 
+    // 生图 → 图像来源 → 分类型模型：剧情 CG / 立绘 / 背景 / 物品各自的模型，留空跟随默认。
+    // 内置 NAI 改 settings.model，数据库生图经 params.model 传给插件；智绘姬 / 柏宝绘没有模型参数，仍用插件自己的。
+    function kindModel(meta) {
+        const kind = meta && meta.imageKind;
+        if (kind !== 'cg' && kind !== 'sprite' && kind !== 'background' && kind !== 'item') return '';
+        const imageApi = readBridge().imageApi || {};
+        return String(imageApi[`${kind}Model`] || '').trim();
+    }
+
     // 写词接口只收到「画什么」。前端正负模板不进这段描述，出图前再合并进插件返回的 caption。
     async function viaDbgen(meta = {}) {
         const api = findDbgenApi(globalObject);
@@ -185,7 +194,7 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
             return { ok: false, error: `${DBGEN_LABEL}写提示词失败：${(error && error.message) || error}` };
         }
         const size = parseSize(meta.size) || (written.value.width && written.value.height
-            ? { width: written.value.width, height: written.value.height } : null);
+            ? clampPixelPair(written.value.width, written.value.height) : null);
         return paintDbgenCaption(api, { ...meta, size: size ? `${size.width}x${size.height}` : meta.size }, written.value.caption);
     }
 
@@ -260,7 +269,18 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         return { ok: true, caption: written.value.caption, captions };
     }
 
+    function captionHasPromptText(caption) {
+        const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+        if (!pos || typeof pos !== 'object') return false;
+        if (String(pos.base_caption || '').trim()) return true;
+        const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+        return chars.some((item) => String(item && item.char_caption || '').trim());
+    }
+
     async function paintDbgenCaption(api, meta, caption) {
+        if (!captionHasPromptText(caption)) {
+            return { ok: false, error: `${DBGEN_LABEL}返回的不是生图提示词，已停止出图`, prompt: promptFromCaption(caption) };
+        }
         const userPrompts = meta.userPrompts && typeof meta.userPrompts === 'object' ? meta.userPrompts : null;
         const merged = userPrompts ? applyUserPromptsToCaption(caption, userPrompts) : caption;
         const positive = userPrompts ? String(userPrompts.positive || '').trim() : '';
@@ -271,9 +291,11 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
             : '（这次没带模板）');
         reportLong(report, '发出去', captionLogText(merged));
         const size = parseSize(meta.size);
-        // 立绘走数据库生图时默认打开透明底。模型用插件自己的运行配置，这里不传 model。
+        // 立绘走数据库生图时默认打开透明底。模型默认用插件自己的运行配置；填了分类型模型才传 model。
+        const model = kindModel(meta);
         const params = {
             ...(size || {}),
+            ...(model && { model }),
             ...(meta.transparent === true && { straight_alpha: true, tag_hint_transparent_background: true }),
             ...(Number.isInteger(meta.seed) && meta.seed >= 0 && { seed: meta.seed }),
         };
@@ -390,6 +412,8 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
     // 剧情 CG / 素材补全入口，签名与 nai-official-client 的 generate 一致，多一个 meta。
     async function generate(slot, naiSettings, meta = {}) {
         const mode = describe().mode;
+        const model = kindModel(meta);
+        if (model && naiSettings && typeof naiSettings === 'object') naiSettings = { ...naiSettings, model };
         if (mode === 'dbgen') return viaDbgen(meta);
         if (mode === 'extension') return viaChatu8(slot, naiSettings, meta);
         if (mode === 'baibai') return viaBaibai(slot, naiSettings, meta);
@@ -410,12 +434,14 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         }
         if (mode === 'dbgen') {
             const messageId = opts.message && opts.message.id != null ? opts.message.id : opts.messageId;
-            const result = await viaDbgen({ description: prompt, messageId });
+            const result = await viaDbgen({ description: prompt, messageId, imageKind: 'cg' });
             return result.ok ? { url: result.dataUrl, providerId: 'vn.provider.dbgen' } : { ok: false, reason: result.error };
         }
-        const settings = normalizeAutoIllustrationSettings(bridge.autoIllustration).nai;
+        let settings = normalizeAutoIllustrationSettings(bridge.autoIllustration).nai;
         if (!String(settings.apiKey || '').trim()) return { delegate: true };
         if (!prompt) return { ok: false, reason: '没有可用于生图的提示词' };
+        const cgModel = kindModel({ imageKind: 'cg' });
+        if (cgModel) settings = { ...settings, model: cgModel };
         const result = await nai.generate({ scene: prompt }, settings);
         return result && result.ok ? { url: result.dataUrl, providerId: 'vn.provider.nai' } : { ok: false, reason: (result && result.error) || 'NAI 生成失败' };
     }

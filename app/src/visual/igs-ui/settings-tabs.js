@@ -94,6 +94,14 @@ const IMAGE_SOURCE_TEMPLATE = `
         <div class="igs-source-filter-grid">{{adapterField}}{{pollIntervalField}}{{pollAttemptsField}}</div>
       </details>
     </div>
+    <div class="igs-settings-sub" data-image-source="dbgen"{{sourceDbgenHidden}}>
+      {{dbgenSpriteTransparentField}}
+    </div>
+    <details class="igs-settings-sub igs-settings-advanced" data-advanced="kind-models"{{advancedKindModelsOpen}}>
+      <summary>按类型单独指定模型（可选）</summary>
+      <div class="igs-source-filter-note">剧情 CG、立绘、背景、物品可以各用一个模型，留空跟随上面的模型。对内置 NAI 和数据库生图插件生效；智绘姬、柏宝绘用插件自己的模型。</div>
+      <div class="igs-source-filter-grid">{{kindModelFields}}</div>
+    </details>
     <div class="igs-settings-row"><button class="igs-settings-action" data-action="test-image" type="button">{{imageTestActionLabel}}</button><button class="igs-settings-action" data-action="open-dbgen-settings" type="button"{{sourceDbgenHidden}}>插件设置</button></div>
     <div class="igs-settings-result" data-result="image">{{imageTestHelp}}</div>
   </div>
@@ -156,9 +164,11 @@ const IMAGE_CG_TEMPLATE = `
     <div class="igs-source-filter-title">CG 库</div>
     <div class="igs-source-filter-note">生成过的 CG 都在这里，点图看大图。</div>
     <div class="igs-source-filter-grid">{{imageCacheCountField}}</div>
+    <div class="igs-settings-row"><button class="igs-settings-action" data-action="purge-asset-cache" type="button" title="清空浏览器里缓存的图片和设置页缩略图，酒馆上的原图不动">清除素材缓存</button></div>
     <div class="igs-cg-actions">
       <div class="igs-cg-actions-row"><span class="igs-cg-actions-label">查看</span>
         <button class="igs-settings-action" data-action="image-cg-refresh" type="button">刷新</button>
+        <button class="igs-settings-action" data-action="image-cg-order" type="button" aria-pressed="{{imageCgOldestFirst}}" title="倒序：切换最新在前 / 最早在前">{{imageCgOrderLabel}}</button>
         <button class="igs-settings-action" data-action="open-cg-gallery" type="button">收藏隐藏</button>
         <button class="igs-settings-action" data-action="image-cache-clear" type="button">清缓存</button>
       </div>
@@ -232,7 +242,7 @@ const READER_DIALOG_TEMPLATE = `
     {{dialogSkinField}}
     {{gradientVeilFields}}
     {{magicHouseField}}
-    <div class="igs-settings-row">{{statusLineToggle}}</div>
+    <div class="igs-settings-row igs-switch-stack">{{statusLineToggle}}</div>
   </div>
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">尺寸{{resetReaderDialogSize}}</div>
@@ -279,6 +289,7 @@ const READER_TEXT_TEMPLATE = `
     <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">旁白</div><div class="igs-settings-row">{{narrationFontField}}{{narrationColorField}}</div></div>
     <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">心里话</div><div class="igs-settings-row">{{thoughtFontField}}{{thoughtColorField}}</div></div>
     <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">系统角色</div>{{systemRoleFields}}</div>
+    <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">上传字体</div>{{customFontManager}}</div>
     <div class="igs-settings-group igs-text-style-line"{{dividerHidden}}><div class="igs-settings-subhead">分隔线</div><div class="igs-settings-row">{{dividerField}}{{dividerColorField}}</div></div>
   </div>
 </div>
@@ -301,7 +312,7 @@ const READER_INTERFACE_TEMPLATE = `
       {{optionBubbleActionField}}
     </div>
   </div>
-  <div class="igs-source-filter"><div class="igs-source-filter-title">工具栏{{resetReaderInterfaceToolbar}}</div><div class="igs-source-filter-grid">{{toolbarScaleField}}{{toolbarDockField}}</div>{{pinnedButtonsField}}</div>
+  <div class="igs-source-filter"><div class="igs-source-filter-title">工具栏{{resetReaderInterfaceToolbar}}</div><div class="igs-source-filter-grid">{{toolbarScaleField}}{{toolbarDockField}}{{toolbarSplitField}}{{dialogBarAlignField}}</div>{{pinnedButtonsField}}</div>
 </div>
 `.trim();
 
@@ -316,15 +327,17 @@ const SCENE_TAB_TEMPLATE = `
 </div>
 `.trim();
 
-// 规则页：上面是发给聊天模型的格式规则，下面是只在生图时用的衣柜提示词，两样分开写清楚。
+// 规则页：上面是发给聊天模型的格式规则（可关掉自动注入，改由酒馆预设提供），下面是只在生图时用的衣柜提示词，两样分开写清楚。
 export const SCENE_RULES_TEMPLATE = `
 <div class="igs-settings-grid" data-scene-settings-pane="rules">
   <div class="igs-source-filter">
-    <div class="igs-source-filter-title">AI 格式规则<span class="igs-outfit-muted">发给聊天模型</span></div>
+    <div class="igs-source-filter-title">AI 格式规则<span class="igs-outfit-muted">{{promptRuleTag}}</span></div>
+    {{promptRuleToggle}}
     {{promptRuleField}}
     <div class="igs-settings-row">
       <button class="igs-settings-action" data-action="reset-prompt-rule" type="button">恢复默认</button>
       <button class="igs-settings-action" data-action="save-prompt-rule" type="button">保存</button>
+      <button class="igs-settings-action" data-action="copy-prompt-rule" type="button">复制到酒馆预设</button>
     </div>
     <div class="igs-settings-result" data-result="prompt-rule">{{promptRuleStatus}}</div>
     {{promptRuleOutfitHint}}
@@ -332,12 +345,12 @@ export const SCENE_RULES_TEMPLATE = `
   </div>
   <div class="igs-source-filter" data-wardrobe-section>
     <div class="igs-source-filter-title">衣柜提示词<span class="igs-outfit-muted">生图用</span><button class="igs-btn-mgr-icon igs-title-add" data-action="wardrobe-add" type="button" title="添加一条衣柜提示词" aria-label="添加一条衣柜提示词">+</button></div>
-    <div class="igs-source-filter-note">画服装立绘时用的衣服描述，没指定就取同名那条。</div>
+    <div class="igs-source-filter-note">生成服装立绘时使用的服装描述；未指定时使用同名的那一条。</div>
     {{wardrobeSection}}
   </div>
   <div class="igs-source-filter" data-mood-section>
     <div class="igs-source-filter-title">情绪组<span class="igs-outfit-muted">聊天与生图共用</span></div>
-    <div class="igs-source-filter-note">情绪词按组取立绘，缺图时退到相近档，最后用默认立绘。</div>
+    <div class="igs-source-filter-note">情绪词按组匹配立绘，缺图时依次回退到相近档位和默认立绘。</div>
     {{moodSection}}
   </div>
 </div>

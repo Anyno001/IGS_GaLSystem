@@ -1,5 +1,6 @@
 export const DIALOG_FONT_SERIF = '"Source Han Serif CN","Noto Serif CJK SC","Songti SC",serif';
 export const DIALOG_FONT_ROUNDED = '"IGS Rounded","Microsoft YaHei",sans-serif';
+export const DIALOG_FONT_CHILL_ROUND = '"ChillRoundF","IGS Rounded","Microsoft YaHei",sans-serif';
 export const DIALOG_FONT_SANS = '"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif';
 export const DIALOG_FONT_CLASSIC_DISPLAY = '"Cormorant Garamond","Source Han Serif CN",serif';
 export const DIALOG_FONT_WENKAI = '"LXGW WenKai","Source Han Serif CN",serif';
@@ -181,6 +182,30 @@ const REFERENCE_DIALOG_TYPOGRAPHY = Object.freeze({
         textColor: '#6b4a5c',
         thoughtColor: '#8c72c4',
         narrationColor: '#8f7a86',
+    }),
+    // 全息投影：正文用细的新晰黑像屏幕字，姓名换思源黑体压在光标签上；正文冷白，心里话偏青，旁白灰蓝。
+    'scifi-holo': Object.freeze({
+        nameAlign: 'left',
+        nameFont: DIALOG_FONT_SOURCE_HAN_SANS,
+        textFont: DIALOG_FONT_NEO_XIHEI,
+        thoughtFont: DIALOG_FONT_NEO_XIHEI,
+        narrationFont: DIALOG_FONT_NEO_XIHEI,
+        nameColor: '#aef5ff',
+        textColor: '#e2f6ff',
+        thoughtColor: '#8fdcf0',
+        narrationColor: '#a3b8cc',
+    }),
+    // 废土锈铁：姓名用得意黑粗体当喷漆模板字，漆色米白；正文思源黑体，心里话换文楷像手记，旁白压成灰土色。
+    'wasteland-rust': Object.freeze({
+        nameAlign: 'left',
+        nameFont: DIALOG_FONT_SMILEY,
+        textFont: DIALOG_FONT_SOURCE_HAN_SANS,
+        thoughtFont: DIALOG_FONT_WENKAI,
+        narrationFont: DIALOG_FONT_SOURCE_HAN_SANS,
+        nameColor: '#e9dcbf',
+        textColor: '#ece3cf',
+        thoughtColor: '#e3ae2f',
+        narrationColor: '#b9ad94',
     }),
 });
 

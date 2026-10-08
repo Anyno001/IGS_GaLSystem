@@ -24,18 +24,30 @@ export const NSFW_VEIL_LEVEL_STYLE = Object.freeze({
 });
 
 // NSFW 场景立绘：显示 / 隐藏 / 仅露脸剪影（按头部标定，头以下黑幕）。取代旧布尔 showSpriteOnNsfw：
-// 旧值 false 迁为 hide，其余迁为 shade；输出里的 showSpriteOnNsfw 只由档位派生，供旧读取点兼容。
+// 旧值 false 迁为 hide，其余默认 show；输出里的 showSpriteOnNsfw 只由档位派生，供旧读取点兼容。
 export const NSFW_SPRITE_MODE_IDS = Object.freeze(['show', 'hide', 'shade']);
 
 export function resolveNsfwSpriteMode(src) {
     if (NSFW_SPRITE_MODE_IDS.includes(src.nsfwSpriteMode)) return src.nsfwSpriteMode;
-    return src.showSpriteOnNsfw === false ? 'hide' : 'shade';
+    return src.showSpriteOnNsfw === false ? 'hide' : 'show';
 }
 
-// NSFW 挂 CG 时对话框左侧的裸体头像（头颈到锁骨，下缘渐隐）：自动按头部探测取景，档位只做手动微调。
-// 上下偏移单位为头宽的百分比（正数 = 取景框下移，露出更多胸口以上）；缩放为百分比。
-export const NSFW_CG_PORTRAIT_SHIFTS = Object.freeze([-30, -20, -10, 0, 10, 20, 30]);
-export const NSFW_CG_PORTRAIT_ZOOMS = Object.freeze([80, 90, 100, 115, 130, 150]);
+// NSFW 挂 CG 时对话框左侧的裸体头像（头颈到锁骨，下缘渐隐）：自动按头部探测取景，在对话框里拖动、捏合微调。
+// 偏移单位为头宽的百分比（上下正数 = 取景框下移，左右正数 = 取景框右移）；缩放为百分比。
+function clampPortraitShift(value) {
+    const n = Math.round(Number(value));
+    return Number.isFinite(n) ? Math.max(-120, Math.min(120, n)) : 0;
+}
+function clampPortraitZoom(value) {
+    const n = Math.round(Number(value));
+    return Number.isFinite(n) && n > 0 ? Math.max(50, Math.min(250, n)) : 100;
+}
+
+// 状态栏位置：电脑 / 手机各一份，x、y 为 0~100 的百分比（0 = 贴左 / 贴上，100 = 贴右 / 贴下，边距不变）。
+// 哪一份生效由 STATUS_HUD_PHONE_MEDIA 决定，与内嵌框「手机」判定同一口径（窗口宽 ≤ 640，或竖着拿的触屏）。
+export const STATUS_HUD_POSITION_DEVICES = Object.freeze(['pc', 'mobile']);
+export const STATUS_HUD_PHONE_MEDIA = '(max-width:640px),(orientation:portrait) and (pointer:coarse)';
+const STATUS_HUD_POSITION_DEFAULT = Object.freeze({ x: 0, y: 0 });
 
 export const STATUS_HUD_DEFAULTS = Object.freeze({
     enabled: false,
@@ -45,17 +57,33 @@ export const STATUS_HUD_DEFAULTS = Object.freeze({
     showLocation: false,
     showLocationDetails: false,
     showSpriteOnNsfw: true,
-    nsfwSpriteMode: 'shade',
+    nsfwSpriteMode: 'show',
     dimSpriteOnNarration: true,
     nsfwVeilLevel: 'medium',
     nsfwCgPortrait: false,
     nsfwCgPortraitShift: 0,
+    nsfwCgPortraitShiftX: 0,
     nsfwCgPortraitZoom: 100,
     avatarRadius: 'circle',
     background: 'none',
     barColor: 'color',
     tables: [],
+    position: Object.freeze({ pc: STATUS_HUD_POSITION_DEFAULT, mobile: STATUS_HUD_POSITION_DEFAULT }),
 });
+
+export function normalizeStatusHudPercent(value) {
+    return Math.round(clampNumber(value, 0, 100, 0));
+}
+
+export function normalizeStatusHudPosition(raw) {
+    const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const out = {};
+    for (const device of STATUS_HUD_POSITION_DEVICES) {
+        const point = src[device] && typeof src[device] === 'object' ? src[device] : {};
+        out[device] = { x: normalizeStatusHudPercent(point.x), y: normalizeStatusHudPercent(point.y) };
+    }
+    return out;
+}
 
 export function normalizeStatusHudSettings(raw) {
     const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
@@ -72,12 +100,15 @@ export function normalizeStatusHudSettings(raw) {
         dimSpriteOnNarration: src.dimSpriteOnNarration === false ? false : true,
         nsfwVeilLevel: NSFW_VEIL_LEVEL_IDS.includes(src.nsfwVeilLevel) ? src.nsfwVeilLevel : STATUS_HUD_DEFAULTS.nsfwVeilLevel,
         nsfwCgPortrait: src.nsfwCgPortrait === true,
-        nsfwCgPortraitShift: NSFW_CG_PORTRAIT_SHIFTS.includes(Number(src.nsfwCgPortraitShift)) ? Number(src.nsfwCgPortraitShift) : 0,
-        nsfwCgPortraitZoom: NSFW_CG_PORTRAIT_ZOOMS.includes(Number(src.nsfwCgPortraitZoom)) ? Number(src.nsfwCgPortraitZoom) : 100,
+        // 头像位置在对话框里直接拖：上下、左右偏移按头宽百分比连续取值。
+        nsfwCgPortraitShift: clampPortraitShift(src.nsfwCgPortraitShift),
+        nsfwCgPortraitShiftX: clampPortraitShift(src.nsfwCgPortraitShiftX),
+        nsfwCgPortraitZoom: clampPortraitZoom(src.nsfwCgPortraitZoom),
         avatarRadius: STATUS_HUD_AVATAR_RADIUS_IDS.includes(src.avatarRadius) ? src.avatarRadius : STATUS_HUD_DEFAULTS.avatarRadius,
         background: STATUS_HUD_BACKGROUND_IDS.includes(src.background) ? src.background : STATUS_HUD_DEFAULTS.background,
         barColor: STATUS_HUD_BAR_COLOR_IDS.includes(src.barColor) ? src.barColor : STATUS_HUD_DEFAULTS.barColor,
         tables: normalizeStatusHudTables(src.tables),
+        position: normalizeStatusHudPosition(src.position),
     };
 }
 
@@ -127,13 +158,16 @@ export function listStatusHudTables(readResult) {
     return { ok: true, reason: '', tables: tables.map((table) => ({ uid: table.uid, name: table.name })) };
 }
 
+// 头像地址：网址、data:image，或图库里的 igs-gen:<编号>（显示前由宿主换成实际图片）。
+const STATUS_AVATAR_URL = /^(?:https?:\/\/|data:image\/|igs-gen:)\S+$/i;
+
 export function resolveStatusAvatar(statusAvatars, character) {
     if (!statusAvatars || typeof statusAvatars !== 'object' || !character) return '';
     const value = statusAvatars[character];
     if (typeof value !== 'string') return '';
     const url = value.trim();
     if (!url) return '';
-    if (!/^(?:https?:\/\/|data:image\/)\S+$/i.test(url)) return '';
+    if (!STATUS_AVATAR_URL.test(url)) return '';
     return url;
 }
 
@@ -144,7 +178,7 @@ export function normalizeStatusAvatars(raw) {
         const name = String(key || '').trim();
         if (!name || typeof value !== 'string') continue;
         const url = value.trim();
-        if (!url || !/^(?:https?:\/\/|data:image\/)\S+$/i.test(url)) continue;
+        if (!url || !STATUS_AVATAR_URL.test(url)) continue;
         out[name] = url;
     }
     return out;

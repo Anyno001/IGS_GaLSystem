@@ -162,6 +162,15 @@ function writePresetStore(storage, update) {
     }
 }
 
+// 整个预设库原样读出（含认不出的条目）；改完用 replacePresetLibrary 整份写回，中间可以异步。
+export function readPresetLibrary(storage) {
+    try { return readPresetStore(storage).presets; } catch (error) { return {}; }
+}
+
+export function replacePresetLibrary(storage, presets) {
+    return writePresetStore(storage, () => presets);
+}
+
 export function isValidPresetName(name) {
     const label = String(name || '').trim();
     return Boolean(label) && !BLOCKED.has(label) && label.length <= 40;
@@ -172,7 +181,9 @@ export function presetFromAssets(effective, { root = {}, readerSettings = {} } =
     const source = plain(effective);
     const preset = {};
     for (const field of NAME_FIELDS) preset[field] = clone(cleanMap(source[field]));
-    preset.generated = clone(plain(source.generated));
+    const gen = plain(source.generated);
+    const { expressionNotes, ...presetGenerated } = gen;
+    preset.generated = clone(presetGenerated);
     preset.characterHouses = clone(cleanMap(plain(root).characterHouses));
     preset.characterVoices = clone(cleanMap(plain(root).characterVoices));
     preset.characterSpriteScales = clone(cleanMap(plain(root).characterSpriteScales));
@@ -227,7 +238,9 @@ export function layeredPresetFromRoot(root, { cardKey = '', cardLabel = '', read
     if (card) {
         const library = {};
         for (const field of NAME_FIELDS) library[field] = clone(cleanMap(card[field]));
-        library.generated = clone(plain(card.generated));
+        const cardGen = plain(card.generated);
+        const { expressionNotes: _cardNotes, ...cardPresetGenerated } = cardGen;
+        library.generated = clone(cardPresetGenerated);
         if (typeof card.worldview === 'string') library.worldview = card.worldview;
         preset.scopeCards = { [cardKey]: { label: cardLabel || cardKey.replace(/^card:/, ''), library } };
     }

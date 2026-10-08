@@ -22,7 +22,7 @@ export function isQuotaError(error) {
 
 export function describeSaveError(error) {
     if (!error) return '未知原因';
-    if (isQuotaError(error)) return '浏览器本地存储已满。可以删掉不用的素材条目后再试，生成的图片存在另一处，不受影响';
+    if (isQuotaError(error)) return '浏览器本地存储已满。可删除不再使用的素材条目后重试；生成的图片存放在别处，不受影响';
     const message = typeof error === 'string' ? error : String(error.message || error.reason || '').trim();
     return message || '未知原因';
 }
@@ -67,7 +67,8 @@ const SETTINGS_BUSY_LABELS = Object.freeze({
 export function settingsBusyLabel(action) {
     const name = String(action || '');
     if (SETTINGS_BUSY_LABELS[name]) return SETTINGS_BUSY_LABELS[name];
-    if (/^(?:char-generate-sprite|outfit-generate-nude|status-avatar-generate|(?:char|outfit)-expression-retry|scene-variant-(?:set|retry)):/.test(name)) return '生图中';
+    if (/^(?:char-generate-sprite|outfit-generate-nude|status-avatar-generate|(?:char|outfit)-expression-retry|scene-variant-(?:set|retry)|wardrobe-reference):/.test(name)) return '生图中';
+    if (/^wardrobe-generate-prompt:/.test(name)) return '写词中';
     return '';
 }
 

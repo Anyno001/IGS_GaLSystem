@@ -126,10 +126,11 @@ function shownUrl(url, resolveUrl) {
     try { return String(resolveUrl(raw) || ''); } catch (error) { return ''; }
 }
 
-function thumb(url, alt, extraClass = '', resolveUrl) {
+// note：点开大图时底部的说明（淡色借图要说清楚这不是这一格自己的图）。
+function thumb(url, alt, extraClass = '', resolveUrl, note = '') {
     const value = shownUrl(url, resolveUrl);
     if (isImageUrl(value)) {
-        return `<img loading="lazy" decoding="async" class="igs-outfit-thumb${extraClass}" src="${esc(value)}" alt="${esc(alt)}" data-action="sprite-preview" onerror="this.classList.add('igs-sprite-thumb-broken')">`;
+        return `<img loading="lazy" decoding="async" class="igs-outfit-thumb${extraClass}" src="${esc(value)}" alt="${esc(alt)}" data-action="sprite-preview"${note ? ` data-preview-note="${esc(note)}"` : ''} onerror="this.classList.add('igs-sprite-thumb-broken')">`;
     }
     return `<span class="igs-outfit-thumb igs-outfit-thumb-empty${extraClass}" aria-hidden="true">${value ? '生成' : PERSON_SVG}</span>`;
 }
@@ -138,16 +139,41 @@ function thumb(url, alt, extraClass = '', resolveUrl) {
 function previewOf(sceneAssets, charName, mood, outfit) {
     const hit = resolveSpriteAsset(charName, mood, { sceneAssets }, outfit);
     // 这一套里没有、借的是角色默认立绘：说成回落原装，不说成借这一套的格子。
-    if (hit.source === 'user-outfit' && hit.slot !== '默认') return { url: hit.url, label: `借用「${hit.slot}」`, kind: 'borrow' };
-    if (hit.url) return { url: hit.url, label: `回落原装「${hit.slot || mood}」`, kind: 'base' };
-    return { url: '', label: '无图可显示', kind: 'none' };
+    if (hit.source === 'user-outfit' && hit.slot !== '默认') return { url: hit.url, label: `借用「${hit.slot}」`, kind: 'borrow', slot: hit.slot };
+    if (hit.url) return { url: hit.url, label: `回落原装「${hit.slot || mood}」`, kind: 'base', slot: hit.slot || mood };
+    return { url: '', label: '无图可显示', kind: 'none', slot: '' };
+}
+
+// 借来的图多半和本格情绪接近（回退链按同方向找），不写明就会被当成本格自己的图。
+function ghostNote(mood, preview, status) {
+    if (!preview.url) return '';
+    const lead = preview.kind === 'borrow'
+        ? `「${mood}」尚无专属图片，此处显示的是阅读器暂时借用的「${preview.slot}」。`
+        : `「${mood}」尚无专属图片，此处显示的是阅读器暂时回落使用的原装「${preview.slot}」。`;
+    return status ? `${lead}\n${status.text}` : lead;
+}
+
+// 表情差分没画出来的格子：注记里记着原因或写好的词，直接写在格子上，不再只剩一张淡色借图。
+export function expressionSlotStatus(note) {
+    if (!note || typeof note !== 'object') return null;
+    const error = String(note.error || '').trim();
+    if (error && error !== '已停止') return { text: `未能生成：${error}`, failed: true };
+    if (note.caption || error === '已停止') return { text: '提示词已写好，尚未出图', failed: false };
+    return null;
+}
+
+// 有原因时分两行：上行原因、下行借谁，各自省略，窄屏上「借用」那行也不会被原因挤掉。
+function fallbackHint(preview, status) {
+    if (!status) return `<span class="igs-outfit-hint">${esc(preview.label)}</span>`;
+    return `<span class="igs-outfit-hint is-stacked" title="${esc(`${status.text} · ${preview.label}`)}">`
+        + `<span class="igs-outfit-status">${esc(status.text)}</span><span>${esc(preview.label)}</span></span>`;
 }
 
 function chipList(items, removeAction, addAction, emptyText, addTitle) {
     const tags = items.map((item) => (
         `<span class="igs-mood-word-tag">${esc(item)}<button type="button" class="igs-mood-word-del" data-action="${removeAction}:${encSeg(item)}" title="删除">×</button></span>`
     )).join('');
-    return `<div class="igs-mood-word-list">${tags || `<span class="igs-outfit-muted">${esc(emptyText)}</span>`}<button type="button" class="igs-btn-mgr-icon" data-action="${addAction}" title="${esc(addTitle)}">+</button></div>`;
+    return `<div class="igs-mood-word-list">${tags || (emptyText ? `<span class="igs-outfit-muted">${esc(emptyText)}</span>` : '')}<button type="button" class="igs-btn-mgr-icon" data-action="${addAction}" title="${esc(addTitle)}">+</button></div>`;
 }
 
 // 衣柜提示词在「规则」页。这里只选用哪一条。「裸体」是内置项，不进服装库，选中后生图按这个角色写裸体。
@@ -169,17 +195,6 @@ function wardrobeChoices(charName, outfitName, entry, wardrobe) {
         + `<div class="igs-add-menu-list" role="listbox">${options.join('')}</div></details>${edit}`;
 }
 
-// 服装设置折起来时，摘要里仍能看到这套衣服的要点，不用展开也知道怎么配的。
-function outfitMetaSummary(entry, words, scenes, avatar) {
-    const wardrobe = typeof entry.wardrobe === 'string' && entry.wardrobe.trim() ? entry.wardrobe.trim() : '同名';
-    return [
-        `衣柜 ${wardrobe}`,
-        words.length ? `服装词 ${words.join('、')}` : '',
-        scenes.length ? `场景 ${scenes.join('、')}` : '',
-        avatar ? '有头像' : '',
-    ].filter(Boolean).join(' · ');
-}
-
 function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen) {
     const c = encSeg(charName);
     const o = encSeg(name);
@@ -193,7 +208,7 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
     const metaOpen = isOpen(metaKey);
     const meta = !metaOpen ? '' : `<div class="igs-outfit-meta-body"><div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">衣柜</span>${wardrobeChoices(charName, name, entry, sceneAssets.wardrobe)}</div>`
         + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">说明</span><input class="igs-scene-url-input" data-scene-outfit-note-char="${esc(charName)}" data-scene-outfit-note="${esc(name)}" value="${esc(note)}" placeholder="什么情形穿这套"></div>`
-        + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">服装词</span>${chipList(words, `scene-remove-outfit-word:${c}:${o}`, `scene-add-outfit-word:${c}:${o}`, '只认服装名', '添加服装词（AI写出或表格里出现该词即视为这套服装）')}</div>`
+        + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">别名</span>${chipList(words, `scene-remove-outfit-word:${c}:${o}`, `scene-add-outfit-word:${c}:${o}`, '', '添加别名：正文或表格里出现这个词，就按这套服装显示')}</div>`
         + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">适用场景</span>${chipList(scenes, `scene-remove-outfit-scene:${c}:${o}`, `scene-add-outfit-scene:${c}:${o}`, '不限', '添加适用场景（换到其他场景时，继承来的这套服装自动失效）')}</div>`
         + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">状态栏头像</span>${thumb(avatar, `${name} 头像`, ' igs-outfit-avatar', resolveUrl)}`
         + `<input class="igs-scene-url-input" data-scene-outfit-avatar-char="${esc(charName)}" data-scene-outfit-avatar="${esc(name)}" value="${esc(avatar)}" placeholder="留空沿用角色头像">`
@@ -215,12 +230,13 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
             menuItem(`scene-rename-outfit-mood:${c}:${o}:${encSeg(mood)}`, '重命名'),
             menuItem(`scene-remove-outfit-mood:${c}:${o}:${encSeg(mood)}`, '删除', ' is-danger'),
         ], `「${mood}」的操作`);
-        // 生成图的格子不放编号地址输入框；自己填地址的格子才有输入框。
-        return `<div class="igs-outfit-slot${filled ? '' : ' is-fallback'}" data-outfit-slot="${esc(mood)}">`
-            + (filled ? thumb(url, mood, '', resolveUrl) : thumb(preview.url, mood, ' is-ghost', resolveUrl))
+        const status = filled ? null : expressionSlotStatus(note);
+        // 生成图的格子不放编号地址输入框（差分没画出来的也算）；自己填地址的格子才有输入框。
+        return `<div class="igs-outfit-slot${filled ? '' : ' is-fallback'}${status && status.failed ? ' is-failed' : ''}" data-outfit-slot="${esc(mood)}">`
+            + (filled ? thumb(url, mood, '', resolveUrl) : thumb(preview.url, mood, ' is-ghost', resolveUrl, ghostNote(mood, preview, status)))
             + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
-            + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-outfit-char="${esc(charName)}" data-scene-outfit="${esc(name)}" data-scene-outfit-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
-            + (filled ? '' : `<span class="igs-outfit-hint">${esc(preview.label)}</span>`)
+            + (imageId || status ? '' : `<input class="igs-scene-url-input" data-scene-outfit-char="${esc(charName)}" data-scene-outfit="${esc(name)}" data-scene-outfit-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
+            + (filled ? '' : fallbackHint(preview, status))
             + `<span class="igs-outfit-acts">${slotMenu}</span>`
             + `</div>`;
     }).join('');
@@ -228,14 +244,15 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
     // 缺的格子和有的排在同一个列表里，淡色显示阅读器暂时用哪张，右边一个 + 补上。
     const fallbackRows = missing.map((mood) => {
         const preview = previewOf(sceneAssets, charName, mood, name);
-        return `<div class="igs-outfit-slot is-fallback" data-outfit-fallback="${esc(mood)}">${thumb(preview.url, mood, ' is-ghost', resolveUrl)}`
-            + `<span class="igs-btn-mgr-label">${esc(mood)}</span><span class="igs-outfit-hint">${esc(preview.label)}</span>`
+        const status = expressionSlotStatus(notes && notes[mood]);
+        return `<div class="igs-outfit-slot is-fallback" data-outfit-fallback="${esc(mood)}">${thumb(preview.url, mood, ' is-ghost', resolveUrl, ghostNote(mood, preview, status))}`
+            + `<span class="igs-btn-mgr-label">${esc(mood)}</span>${fallbackHint(preview, status)}`
             + `<span class="igs-outfit-acts"><button type="button" class="igs-btn-mgr-icon" data-action="scene-add-outfit-mood:${c}:${o}:${encSeg(mood)}" title="给这套补上「${esc(mood)}」">+</button></span></div>`;
     }).join('');
     const fillAll = missing.length > 1
         ? `<div class="igs-outfit-fill-all"><button type="button" class="igs-review-link" data-action="scene-outfit-copy-slots:${c}:${o}">缺的 ${missing.length} 格全部补上</button></div>`
         : '';
-    const rows = ownRows + fallbackRows || '<div class="igs-scene-empty">还没有情绪槽，点右上 + 添加</div>';
+    const rows = ownRows + fallbackRows || '<div class="igs-scene-empty">暂无情绪槽，可点击右上角「+」添加</div>';
     return `<div class="igs-outfit-panel" data-outfit-panel="${esc(name)}">${meta}<div class="igs-btn-mgr-list igs-outfit-slots">${rows}</div>${fillAll}</div>`;
 }
 
@@ -268,11 +285,11 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
     const quickButtons = `<span class="igs-outfit-quick">`
         + spriteButton
         + `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${exprAction}">表情差分</button>`
-        + (pending.length ? `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${resumeAction}" title="词已经写好，直接出图，不重写">继续生图（${pending.length}）</button>` : '')
+        + (pending.length ? `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${resumeAction}" title="提示词已写好，将直接出图，不重写">继续生图（${pending.length}）</button>` : '')
         + `</span>`;
     const menu = active
         ? renderRowMenu([
-            menuItem(`ui-toggle-open:${encSeg(metaKey)}`, isOpen(metaKey) ? '收起服装设置' : '服装设置（衣柜、服装词…）'),
+            menuItem(`ui-toggle-open:${encSeg(metaKey)}`, isOpen(metaKey) ? '收起服装设置' : '服装设置（衣柜、别名…）'),
             menuItem(`scene-rename-outfit:${c}:${o}`, '重命名这套'),
             menuItem(`scene-remove-outfit:${c}:${o}`, '删除这套', ' is-danger'),
         ], `「${active}」的操作`)
@@ -312,7 +329,7 @@ export function renderWardrobe(wardrobe, { resolveUrl, scopeTag, focus = '', lea
     }).join('');
     const body = rows
         ? `<div class="igs-btn-mgr-list igs-wardrobe-list is-tall">${rows}</div>`
-        : '<div class="igs-scene-empty">还没有衣柜提示词，点右上 + 添加</div>';
+        : '<div class="igs-scene-empty">暂无衣柜提示词，可点击右上角「+」添加</div>';
     return `<div class="igs-wardrobe-group">${lead ? `<div class="igs-asset-folder-bar">${lead}</div>` : ''}${body}</div>`;
 }
 
@@ -351,7 +368,7 @@ export function renderOutfitReviewList(items, characterOutfits, characters) {
         key: 'outfit',
         title: '服装词',
         count: list.length,
-        hint: 'AI写了、角色还没登记的服装。归入已有服装后，下次就认得这个词。',
+        hint: 'AI 写出、尚未在该角色名下登记的服装词。归入已有服装后，之后即可识别。',
         clearAction: 'outfit-review-clear',
         body: rows ? `<div class="igs-review-list">${rows}</div>` : '',
         empty: '没有待确认的服装词',
@@ -431,6 +448,15 @@ span.igs-char-dna-btn{display:inline-flex;color:var(--igs-settings-ink-3)}
 .igs-outfit-panel{display:flex;flex-direction:column;gap:6px;min-width:0}
 .igs-outfit-meta-toggle.is-open{background:var(--igs-settings-highlight);color:var(--igs-settings-ink)}
 .igs-outfit-hint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--igs-settings-ink-4)}
+.igs-outfit-hint.is-stacked{display:flex;flex-direction:column;justify-content:center;line-height:1.4}
+.igs-outfit-hint.is-stacked>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.igs-outfit-status{color:var(--igs-settings-ink-3)}
+.igs-outfit-slot.is-failed .igs-outfit-status{color:var(--igs-settings-danger)}
+/* 窄屏上空格子的地址框让出位置，「借用谁」按原长显示。 */
+@media (max-width:640px){.igs-outfit-slot.is-fallback>.igs-scene-url-input{flex:1 1 0;min-width:44px;margin-right:0}.igs-outfit-slot.is-fallback>.igs-outfit-hint{flex:0 1 auto}}
+/* 没画出来的格子，「重新生成」就是下一步：任何宽度都露在行内，⋯ 里不再重复。 */
+.igs-scene-char-group .igs-outfit-slot.is-failed .igs-slot-act{display:inline-flex}
+.igs-scene-char-group .igs-outfit-slot.is-failed .igs-add-menu-list .igs-slot-act-menu{display:none}
 .igs-outfit-slot.is-fallback>.igs-btn-mgr-label{color:var(--igs-settings-ink-4)}
 .igs-outfit-fill-all{display:flex;justify-content:flex-end;margin-top:2px}
 .igs-outfit-meta-body{display:flex;flex-direction:column;gap:6px;margin:2px 0 6px 6px;padding:2px 0 2px 12px;border-left:1px solid var(--igs-settings-line)}

@@ -766,7 +766,8 @@ test('gate:igs-ui:reader-source-keeps-original-selectors', () => {
     assert.match(source.html, /id="igs-controls-shujuku_v120-guard"/);
 
     const rendererText = readText('src/visual/igs-ui/reader-dom-render.js');
-    const readerHostText = readText('src/visual/igs-ui/reader-host.js');
+    const readerHostText = ['reader-host.js', 'settings-host.js', 'settings-host-render.js', 'settings-host-normalize.js']
+        .map((name) => readText(`src/visual/igs-ui/${name}`)).join('\n');
     const readerSourceText = getOriginalReaderStyleText();
     const dbControllerText = readText('src/shujuku-panel/panel-controller.js');
     assert.doesNotMatch(rendererText, /emptyBackgroundColor/);
@@ -1019,7 +1020,7 @@ test('gate:igs-ui:double-click-hides-chrome-and-keeps-cg-and-fx', () => {
     assert.doesNotMatch(hidden, /#igs-effect-layer/);
     assert.doesNotMatch(hidden, /#igs-effect-front-layer/);
     const rendererText = readText('src/visual/igs-ui/reader-dom-render.js');
-    assert.match(rendererText, /addEventListener\('dblclick'/);
+    assert.match(rendererText, /addEventListener\('contextmenu'/);
     assert.match(rendererText, /data-igs-cg-only/);
 });
 
@@ -1184,7 +1185,7 @@ test('gate:igs-ui:illustrated-dialog-style-uses-three-slice-assets', () => {
 });
 
 test('gate:igs-ui:new-dialog-skins-register-frames-and-typography', () => {
-    const skins = ['retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy'];
+    const skins = ['retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy', 'scifi-holo', 'wasteland-rust'];
     for (const skin of skins) {
         assert.equal(normalizeDialogSkin(skin), skin);
         assert.ok(ILLUSTRATED_SKIN_CSS.includes(`#igs-overlay .igs-dialog[data-igs-dialog-skin="${skin}"]{`), skin);
@@ -1215,7 +1216,7 @@ test('gate:igs-ui:hud-and-emotion-follow-dialog-skin', () => {
     const main = getOriginalReaderStyleText();
     assert.ok(!main.includes('[data-igs-dialog-skin="western-classic"] #igs-status-hud'));
     const skins = ['western-classic', 'plant-coffee', 'black-white-manga', 'cute-pink', 'gradient-veil',
-        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy'];
+        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy', 'scifi-holo', 'wasteland-rust'];
     for (const skin of skins) {
         const css = getDialogSkinStyleText(skin, { base: 'https://cdn.example/dist/skins/' });
         const hud = `#igs-overlay[data-igs-dialog-skin="${skin}"] #igs-status-hud`;
@@ -1242,7 +1243,7 @@ test('gate:igs-ui:options-follow-dialog-skin', () => {
     assert.ok(!main.includes('[data-igs-dialog-skin="western-classic"] .igs-option-bubble'));
     const skinCss = (skin) => getDialogSkinStyleText(skin, { base: 'https://cdn.example/dist/skins/' });
     const skins = ['western-classic', 'plant-coffee', 'black-white-manga', 'cute-pink', 'gradient-veil',
-        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy'];
+        'retro-japanese', 'adventure-journey', 'day-minimal', 'warm-picturebook', 'elegant-european', 'magic-academy', 'scifi-holo', 'wasteland-rust'];
     for (const skin of skins) {
         const css = skinCss(skin);
         assert.ok(css.includes(`#igs-overlay[data-igs-dialog-skin="${skin}"] .igs-option-bubble{`), skin);

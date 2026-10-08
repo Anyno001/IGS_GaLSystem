@@ -48,6 +48,7 @@ function extraSwitches(reader, extras) {
     const hud = reader.statusHud && typeof reader.statusHud === 'object' ? reader.statusHud : {};
     return {
         text: [
+            ['漫画演出模式', on('comicMode')],
             ['双语台词', on('bilingual')],
             extras.sentencePaging ? ['旁白按句号分页', extras.sentencePagingOn === true] : null,
         ],
@@ -56,7 +57,7 @@ function extraSwitches(reader, extras) {
             extras.narrationFilter ? ['旁白时压暗立绘', hud.dimSpriteOnNarration !== false] : null,
         ],
         story: [['选项检定掷骰', on('resultFx')]],
-        sound: [extras.voiceBark ? ['角色语气音', extras.voiceBarkOn === true] : null],
+        sound: [extras.tts ? ['台词朗读', extras.ttsOn === true] : null, extras.voiceBark ? ['角色语气音', extras.voiceBarkOn === true] : null],
     };
 }
 
@@ -101,22 +102,22 @@ export function renderPerformanceSettings(reader, extras = {}, isOpen = () => fa
     const stage = renderStageDirectionFields(src, more, { worldview: extras.worldviewId });
     const danmaku = renderDanmakuFields(src, more);
     const bodies = {
-        text: [host('playback-speed', extras.playbackSpeed), host('typewriter', extras.typewriter, '逐字显示'), stage.clickWaitMark, stage.textFx, stage.bilingual, host('sentence-paging', extras.sentencePaging)],
+        text: [fx.comic, host('playback-speed', extras.playbackSpeed), host('typewriter', extras.typewriter, '逐字显示'), stage.clickWaitMark, stage.textFx, stage.bilingual, host('sentence-paging', extras.sentencePaging)],
         stage: [
-            section('镜头与环境', [stage.transition, stage.tint, stage.camera, host('weather', extras.weatherFx, '雨雪雾粒子'), host('stage-shake', extras.stageShake, '冲击时晃屏'), host('cinema-bars', extras.cinemaBars, '只盖背景，CG时收起')]),
+            section('镜头与环境', [stage.transition, stage.tint, stage.camera, host('weather', extras.weatherFx, '雨雪雾粒子'), fx.crowd, host('stage-shake', extras.stageShake, '冲击时晃屏'), host('cinema-bars', extras.cinemaBars, '只盖背景，CG时收起')]),
             section('立绘', [stage.motion, stage.actions, stage.cast, host('narration-filter', extras.narrationFilter)]),
         ],
         story: [
-            section('情绪', [fx.manga, fx.heartbeat]),
+            section('情绪', [fx.manga, fx.mangaBack, fx.heartbeat]),
             section('剧情提示', [fx.title, fx.favor, fx.itemFx, fx.resultFx]),
             section('事件演出', [fx.tags]),
         ],
         special: [
             section('日常与冒险', [stage.daily, fx.battleFx, fx.flash]),
             section('线上与直播', [host('chat-show', extras.chatShow, '聊天页演出'), danmaku.live, danmaku.audience, danmaku.inner]),
-            section('亲密', [renderRomanceFxFields(src, more), host('nsfw-display', extras.nsfw)]),
+            section('亲密', [renderRomanceFxFields(src, more), host('nsfw-sprite', extras.nsfwSprite), host('nsfw-veil', extras.nsfwVeil), host('nsfw-cg-portrait', extras.nsfwCgPortrait)]),
         ],
-        sound: [stage.master, fx.sound, host('voice-bark', extras.voiceBark, '台词开头的语气声'), stage.ambient, stage.ui, stage.bgm],
+        sound: [stage.master, fx.sound, host('tts', extras.tts, '朗读台词与旁白'), host('voice-bark', extras.voiceBark, '台词开头的语气声'), stage.ambient, stage.ui, stage.bgm],
     };
     const extra = extraSwitches(src, extras);
     const groups = PERFORMANCE_GROUPS.map(([id, title]) => groupCard(id, title, groupSummary(src, id, current === 'off', extra[id]), bodies[id].filter(Boolean).join(''), isOpen(`perf-group-${id}`)));

@@ -24,6 +24,8 @@ import { ITEM_FX_STYLE_TEXT } from './fx-item.js';
 import { BATTLE_FX_STYLE_TEXT } from './fx-battle.js';
 import { RESULT_FX_STYLE_TEXT } from './fx-result.js';
 import { CG_GALLERY_STYLE_TEXT } from './cg-gallery-panel.js';
+import { TURN_INDEX_STYLE_TEXT } from './turn-index-panel.js';
+import { GENERATION_STRIP_STYLE_TEXT } from './generation-strip.js';
 import { INVENTORY_IMAGE_STYLE_TEXT } from './inventory-slot-image.js';
 import { ITEM_CG_ICONS } from './item-cg-icons.js';
 import { ASSET_REVIEW_STYLE_TEXT } from './asset-review-panel.js';
@@ -33,8 +35,12 @@ import { HTML_CARD_LAYER_STYLE_TEXT } from './html-card-layer.js';
 import { CHAT_LAYER_STYLE_TEXT } from './chat-layer.js';
 import { SPRITE_OUTFIT_SWAP_STYLE_TEXT } from './sprite-outfit-swap.js';
 import { STAGE_PAUSE_STYLE_TEXT } from './stage-pause.js';
+import { COMIC_STYLE_TEXT } from './comic-style.js';
+import { MANGA_BACK_STYLE_TEXT } from './manga-back.js';
+import { CROWD_STYLE_TEXT } from './crowd-fx.js';
 
 import { SETTINGS_THEME_OPTIONS, getSettingsThemePalette } from './settings-theme.js';
+import { STATUS_HUD_PHONE_MEDIA } from '../../data/shujuku/status-hud-model.js';
 import {
     IGS_UI_BLUR, IGS_UI_EDGE_NIGHT, IGS_UI_ELEVATION, IGS_UI_FONT_SANS, IGS_UI_INK, IGS_UI_RADIUS, IGS_UI_THICKNESS, igsUiSurface,
 } from '../../styles/ui-material.js';
@@ -50,6 +56,7 @@ export const ORIGINAL_READER_ICONS = Object.freeze({
     prev: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="15 18 9 12 15 6"/></svg>',
     next: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="9 18 15 12 9 6"/></svg>',
     play: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="m8 5 11 7-11 7z"/></svg>',
+    replay: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>',
     stop: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
     assets: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="9" cy="7" r="3.2"/><path d="M3.5 20v-1.5A4.5 4.5 0 0 1 8 14h2"/><path d="M13 20l3.2-4.2 2 2.5 1.3-1.6L22 20z"/><path d="M18 4v5M15.5 6.5h5"/></svg>',
     regen: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M13 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M4 16l4.5-4.5a1.5 1.5 0 0 1 2.1 0L16 17"/><path d="M14 15l1.5-1.5a1.5 1.5 0 0 1 2.1 0L20 16"/><path d="M18.5 2.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" fill="currentColor"/></svg>',
@@ -62,6 +69,9 @@ export const ORIGINAL_READER_ICONS = Object.freeze({
     hide: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
     prevTurn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polygon points="19 20 9 12 19 4 19 20" fill="currentColor" stroke="none"/><line x1="5" y1="19" x2="5" y2="5"/></svg>',
     nextTurn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polygon points="5 4 15 12 5 20 5 4" fill="currentColor" stroke="none"/><line x1="19" y1="5" x2="19" y2="19"/></svg>',
+    firstTurn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg>',
+    quickSave: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M6 3.5h12v17l-6-4.5-6 4.5z"/><path d="M12 6.5v6M9.5 10l2.5 2.5 2.5-2.5"/></svg>',
+    quickLoad: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M6 3.5h12v17l-6-4.5-6 4.5z"/><path d="M12 12.5v-6M9.5 9l2.5-2.5L14.5 9"/></svg>',
     toggleBar: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:block"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
     firstPage: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>',
     lastPage: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>',
@@ -73,6 +83,7 @@ export const ORIGINAL_READER_TOOLBAR_BUTTONS = Object.freeze([
     // group 决定工具栏分隔：nav 翻页 / create 画图与素材 / view 画面 / system 系统。
     // 按钮可被用户重排、隐藏、固定，分隔由 applyToolbarState 按实际可见顺序标记，不写死在 DOM 里。
     // title 同时是悬停提示与读屏名称：用动词短语，一眼看懂做什么。
+    { id: 'first-turn', group: 'nav', title: '目录（续读、回第 0 层、跳到某楼、存档）', html: ORIGINAL_READER_ICONS.firstTurn },
     { id: 'prev-turn', group: 'nav', title: '上一轮', html: ORIGINAL_READER_ICONS.prevTurn },
     { id: 'first-page', group: 'nav', title: '第一页', html: ORIGINAL_READER_ICONS.firstPage },
     { id: 'prev', group: 'nav', title: '上一页', html: ORIGINAL_READER_ICONS.prev },
@@ -80,6 +91,9 @@ export const ORIGINAL_READER_TOOLBAR_BUTTONS = Object.freeze([
     { id: 'last-page', group: 'nav', title: '最后一页', html: ORIGINAL_READER_ICONS.lastPage },
     { id: 'next-turn', group: 'nav', title: '下一轮', html: ORIGINAL_READER_ICONS.nextTurn },
     { id: 'auto-play', group: 'nav', title: '自动播放', html: ORIGINAL_READER_ICONS.play },
+    { id: 'tts-replay', group: 'nav', title: '重听这句', html: ORIGINAL_READER_ICONS.replay },
+    { id: 'quick-save', group: 'nav', title: '快速存档', html: ORIGINAL_READER_ICONS.quickSave },
+    { id: 'quick-load', group: 'nav', title: '快速读档', html: ORIGINAL_READER_ICONS.quickLoad },
     { id: 'regen', group: 'create', title: '绘制 CG', html: ORIGINAL_READER_ICONS.regen },
     { id: 'reroll-cg', group: 'create', title: '重画这张（提示词不变，只重画当前这一张）', html: ORIGINAL_READER_ICONS.rerollCg },
     { id: 'clear-cg', group: 'create', title: '清扫当前 CG', html: ORIGINAL_READER_ICONS.clearCg },
@@ -93,6 +107,24 @@ export const ORIGINAL_READER_TOOLBAR_BUTTONS = Object.freeze([
     { id: 'rescan', group: 'system', title: '重新加载', html: ORIGINAL_READER_ICONS.rescan },
     { id: 'settings', group: 'system', title: '设置', html: ORIGINAL_READER_ICONS.settings },
 ]);
+
+// 对话框底部快捷栏：经典 galgame 文本框底部那一排。透明底、跟对话框文字同色，换皮肤自动跟随；手机居中，电脑（精确指针）靠左。
+const DIALOG_BAR_STYLE_TEXT = `
+#igs-dialog-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:0;margin-top:4px;flex-shrink:0;pointer-events:auto;color:inherit;}
+#igs-dialog-bar[hidden]{display:none!important;}
+@media (hover:hover) and (pointer:fine){#igs-dialog-bar:not([data-igs-align]){justify-content:flex-start;}}
+#igs-dialog-bar[data-igs-align="left"]{justify-content:flex-start;}
+#igs-dialog-bar[data-igs-align="center"]{justify-content:center;}
+#igs-dialog-bar[data-igs-align="right"]{justify-content:flex-end;}
+#igs-dialog-bar .igs-icon-btn{width:28px;height:26px;min-width:28px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:6px;background:transparent;color:inherit;opacity:.34;cursor:pointer;box-shadow:none;transition:opacity .15s,background .15s;}
+#igs-dialog-bar .igs-icon-btn:hover,#igs-dialog-bar .igs-icon-btn:focus-visible{opacity:.9;background:rgba(127,127,127,.12);}
+#igs-dialog-bar .igs-icon-btn:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
+#igs-dialog-bar .igs-icon-btn[aria-pressed="true"]{opacity:.8;}
+#igs-dialog-bar .igs-icon-btn:disabled{opacity:.14;cursor:default;}
+#igs-dialog-bar .igs-icon-btn svg{width:14px;height:14px;}
+#igs-dialog-bar .igs-icon-btn.igs-group-start{margin-left:6px;}
+.igs-mode-embedded #igs-dialog-bar{margin-top:2px;}
+`;
 
 const ORIGINAL_READER_STYLE_TEXT = `
 #igs-overlay{position:fixed;top:0;left:0;right:0;bottom:0;width:100vw;height:100vh;height:100dvh;z-index:900;background:var(--igs-empty-bg,#16181a);overflow:hidden;overscroll-behavior:none;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;color:#d8d5cf;--igs-empty-bg:#16181a;--igs-glass-fill-alpha:.62;--igs-glass-density:.62;--igs-glass-opacity:.62;--igs-transparent-glass-bg:rgba(31,34,37,.62);--igs-glass-bg:var(--igs-transparent-glass-bg);--igs-glass-border:rgba(207,204,198,.08);--igs-glass-blur:none;--igs-glass-radius:8px;--igs-glass-shadow:none;--igs-choice-soft-shadow:none;--igs-dialog-bg:var(--igs-glass-bg);--igs-dialog-border:transparent;--igs-dialog-blur:var(--igs-glass-blur);--igs-dialog-radius:8px;--igs-dialog-shadow:none;--igs-toolbar-bg:var(--igs-glass-bg);--igs-toolbar-border:var(--igs-glass-border);--igs-toolbar-blur:var(--igs-glass-blur);--igs-toolbar-radius:8px;--igs-toolbar-shadow:none;--igs-choice-bg:var(--igs-glass-bg);--igs-choice-border:rgba(207,204,198,.08);--igs-choice-blur:var(--igs-glass-blur);--igs-choice-radius:6px;--igs-choice-shadow:none;--igs-db-bg:var(--igs-glass-bg);--igs-db-border:var(--igs-glass-border);--igs-db-blur:var(--igs-glass-blur);--igs-db-head-bg:var(--igs-db-bg);--igs-db-head-blur:var(--igs-db-blur);--igs-db-radius:var(--igs-glass-radius);--igs-db-shadow:none;--igs-toolbar-h:50px;}
@@ -112,7 +144,7 @@ const ORIGINAL_READER_STYLE_TEXT = `
 #igs-sprite{position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:40%;height:85%;background-size:100%;background-repeat:no-repeat;background-position:50% 100%;pointer-events:none;z-index:2;display:none;}
 #igs-overlay.igs-mode-embedded #igs-sprite.igs-sprite-narration{filter:brightness(.86) saturate(.86) var(--igs-grade-sprite,) var(--igs-sprite-enhance,)!important;-webkit-filter:brightness(.86) saturate(.86) var(--igs-grade-sprite,) var(--igs-sprite-enhance,)!important;}
 
-#igs-sprite.igs-sprite-editing{pointer-events:all;cursor:grab;outline:2px dashed rgba(255,255,255,.5);outline-offset:-2px;}
+#igs-sprite.igs-sprite-editing{pointer-events:all;cursor:grab;touch-action:none;overscroll-behavior:contain;outline:2px dashed rgba(255,255,255,.5);outline-offset:-2px;}
 #igs-sprite.igs-sprite-editing.is-dragging{cursor:grabbing;}
 #igs-dialog-layer,#igs-toolbar-layer,#igs-option-layer,#igs-db-layer{position:absolute;inset:0;pointer-events:none;}
 #igs-dialog-layer{z-index:4;}
@@ -131,11 +163,15 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-head-edit-layer .igs-fx-symbol.is-preview{animation:none;opacity:.9;pointer-events:none;}
 #igs-click-layer{position:absolute;inset:0;cursor:pointer;z-index:3;}
 /* 双击看全 CG：收起对话框、状态栏、工具栏、选项、立绘。背景和演出层不动。 */
-#igs-overlay[data-igs-cg-only="1"] :is(#igs-dialog-layer,#igs-status-hud,#igs-toolbar-layer,#igs-option-layer,#igs-db-layer,#igs-toast,#igs-sprite,#igs-cast,#igs-sprite-edit-bar,#igs-asset-review,#igs-bg-blur,#igs-map-panel,#igs-record-panel,#igs-cg-gallery){display:none!important;pointer-events:none!important;}
+#igs-overlay[data-igs-cg-only="1"] :is(#igs-dialog-layer,#igs-status-hud,#igs-toolbar-layer,#igs-option-layer,#igs-db-layer,#igs-toast,#igs-sprite,#igs-cast,#igs-sprite-edit-bar,#igs-asset-review,#igs-bg-blur,#igs-map-panel,#igs-record-panel,#igs-cg-gallery,#igs-turn-index,#igs-resume-bar){display:none!important;pointer-events:none!important;}
 #igs-status-hud{position:absolute;z-index:8;top:14px;left:14px;pointer-events:none;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;column-gap:calc(6px * var(--igs-hud-scale,1));width:calc(340px * var(--igs-hud-scale,1));max-width:calc(100% - 28px);padding:calc(8px * var(--igs-hud-scale,1));border-radius:calc(10px * var(--igs-hud-scale,1));box-sizing:border-box;}
 #igs-status-hud.igs-hud-bg-dialog{background:color-mix(in srgb,var(--igs-dialog-bg,var(--igs-glass-bg,rgba(31,34,37,.62))) 50%,transparent);border-radius:calc(6px * var(--igs-hud-scale,1));}
 #igs-overlay.igs-toolbar-top #igs-status-hud{top:14px;}
-#igs-overlay.igs-mode-embedded #igs-status-hud{top:14px;left:12px;width:calc(320px * var(--igs-hud-scale,1));}
+#igs-overlay.igs-mode-embedded #igs-status-hud{top:14px;left:12px;--igs-hud-edge-x:12px;width:calc(320px * var(--igs-hud-scale,1));}
+#igs-overlay #igs-status-hud[data-igs-hud-pos]{z-index:6;--igs-hud-px:var(--igs-hud-x,0);--igs-hud-py:var(--igs-hud-y,0);top:calc(14px + (100% - 28px) * var(--igs-hud-py) / 100);left:calc(var(--igs-hud-edge-x,14px) + (100% - var(--igs-hud-edge-x,14px) * 2) * var(--igs-hud-px) / 100);transform:translate(calc(var(--igs-hud-px) * -1%),calc(var(--igs-hud-py) * -1%));}
+#igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-no-metrics{width:max-content;}
+#igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-collapsed{width:calc(36px * var(--igs-hud-scale,1));height:calc(36px * var(--igs-hud-scale,1));padding:0;}
+@media ${STATUS_HUD_PHONE_MEDIA}{#igs-overlay #igs-status-hud[data-igs-hud-pos]{--igs-hud-px:var(--igs-hud-mx,0);--igs-hud-py:var(--igs-hud-my,0);}}
 #igs-status-hud.igs-hud-suppressed{opacity:0;}
 #igs-status-hud .igs-hud-toggle{position:absolute;inset:0;width:100%;height:100%;align-self:center;padding:0;pointer-events:auto;border:0;background:transparent;border-radius:0;box-shadow:none;color:rgba(255,255,255,.48);cursor:pointer;}
 #igs-status-hud .igs-hud-toggle:hover{background:transparent;border-color:transparent;color:rgba(255,255,255,.9);}
@@ -184,6 +220,8 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-option-bubble:active{transform:scale(.97);}
 .igs-dialog{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);width:min(880px,calc(100vw - 32px));background:var(--igs-dialog-bg,var(--igs-glass-bg,rgba(31,34,37,.62)));border:0;-webkit-backdrop-filter:var(--igs-dialog-blur,none);backdrop-filter:var(--igs-dialog-blur,none);border-radius:var(--igs-dialog-radius,8px);box-shadow:none;padding:10px 26px 18px;z-index:4;overflow:visible;pointer-events:auto;transition:opacity .3s,transform .3s;}
 .igs-dialog[data-igs-narration="1"]{padding-top:15px;}
+.igs-dialog,.igs-dialog *{-webkit-user-select:none;user-select:none;}
+.igs-dialog input,.igs-dialog textarea{-webkit-user-select:text;user-select:text;}
 .igs-dialog.igs-hidden{opacity:0;transform:translateX(-50%) translateY(20px);pointer-events:none;}
 #igs-overlay.igs-floating #igs-click-layer{cursor:grab;touch-action:none;}
 #igs-overlay.igs-floating.is-dragging #igs-click-layer{cursor:grabbing;}
@@ -221,10 +259,10 @@ const ORIGINAL_READER_STYLE_TEXT = `
 #igs-bar-btns{display:none;gap:6px;align-items:center;}
 #igs-bar-pinned{display:flex;gap:6px;align-items:center;}
 .igs-progress{display:none;font-size:11px;color:rgba(255,255,255,.55);margin-bottom:0;letter-spacing:1px;}
-.igs-speaker{font-size:14px;font-weight:600;letter-spacing:1px;margin-top:0;margin-bottom:4px;display:none;text-shadow:none;}
+.igs-speaker{caret-color:transparent;font-size:14px;font-weight:600;letter-spacing:1px;margin-top:0;margin-bottom:4px;display:none;text-shadow:none;}
 .igs-divider{font-size:11px;letter-spacing:4px;text-align:center;margin-bottom:4px;opacity:.6;display:none;}
 .igs-thought{font-style:italic;opacity:.72;font-size:.98em;}
-.igs-text{font-size:18px;line-height:1.7;letter-spacing:.5px;min-height:60px;color:#d8d5cf;text-shadow:none;margin-bottom:14px;margin-top:0;white-space:pre-wrap;word-break:break-word;}
+.igs-text{caret-color:transparent;font-size:18px;line-height:1.7;letter-spacing:.5px;min-height:60px;color:#d8d5cf;text-shadow:none;margin-bottom:14px;margin-top:0;white-space:pre-wrap;word-break:break-word;}
 .igs-controls{display:flex;align-items:center;gap:8px;border-top:1px solid rgba(255,255,255,.08);padding-top:12px;}
 #igs-overlay.igs-floating .igs-progress{flex-shrink:0;}
 #igs-overlay.igs-floating .igs-text{min-height:0;overflow-y:auto;margin-bottom:12px;flex:1 1 auto;}
@@ -244,6 +282,12 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-image-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:1;font-size:13px;color:rgba(255,255,255,.4);letter-spacing:.5px;}
 #igs-send-status{display:none;flex:1;align-items:center;gap:8px;padding:8px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:14px;font-size:13px;color:rgba(255,255,255,.55);letter-spacing:.3px;}
 #igs-overlay.igs-awaiting-reply #igs-send-status{display:flex;}
+#igs-send-status{gap:6px;}
+.igs-send-status-dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.35;animation:igs-embedded-pulse 1.1s ease-in-out infinite;}
+.igs-send-status-dot:nth-child(2){animation-delay:.18s;}
+.igs-send-status-dot:nth-child(3){animation-delay:.36s;}
+#igs-send-status-text{margin-left:4px;}
+@media (prefers-reduced-motion: reduce){.igs-send-status-dot{animation:none;opacity:.6;}}
 #igs-overlay.igs-awaiting-reply #igs-input,#igs-overlay.igs-awaiting-reply #igs-send-btn{display:none;}
 #igs-settings{display:none;position:absolute;right:0;bottom:calc(100% + 10px);min-width:232px;background:rgba(16,16,20,.92);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(40px) saturate(180%);border-radius:18px;padding:16px 18px 14px;box-shadow:0 10px 40px rgba(0,0,0,.6);z-index:30;}
 #igs-toast{position:absolute;left:50%;top:calc(env(safe-area-inset-top,0px) + 64px);transform:translateX(-50%);z-index:40;display:flex;align-items:center;justify-content:center;min-width:160px;max-width:min(400px,calc(100% - 32px));min-height:38px;box-sizing:border-box;padding:8px 18px;border:0;border-radius:${IGS_UI_RADIUS.card};background:${igsUiSurface(IGS_UI_THICKNESS.thick)};-webkit-backdrop-filter:${IGS_UI_BLUR};backdrop-filter:${IGS_UI_BLUR};box-shadow:${IGS_UI_ELEVATION},${IGS_UI_EDGE_NIGHT};color:${IGS_UI_INK.primary};font-family:${IGS_UI_FONT_SANS};font-size:13px;font-weight:500;line-height:1.5;letter-spacing:.02em;text-align:center;text-shadow:none;-webkit-font-smoothing:antialiased;opacity:0;pointer-events:none;transition:opacity .2s ease;}
@@ -252,6 +296,8 @@ ${TOAST_THEME_STYLE_TEXT}
 /* 手机：避开刘海与顶部工具栏，窄屏下不强撑最小宽度，长文本可换行。 */
 @media (max-width:640px){#igs-toast{top:calc(env(safe-area-inset-top,0px) + 56px);min-width:0;width:max-content;max-width:calc(100% - 24px);padding:8px 14px;}}
 #igs-overlay.igs-floating-mobile #igs-toast{top:calc(env(safe-area-inset-top,0px) + 56px);min-width:0;width:max-content;max-width:calc(100% - 24px);padding:8px 14px;}
+/* 触屏（手机、平板）：工具栏图标外观不变，可点范围上下撑到 44px，手指不用对准那 32px。 */
+@media (pointer:coarse){#igs-overlay .igs-ctrl-bar .igs-icon-btn{position:relative;}#igs-overlay .igs-ctrl-bar .igs-icon-btn::after{content:"";position:absolute;left:0;right:0;top:50%;height:max(100%,44px);transform:translateY(-50%);}}
 /* 楼层内嵌：容器固定高度、不可拖动、不锁页面滚动，全部层约束在容器内。 */
 .igs-embedded-host{position:relative;display:block;width:100%;margin:8px 0;border-radius:8px;overflow:hidden;isolation:isolate;background:#16181a;overscroll-behavior:auto;touch-action:pan-y;}
 .igs-parallel-blocks{display:block;width:100%;margin:8px 0 0;position:relative;}
@@ -331,7 +377,13 @@ ${ITEM_FX_STYLE_TEXT}
 ${BATTLE_FX_STYLE_TEXT}
 ${RESULT_FX_STYLE_TEXT}
 ${DANMAKU_STYLE_TEXT}
+${COMIC_STYLE_TEXT}
+${MANGA_BACK_STYLE_TEXT}
+${CROWD_STYLE_TEXT}
 ${CG_GALLERY_STYLE_TEXT}
+${TURN_INDEX_STYLE_TEXT}
+${DIALOG_BAR_STYLE_TEXT}
+${GENERATION_STRIP_STYLE_TEXT}
 ${INVENTORY_IMAGE_STYLE_TEXT}
 ${STAGE_PAUSE_STYLE_TEXT}
 `.trim();
@@ -353,10 +405,11 @@ const ORIGINAL_READER_HTML = `
   <div class="igs-divider" id="igs-divider"></div>
   <div class="igs-text" id="igs-text"></div>
   <div class="igs-controls" id="igs-controls-shujuku_v120-guard">
-    <div id="igs-send-status" aria-live="polite"><span class="igs-spinner"></span><span id="igs-send-status-text">已发送，等待 AI 回复…</span></div>
+    <div id="igs-send-status" aria-live="polite"><span class="igs-send-status-dot"></span><span class="igs-send-status-dot"></span><span class="igs-send-status-dot"></span><span id="igs-send-status-text">正在生成…</span></div>
     <input class="igs-input" id="igs-input" type="text" placeholder="输入内容后按 Enter 发送">
     <button class="igs-send-btn" id="igs-send-btn" type="button">发送</button>
   </div>
+  <div id="igs-dialog-bar" class="igs-dialog-bar" role="toolbar" aria-label="快捷操作" hidden></div>
 </div>
 </div>
 <div id="igs-toolbar-layer" class="igs-hud-layer">

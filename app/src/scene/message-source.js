@@ -7,7 +7,7 @@ import { extractSceneDirectives, stripIllustrationMarkers } from './scene-direct
 import { parseSceneText } from './text-parser.js';
 import { DEFAULT_HTML_CARD_TAGS, extractHtmlCards } from './html-cards.js';
 import { extractChatBlocks } from './chat-blocks.js';
-import { IGS_DIRECTIVE_CLOSE_SOURCE, IGS_DIRECTIVE_LINE_RE, hasIgsDirectiveTags, stripOutfitFields } from './directive-tags.js';
+import { IGS_DIRECTIVE_CLOSE_SOURCE, IGS_DIRECTIVE_LINE_RE, hasIgsDirectiveTags, normalizeIgsDirectiveLayout, stripOutfitFields } from './directive-tags.js';
 import { createOutfitResolver } from './character-outfits.js';
 
 export const DEFAULT_SOURCE_FILTER = Object.freeze({
@@ -28,19 +28,37 @@ const LEGACY_TEXT_EXCLUDE_TAGS = Object.freeze([
 
 // 字段不得跨行：AI 漏写 "]" 时旧规则会一路吞到后文下一个 "]"，把旁白并进台词。
 // 表情栏可省略：AI 偶发 [igs-char:角色|台词] 两栏写法，按「没写表情」的台词处理。
+// 内置追加规则：把整段 HTML 注释连同它独占的换行一起去掉，避免正文里留一大片空行。
+// 它排在用户规则之前，所以用户自己的规则仍然后跑、可以覆盖它。
+export const DEFAULT_VIRTUAL_REGEX_RULES = Object.freeze([
+    Object.freeze({
+        pattern: '\\s*<!--[\\s\\S]*?-->\\s*\\n?',
+        flags: 'g',
+        replacement: '',
+    }),
+]);
+
 export const DEFAULT_VIRTUAL_REGEX = Object.freeze({
     enabled: true,
     pattern: '\\[igs-char:([^|\\]\\n]+)\\|(?:[^|\\]\\n]*\\|)?([^\\]\\n]+)\\]?',
     flags: 'gm',
     replacement: '[$1]：$2',
+    rules: DEFAULT_VIRTUAL_REGEX_RULES,
 });
+
+// 内置规则的注入版本。老存档里的 virtualRegex.rules 是空数组，靠这个标记补一次内置规则；
+// 补过之后用户删掉它就真的删掉了，不会每次保存又冒出来。
+export const DEFAULT_VIRTUAL_REGEX_RULES_VERSION = 1;
 
 // 已保存设置中的旧默认规则按原值迁移，用户自定义规则不动。
 const LEGACY_VIRTUAL_REGEX_PATTERNS = Object.freeze([
     '\\[igs-char:([^|\\]]+)\\|[^|\\]]+\\|([^\\]]+)\\]',
 ]);
 
-const SENTENCE_PAGING_TERMINATOR = '。';
+// 句末符号集：中文句号、叹号、问号、半角叹问与省略号；不含半角句点，避免小数与缩写误切。
+const SENTENCE_PAGING_TERMINATORS = '。！？!?…';
+// 句末后紧跟这些闭符号时不断页：引号、括号与 〖〗 译文边界保持在本页。
+const SENTENCE_PAGING_CLOSERS = '」』”’）)]】〖〗';
 
 const THOUGHT_RE_GLOBAL = /\[igs-thought:([^|\]\n]+)\|(?:[^|\]\n]*\|)?([^\]\n]+)\]?/gm;
 
@@ -176,15 +194,24 @@ export function normalizeVirtualRegex(value) {
     const source = isPlainObject(value) ? value : {};
     const merged = { ...DEFAULT_VIRTUAL_REGEX, ...source };
     const pattern = String(merged.pattern == null ? DEFAULT_VIRTUAL_REGEX.pattern : merged.pattern);
-    const rules = Array.isArray(merged.rules)
+    let rules = Array.isArray(merged.rules)
         ? merged.rules.map(normalizeVirtualRegexRule)
         : [];
+    // 老存档（rulesVersion 缺失）没见过内置规则，补一次；用户删掉后版本号仍在，不会重新长出来。
+    const sourceVersion = Number(merged.rulesVersion);
+    const rulesVersion = Number.isInteger(sourceVersion) && sourceVersion >= DEFAULT_VIRTUAL_REGEX_RULES_VERSION
+        ? sourceVersion
+        : DEFAULT_VIRTUAL_REGEX_RULES_VERSION;
+    if (rulesVersion < DEFAULT_VIRTUAL_REGEX_RULES_VERSION) {
+        rules = [...DEFAULT_VIRTUAL_REGEX_RULES.map((rule) => normalizeVirtualRegexRule(rule)), ...rules];
+    }
     return {
         enabled: merged.enabled !== false,
         pattern: LEGACY_VIRTUAL_REGEX_PATTERNS.includes(pattern) ? DEFAULT_VIRTUAL_REGEX.pattern : pattern,
         flags: String(merged.flags == null ? DEFAULT_VIRTUAL_REGEX.flags : merged.flags).replace(/\s+/g, ''),
         replacement: String(merged.replacement == null ? DEFAULT_VIRTUAL_REGEX.replacement : merged.replacement),
         rules,
+        rulesVersion,
     };
 }
 
@@ -292,10 +319,28 @@ function splitSentenceLine(line, narrationOnly) {
     if (narrationOnly && !isNarrationLine(trimmed)) return line;
     // \x00IMG\x00 是图片占位，不能被句号切断；保护标签/心理/插图块内部的句号。
     if (/\x00IMG\x00/.test(line) || /image###/i.test(line) || /^\s*\[[^\]]+\]\s*$/.test(trimmed)) return line;
-    return line.replace(
-        new RegExp(`${SENTENCE_PAGING_TERMINATOR}(?!\\s*$)(?![\\s${SENTENCE_PAGING_TERMINATOR}」』”’）)\\]】〖〗])`, 'g'),
-        `${SENTENCE_PAGING_TERMINATOR}\n`,
-    );
+    // 逐字扫描：〖〗 译文块内部的句末符号不切（译文被切到下一页会丢失注音配对）；
+    // 连续句末符号（……、？！）视作一个整体，在最后一个符号后断页。
+    let out = '';
+    let depth = 0;
+    let thought = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        out += ch;
+        if (ch === '〖') { depth += 1; continue; }
+        if (ch === '〗') { depth = Math.max(0, depth - 1); continue; }
+        if (depth > 0) continue;
+        // *…*/**…** 心理话标记内部的句末不切：标记被切成两页会丢失心理样式与配对。
+        // 连续 *（如 ** 强调）是同一个标记单元，只翻转一次。
+        if (ch === '*') { thought = !thought; while (line[i + 1] === '*') { out += '*'; i++; } continue; }
+        if (thought || !SENTENCE_PAGING_TERMINATORS.includes(ch)) continue;
+        const rest = line.slice(i + 1);
+        if (!rest.trim()) continue;
+        const next = rest[0];
+        if (/\s/.test(next) || SENTENCE_PAGING_TERMINATORS.includes(next) || SENTENCE_PAGING_CLOSERS.includes(next)) continue;
+        out += '\n';
+    }
+    return out;
 }
 
 function isNarrationLine(trimmed) {
@@ -335,16 +380,28 @@ export function buildFormattedTextPipeline(raw, sourceFilter, formatRule, option
     };
 }
 
+// 阅读器会当正文显示的文字（不含 DOM 改词覆盖）：取正文保留标签里的内容；保留标签在但是空的，正文就是空；
+// 整楼没有保留标签时和阅读器一样退回到去掉排除标签后的全文。思考、状态栏这类排除块都不算正文。
+export function readerBodyText(raw, sourceFilter) {
+    const cfg = normalizeSourceFilter(sourceFilter);
+    const source = normalizeIgsDirectiveLayout(raw);
+    const filtered = buildFilteredTextSource(source, cfg, '');
+    if (filtered.sourceKind === 'tagged-empty') return '';
+    const body = filtered.textSource || (cfg.enabled ? removeTagBlocks(source, cfg.textExcludeTags) : source);
+    return normalizeWhitespace(stripReaderFormattingControls(cleanNarrativeSource(body)).replace(/\x00IMG\x00/g, ' '));
+}
+
 export function buildIgsTextPayload(message, options = {}) {
     const originalRaw = getMessagePrimaryText(message);
     const sourceFilter = normalizeSourceFilter(options.sourceFilter);
     const htmlCardResult = extractHtmlCards(originalRaw, parseTagList(sourceFilter.htmlCardTags));
     const chatResult = extractChatBlocks(htmlCardResult.text);
-    const raw = chatResult.text;
+    // 指令写走样、或和旁白挤在同一行时先理顺：分页、正文格式化和指令归属都从这份文本出发，三者才对得上。
+    const raw = normalizeIgsDirectiveLayout(chatResult.text);
     const htmlCards = htmlCardResult.cards;
     const chats = chatResult.chats;
     const virtualRegex = normalizeVirtualRegex(options.virtualRegex);
-    const visibleText = resolveVisibleText(message, options.visibleText);
+    const visibleText = normalizeIgsDirectiveLayout(resolveVisibleText(message, options.visibleText));
     const hasExcludedBlocks = sourceFilter.enabled && hasTagBlocks(raw, sourceFilter.textExcludeTags);
     // Once DOM has flattened a removed block into plain text, its boundaries cannot be recovered.
     const safeVisibleText = hasExcludedBlocks ? '' : (sourceFilter.enabled

@@ -95,6 +95,38 @@ test('gate:settings-polish:toast-follows-dialog-skin', async () => {
     assert.ok(!getDialogSkinStyleText('default').includes('#igs-toast'));
 });
 
+// 子页标签栏随正文滚动：吸顶时半透明底会和下面的内容叠在一起（横屏矮屏尤其明显）；生图 5 个子页排一行。
+test('gate:settings-polish:subtab-bars-scroll-with-content', async () => {
+    const { getSettingsStyleText } = await import('../src/visual/igs-ui/settings-style.js');
+    const css = getSettingsStyleText();
+    for (const bar of ['igs-scene-settings-subtabs', 'igs-reader-subtabs', 'igs-image-subtabs']) {
+        const rule = css.match(new RegExp(`\\.${bar}\\{[^}]*\\}`))[0];
+        assert.doesNotMatch(rule, /position:sticky/, bar);
+    }
+    assert.match(css, /\.igs-image-subtabs\{[^}]*grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/);
+    assert.equal(IMAGE_SUBTAB_DEFS.length, 5);
+    // 仍吸顶的批量选择栏要垫不透明底色，内容滚过去时不透出来；高亮色叠在伪元素上（设置器不用渐变）。
+    assert.match(css, /\.igs-asset-select-bar\{[^}]*position:sticky[^}]*background:var\(--igs-settings-panel\)/);
+    assert.match(css, /\.igs-asset-select-bar::before\{[^}]*z-index:-1;[^}]*background:var\(--igs-settings-highlight\)/);
+});
+
+// 「高级」折叠区自带底色框，不能再叠上 .igs-settings-sub 的左竖线、左外边距和 flex 间距。
+test('gate:settings-polish:advanced-details-drop-sub-border', async () => {
+    const { getSettingsStyleText } = await import('../src/visual/igs-ui/settings-style.js');
+    const css = getSettingsStyleText();
+    assert.ok(css.includes('details.igs-settings-advanced{display:block;margin-top:4px;margin-left:0;padding:0;border-left:0;'));
+    assert.ok(css.includes('details.igs-settings-advanced[open]>summary{margin-bottom:0}'));
+    assert.match(getImageSubTabTemplate('source'), /<details class="igs-settings-sub igs-settings-advanced" data-advanced="nai"/);
+});
+
+// CG 库：「查看」行有倒序切换；翻页条和状态行在缩略图网格里独占一整行，不再被挤进一个格子竖排。
+test('gate:settings-polish:cg-pane-order-toggle-and-full-width-pager', async () => {
+    const { getSettingsStyleText } = await import('../src/visual/igs-ui/settings-style.js');
+    const cg = getImageSubTabTemplate('cg');
+    assert.match(cg, /data-action="image-cg-order" type="button" aria-pressed="\{\{imageCgOldestFirst\}\}"[^>]*>\{\{imageCgOrderLabel\}\}<\/button>/);
+    assert.ok(getSettingsStyleText().includes('.igs-image-cg-grid>:not(.igs-image-cg-tile){grid-column:1/-1}'));
+});
+
 test('gate:settings-polish:mood-review-rows-align-buttons', async () => {
     const mod = await import('../src/visual/igs-ui/settings-style.js');
     const css = Object.values(mod).filter((v) => typeof v === 'string').join('\n')

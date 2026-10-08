@@ -221,3 +221,70 @@ export function insertMarkers(raw, paragraphs, slots) {
     }
     return lines.join('\n');
 }
+
+/**
+ * 出图期间其他插件只在正文末尾追加了内容（平行事件、状态栏等）时，返回追加的那一截；
+ * 正文没变返回 ''，正文中间被改过返回 null。原文结尾的空白允许被改写。
+ * @param {string} before 开始出图时的正文
+ * @param {string} after 现在的正文
+ * @returns {string | null}
+ */
+export function appendedTail(before, after) {
+    const source = String(before || '');
+    const current = String(after || '');
+    if (current === source) return '';
+    const head = source.replace(/\s+$/, '');
+    if (!head || !current.startsWith(head)) return null;
+    return current.slice(head.length);
+}
+
+/**
+ * 把插好标记的正文接回追加的那一截。没有追加时原样返回。
+ * @param {string} marked 按开始时的正文插好标记的结果
+ * @param {string} tail appendedTail 的返回值
+ * @returns {string}
+ */
+export function reattachTail(marked, tail) {
+    if (!tail) return marked;
+    return String(marked || '').replace(/\s+$/, '') + tail;
+}
+
+const TRANSPLANT_MARKER_RE = /\[igs-img:(\d+)\]/g;
+const TRANSPLANT_CONTEXT = 60;
+
+function contextLine(text, fromEnd) {
+    const lines = String(text || '').replace(/\[igs-img:\d+\]/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
+    const line = fromEnd ? lines[lines.length - 1] : lines[0];
+    if (!line) return '';
+    return fromEnd ? line.slice(-TRANSPLANT_CONTEXT) : line.slice(0, TRANSPLANT_CONTEXT);
+}
+
+/**
+ * 出图期间正文被其他插件改过（开头、中间、content 外插了平行事件等）时，把按旧正文插好的标记搬到现在的正文上：
+ * 每个标记按它前面一行（没有就按后面一行）的文字在新正文里找位置；对不上的那张丢掉，不连累整楼。
+ * @param {string} marked 按旧正文插好标记的结果
+ * @param {string} current 现在的正文
+ * @returns {{ text: string, slots: number[] }} slots 为搬过去的标记编号
+ */
+export function transplantMarkers(marked, current) {
+    const source = String(marked || '');
+    const target = String(current || '');
+    const placed = [];
+    TRANSPLANT_MARKER_RE.lastIndex = 0;
+    let match;
+    while ((match = TRANSPLANT_MARKER_RE.exec(source))) {
+        const slot = Number(match[1]);
+        const before = contextLine(source.slice(0, match.index), true);
+        let index = before ? findAnchorInsertIndex(target, before).index : -1;
+        if (index < 0) {
+            const after = contextLine(source.slice(match.index + match[0].length), false);
+            const at = after ? target.indexOf(after) : -1;
+            index = at;
+        }
+        if (index >= 0) placed.push({ index, slot });
+    }
+    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
+    let text = target;
+    for (const item of placed) text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
+    return { text, slots: placed.map((item) => item.slot).sort((a, b) => a - b) };
+}

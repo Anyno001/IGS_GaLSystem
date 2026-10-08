@@ -6,7 +6,8 @@ import {
     ORIGINAL_READER_ICONS,
     ORIGINAL_READER_TOOLBAR_BUTTONS,
 } from './original-reader-source.js';
-import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
+import { DIALOG_ONLY_BUTTONS, TOOLBAR_ACTIONS } from './reader-host-constants.js';
+import { normalizeDialogBarAlign, normalizeDialogBarButtons, normalizeToolbarSplit } from './settings-normalize.js';
 import {
     ensureImageLoadingSpinner,
     ensureImageEmptyPlaceholder,
@@ -17,7 +18,7 @@ import {
     removeImageLoadingSpinner,
 } from './reader-dom-utils.js';
 import { applyTransparentGlassMaterial } from '../../styles/glass-material.js';
-import { resolveStatusHudScale, resolveStatusHudLocationScale, NSFW_VEIL_LEVEL_STYLE, normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
+import { resolveStatusHudScale, resolveStatusHudLocationScale, NSFW_VEIL_LEVEL_STYLE, normalizeStatusHudPosition, normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
 import { computeLineHeight, igsDebug } from './reader-value-utils.js';
 import {
     applySpriteDisplayScale,
@@ -28,18 +29,21 @@ import {
 import { applyReaderModeRuntime } from './reader-runtime.js';
 import { applyTypewriterEffect, cancelTypewriter } from './typewriter-runtime.js';
 import { applyVoiceBark } from './voice-bark.js';
+import { applyTts, normalizeTtsSettings } from './tts.js';
 import { resolveSpriteBaseScale } from './sprite-height.js';
 import { applyStageShakeEffect } from './stage-shake-runtime.js';
-import { applyFxToDom } from './fx-runtime.js';
+import { applyFxToDom, repositionFxSymbols } from './fx-runtime.js';
 import { applyDanmakuToDom } from './danmaku-runtime.js';
 import { applyItemMentionMarkup, itemMentionsOf, renderItemFx, showItemMention } from './fx-item-render.js';
 import { renderBattleFx } from './fx-battle-render.js';
+import { repositionBattleImpacts } from './fx-battle.js';
 import { renderDailyFx } from './fx-daily.js';
 import { peekSpriteHead, probeSpriteHead, resolveSpriteHead, spriteBackgroundSize, spriteWidthPercent } from './fx-anchor.js';
 import { applyWeatherFx, resolveWeatherFxTime } from './weather-fx-runtime.js';
 import { applySceneGrade } from './scene-grade.js';
 import { applyStageDirection } from './stage-direction-runtime.js';
 import { applyCastToDom, castRomanceAttr, castSlotKey, clearCastDom, isCastAlignEnabled, isCastCollapsed, isCastRomanceDuoEnabled, isStageCastEnabled, layoutCastSlots, resolveCastCapacity, resolveCastRomanceMode, resolveCastRomanceTarget, isCastLeanEnabled, markCalledCast, playCastBeats, resolveCastPosePlan, resolveCastReactPage, applySpeakerFlip, castStageEntrances } from './stage-cast-render.js';
+import { applySavedCastSlot } from './cast-slot-edit.js';
 import { spriteIdentity } from '../../scene/character-outfits.js';
 import { planCastLayouts, playSpeakerCastMotion, playSpeakerMove, resolveCastHandoff } from './stage-cast-motion.js';
 import { prefersReducedMotion } from './reduced-motion.js';
@@ -53,20 +57,27 @@ import { isConfessionLine } from './bgm-library.js';
 import { applyTextFxMarkup, armTextFx, disarmTextFx } from './text-fx.js';
 import { fitBilingualRuby, normalizeBilingualSettings, renderBilingualHtml, resolveBilingualDisplay } from './bilingual-text.js';
 import { preloadDialogFonts, resolveDialogFontMetrics } from './dialog-theme-typography.js';
+import { loadCustomFonts, registerCustomFonts } from '../../media/custom-fonts.js';
 import { clearSpriteOutfitSwap, spriteLookOf } from './sprite-outfit-swap.js';
 import { spriteEnhanceFilter } from './sprite-enhance.js';
 import { cgSizeForMode, EMBEDDED_PHONE_MAX_WIDTH, isPortraitTouchWindow } from '../../generated-images/illustration/auto-illustration-service.js';
 import { applyClickWaitMark } from './click-wait-mark.js';
 import { applyHorrorDread, resolveHorrorDread } from './horror-dread.js';
 import { resolveHorrorTypewriterLevel } from './typewriter-horror.js';
+import { isUnderwaterScene } from './typewriter-underwater.js';
 import { applyHtmlCardToDom } from './html-card-layer.js';
 import { applyChatToDom } from './chat-layer.js';
+import { comicContentKey, dialogRenderSettings, isComicModeActive } from './comic-settings.js';
+import { applyMangaBack } from './manga-back.js';
+import { applyCrowdFx } from './crowd-fx.js';
+import { applyComicToDom, finishComicReveal, isComicGhostTarget, relayoutComic } from './comic-bubble.js';
 import { normalizeSystemRoleSettings } from './system-role.js';
 import {
     applyDialogSkinAssets,
     isClassicDialogSkin,
     isGradientVeilDialogSkin,
     isMaterialDialogSkin,
+    supportsDialogAutoHeight,
     normalizeClassicDialogWidthPercent,
 } from './classic-dialog-skin.js';
 import { syncDialogSkinStyle } from './dialog-skin-style.js';
@@ -324,13 +335,15 @@ export function buildFallbackReaderOverlay(doc) {
     sendStatus.setAttribute('aria-live', 'polite');
     controls.appendChild(sendStatus);
 
-    const spinner = doc.createElement('span');
-    spinner.className = 'igs-spinner';
-    sendStatus.appendChild(spinner);
+    for (let i = 0; i < 3; i += 1) {
+        const dot = doc.createElement('span');
+        dot.className = 'igs-send-status-dot';
+        sendStatus.appendChild(dot);
+    }
 
     const sendStatusText = doc.createElement('span');
     sendStatusText.id = 'igs-send-status-text';
-    sendStatusText.textContent = '已发送，等待 AI 回复…';
+    sendStatusText.textContent = '正在生成…';
     sendStatus.appendChild(sendStatusText);
 
     const input = doc.createElement('input');
@@ -346,6 +359,15 @@ export function buildFallbackReaderOverlay(doc) {
     sendButton.type = 'button';
     sendButton.textContent = '发送';
     controls.appendChild(sendButton);
+
+    // 对话框底部快捷栏：按钮由 applyToolbarState 按「按钮分布」从工具栏挪进来。
+    const dialogBar = doc.createElement('div');
+    dialogBar.id = 'igs-dialog-bar';
+    dialogBar.className = 'igs-dialog-bar';
+    dialogBar.setAttribute('role', 'toolbar');
+    dialogBar.setAttribute('aria-label', '快捷操作');
+    dialogBar.setAttribute('hidden', '');
+    dialog.appendChild(dialogBar);
 
     const toast = doc.createElement('div');
     toast.id = 'igs-toast';
@@ -440,9 +462,17 @@ export function applyToolbarState(root, current) {
     if (!root || !current) return;
     const collapsible = root.querySelector('#igs-bar-btns');
     const pinned = root.querySelector('#igs-bar-pinned');
+    const dialogBar = root.querySelector('#igs-dialog-bar');
     const readerSettings = current.snapshot && current.snapshot.readerSettings || {};
+    // 按钮分布：split 分两截（dialogBarBtns 放对话框底部快捷栏）/ top 只用顶栏 / dialog 除设置外全放对话框下。
+    const split = normalizeToolbarSplit(readerSettings.toolbarSplit);
+    const dialogIds = new Set(normalizeDialogBarButtons(readerSettings.dialogBarBtns));
+    // 用户固定在顶栏的按钮优先留在顶栏。
+    const toDialog = (id) => Boolean(dialogBar) && id !== 'settings' && !pins.has(id) && (split === 'dialog' || (split === 'split' && dialogIds.has(id)));
     const pins = new Set(Array.isArray(readerSettings.pinnedBtns) ? readerSettings.pinnedBtns : []);
     const hiddenSet = new Set(Array.isArray(readerSettings.hiddenBtns) ? readerSettings.hiddenBtns : []);
+    // 「重听这句」只在开了台词朗读时显示。
+    if (!normalizeTtsSettings(readerSettings.tts).enabled) hiddenSet.add('tts-replay');
     const embeddedMode = current.snapshot && current.snapshot.mode === 'embedded';
     const defaultChrome = Boolean(root.classList && root.classList.contains('igs-default-reader-chrome'));
     // 默认顶部固定：只有明确选了「紧贴对话框」才是 float。
@@ -482,12 +512,14 @@ export function applyToolbarState(root, current) {
     for (const id of order) {
         const button = root.querySelector(`#igs-btn-${id}`);
         if (!button) continue;
-        if (hiddenSet.has(id)) {
+        if (hiddenSet.has(id) || (split === 'top' && DIALOG_ONLY_BUTTONS.includes(id))) {
             button.style.display = 'none';
         } else {
             button.style.display = '';
+            if (toDialog(id)) {
+                dialogBar.appendChild(button);
             // 顶部固定模式下，按钮区横向滚动；设置键固定到右侧不随之滚动。
-            if ((pins.has(id) || (dockTop && id === 'settings')) && pinned) {
+            } else if ((pins.has(id) || (dockTop && id === 'settings')) && pinned) {
                 pinned.appendChild(button);
             } else if (collapsible) {
                 collapsible.appendChild(button);
@@ -497,7 +529,15 @@ export function applyToolbarState(root, current) {
 
     // 工具栏分组：按实际可见顺序在每组第一个按钮上标记分隔；用户重排、隐藏、固定后同样成立，不改按钮尺寸。
     const groupOf = new Map(ORIGINAL_READER_TOOLBAR_BUTTONS.map((item) => [item.id, item.group || '']));
-    for (const container of [collapsible, pinned]) {
+    if (dialogBar) {
+        const align = normalizeDialogBarAlign(readerSettings.dialogBarAlign);
+        if (align === 'auto') dialogBar.removeAttribute('data-igs-align');
+        else dialogBar.setAttribute('data-igs-align', align);
+        const anyVisible = Array.from(dialogBar.children || []).some((button) => !(button.style && button.style.display === 'none'));
+        if (anyVisible) dialogBar.removeAttribute('hidden');
+        else dialogBar.setAttribute('hidden', '');
+    }
+    for (const container of [collapsible, pinned, dialogBar]) {
         if (!container) continue;
         let prevGroup = null;
         for (const button of Array.from(container.children || [])) {
@@ -613,7 +653,8 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
     const controls = root.querySelector('.igs-controls');
     const bg = root.querySelector('#igs-bg');
     const bgBlur = root.querySelector('#igs-bg-blur');
-    const readerSettings = snapshot.readerSettings || {};
+    // 漫画模式下对话框本体按默认外观渲染（皮肤素材、九宫格都不挂），泡的配色由 comic-bubble 另取。
+    const readerSettings = dialogRenderSettings(snapshot.readerSettings || {});
     const classicDialog = isClassicDialogSkin(readerSettings);
     const materialDialog = isMaterialDialogSkin(readerSettings);
     const inlineMode = snapshot.mode === 'pc' || snapshot.mode === 'mobile';
@@ -649,6 +690,8 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
             clearFrozenDialogHeight(current);
             dialog.style.minHeight = '';
             dialog.style.maxHeight = '';
+            if (readerSettings.dialogAutoHeight === true && supportsDialogAutoHeight(readerSettings)) dialog.setAttribute('data-igs-auto-h', '');
+            else dialog.removeAttribute('data-igs-auto-h');
         } else {
             const viewportHeight = Number(win && win.visualViewport && win.visualViewport.height)
                 || Number(win && win.innerHeight)
@@ -751,6 +794,11 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
     }
 }
 
+function toggleCgOnly(root) {
+    if (root.getAttribute('data-igs-cg-only') === '1') root.removeAttribute('data-igs-cg-only');
+    else root.setAttribute('data-igs-cg-only', '1');
+}
+
 export function applyAlignStyle(element, align) {
     applyAlignStyleImpl(element, align);
 }
@@ -809,6 +857,26 @@ function statusHudKey(root, snapshot, hud, radius) {
     }
 }
 
+// 位置只写 CSS 变量，不进重建签名：拖完位置不重建 HUD。两份都在默认左上角时不挂属性，样式与改版前完全一致。
+const STATUS_HUD_POSITION_VARS = Object.freeze([['--igs-hud-x', 'pc', 'x'], ['--igs-hud-y', 'pc', 'y'], ['--igs-hud-mx', 'mobile', 'x'], ['--igs-hud-my', 'mobile', 'y']]);
+
+export function applyStatusHudPosition(host, position) {
+    if (!host || !host.style || typeof host.setAttribute !== 'function') return;
+    const pos = normalizeStatusHudPosition(position);
+    const custom = STATUS_HUD_POSITION_VARS.some(([, device, axis]) => pos[device][axis] !== 0);
+    if (!custom) {
+        if (!host.hasAttribute?.('data-igs-hud-pos')) return;
+        host.removeAttribute('data-igs-hud-pos');
+        for (const [name] of STATUS_HUD_POSITION_VARS) host.style.removeProperty?.(name);
+        return;
+    }
+    host.setAttribute('data-igs-hud-pos', '');
+    for (const [name, device, axis] of STATUS_HUD_POSITION_VARS) {
+        const value = String(pos[device][axis]);
+        if (host.style.getPropertyValue?.(name) !== value) host.style.setProperty(name, value);
+    }
+}
+
 export function applyStatusHudToDom(root, snapshot) {
     const host = findStatusHudHost(root);
     if (!host) return;
@@ -817,6 +885,7 @@ export function applyStatusHudToDom(root, snapshot) {
     const radius = STATUS_HUD_RADIUS[hud && hud.avatarRadius] != null ? STATUS_HUD_RADIUS[hud && hud.avatarRadius] : '50%';
     const scale = snapshot && snapshot.readerSettings && snapshot._statusHudScale;
     host.style.setProperty('--igs-hud-scale', String(Number(scale) > 0 ? Number(scale) : 1));
+    applyStatusHudPosition(host, snapshot && snapshot.readerSettings && snapshot.readerSettings.statusHud && snapshot.readerSettings.statusHud.position);
     const key = statusHudKey(root, snapshot, hud, radius);
     if (key && statusHudKeys.get(host) === key && (host.firstChild || host.hasAttribute?.('hidden'))) return;
     statusHudKeys.set(host, key);
@@ -1095,11 +1164,12 @@ function writeBackgroundImage(element, url, source = url) {
 }
 
 const ROOT_TOGGLED_CLASSES = new Set(['igs-default-reader-chrome', 'igs-gradient-veil-active', 'igs-scene-nsfw']);
-const dialogPageTimers = new WeakMap();
 
 export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
-    const materialDialog = isMaterialDialogSkin(snapshot.readerSettings);
-    const gradientVeilDialog = isGradientVeilDialogSkin(snapshot.readerSettings);
+    const comicActive = isComicModeActive(snapshot.readerSettings);
+    const dialogSettings = dialogRenderSettings(snapshot.readerSettings);
+    const materialDialog = isMaterialDialogSkin(dialogSettings);
+    const gradientVeilDialog = isGradientVeilDialogSkin(dialogSettings);
     const nsfwVeilActive = snapshot.content.sceneNsfw === true && snapshot.content.illustrationActive !== true;
     // 先算出最终类名再整串比较：覆盖后再 toggle 会让同一组类每次渲染都先删后加，反复触发样式失效。
     const rootClasses = snapshot.classes.filter((name) => !ROOT_TOGGLED_CLASSES.has(name));
@@ -1126,8 +1196,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const send = root.querySelector('#igs-send-btn');
     const dialog = root.querySelector('#igs-dialog');
     // 根节点同步皮肤标记，供对话框之外的选项气泡跟随皮肤。
-    applyDialogSkinAssets(root, snapshot.readerSettings);
-    syncDialogSkinStyle(root, snapshot.readerSettings);
+    applyDialogSkinAssets(root, dialogSettings);
+    syncDialogSkinStyle(root, dialogSettings);
     const toolbar = root.querySelector('#igs-ctrl-bar');
     const clickLayer = root.querySelector('#igs-click-layer');
     const toast = root.querySelector('#igs-toast');
@@ -1245,13 +1315,14 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             snapshot.readerSettings.spriteDisplayScale,
         );
     };
+    const castBaseHeight = (character) => {
+        const height = resolveSpriteBaseScale(snapshot.readerSettings._sceneAssets, snapshot.readerSettings, character);
+        return height.characterScale ?? height.defaultScale;
+    };
     const withCastSlot = (entry, character, outfit, slotIndex) => {
         const slotKey = slotIndex == null ? '' : castSlotKey(snapshot.mode, castLayout.count, slotIndex, spriteIdentity(character, outfit));
         const saved = slotKey ? castSlotLayouts[slotKey] : null;
-        const auto = { posX: entry.posX, posY: entry.posY, scale: entry.scale };
-        return saved
-            ? { ...entry, posX: saved.posX, posY: saved.posY, slotKey, auto, locked: true }
-            : { ...entry, slotKey, auto };
+        return { ...applySavedCastSlot(entry, saved, snapshot.readerSettings.spriteDisplayScale), slotKey };
     };
     const castPlanInput = castLayout.multi && !current.spriteEditMode ? {
         stageW: stageMotion.clientWidth,
@@ -1260,9 +1331,11 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         speaker: spriteAssetUrl ? withCastSlot({
             ...presentSpriteLayout(castSpeakerKey, castSpeakerMood, castSpeakerOutfit),
             ...(speakerSlotX != null ? { posX: speakerSlotX } : {}),
+            character: castSpeakerKey,
             url: spriteAssetUrl,
             order: Number.isFinite(snapshot.content.speakerCastOrder) ? snapshot.content.speakerCastOrder : Number.MAX_SAFE_INTEGER,
             head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, castSpeakerKey, castSpeakerMood, castSpeakerOutfit),
+            baseHeight: castBaseHeight(castSpeakerKey),
         }, castSpeakerKey, castSpeakerOutfit, castLayout.speakerSlot) : null,
         members: castLayout.members.map((m) => {
             const layout = presentSpriteLayout(m.character, m.mood, m.outfit);
@@ -1274,6 +1347,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 posY: layout.posY,
                 scale: layout.scale,
                 head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, m.character, m.mood, m.outfit),
+                baseHeight: castBaseHeight(m.character),
             }, m.character, m.outfit, m.slotIndex);
         }).filter((m) => m.url),
         peek: peekSpriteHead,
@@ -1388,12 +1462,15 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                     const t = fxTargetOf.get(m.character);
                     if (t) Object.assign(t, { posX: m.posX, posY: m.posY, scale: m.scale });
                 }
+                relayoutComic(root);
+                repositionFxSymbols(root, { speaker: fxSprite, cast: castFxTargets });
+                repositionBattleImpacts(root, { speaker: fxSprite, cast: castFxTargets });
                 // 对齐改了大小和高度，槽位编辑的起点要跟着更新，否则拖动从旧值开始。
                 if (current.castStage && Array.isArray(current.castStage.entries)) {
                     const byChar = new Map(again.members.map((m) => [m.character, m]));
                     current.castStage.entries = current.castStage.entries.map((e) => {
                         const next = e.speaker ? again.speaker : byChar.get(e.character);
-                        return next ? { ...e, posX: next.posX, posY: next.posY, scale: next.scale } : e;
+                        return next ? { ...e, posX: next.posX, posY: next.posY, scale: next.scale, auto: next.auto || e.auto } : e;
                     });
                 }
             }).finally(() => releaseCastAlign());
@@ -1467,7 +1544,13 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         applyAlignStyle(textEl, themeEnabled ? segAlign : '');
         if (themeEnabled && segFont && segFont !== 'inherit') {
             textEl.style.fontFamily = segFont;
-            preloadDialogFonts(textEl.ownerDocument, [theme.nameFont, theme.textFont, theme.thoughtFont, theme.narrationFont]);
+            const themeFonts = [theme.nameFont, theme.textFont, theme.thoughtFont, theme.narrationFont];
+            // 选了上传字体才读字体表注册，其余页面不碰 localStorage。
+            if (themeFonts.some((stack) => String(stack || '').includes('IGSUserFont-'))) {
+                const hostDoc = textEl.ownerDocument;
+                registerCustomFonts(hostDoc, loadCustomFonts((hostDoc && hostDoc.defaultView) || globalThis));
+            }
+            preloadDialogFonts(textEl.ownerDocument, themeFonts);
         } else {
             textEl.style.fontFamily = '';
         }
@@ -1542,6 +1625,9 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         // 背景是素材自带时段变体（如夜景图）时不再叠时段调色。
         timedAsset: Boolean(snapshot.content && snapshot.content.backgroundTimed === true && snapshot.content.illustrationActive !== true),
     });
+    // 人群剪影与漫画背景：前者按地点铺在背景之后（随时段叠色），后者按情绪铺在立绘之前。
+    applyCrowdFx(root, snapshot);
+    applyMangaBack(root, snapshot, { sprite: fxSprite });
     // 场景时段挂到 overlay 上，供对话框等界面随昼夜调整明暗；不受天气/夜间调色开关影响，夜景底图本身就暗。
     const sceneTime = resolveWeatherFxTime(snapshot.content && snapshot.content.sceneTime);
     if (sceneTime) root.setAttribute('data-igs-scene-time', sceneTime);
@@ -1568,11 +1654,11 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         });
     }
     // 亲密演出与 NSFW 仅露脸剪影：复用 fxSprite（布局 + 手动头部标定），编辑立绘时 fxSprite 为 null、不逼近不剪影。
-    const romanceResult = applyRomanceToDom(root, snapshot, { sprite: fxSprite, onMemory: ctx.onRomanceMemory, resolveAssetUrl });
+    const romanceResult = applyRomanceToDom(root, snapshot, { sprite: fxSprite, onMemory: ctx.onRomanceMemory, resolveAssetUrl, userName: ctx.userName });
     // Meta 互动：头部热区在亲密演出之后同步，心形快捷按钮已在前层时热区插到它下面。
     applyMetaFx(root, snapshot, { sprite: fxSprite, chatId: ctx.chatId, cast: castFxTargets });
     // NSFW 挂 CG 时对话框左侧的裸体头像（开关默认关，旁白页为空即撤下）。
-    applyCgPortrait(root, snapshot, { resolveAssetUrl });
+    applyCgPortrait(root, snapshot, { resolveAssetUrl, onMove: ctx.onCgPortraitMove });
     const sceneAudio = applySceneAudio(root, {
         master: snapshot.readerSettings && snapshot.readerSettings.audioMaster,
         bgm: snapshot.readerSettings && snapshot.readerSettings.bgm,
@@ -1607,6 +1693,10 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             speakerEl.style.display = 'block';
             applyAlignStyle(speakerEl, theme.nameAlign);
             speakerEl.style.fontFamily = theme.nameFont && theme.nameFont !== 'inherit' ? theme.nameFont : '';
+            if (String(theme.nameFont || '').includes('IGSUserFont-')) {
+                const hostDoc = speakerEl.ownerDocument;
+                registerCustomFonts(hostDoc, loadCustomFonts((hostDoc && hostDoc.defaultView) || globalThis));
+            }
             speakerEl.style.fontWeight = snapshot.readerSettings.dialogFontWeight == null ? '' : String(snapshot.readerSettings.dialogFontWeight);
             speakerEl.style.color = theme.nameColor || '';
         } else {
@@ -1639,13 +1729,16 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const controls = root.querySelector('.igs-controls');
     if (controls) {
         // 内嵌模式使用酒馆默认输入框；其它模式的 IGS 输入区只在最后一页显示。
+        const comicSent = isComicModeActive(snapshot.readerSettings) && current.comicInputSent && current.comicInputSent === comicContentKey(snapshot);
         controls.style.display = snapshot.mode === 'embedded' ? 'none' : (isLastPage ? '' : 'none');
+        if (comicSent) controls.setAttribute('data-igs-comic-sent', '1');
+        else controls.removeAttribute('data-igs-comic-sent');
     }
     applyStatusHudToDom(root, snapshot);
     applyBgmNoteToDom(root, sceneAudio.track);
     applyStatusHudScale(root, snapshot);
     if (dialog) {
-        applyDialogSkinAssets(dialog, snapshot.readerSettings);
+        applyDialogSkinAssets(dialog, dialogSettings);
         const sceneAssetsEnabled = snapshot.readerSettings._sceneAssets && snapshot.readerSettings._sceneAssets.enabled;
         if (materialDialog && sceneAssetsEnabled && snapshot.content.speaker) {
             dialog.setAttribute('data-igs-has-speaker', '1');
@@ -1671,25 +1764,24 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     }
     if (root && root.getAttribute && root.getAttribute('data-igs-cg-only-bound') !== '1') {
         root.setAttribute('data-igs-cg-only-bound', '1');
-        root.addEventListener('dblclick', (event) => {
+        // 隐藏对话框只留 CG：电脑右键，手机三击（见点击层）。只认对话框以外的画面。
+        root.addEventListener('pointerdown', (event) => {
+            current.lastPointerType = event.pointerType || '';
+        }, true);
+        root.addEventListener('contextmenu', (event) => {
+            if (current.lastPointerType === 'touch') return;
             const target = event.target;
-            if (target && typeof target.closest === 'function' && target.closest('button,input,textarea,select,a,#igs-settings,#igs-map-panel,#igs-record-panel,#igs-cg-gallery')) return;
+            if (target && typeof target.closest === 'function' && target.closest('button,input,textarea,select,a,#igs-settings,#igs-map-panel,#igs-record-panel,#igs-cg-gallery,#igs-turn-index,#igs-resume-bar,#igs-dialog,.igs-dialog')) return;
             const live = current.snapshot || snapshot;
             if (!(live && live.readerSettings && live.readerSettings.dblclickCgOnly === true)) return;
             event.preventDefault();
-            if (root.getAttribute('data-igs-cg-only') === '1') root.removeAttribute('data-igs-cg-only');
-            else root.setAttribute('data-igs-cg-only', '1');
+            toggleCgOnly(root);
         });
     }
     if (clickLayer && !(clickLayer.dataset && clickLayer.dataset.igsBound)) {
         if (clickLayer.dataset) clickLayer.dataset.igsBound = '1';
-        clickLayer.addEventListener('click', () => {
+        const blankTap = () => {
             if (root && root.getAttribute && root.getAttribute('data-igs-cg-only') === '1') return;
-            if (current.dragSuppressClick || (current.runtime && current.runtime.dragSuppressClick)) {
-                current.dragSuppressClick = false;
-                if (current.runtime) current.runtime.dragSuppressClick = false;
-                return;
-            }
             if (current.hidden) {
                 current.controller.toggleHidden();
                 return;
@@ -1700,6 +1792,40 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             }
             // 最后一页且启用选项气泡时，点击空白处切换气泡显隐（消费本次点击，不翻页）。
             if (typeof ctx.handleBlankClick === 'function' && ctx.handleBlankClick()) return;
+            // 漫画模式没有对话框可点：点画面空白处翻页。
+            if (current.snapshot && isComicModeActive(current.snapshot.readerSettings)) {
+                if (finishComicReveal(root)) return;
+                if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction('next');
+                return;
+            }
+            // 单击对话框以外的画面（左右都算）推进到下一页；打字机没放完时 next 会先放完。
+            if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction('next');
+        };
+        clickLayer.addEventListener('click', () => {
+            if (current.dragSuppressClick || (current.runtime && current.runtime.dragSuppressClick)) {
+                current.dragSuppressClick = false;
+                if (current.runtime) current.runtime.dragSuppressClick = false;
+                return;
+            }
+            const live = current.snapshot || snapshot;
+            const tripleOn = current.lastPointerType === 'touch' && live && live.readerSettings && live.readerSettings.dblclickCgOnly === true;
+            if (!tripleOn) {
+                blankTap();
+                return;
+            }
+            // 手机三击隐藏：开关打开时单击稍等一下排除连击；关掉时单击立即生效。
+            current.blankTapCount = (current.blankTapCount || 0) + 1;
+            clearTimeout(current.blankTapTimer);
+            if (current.blankTapCount >= 3) {
+                current.blankTapCount = 0;
+                toggleCgOnly(root);
+                return;
+            }
+            current.blankTapTimer = setTimeout(() => {
+                const taps = current.blankTapCount;
+                current.blankTapCount = 0;
+                for (let i = 0; i < taps; i++) blankTap();
+            }, 320);
         });
     }
     if (dialog && !(dialog.dataset && dialog.dataset.igsBound)) {
@@ -1715,9 +1841,21 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             }
             if (event.target && event.target.closest && (
                 event.target.closest('.igs-controls')
+                || event.target.closest('#igs-dialog-bar')
+                || event.target.closest('#igs-gen-strip')
                 || event.target.closest('#igs-ctrl-bar')
                 || event.target.closest('#igs-settings')
             )) {
+                return;
+            }
+            if (current.snapshot && isComicModeActive(current.snapshot.readerSettings)) {
+                // 漫画模式：先把还在弹出的泡放完；点淡化的上一句回上一页，点泡翻下一页。
+                if (finishComicReveal(root)) {
+                    event.preventDefault();
+                    return;
+                }
+                if (root && root.getAttribute && root.getAttribute('data-igs-cg-only') === '1') return;
+                if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction(isComicGhostTarget(event.target) ? 'prev' : 'next');
                 return;
             }
             if (cancelTypewriter(textEl, { finish: true })) {
@@ -1729,25 +1867,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 : { left: 0, width: 0 };
             const clientX = Number(event.clientX);
             const action = !Number.isFinite(clientX) || clientX < rect.left + rect.width / 2 ? 'prev' : 'next';
-            const detail = Number(event.detail) || 0;
-            const win = dialog.ownerDocument && dialog.ownerDocument.defaultView;
-            const pending = dialogPageTimers.get(dialog);
-            if (pending && win && typeof win.clearTimeout === 'function') win.clearTimeout(pending);
-            // 关了双击隐藏就不用等双击：单击立即翻页，连点也逐次翻。
-            const live = current.snapshot || snapshot;
-            const waitDouble = Boolean(live && live.readerSettings && live.readerSettings.dblclickCgOnly === true);
-            if (detail >= 2 && waitDouble) {
-                dialogPageTimers.delete(dialog);
-                return;
-            }
-            const go = () => {
-                dialogPageTimers.delete(dialog);
-                if (root && root.getAttribute && root.getAttribute('data-igs-cg-only') === '1') return;
-                if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction(action);
-            };
-            // 真机单击带 detail=1，稍等以取消紧接着的双击。测试里的合成点击没有 detail，立即翻页。
-            if (waitDouble && detail === 1 && win && typeof win.setTimeout === 'function') dialogPageTimers.set(dialog, win.setTimeout(go, 280));
-            else go();
+            if (root && root.getAttribute && root.getAttribute('data-igs-cg-only') === '1') return;
+            if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction(action);
         });
     }
     if (dialog) {
@@ -1766,7 +1887,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     if (textEl && typewriterRenderKey) {
         const typewriterSettings = snapshot.readerSettings.typewriter || {};
         const typewriter = applyTypewriterEffect(textEl, {
-            enabled: typewriterSettings.enabled === true,
+            // 漫画模式的台词在对话泡里整句弹出，隐藏的源文字不跑打字机。
+            enabled: typewriterSettings.enabled === true && !comicActive,
             // 告白段打字机降一档、回答页文字出现前停顿（romance-moments）。
             speed: (romanceResult.typewriter && romanceResult.typewriter.speed) || typewriterSettings.speed,
             delay: romanceResult.typewriter && romanceResult.typewriter.delay,
@@ -1783,26 +1905,56 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             phone: fxResult.phone === true,
             // 恐怖题材的打字机特化：随恐怖档位变闷、变低（非恐怖时为 null，打字机原样）。
             horror: resolveHorrorTypewriterLevel(snapshot.readerSettings, resolveHorrorDread(snapshot.content.sceneDread, snapshot.readerSettings.horrorDreadCap)),
+            // 水下：打字音变闷、冒泡，文字逐行浮起（不分世界观）。
+            underwater: isUnderwaterScene(snapshot.content, snapshot.readerSettings),
         });
         armTextFx(textEl, typewriter && typewriter.animated ? typewriter.revealDelay : null);
     }
     if (textEl && typewriterRenderKey) {
-        // 角色语气音：台词开头按情绪播一声「啊嗯哼」。去重只看消息与句序号，换主题、调字号等重绘不重播。
+        // 台词朗读与角色语气音二选一，朗读优先。去重只看消息与句序号，换主题、调字号等重绘不重播。
         const content = snapshot.content;
-        applyVoiceBark(root, {
+        const posX = stageSprite && (!content.spriteCharacter || content.spriteCharacter === content.speaker) ? stageSprite.posX : undefined;
+        const mood = content.statusEmotion || (content.spriteCharacter === content.speaker ? content.spriteMood : '') || '';
+        if (normalizeTtsSettings(snapshot.readerSettings.tts).enabled) applyTts(root, {
+            key: `${snapshot.messageId}:${content.currentIndex}`,
+            textType: typewriterTextType,
+            text: content.displayText,
+            speaker: content.speaker || '',
+            mood,
+            phone: fxResult.phone === true,
+            nsfw: Boolean(content.sceneNsfw),
+            posX,
+            whisper: romanceResult.whisper === true,
+            next: Array.isArray(content.segments) ? content.segments[content.currentIndex + 1] : '',
+        }, snapshot.readerSettings.tts, snapshot.readerSettings._sceneAssets);
+        else applyVoiceBark(root, {
             key: `${snapshot.messageId}:${content.currentIndex}`,
             textType: typewriterTextType,
             speaker: content.speaker || '',
-            mood: content.statusEmotion || (content.spriteCharacter === content.speaker ? content.spriteMood : '') || '',
+            mood,
             phone: fxResult.phone === true,
             nsfw: Boolean(content.sceneNsfw),
             // 声像与力度：立绘就是说话人时按其位置分左右；亲密演出压成耳语时轻声贴耳。
-            posX: stageSprite && (!content.spriteCharacter || content.spriteCharacter === content.speaker) ? stageSprite.posX : undefined,
+            posX,
             whisper: romanceResult.whisper === true,
             // 场上角色的声线提前备好，第一次开口不用等下载。
             cast: [content.speaker, content.spriteCharacter, ...(Array.isArray(content.castSprites) ? content.castSprites.map((m) => m && m.character) : [])],
         }, snapshot.readerSettings.voiceBark, snapshot.readerSettings._sceneAssets);
     }
+    // 漫画演出模式：台词排进竖排对话泡，底部对话框整个收起。
+    const comicOpts = {
+        dialog,
+        textEl,
+        sprite: fxSprite,
+        cast: castFxTargets,
+        renderKey: typewriterRenderKey,
+        textType: typewriterTextType,
+        whisper: Boolean(fxResult && fxResult.whisper),
+        phone: Boolean(fxResult && fxResult.phone),
+        isLastPage,
+        theme: resolveActiveTheme(snapshot),
+    };
+    applyComicToDom(root, snapshot, comicOpts);
     if (toast) {
         toast.textContent = current.toastMessage || '';
         toast.style.opacity = current.toastMessage ? '1' : '0';

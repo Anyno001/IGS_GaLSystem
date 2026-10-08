@@ -173,9 +173,10 @@ test('gate:romance:shade-neck-below-chin-and-null-without-head', () => {
 });
 
 test('gate:romance:nsfw-sprite-mode-migrates-legacy-boolean', () => {
-    assert.equal(STATUS_HUD_DEFAULTS.nsfwSpriteMode, 'shade');
-    assert.equal(normalizeStatusHudSettings({}).nsfwSpriteMode, 'shade');
-    assert.equal(normalizeStatusHudSettings({ showSpriteOnNsfw: true }).nsfwSpriteMode, 'shade');
+    assert.equal(STATUS_HUD_DEFAULTS.nsfwSpriteMode, 'show');
+    assert.equal(normalizeStatusHudSettings({}).nsfwSpriteMode, 'show');
+    assert.equal(normalizeStatusHudSettings({ showSpriteOnNsfw: true }).nsfwSpriteMode, 'show');
+    assert.equal(normalizeStatusHudSettings({ nsfwSpriteMode: 'shade' }).nsfwSpriteMode, 'shade');
     const hidden = normalizeStatusHudSettings({ showSpriteOnNsfw: false });
     assert.equal(hidden.nsfwSpriteMode, 'hide');
     assert.equal(hidden.showSpriteOnNsfw, false);
@@ -237,7 +238,7 @@ test('gate:romance:nsfw-shade-full-silhouette-until-calibrated-head-is-sized', a
     const head = { x: 0.5, top: 0.45, w: 0.3 };
     const ctx = { sprite: { url, posX: 50, posY: 100, scale: 40, head }, reducedMotion: false };
     // 亲密演出关闭时剪影照常生效，并带一层逆光保证轮廓可读。
-    const snap = snapshotOf({ nsfw: true, statusHud: {} });
+    const snap = snapshotOf({ nsfw: true, statusHud: { nsfwSpriteMode: 'shade' } });
     const first = applyRomanceToDom(root, snap, ctx);
     assert.equal(first.level, 0);
     assert.equal(stage.getAttribute('data-igs-rm-shade'), '1');
@@ -267,7 +268,7 @@ test('gate:romance:nsfw-shade-full-silhouette-until-calibrated-head-is-sized', a
 
 test('gate:romance:nsfw-with-romance-enabled-is-level-three', () => {
     const { root, stage } = makeReader();
-    const result = applyRomanceToDom(root, snapshotOf({ romance: { enabled: true }, nsfw: true }), {
+    const result = applyRomanceToDom(root, snapshotOf({ romance: { enabled: true }, nsfw: true, statusHud: { nsfwSpriteMode: 'shade' } }), {
         sprite: { url: `e${urlSeq += 1}.png`, posX: 50, scale: 40 }, reducedMotion: false,
     });
     assert.equal(result.level, 3);
@@ -542,21 +543,32 @@ test('gate:romance:memory-captures-once-and-never-in-nsfw', () => {
 test('gate:romance:rival-tone-for-other-registered-character', () => {
     const { root, stage } = makeReader();
     closeRomanceFx(root);
-    const characters = { 爱丽丝: {}, 贝拉: {} };
-    const ctx = { sprite: { url: `g${urlSeq += 1}.png`, posX: 50, scale: 40 }, reducedMotion: false };
+    const characters = { 爱丽丝: {}, 贝拉: {}, 系统: {}, 林舟: {} };
+    const ctx = { sprite: { url: `g${urlSeq += 1}.png`, posX: 50, scale: 40 }, reducedMotion: false, userName: '林舟' };
     const romance = { rival: true };
+    // 好感不等于爱情：系统、主角都有好感数据，也不因此算情敌。
+    for (const character of ['系统', '林舟']) applyRomanceToDom(root, hudSnapshot({ romance, character, spriteCharacter: character, metrics: [{ label: '好感', percent: 80 }] }), ctx);
     const fx = { romance: 'ambiguous', romanceAt: 12 };
-    // 未写对象：第一个出场的爱丽丝成为对象，本人不触发。
+    // 未写对象：不猜对象，谁出场都不触发（以前按第一个出场的人猜，换人说话就频繁弹心碎）。
     assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx, spriteCharacter: '爱丽丝', characters }), ctx).rival, false);
     assert.equal(stage.getAttribute('data-igs-rm-tone'), 'warm');
-    // 别名也认作对象本人。
-    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx, spriteCharacter: '小爱', characters }), ctx).rival, false);
-    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx, spriteCharacter: '贝拉', characters }), ctx).rival, true);
-    assert.equal(stage.getAttribute('data-igs-rm-tone'), 'rival');
-    // 未登记的路人不算修罗场；标签写明对象时以标签为准。
-    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx, spriteCharacter: '路人', characters }), ctx).rival, false);
+    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx, spriteCharacter: '贝拉', characters }), ctx).rival, false);
+    assert.equal(stage.getAttribute('data-igs-rm-tone'), 'warm');
+    // 标签写明对象：对象本人（含别名）不触发，另一位已登记角色触发；未登记的路人不算。
     const named = { romance: 'ambiguous', romanceAt: 40, romanceTarget: '贝拉' };
+    // 爱丽丝还没当过对象：只是同场的人，不算情敌。
+    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: named, spriteCharacter: '爱丽丝', characters }), ctx).rival, false);
+    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: { ...named, romanceTarget: '爱丽丝' }, spriteCharacter: '小爱', characters }), ctx).rival, false);
+    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: named, spriteCharacter: '路人', characters }), ctx).rival, false);
+    // 爱丽丝当过对象（上面那页写的别名「小爱」也归到她），之后在贝拉的段落出场才算情敌。
     assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: named, spriteCharacter: '爱丽丝', characters }), ctx).rival, true);
+    assert.equal(stage.getAttribute('data-igs-rm-tone'), 'rival');
+    // 男女主 + 系统角色：系统插话（无好感数据）、主角本人出场、对象写成主角，都不触发。
+    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: named, spriteCharacter: '系统', characters }), ctx).rival, false);
+    assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: named, spriteCharacter: '林舟', characters }), ctx).rival, false);
+    for (const romanceTarget of ['林舟', '主角']) {
+        assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: { ...named, romanceTarget }, spriteCharacter: '爱丽丝', characters }), ctx).rival, false);
+    }
     // 子开关关闭、NSFW 时不触发。
     assert.equal(applyRomanceToDom(root, storySnapshot({ fx: named, spriteCharacter: '爱丽丝', characters }), ctx).rival, false);
     assert.equal(applyRomanceToDom(root, storySnapshot({ romance, fx: named, spriteCharacter: '爱丽丝', characters, nsfw: true }), ctx).rival, false);
