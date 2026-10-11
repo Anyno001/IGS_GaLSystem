@@ -16,19 +16,24 @@ import {
 } from '../storage/legacy-igs.js';
 import { createPresetStore } from '../storage/preset-store.js';
 import { createTavernSettingsSync } from '../storage/tavern-settings-file.js';
+import { createExpressionNotesFile, fillExpressionNotes } from '../storage/expression-notes-file.js';
 import { createLayerController } from '../visual/layer-controller.js';
 import { createStageRenderer } from '../visual/stage-renderer.js';
 import { resolveVisualMode } from '../visual/visual-mode.js';
 import { DEFAULT_SCENE_PROMPT_RULE, LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3, normalizeScenePromptRule } from '../visual/igs-ui/reader-host-constants.js';
 import { createIgsReaderHost } from '../visual/igs-ui/reader-host.js';
 import { normalizeChatShowSettings, resolveChatShowPromptRule } from '../visual/igs-ui/chat-show-runtime.js';
-import { resolveBgmPromptRule, resolveFxPromptRule, resolveItemFxPromptRule, resolveRomanceFxPromptRule, resolveStageCastFxPromptRule } from '../visual/igs-ui/fx-prompt.js';
+import { resolveBgmPromptRule, resolveDlcFxPromptRule, resolveFxPromptRule, resolveItemFxPromptRule, resolveRomanceFxPromptRule, resolveStageCastFxPromptRule } from '../visual/igs-ui/fx-prompt.js';
 import { resolveDanmakuPromptRule } from '../visual/igs-ui/danmaku-prompt.js';
+import { resolveFeedPromptRule } from '../visual/igs-ui/feed-prompt.js';
+import { mentionedFeedPlatforms } from '../scene/feed-platforms.js';
 import { resolveTextFxPromptRule } from '../visual/igs-ui/text-fx.js';
 import { resolveBilingualPromptRule } from '../visual/igs-ui/bilingual-text.js';
 import { resolveDailyFxPromptRule } from '../visual/igs-ui/fx-daily-prompt.js';
+import { normalizeFxPromptsSettings } from '../visual/igs-ui/fx-settings.js';
 import { beginMetaDigestSend, clearMetaDigest, finishMetaDigestSend, onMetaDigestChange, resolveMetaDigestRule } from '../visual/igs-ui/meta-digest.js';
-import { applyFxWorldview, resolveWorldviewPromptRule } from '../scene/fx-era.js';
+import { resolveLiveDigestRule } from '../visual/igs-ui/danmaku-interact.js';
+import { applyFxWorldview, resolveCarryPhonePrompt, resolveWorldviewPromptRule } from '../scene/fx-era.js';
 import { resolveWorldview } from '../scene/worldview.js';
 import { resolveBattleFxPromptRule } from '../visual/igs-ui/fx-battle-model.js';
 import { createEventBus } from './event-bus.js';
@@ -52,11 +57,11 @@ import { createItemAndCgServices } from './item-cg-services.js';
 import { createIndexedDbGeneratedAssetStore } from '../media/generated-asset-store.js';
 import { createAlphaMatte } from '../media/alpha-matte.js';
 import { firstMoodWord, resolvePromptRuleContent, scenePromptRuleEnabled } from '../scene/prompt-rule-content.js';
-import { buildTagGrammar, DEPTH0_REMINDER, normalizePromptPlacement } from '../visual/igs-ui/tag-grammar.js';
-import { detectPromptTriggers } from '../scene/prompt-triggers.js';
+import { buildTagGrammar, DEPTH0_REMINDER, GRAMMAR_HEADER, normalizePromptPlacement } from '../visual/igs-ui/tag-grammar.js';
+import { resolvePromptTriggers, setLastPromptReport } from '../scene/prompt-triggers.js';
 import { collectPromptContext } from '../host/prompt-context.js';
 
-const IGS_VERSION = '0.35.3';
+const IGS_VERSION = '0.36.34';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
@@ -86,6 +91,8 @@ export function bootstrapIGS(options = {}) {
         return sceneAssetsForContext(sceneAssets, getSillyTavernContext(globalObject));
     }
     const events = options.events || createEventBus();
+    // getUnifiedSettingsSnapshot 的复用缓存（见该函数）；启动途中就会被调用，所以放在最前面声明。
+    let unifiedCache = null;
     const hostAdapter = options.hostAdapter || createTavernHelperAdapter(globalObject);
     const storageLike = options.storage || getStorageLike(globalObject);
     const legacyIgs = options.legacyIgsSettings || readLegacyIgsSettings(storageLike);
@@ -114,17 +121,19 @@ export function bootstrapIGS(options = {}) {
     const illustrationMessageHost = options.illustrationMessageHost || createIllustrationMessageHost(globalObject);
     const secondaryLlm = options.secondaryLlm || createSecondaryLlm(globalObject, { fetch: options.fetch });
     const naiOfficialClient = options.naiOfficialClient || createNaiOfficialClient({ fetch: options.fetch || (typeof globalObject.fetch === 'function' ? globalObject.fetch.bind(globalObject) : undefined) });
+    // 只读一两个字段的地方用浅合并，不为一个开关整份深拷贝配置（素材库大时每条生图日志、每次取阅读模式都很贵）。
+    const peekBridge = () => ({ ...(state.legacyIgs && state.legacyIgs.bridge || {}), ...(state.config || {}) });
     const readImageBridge = () => {
         const bridge = (getUnifiedSettingsSnapshot() || {}).bridge || {};
         return { ...bridge, autoIllustration: mergeLegacyNaiSettings(bridge.autoIllustration, bridge.imageApi) };
     };
     const imageJobLog = options.imageJobLog || createImageJobLog({
         storage: storageLike,
-        getSettings: () => ((getUnifiedSettingsSnapshot() || {}).bridge || {}).imageJobLog,
+        getSettings: () => cloneData(peekBridge().imageJobLog),
     });
     const reportImageJob = options.reportImageJob || createImageJobReporter(
         globalObject,
-        () => (getUnifiedSettingsSnapshot() || {}).bridge || {},
+        () => ({ showToasts: peekBridge().showToasts }),
         imageJobLog,
         () => (app.igsUi && typeof app.igsUi.showImageNotice === 'function' ? app.igsUi.showImageNotice.bind(app.igsUi) : null),
     );
@@ -134,6 +143,7 @@ export function bootstrapIGS(options = {}) {
         getBridge: readImageBridge,
         global: globalObject,
         llm: secondaryLlm,
+        onRetry: (event) => { const notice = app.igsUi && app.igsUi.showImageNotice; if (typeof notice === 'function') notice.call(app.igsUi, 'info', event.text); },
         report: (level, message) => {
             if (imageJobLog && typeof imageJobLog.add === 'function') imageJobLog.add(level, message);
         },
@@ -142,8 +152,8 @@ export function bootstrapIGS(options = {}) {
     const cgIndexStore = options.cgIndexStore || createIndexedDbCgIndexStore(globalObject);
     const illustrationStore = options.illustrationStore || withCgIndexSync(withTavernIllustrationFiles(createIndexedDbIllustrationStore(globalObject), globalObject), cgIndexStore);
     const readerModeNow = () => {
-        const snapshot = getUnifiedSettingsSnapshot() || {};
-        return String(snapshot.readerMode || (snapshot.bridge && snapshot.bridge.openMode) || 'pc');
+        const bridge = peekBridge();
+        return String(resolveLegacyReaderMode(undefined, state.legacyIgs && state.legacyIgs.displayMode, bridge) || bridge.openMode || 'pc');
     };
     const illustrationService = options.illustrationService || createAutoIllustrationService({
         messageHost: illustrationMessageHost,
@@ -223,6 +233,7 @@ export function bootstrapIGS(options = {}) {
         generateImage,
         collectMessageImages,
         getState,
+        getConfig,
         getPresetRegistry,
         getLegacyIgsSettings,
         getUnifiedSettingsSnapshot,
@@ -241,6 +252,7 @@ export function bootstrapIGS(options = {}) {
         getIllustrationSource: (messageId) => illustrationMessageHost.readFloor(messageId),
         getIllustrationUrl: (query) => illustrationService.getIllustrationUrl(query),
         illustrations: illustrationService,
+        isIllustrationEnabled: () => { const cfg = readImageBridge().autoIllustration || {}; return Boolean(cfg.nsfwEnabled || cfg.interludeEnabled); },
         onIllustrationUpdated: (handler) => events.on(ILLUSTRATION_UPDATED_EVENT, handler),
         onIllustrationProgress: (handler) => events.on(ILLUSTRATION_PROGRESS_EVENT, handler),
         onImageActivity: (handler) => events.on(IMAGE_ACTIVITY_EVENT, handler),
@@ -259,6 +271,8 @@ export function bootstrapIGS(options = {}) {
         getCurrentChatId: () => (typeof illustrationMessageHost.getChatId === 'function' ? illustrationMessageHost.getChatId() : ''),
         imageJobLog,
         getUnifiedSettings: getUnifiedSettingsSnapshot,
+        // 配置每次写入（保存、从酒馆文件恢复）都加一；阅读器翻页据此复用上次整理好的配置。
+        getSettingsRevision: () => state.settingsRevision || 0,
         saveUnifiedSettings,
         typeAndSend,
         setInputText(text) {
@@ -372,14 +386,48 @@ export function bootstrapIGS(options = {}) {
                 if (state.destroyed) return;
                 state.legacyIgs = readLegacyIgsSettings(storageLike);
                 state.config = mergeInitialConfig(options.config, state.legacyIgs);
+                state.settingsRevision = (state.settingsRevision || 0) + 1;
                 if (typeof presetRegistry.hydrate === 'function') presetRegistry.hydrate();
-                events.emit('igs:legacy-settings-updated', cloneData(state.legacyIgs));
+                events.emit('igs:legacy-settings-updated', state.legacyIgs);
                 if (options.autoAttachMagicWand !== false) applyEntryConfig(resolveEntryConfig());
+                applyFileExpressionNotes();
                 applyImageCacheLimit(state.config);
                 syncSceneAssetsInjectionWithRetry(1);
             },
         });
         void state.settingsSync.start();
+    }
+    // 立绘提示词单独落酒馆文件（localStorage 不存这段）：读回后补进运行时配置。
+    if (!options.storage && storageLike && options.tavernSettingsSync !== false) {
+        state.notesFile = createExpressionNotesFile(globalObject);
+        void state.notesFile.load().then((notes) => {
+            if (state.destroyed || !notes) return;
+            state.fileExpressionNotes = notes;
+            if (applyFileExpressionNotes()) events.emit('igs:legacy-settings-updated', state.legacyIgs);
+        });
+    }
+    // 存储里的配置只读：补进来的提示词按路径浅拷出新的 bridge 再整份换上，并升版本让缓存失效。
+    function applyFileExpressionNotes() {
+        const notes = state.fileExpressionNotes;
+        if (!notes) return false;
+        const withNotes = (bridge) => {
+            const sa = bridge && bridge.sceneAssets;
+            if (!sa || typeof sa !== 'object') return bridge;
+            const generated = sa.generated && typeof sa.generated === 'object' ? sa.generated : {};
+            const current = generated.expressionNotes && typeof generated.expressionNotes === 'object' ? generated.expressionNotes : {};
+            const next = {};
+            for (const [name, moods] of Object.entries(current)) next[name] = moods && typeof moods === 'object' && !Array.isArray(moods) ? { ...moods } : moods;
+            if (!fillExpressionNotes(next, notes)) return bridge;
+            return { ...bridge, sceneAssets: { ...sa, generated: { ...generated, expressionNotes: next } } };
+        };
+        const config = withNotes(state.config);
+        const legacyBridge = state.legacyIgs && state.legacyIgs.bridge;
+        const nextLegacyBridge = legacyBridge === state.config ? config : withNotes(legacyBridge);
+        if (config === state.config && nextLegacyBridge === legacyBridge) return false;
+        state.config = config;
+        if (nextLegacyBridge !== legacyBridge) state.legacyIgs = { ...state.legacyIgs, bridge: nextLegacyBridge };
+        state.settingsRevision = (state.settingsRevision || 0) + 1;
+        return true;
     }
     function applyImageCacheLimit(bridge) {
         const cache = localImageCacheFor(globalObject);
@@ -467,6 +515,11 @@ export function bootstrapIGS(options = {}) {
         });
     }
 
+    // 只读引用（共享只读，不要原地改）：只要配置时用它，免得 getState() 深拷整份阅读器快照和预设库。
+    function getConfig() {
+        return state.config;
+    }
+
     function getState() {
         return {
             status: state.status,
@@ -491,13 +544,22 @@ export function bootstrapIGS(options = {}) {
         return cloneData(state.legacyIgs);
     }
 
+    // 存储里的配置（state.config / state.legacyIgs）是共享只读的：只在 saveUnifiedSettings 换整份，从不原地改。
+    // 所以这里不深拷，同一版本（settingsRevision）同一模式直接复用上次的结果；拿到的人只读，要改就浅拷改到的那层。
     function getUnifiedSettingsSnapshot(input = {}) {
-        // The shallow merge picks one value per key. Clone only the winning graph;
-        // cloning the overwritten sceneAssets tree and then cloning it again is costly.
-        const bridge = cloneData({
+        const modeKey = input && typeof input === 'object' ? input.mode : input;
+        const revision = state.settingsRevision || 0;
+        if (unifiedCache && unifiedCache.revision === revision && unifiedCache.modeKey === modeKey
+            && unifiedCache.legacy === state.legacyIgs && unifiedCache.config === state.config) return unifiedCache.value;
+        const value = buildUnifiedSettingsSnapshot(input);
+        unifiedCache = { revision, modeKey, legacy: state.legacyIgs, config: state.config, value };
+        return value;
+    }
+    function buildUnifiedSettingsSnapshot(input) {
+        const bridge = {
             ...(state.legacyIgs && state.legacyIgs.bridge || {}),
             ...(state.config || {}),
-        });
+        };
         if (bridge.sceneAssets && typeof bridge.sceneAssets === 'object' && !Array.isArray(bridge.sceneAssets)) {
             bridge.sceneAssets = {
                 ...bridge.sceneAssets,
@@ -520,8 +582,8 @@ export function bootstrapIGS(options = {}) {
             version: app.version,
             bridge,
             readerMode,
-            imageApi: cloneData(bridge.imageApi || {}),
-            readerSettings: cloneData(resolvedReaderSettings),
+            imageApi: bridge.imageApi || {},
+            readerSettings: resolvedReaderSettings,
         };
     }
 
@@ -544,7 +606,8 @@ export function bootstrapIGS(options = {}) {
             displayMode,
             nextBridge,
         );
-        const readerSettingsByMode = cloneData(currentLegacy.readerSettingsByMode || {});
+        // 只换 default 桶，其余桶原样共享（只读）。
+        const readerSettingsByMode = { ...(currentLegacy.readerSettingsByMode || {}) };
         // v0.21.4 起全模式共用一套设置，统一存取 'default' 桶。
         // 历史上保存按 readerMode 分桶、读取却固定读 'default'，导致移动端存了读不回。
         for (const mode of LEGACY_READER_MODES) {
@@ -558,27 +621,33 @@ export function bootstrapIGS(options = {}) {
             bridge: nextBridge,
             displayMode,
             readerMode,
-            readerSettings: cloneData(readerSettingsByMode['default'] || {}),
+            readerSettings: readerSettingsByMode['default'] || {},
             readerSettingsByMode,
         };
         const writeResult = storageLike
             ? writeLegacyIgsSettings(storageLike, nextLegacy)
             : { ok: true, legacy: nextLegacy, persisted: false };
         if (writeResult.ok === false) return writeResult;
-        state.legacyIgs = cloneData(writeResult.legacy);
-        state.config = cloneData({
-            ...(state.config || {}),
-            ...nextBridge,
-        });
-        events.emit('igs:legacy-settings-updated', cloneData(state.legacyIgs));
+        const savedNotes = nextBridge.sceneAssets && nextBridge.sceneAssets.generated && nextBridge.sceneAssets.generated.expressionNotes;
+        if (state.notesFile) state.notesFile.save(savedNotes);
+        // 文件里那份跟着用户的删改走，之后的补缺不把删掉的提示词补回来。
+        if (savedNotes && typeof savedNotes === 'object') state.fileExpressionNotes = cloneData(savedNotes);
+        // 整份替换：nextBridge 是本次唯一一次深拷（payload 多半是设置草稿，之后还会被原地改），已含 state.config 全部键。
+        // 从此它和 writeResult.legacy 都只读，config 与 legacy.bridge 共用同一份。
+        state.legacyIgs = writeResult.legacy;
+        state.config = nextBridge;
+        state.settingsRevision = (state.settingsRevision || 0) + 1;
+        // 监听方只当通知用（不读载荷），传引用即可；需要数据请走 getUnifiedSettings。
+        events.emit('igs:legacy-settings-updated', state.legacyIgs);
         // 用户改了日志保留天数 / 条数后立即按新规则清理。
         if (imageJobLog && typeof imageJobLog.prune === 'function') imageJobLog.prune();
         applyImageCacheLimit(nextBridge);
         syncSceneAssetsInjectionWithRetry(1);
         return {
             ok: true,
-            legacy: cloneData(state.legacyIgs),
-            unified: getUnifiedSettingsSnapshot({ mode: readerMode }),
+            legacy: state.legacyIgs,
+            // 调用方基本不读这份，按需再生成，免得每次保存都多拷一遍。
+            get unified() { return getUnifiedSettingsSnapshot({ mode: readerMode }); },
         };
     }
 
@@ -588,11 +657,18 @@ export function bootstrapIGS(options = {}) {
         // 世界观：与之冲突的演出开关在这里拨成关，AI 不会收到它们的语法说明；时代规则按世界观追加（现代为空）。
         const worldview = resolveWorldview(sceneAssets);
         const ancient = worldview === 'ancient';
-        const eraRule = resolveWorldviewPromptRule(worldview, sceneAssets);
-        const readerSettings = applyFxWorldview(unified.readerSettings, worldview);
+        // 随身带着现代手机：提示句追加在时代规则后面（开关关或世界观为现代时为空）。
+        const carryPhoneRule = resolveCarryPhonePrompt(worldview, sceneAssets);
+        const eraRule = [resolveWorldviewPromptRule(worldview, sceneAssets), carryPhoneRule].filter(Boolean).join('\n');
+        const worldviewSettings = applyFxWorldview(unified.readerSettings, worldview, { carryPhone: Boolean(carryPhoneRule) });
+        // 手机社区按世界观换平台：把世界观写进传给提示词的快照（新对象，不改原设置）。
+        const readerSettings = worldviewSettings && typeof worldviewSettings === 'object'
+            ? { ...worldviewSettings, feedFx: { ...(worldviewSettings.feedFx || {}), worldview } }
+            : worldviewSettings;
         const placement = normalizePromptPlacement(sceneAssets && sceneAssets.promptPlacement);
         // 交互摘要：只在有待送出的事件时注入，生成结束后清空（见 attachMetaDigestSync）。
-        const metaDigestRule = resolveMetaDigestRule(readerSettings && readerSettings.metaFx);
+        // 直播互动与 Meta 互动共用待送出事件，各自开关、各自成段，合并后走同一条注入路径。
+        const metaDigestRule = [resolveMetaDigestRule(readerSettings && readerSettings.metaFx), resolveLiveDigestRule(readerSettings)].filter(Boolean).join('\n\n');
         if (sceneAssets && sceneAssets.promptAdaptive === false) {
             return injectLegacyPromptRules(sceneAssets, readerSettings, { ancient, eraRule, placement, metaDigestRule });
         }
@@ -601,53 +677,71 @@ export function bootstrapIGS(options = {}) {
             return { ok: true, reason: 'generation-type-skipped' };
         }
         const promptContext = collectPromptContext(resolveTavernContext(), { document: globalObject.document });
+        // 社区平台写法只展开最近提到的平台，其余只列名字。
+        if (readerSettings && readerSettings.feedFx) readerSettings.feedFx.mentioned = mentionedFeedPlatforms([promptContext.userText, ...(promptContext.recentAiTexts || []).slice(-2)]);
         const sceneOn = Boolean(sceneAssets && sceneAssets.enabled && scenePromptRuleEnabled(sceneAssets) && sceneAssets.promptRule);
+        const entries = sceneAssets && sceneAssets.promptEntries;
+        const triggers = resolvePromptTriggers({ ...promptContext, entries });
         const grammar = buildTagGrammar({
             readerSettings,
             sceneRule: sceneOn ? resolvePromptRuleContent(sceneAssets, { compact: true, presentText: promptContext.presentText }) : '',
             ancient,
-            expand: detectPromptTriggers(promptContext),
+            expand: triggers.hits,
             tailRules: eraRule ? [eraRule] : [],
             dynamicRules: metaDigestRule ? [metaDigestRule] : [],
             moodWord: firstMoodWord(sceneAssets),
+            entries,
         });
+        // 记下每块展开与否、原因和字数，诊断与设置页拿来对着调关键词。
+        setLastPromptReport({ at: Date.now(), blocks: Object.fromEntries(Object.entries(triggers.report).filter(([key]) => key in grammar.sizes || triggers.report[key].reason === 'off').map(([key, item]) => [key, { ...item, chars: grammar.sizes[key] || 0, ...(grammar.placements && grammar.placements[key] ? grammar.placements[key] : {}) }])) });
         if (!grammar.system) {
             promptInjector.clear();
             return { ok: true, reason: 'scene-assets-disabled' };
         }
         const depth0Content = [placement === 'system' ? DEPTH0_REMINDER : '', grammar.depth0].filter(Boolean).join('\n\n');
-        return promptInjector.inject(grammar.system, { placement, depth0Content });
+        return promptInjector.inject(grammar.system, { placement, depth0Content, segments: grammar.segments });
     }
 
     // 关闭按需注入时的旧行为：各块完整拼接；未自定义的场景规则用改版前的长版原文。
     function injectLegacyPromptRules(sceneAssets, readerSettings, { ancient, eraRule, placement, metaDigestRule }) {
         const rules = [];
+        // 场景规则自带 [igs标签语法] 头部（含通用机制）；没有它时，若后面有演出规则就补一次兜底，
+        // 因为各演出块已把通用机制抽到头部、自身不再复述。
+        let hasHeader = false;
         if (sceneAssets && sceneAssets.enabled && scenePromptRuleEnabled(sceneAssets) && sceneAssets.promptRule) {
             const promptRule = sceneAssets.promptRule === DEFAULT_SCENE_PROMPT_RULE ? LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3 : sceneAssets.promptRule;
             rules.push(resolvePromptRuleContent({ ...sceneAssets, promptRule }));
+            hasHeader = true;
         }
-        const chatShow = readerSettings && readerSettings.chatShow;
-        if (normalizeChatShowSettings(chatShow).enabled) rules.push(resolveChatShowPromptRule(chatShow, { ancient }));
-        const fxRule = resolveFxPromptRule(readerSettings && readerSettings.fxTags, { ancient });
-        if (fxRule) rules.push(fxRule);
-        const itemFxRule = resolveItemFxPromptRule(Boolean(readerSettings && readerSettings.itemFx && readerSettings.itemFx.enabled));
-        if (itemFxRule) rules.push(itemFxRule);
-        const textFxRule = resolveTextFxPromptRule(Boolean(readerSettings && readerSettings.textFx && readerSettings.textFx.enabled));
-        if (textFxRule) rules.push(textFxRule);
-        const bilingualRule = resolveBilingualPromptRule(readerSettings && readerSettings.bilingual);
-        if (bilingualRule) rules.push(bilingualRule);
-        const dailyFxRule = resolveDailyFxPromptRule(readerSettings && readerSettings.dailyFx);
-        if (dailyFxRule) rules.push(dailyFxRule);
-        const battleFxRule = resolveBattleFxPromptRule(Boolean(readerSettings && readerSettings.battleFx && readerSettings.battleFx.enabled));
-        if (battleFxRule) rules.push(battleFxRule);
-        const romanceFxRule = resolveRomanceFxPromptRule(readerSettings && readerSettings.romanceFx);
-        if (romanceFxRule) rules.push(romanceFxRule);
-        const bgmRule = resolveBgmPromptRule(readerSettings && readerSettings.bgm);
-        if (bgmRule) rules.push(bgmRule);
-        const stageCastFxRule = resolveStageCastFxPromptRule(readerSettings && readerSettings.stageCast);
-        if (stageCastFxRule) rules.push(stageCastFxRule);
-        const danmakuRule = resolveDanmakuPromptRule(readerSettings);
+        const rs = readerSettings || {};
+        const fxStart = rules.length;
+        const chatShow = rs.chatShow;
+        // 随身手机：聊天与来电等手机演出按现代写法。
+        const phoneAncient = ancient && !(rs.feedFx && rs.feedFx.carryPhone === true);
+        // 演出提示词入口：inject 关掉就不发任何演出标签用法；某块覆盖文本非空时用用户自己写的（功能本身关着则不发）。
+        const fxPrompts = normalizeFxPromptsSettings(rs.fxPrompts);
+        const pushFx = (key, builtin) => {
+            if (!fxPrompts.inject || !builtin) return;
+            rules.push(fxPrompts[key].trim() || builtin);
+        };
+        if (normalizeChatShowSettings(chatShow).enabled) pushFx('chat', resolveChatShowPromptRule(chatShow, { ancient: phoneAncient }));
+        pushFx('fx', resolveFxPromptRule(rs.fxTags, { ancient: phoneAncient }));
+        pushFx('dlc', resolveDlcFxPromptRule(rs.dlcFx));
+        pushFx('item', resolveItemFxPromptRule(Boolean(rs.itemFx && rs.itemFx.enabled)));
+        pushFx('text', resolveTextFxPromptRule(Boolean(rs.textFx && rs.textFx.enabled)));
+        pushFx('bilingual', resolveBilingualPromptRule(rs.bilingual));
+        pushFx('daily', resolveDailyFxPromptRule(rs.dailyFx));
+        pushFx('battle', resolveBattleFxPromptRule(Boolean(rs.battleFx && rs.battleFx.enabled)));
+        pushFx('romance', resolveRomanceFxPromptRule(rs.romanceFx));
+        pushFx('bgm', resolveBgmPromptRule(rs.bgm));
+        pushFx('cast', resolveStageCastFxPromptRule(rs.stageCast));
+        const danmakuRule = resolveDanmakuPromptRule(readerSettings, fxPrompts.inject
+            ? { live: fxPrompts.live, audience: fxPrompts.audience }
+            : { live: false, audience: false });
         if (danmakuRule) rules.push(danmakuRule);
+        pushFx('feed', resolveFeedPromptRule(readerSettings));
+        // 没有场景头部、但确实注入了演出规则时，在演出规则前补一次通用机制说明。
+        if (!hasHeader && rules.length > fxStart) rules.splice(fxStart, 0, GRAMMAR_HEADER);
         const split = placement === 'system';
         if (metaDigestRule && !split) rules.push(metaDigestRule);
         if (rules.length && eraRule) rules.push(eraRule);
@@ -792,6 +886,7 @@ export function bootstrapIGS(options = {}) {
         clearSceneAssetsInjectionTimer();
         detachChatChangedReinjection();
         if (state.settingsSync) state.settingsSync.stop();
+        if (state.notesFile) state.notesFile.flush();
         if (typeof state.metaDigestCleanup === 'function') state.metaDigestCleanup();
         state.metaDigestCleanup = null;
         promptInjector.clear();

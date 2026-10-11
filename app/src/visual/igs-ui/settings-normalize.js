@@ -1,7 +1,11 @@
+import { normalizePhoneWallpaper } from './my-phone.js';
+import { normalizePromptEntry } from '../../scene/prompt-entries.js';
+import { isPackSwitchPath } from '../../scene/fx-packs.js';
+import { defaultPromptKeywords } from '../../scene/prompt-triggers.js';
 import { LEGACY_READER_MODES, resolveLegacyReaderMode } from '../../storage/legacy-igs.js';
 import { buildNarrativeSegments } from '../../scene/image-slots.js';
-import { SETTINGS_TAB_ALIASES, SETTINGS_TAB_DEFS } from './settings-tabs.js';
-import { DEFAULT_DIALOG_BAR_BUTTONS, DIALOG_BAR_ALIGNS, TOOLBAR_ACTIONS, TOOLBAR_SPLIT_MODES, VN_THEME_PRESETS } from './reader-host-constants.js';
+import { normalizeSettingsTab as normalizeSettingsCategory } from './settings-pages.js';
+import { DEFAULT_DIALOG_BAR_BUTTONS, DIALOG_BAR_ALIGNS, TOOLBAR_ACTIONS, TOOLBAR_PLATE_MODES, TOOLBAR_SPLIT_MODES, VN_THEME_PRESETS } from './reader-host-constants.js';
 import { esc, normalizeFiniteNumber } from './reader-value-utils.js';
 import { CLASSIC_DIALOG_THEME_DEFAULTS, isClassicDialogSkin, normalizeDialogSkin } from './classic-dialog-skin.js';
 import { getReferenceDialogTypography } from './dialog-theme-typography.js';
@@ -18,10 +22,9 @@ export function normalizeReaderMode(mode, bridge) {
     return LEGACY_READER_MODES.includes(resolved) ? resolved : 'pc';
 }
 
+// settingsState.tab 现在是分类 id（dash / style / ... / data）；旧的 basic / reader / scene / image 也认，映射到对应分类。
 export function normalizeSettingsTab(tab) {
-    const raw = String(tab || 'basic').trim();
-    const normalized = SETTINGS_TAB_ALIASES[raw] || raw;
-    return SETTINGS_TAB_DEFS.some(([id]) => id === normalized) ? normalized : 'basic';
+    return normalizeSettingsCategory(tab);
 }
 
 export function normalizePerformanceSettings(value) {
@@ -45,28 +48,45 @@ export function normalizeSettingsValue(path, value) {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
         if (/^readerSettings\.chatShow\.(dim|sound\.volume)$/.test(path)) return Number(value);
-        if (/^readerSettings\.(titleCard|mangaFx|heartbeatFx|flashFx|favorToast|fxTags|fxSound)\.(enabled|onLocation|onTime|call|notify|flashback|dream|letterbox|sfx|eye)$/.test(path)) {
+        if (/^readerSettings\.(titleCard|mangaFx|heartbeatFx|flashFx|favorToast|fxTags|fxSound)\.(enabled|onLocation|onTime|call|notify|flashback|dream|letterbox|sfx|eye|emergency|spam)$/.test(path)) {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
-        if (/^readerSettings\.(sceneTransition|timeTint|spriteMotion|spriteActions|camera|stageCast|textFx|bilingual|clickWaitMark|bgm|ambientSound|uiSound)\.(enabled|moodTag|night|alignHeads|romanceDuo|castReact|castStage|breathing|castBreathing|castLean|speakBounce|enterExit|emotionFade|kenBurns|parallax|closeUp|aiShots|birds|rain|wind|insects|waves|crowd|thunder|stream|fire|snow|cicadas|frogs|chimes|bell|clock|drip|train|tavern|ship|traffic|car|carriage|bath|underwater|space)$/.test(path)
+        if (path === 'readerSettings.fxPrompts.inject') return value === true || value === 'true' || value === 1 || value === '1';
+        if (/^readerSettings\.fxPrompts\.(fx|daily|item|bgm|romance|battle|camera|cast|chat|live|audience|feed|text|bilingual|dlc)$/.test(path)) {
+            return (typeof value === 'string' ? value : '').slice(0, 6000);
+        }
+        if (path === 'readerSettings.fxPrompts.style') return value === 'detailed' ? 'detailed' : 'compact';
+        if (/^readerSettings\.(sceneTransition|timeTint|spriteMotion|spriteActions|camera|stageCast|textFx|bilingual|clickWaitMark|bgm|ambientSound|uiSound)\.(enabled|moodTag|night|alignHeads|romanceDuo|castReact|castStage|backHint|breathing|castBreathing|castLean|speakBounce|enterExit|emotionFade|kenBurns|parallax|closeUp|aiShots|birds|rain|wind|insects|waves|crowd|thunder|stream|fire|snow|cicadas|frogs|chimes|bell|clock|drip|train|tavern|ship|traffic|car|carriage|bath|underwater|space)$/.test(path)
             || /^readerSettings\.dailyFx\.[a-zA-Z]+$/.test(path)
-            || /^readerSettings\.(liveFx|audienceFx|innerFx)\.(enabled|muteOnNsfw|ambient|useThought)$/.test(path)
+            || (path.startsWith('readerSettings.') && isPackSwitchPath(path.slice('readerSettings.'.length)))
+            || /^readerSettings\.(liveFx|audienceFx|innerFx|feedFx)\.(enabled|muteOnNsfw|ambient|useThought|interact|followTheme)$/.test(path)
+            || path === 'readerSettings.liveFx.blockHostile'
+            || /^readerSettings\.feedFx\.platforms\.[a-z]+\.enabled$/.test(path)
+            || path === 'readerSettings.feedFx.storm.enabled'
+            || path === 'readerSettings.cameraPackFx.sound'
             || path === 'readerSettings.typewriter.punctuationPause'
             || path === 'readerSettings.typewriter.prosody') {
             return value === true || value === 'true' || value === 1 || value === '1';
         }
-        if (path === 'readerSettings.fxSound.volume' || path === 'readerSettings.bgm.volume' || path === 'readerSettings.ambientSound.volume' || path === 'readerSettings.uiSound.volume' || path === 'readerSettings.audioMaster.volume') {
+        if (path === 'readerSettings.fxSound.volume' || path === 'readerSettings.bgm.volume' || path === 'readerSettings.ambientSound.volume' || path === 'readerSettings.uiSound.volume' || path === 'readerSettings.audioMaster.volume' || path === 'readerSettings.cameraPackFx.volume') {
             const volume = Number(value);
             return Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.5;
         }
+        if (/^readerSettings\.cgEntrance\.styles\.[a-z]+$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
         if (/^readerSettings\.metaFx\.(enabled|poke|hover|reading|clock|festivals|digest)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
         if (/^readerSettings\.comicMode\.(enabled|frame|keepPrev|tail)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
-        if (/^readerSettings\.(mangaBack\.enabled|crowdFx\.(enabled|react))$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
+        if (/^readerSettings\.(mangaBack\.enabled|crowdFx\.(enabled|react)|notifyCenter\.enabled)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
         if (path === 'readerSettings.comicMode.palette') return value === 'color' ? 'color' : 'mono';
         if (path === 'readerSettings.comicMode.line') return ['thin', 'medium', 'bold'].includes(value) ? value : 'medium';
         if (path === 'readerSettings.comicMode.inputStyle') return value === 'plain' ? 'plain' : 'comic';
         if (path === 'readerSettings.comicMode.gap') return ['near', 'medium', 'far'].includes(value) ? value : 'medium';
         if (path === 'readerSettings.comicMode.inkMode') return value === 'custom' ? 'custom' : 'auto';
+        if (path === 'readerSettings.comicMode.font') return typeof value === 'string' && value !== 'inherit' ? value.slice(0, 300) : '';
+        if (path === 'readerSettings.myPhone.caseColor') return /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : '#111215';
+        if (path === 'readerSettings.myPhone.wallpaper') return normalizePhoneWallpaper(value);
+        if (path === 'readerSettings.myPhone.model') return ['full', 'notch', 'fold', 'tablet'].includes(value) ? value : 'full';
+        if (path === 'readerSettings.myPhone.size') return value === 'fit' ? 'fit' : 'large';
+        if (path === 'readerSettings.myPhone.ringtone') return ['classic', 'soft', 'none'].includes(value) ? value : 'classic';
         if (path === 'readerSettings.comicMode.inkColor') return /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#141414';
         if (path === 'readerSettings.metaFx.cooldownSec') return Number(value);
         if (path === 'readerSettings.metaFx.birthday') return String(value || '').trim();
@@ -79,6 +99,8 @@ export function normalizeSettingsValue(path, value) {
         if (path === 'readerSettings.spriteGenderScale.enabled') return value === true || value === 'true' || value === 1 || value === '1';
         const genderHeight = path.match(/^readerSettings\.spriteGenderScale\.(female|male|other)$/);
         if (genderHeight) return normalizeSpriteHeight(value, SPRITE_GENDER_SCALE_DEFAULTS[genderHeight[1]]);
+        const ageShorter = path.match(/^readerSettings\.spriteGenderScale\.(elderShorter|childShorter)$/);
+        if (ageShorter) return normalizeSpriteShorter(value, SPRITE_GENDER_SCALE_DEFAULTS[ageShorter[1]]);
         if (path === 'readerSettings.spriteDisplayScale') return normalizeSpriteDisplayScale(value);
         if (path === 'readerSettings.dialogTextEffectStrength') return Math.max(5, Math.min(50, Number(value) || 20));
         if (path === 'readerSettings.dialogTextEffectSize') return [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].includes(Number(value)) ? Number(value) : 0.8;
@@ -99,9 +121,16 @@ export function normalizeSettingsValue(path, value) {
     if (path === 'bridge.sceneAssets.spriteEnhance.strength') return [5, 10, 15, 20, 30, 40, 50].includes(Number(value)) ? Number(value) : 20;
     if (path === 'bridge.sceneAssets.spriteEnhance.size') return [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].includes(Number(value)) ? Number(value) : 0.8;
     if (path === 'bridge.sceneAssets.promptPlacement') return value === 'depth0' ? 'depth0' : 'system';
+    // 按需块条目：关键词与默认一致时存空（留空即用默认），其余字段按条目规范化。
+    const promptEntry = path.match(/^bridge.sceneAssets.promptEntries.([a-z]+).(mode|keys|position|depth|text)$/);
+    if (promptEntry) {
+        if (promptEntry[2] === 'keys' && String(value || '').trim() === defaultPromptKeywords(promptEntry[1])) return '';
+        return normalizePromptEntry({ [promptEntry[2]]: value })[promptEntry[2]];
+    }
     if (path === 'bridge.sceneAssets.promptAdaptive') return !(value === false || value === 'false' || value === 0 || value === '0');
+    if (path === 'bridge.sceneAssets.wardrobeAutoFlow') return !(value === false || value === 'false' || value === 0 || value === '0');
     if (path === 'bridge.sceneAssets.promptRuleEnabled') return !(value === false || value === 'false' || value === 0 || value === '0');
-    if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
+    if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|backfillOldFloors|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
         return value === true || value === 'true' || value === 1 || value === '1';
     }
     if (/^bridge\.autoIllustration\.assets\.(spriteSize|backgroundSize|templates\.(background|backgroundNegative|sprite|spriteNegative|nsfwExtra))$/.test(path)) {
@@ -173,6 +202,10 @@ export function normalizeToolbarSplit(value) {
     return TOOLBAR_SPLIT_MODES.includes(value) ? value : 'split';
 }
 
+export function normalizeToolbarPlate(value) {
+    return TOOLBAR_PLATE_MODES.includes(value) ? value : 'off';
+}
+
 export function normalizeDialogBarAlign(value) {
     return DIALOG_BAR_ALIGNS.includes(value) ? value : 'auto';
 }
@@ -220,21 +253,44 @@ export function normalizeSpriteLayouts(value) {
     return out;
 }
 
-export function normalizeSpriteDefaultScale(value) {
-    const n = Number(value);
-    return Number.isFinite(n) && n > 0 ? Math.max(40, Math.min(200, n)) : 100;
+// 多人槽位只有站位。高度在这个人自己的立绘记录上，槽位对象里没有 scale。
+export function normalizeCastSlotLayouts(value) {
+    const def = { posX: 50, posY: 100 };
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const out = {};
+    for (const key of Object.keys(value)) {
+        const src = (typeof value[key] === 'object' && value[key]) ? value[key] : {};
+        out[key] = {
+            posX: normalizeFiniteNumber(src.posX, def.posX),
+            posY: normalizeFiniteNumber(src.posY, def.posY),
+        };
+    }
+    return out;
 }
 
-// 设置里能填的立绘高度（基准高度、性别默认、角色自定义），单位是舞台高度百分比。
-export const SPRITE_HEIGHT_RANGE = Object.freeze([60, 150]);
-const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95 });
+export function normalizeSpriteDefaultScale(value) {
+    return normalizeSpriteHeight(value, 100);
+}
 
-// 留空或不是数字时用 fallback；超出范围夹到两端并取整。
+// 立绘高度（基准高度、性别默认、角色自定义），单位是舞台高度百分比。不设上下限。
+// elderShorter / childShorter：老人、儿童比同性别默认高度矮多少（百分点），0–60。
+const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95, elderShorter: 5, childShorter: 20 });
+export const SPRITE_SHORTER_RANGE = Object.freeze([0, 60]);
+
+// 留空、不是数字或为 0 时用 fallback；其余取整，正负都可以。
 export function normalizeSpriteHeight(value, fallback = null) {
     if (value == null || String(value).trim() === '') return fallback;
     const n = Number(value);
+    if (!Number.isFinite(n) || n === 0) return fallback;
+    return Math.round(n);
+}
+
+// 矮多少：留空或非数字用 fallback，其余夹到 0–60 取整（不接受负数，免得老人反而更高）。
+export function normalizeSpriteShorter(value, fallback = 0) {
+    if (value == null || String(value).trim() === '') return fallback;
+    const n = Number(value);
     if (!Number.isFinite(n)) return fallback;
-    return Math.round(Math.max(SPRITE_HEIGHT_RANGE[0], Math.min(SPRITE_HEIGHT_RANGE[1], n)));
+    return Math.round(Math.max(SPRITE_SHORTER_RANGE[0], Math.min(SPRITE_SHORTER_RANGE[1], n)));
 }
 
 export function normalizeSpriteGenderScale(value) {
@@ -245,12 +301,15 @@ export function normalizeSpriteGenderScale(value) {
         female: normalizeSpriteHeight(src.female, defaults.female),
         male: normalizeSpriteHeight(src.male, defaults.male),
         other: normalizeSpriteHeight(src.other, defaults.other),
+        elderShorter: normalizeSpriteShorter(src.elderShorter, defaults.elderShorter),
+        childShorter: normalizeSpriteShorter(src.childShorter, defaults.childShorter),
     };
 }
 
-// 全局显示比例：100 是当前占满舞台的高度，所有立绘一起乘上它。
+// 全局显示比例：100 是当前占满舞台的高度，所有立绘一起乘上它。不设上下限，非法或非正数回到 100。
 export function normalizeSpriteDisplayScale(value) {
-    return normalizeSpriteDefaultScale(value);
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : 100;
 }
 
 export function applySpriteDisplayScale(layout, displayScale) {
@@ -269,10 +328,28 @@ export function spriteStoredScale(displayScale, globalPercent) {
     return (Number.isFinite(n) ? n : 100) / factor;
 }
 
+// 多人同屏里改高度时，写到 resolveSpriteLayout 正在用的那条记录上，只改 scale。
+// 服装 / 表情有自己的记录就改那条；没有就改角色记录；都没有才新建「模式::身份」，不按槽位、不按人数拆。
+export function spriteHeightLayoutKey(layouts, mode, character, mood, outfit = '') {
+    const name = String(character || '');
+    if (!name) return '';
+    const identity = spriteIdentity(name, outfit);
+    const has = (key) => Boolean(layouts && Object.prototype.hasOwnProperty.call(layouts, key));
+    if (identity !== name) {
+        if (mood && has(`${mode}::${identity}::${mood}`)) return `${mode}::${identity}::${mood}`;
+        if (has(`${mode}::${identity}`)) return `${mode}::${identity}`;
+    } else if (mood && has(`${mode}::${name}::${mood}`)) {
+        return `${mode}::${name}::${mood}`;
+    }
+    if (has(`${mode}::${name}`)) return `${mode}::${name}`;
+    return `${mode}::${identity}`;
+}
+
 // defaultScale：没单独调过位置的立绘用的默认高度（舞台高度百分比），来自基准高度或性别默认高度，让位给模式整体缩放。
 // characterScale：角色在素材里单独填的高度，压过模式整体缩放；「调整立绘」存下的位置仍按自己的大小。
 export function resolveSpriteLayout(layouts, mode, character, mood, outfit = '', defaultScale = 100, characterScale = null) {
-    const own = character && characterScale != null && Number(characterScale) > 0 ? Number(characterScale) : null;
+    const ownScale = Number(characterScale);
+    const own = character && Number.isFinite(ownScale) && ownScale !== 0 ? ownScale : null;
     const def = { posX: 50, posY: 100, scale: own ?? normalizeSpriteDefaultScale(defaultScale) };
     const modeLayout = layouts && layouts[mode];
     const placed = (layout) => ({

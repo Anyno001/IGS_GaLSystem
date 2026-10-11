@@ -266,8 +266,8 @@ test('asset scope: 打开角色卡时筛选旁一直有一键迁移，两个方�
         controller.setValue('bridge.sceneAssets.enabled', true);
         controller.setValue('bridge.sceneAssets.scenes', { 教室: { url: '', times: {} } });
         const html = controller.switchSceneSubTab('scenes').html || controller.getSnapshot().html;
-        assert.match(html, /data-asset-bulk="scenes"[\s\S]*?data-action="asset-move-all:scenes:global"[^>]*disabled[^>]*>本卡的 0 个全部放到全局</);
-        assert.match(html, /data-action="asset-move-all:scenes:card" role="menuitem">全局的 1 个全部收进本卡</);
+        assert.match(html, /data-asset-bulk="scenes"[\s\S]*?data-action="asset-move-all:scenes:global"[^>]*disabled[^>]*>本卡的0个全放全局</);
+        assert.match(html, /data-action="asset-move-all:scenes:card" role="menuitem">全局的1个全收本卡</);
         assert.doesNotMatch(html, /列表里是这张卡实际会用的素材/);
         controller.close();
     } finally {
@@ -398,7 +398,7 @@ test('preset: 导出把引用的生成图一起打进压缩包，清了本机再
         assert.equal(result.fileName, 'HP.zip');
         assert.equal(result.images, 2);
         assert.equal(result.missing, 1);
-        assert.match(alerts.at(-1), /1 张图片在本机未找到/);
+        assert.match(alerts.at(-1), /1张图片在本机未找到/);
 
         // 模拟清了浏览器数据：图和预设都没了。
         images.clear();
@@ -415,4 +415,26 @@ test('preset: 导出把引用的生成图一起打进压缩包，清了本机再
     } finally {
         globalThis.FileReader = RealFileReader;
     }
+});
+
+test('asset scope: 角色可以在本卡和全局之间挪，别的卡的角色不动', async () => {
+    const { ctx, draft } = makeCtx({ sceneAssets: { characters: { 莉莉: { 默认: 'global-lily' } }, characterAliases: { 莉莉: ['莉'] }, cards: { 'card:A': { characters: { 悟: { 默认: 'a' } } } } } });
+    await handleSettingsAction('asset-move:characters:%E8%8E%89%E8%8E%89', ctx);
+    const root = draft.bridge.sceneAssets;
+    assert.equal(root.characters.莉莉, undefined);
+    assert.equal(root.cards['card:小雪'].characters.莉莉.默认, 'global-lily');
+    assert.deepEqual(root.cards['card:小雪'].characterAliases.莉莉, ['莉']);
+    assert.equal(root.cards['card:A'].characters.悟.默认, 'a');
+});
+
+test('asset scope: 删除角色只问这一份，不提所有卡共用', async () => {
+    const asked = [];
+    const { ctx, draft } = makeCtx({ sceneAssets: { cards: { 'card:小雪': { characters: { 莉莉: { 默认: 'mine' } } }, 'card:A': { characters: { 悟: { 默认: 'a' } } } } } });
+    ctx.dialogs.confirm = async (text) => { asked.push(text); return false; };
+    await handleSettingsAction('scene-remove-char:%E8%8E%89%E8%8E%89', ctx);
+    const text = asked.pop();
+    assert.match(text, /删除角色「莉莉」/);
+    assert.doesNotMatch(text, /其他角色卡也将无法使用/);
+    assert.equal(draft.bridge.sceneAssets.cards['card:小雪'].characters.莉莉.默认, 'mine');
+    assert.equal(draft.bridge.sceneAssets.cards['card:A'].characters.悟.默认, 'a');
 });

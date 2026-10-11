@@ -17,7 +17,7 @@ test('gate:dialog-skin-catalog:lists-every-skin-once-with-a-label', () => {
         assert.equal(normalizeDialogSkin(id), id, id);
         assert.ok(label && dialogSkinLabel(id) === label, id);
     }
-    assert.equal(dialogSkinLabel('bogus'), '默认');
+    assert.equal(dialogSkinLabel('bogus'), '磨砂玻璃');
 });
 
 test('gate:worldview-skins:every-worldview-has-valid-recommended-skins', () => {
@@ -102,5 +102,5 @@ test('gate:title-screen:settings-search-finds-title-screen-and-dialog-skin', asy
     assert.equal(searchSettings('主界面')[0].id, 'title-screen');
     assert.equal(searchSettings('开场白')[0].id, 'title-screen');
     assert.ok(searchSettings('皮肤').some((hit) => hit.id === 'dialog-skin'));
-    assert.deepEqual({ ...searchSettings('废土')[0].target, open: [] }, { tab: 'reader', readerSubTab: 'dialog', open: [] });
+    assert.deepEqual({ ...searchSettings('废土')[0].target, open: [] }, { page: 'style', open: [], path: 'readerSettings.dialogSkin' });
 });

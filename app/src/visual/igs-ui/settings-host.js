@@ -1,9 +1,11 @@
 // 设置器的打开 / 关闭、挂载、事件委托、草稿写入与保存。reader-host 只负责把阅读器侧的依赖交进来。
+import { updateCharCounts } from './prompt-entries-fields.js';
 import { draftAssetLibrary, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { placeRowMenu } from './settings-outfit-fields.js';
 import { cgReasonText } from '../../media/cg-library.js';
 import { setStagePauseReason } from './stage-pause.js';
+import { scheduleFontGuard } from './font-guard.js';
 import { fileGeneratedHoldings, normalizeGeneratedLibrary, collectGeneratedImageIds } from '../../scene/asset-match.js';
 import { CHARACTER_DNA_FIELDS, resolveCharacterDna } from '../../scene/character-dna.js';
 import { loadMatteEditor } from './sprite-matte-editor.js';
@@ -13,17 +15,20 @@ import { createInpaintTransaction } from '../../generated-images/illustration/in
 import { normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { mergeLegacyNaiSettings } from '../../generated-images/image-backend.js';
 import { getSettingsStyleText } from './settings-style.js';
-import { normalizeImageSubTab, normalizeSceneSubTab, normalizeReaderSubTab } from './settings-tabs.js';
+import { categoryOfPage, currentSettingsPage, defaultPageOfCategory, isSettingsCategory, isSettingsPage, normalizeSettingsPage, openSettingsPage, resolveSettingsPage, resolveSettingsTarget } from './settings-pages.js';
+import { recordSettingsRecent, settingsRecentLabel } from './settings-recent.js';
 import { VN_THEME_PRESETS } from './reader-host-constants.js';
 import { cloneData } from './reader-value-utils.js';
 import { attachSettingsViewportEvents, clearChildren, detachSettingsViewportEvents, ensureStyleTag, getRootDocument, unmountNode } from './reader-dom-utils.js';
-import { getPath, normalizeReaderMode, normalizeSettingsTab, normalizeSettingsValue, setPath } from './settings-normalize.js';
+import { getPath, normalizeReaderMode, normalizeSettingsValue, setPath } from './settings-normalize.js';
+import { FX_PACKS_ACTIVE, packSwitchPath } from '../../scene/fx-packs.js';
 import { handleSettingsAction as runSettingsAction, releasedGeneratedImageIds } from './settings-actions.js';
 import { SETTINGS_NOTICE_MS, describeSettingsFailure, markSettingsButtonBusy, remountSettingsNotice, remountSettingsProgress, settingsBusyLabel } from './settings-notice.js';
 import { createSettingsDialogs } from './settings-dialog.js';
 import { captureSettingsFocus, restoreSettingsFocus } from './settings-focus.js';
 import { CLASSIC_DIALOG_THEME_DEFAULTS } from './classic-dialog-skin.js';
-import { SETTINGS_SEARCH_INDEX, renderSettingsSearchResults } from './settings-search.js';
+import { SETTINGS_SEARCH_INDEX, buildSettingsSearchIndex, findSettingNode, renderSettingsSearchResults } from './settings-search.js';
+import { eventToShortcut } from './reader-shortcuts.js';
 import { canMorph, morphChildren } from './settings-dom-morph.js';
 import { buildFallbackSettingsOverlay } from './reader-dom-render.js';
 import { createSettingsRenderer } from './settings-host-render.js';
@@ -48,7 +53,7 @@ export function createSettingsHost(deps) {
     const settingsBusyActions = new Set();
     // 手指按着或 ⋯ 菜单开着时不整页重绘：重绘会收掉菜单、换掉按下的按钮，点击落空。
     let settingsPointerDown = false;
-    const { buildSettingsSnapshot, renderSettingsBody, renderImageJobLogList, buildRegexPreview, settingsLowQuality } = createSettingsRenderer({
+    const { buildSettingsSnapshot, renderSettingsBody, renderPageForIndex, renderImageJobLogList, buildRegexPreview, settingsLowQuality } = createSettingsRenderer({
         normalizeUnifiedSettings, options, rerenderSettings, settingsShellHtml, state,
     });
 
@@ -62,31 +67,41 @@ export function createSettingsHost(deps) {
         try {
             const storage = (options.global || globalThis).localStorage;
             if (!storage || typeof storage.setItem !== 'function') return;
-            const page = current.asyncState || {};
-            storage.setItem(LAST_SETTINGS_PAGE_KEY, JSON.stringify({
-                tab: normalizeSettingsTab(current.tab),
-                readerSubTab: normalizeReaderSubTab(page.readerSubTab),
-                sceneSubTab: normalizeSceneSubTab(page.sceneSubTab),
-                imageSubTab: normalizeImageSubTab(page.imageSubTab),
-            }));
+            const page = currentSettingsPage(current);
+            storage.setItem(LAST_SETTINGS_PAGE_KEY, JSON.stringify({ tab: categoryOfPage(page), page }));
         } catch (error) {
             try { console.warn('[IGS] 设置页记忆写入失败：', error); } catch { /* 控制台不可用时不影响切页 */ }
         }
     }
 
-    function openSettings(openOptions = {}) {
-        // 显式指定页签（阅读器工具按钮、引导跳转）始终优先于上次停留的位置。
-        let lastPage = null;
+    // 上次停留的页面。新格式 { tab, page }；旧格式 { tab, readerSubTab, sceneSubTab, imageSubTab } 走旧 id 映射。
+    function readLastSettingsPage() {
         try {
             const storage = (options.global || globalThis).localStorage;
             const stored = storage && storage.getItem(LAST_SETTINGS_PAGE_KEY);
             const parsed = stored ? JSON.parse(stored) : null;
-            lastPage = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-        } catch { /* 无存储权限时仍可打开设置 */ }
-        const normalizedTab = normalizeSettingsTab(openOptions.tab || (state.activeSettings && state.activeSettings.tab) || (lastPage && lastPage.tab));
-        const fallbackMode = state.activeReader ? state.activeReader.mode : undefined;
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
+            return resolveSettingsPage(parsed);
+        } catch { /* 无存储权限或存档损坏时仍可打开设置 */ }
+        return '';
+    }
+
+    // 显式指定（阅读器工具按钮、引导跳转）始终优先于上次停留的位置；只给了新分类 id 时，上次停在这一类里就回到那一页。
+    function explicitSettingsPage(openOptions, lastPage) {
+        const raw = openOptions && typeof openOptions === 'object' ? openOptions : {};
+        if (isSettingsPage(raw.page)) return normalizeSettingsPage(raw.page);
+        const tab = String(raw.tab || '').trim();
+        if (!tab) return '';
+        const page = resolveSettingsPage(raw);
+        if (isSettingsCategory(tab) && lastPage && categoryOfPage(lastPage) === tab && defaultPageOfCategory(tab) === page) return lastPage;
+        return page;
+    }
+
+    function openSettings(openOptions = {}) {
+        const lastPage = readLastSettingsPage();
+        const explicit = explicitSettingsPage(openOptions, lastPage);
         if (state.activeSettings) {
-            state.activeSettings.tab = normalizedTab;
+            if (explicit) openSettingsPage(state.activeSettings, explicit);
             rememberSettingsPage(state.activeSettings);
             return rerenderSettings();
         }
@@ -98,18 +113,16 @@ export function createSettingsHost(deps) {
         }
         const controller = createSettingsController();
         const settingsState = {
-            tab: normalizedTab,
+            tab: 'dash',
+            // 草稿是设置里唯一可原地改的副本：打开时整份拷一次，存储里那份是共享只读的。
             draft: cloneData(initialSnapshot),
             initialOpenMode: initialSnapshot.bridge.openMode,
-            asyncState: {
-                readerSubTab: normalizeReaderSubTab(lastPage && lastPage.readerSubTab),
-                sceneSubTab: normalizeSceneSubTab(lastPage && lastPage.sceneSubTab),
-                imageSubTab: normalizeImageSubTab(lastPage && lastPage.imageSubTab),
-            },
+            asyncState: {},
             committedImageIds: collectGeneratedImageIds(initialSnapshot.bridge && initialSnapshot.bridge.sceneAssets),
             controller,
             dom: null,
         };
+        openSettingsPage(settingsState, explicit || lastPage || 'dash');
         state.activeSettings = settingsState;
         settingsState.dom = mountSettingsDom(controller);
         syncSettingsStagePause();
@@ -134,7 +147,8 @@ export function createSettingsHost(deps) {
         return {
             ok: true,
             tab: state.activeSettings.tab,
-            snapshot: cloneData(snapshot),
+            // draft 已是本次归一化出的新副本，不再整份深拷贝第二遍（每次点按钮、改字段都会走到这里）。
+            snapshot: { ...cloneData({ ...snapshot, draft: null }), draft: snapshot.draft },
             domMounted: Boolean(state.activeSettings.dom),
             controller: state.activeSettings.controller,
         };
@@ -162,51 +176,95 @@ export function createSettingsHost(deps) {
         return { ok: true };
     }
 
+    // 搜索索引：第一次输入搜索词时才按页面渲染建一次，缓存在本次打开的设置状态上，关掉设置即丢弃。
+    function ensureSearchIndex() {
+        const current = state.activeSettings;
+        if (!current) return null;
+        if (!current.searchIndex) {
+            try {
+                const indexDraft = normalizeUnifiedSettings(current.draft);
+                current.searchIndex = buildSettingsSearchIndex((page) => renderPageForIndex(current, page, indexDraft));
+            } catch (error) {
+                try { console.warn('[IGS] 设置搜索索引构建失败：', error); } catch { /* 控制台不可用时忽略 */ }
+                current.searchIndex = SETTINGS_SEARCH_INDEX;
+            }
+        }
+        return current.searchIndex;
+    }
+
+    function jumpToTarget(rawTarget, entry) {
+        const current = state.activeSettings;
+        const target = resolveSettingsTarget(rawTarget);
+        const asyncState = current.asyncState;
+        openSettingsPage(current, target.page);
+        asyncState.advancedOpen = { ...(asyncState.advancedOpen || {}) };
+        for (const key of target.open) asyncState.advancedOpen[key] = true;
+        asyncState.settingsSearch = '';
+        rememberSettingsPage(current);
+        const result = rerenderSettings();
+        revealSetting({ ...entry, target });
+        return result;
+    }
+
+    // open：要自动展开的折叠 key（新手引导用）；不传则不动折叠状态。
+    function switchPage(page, open) {
+        if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
+        openSettingsPage(state.activeSettings, page);
+        if (Array.isArray(open) && open.length) {
+            const asyncState = state.activeSettings.asyncState;
+            asyncState.advancedOpen = { ...(asyncState.advancedOpen || {}) };
+            for (const key of open) asyncState.advancedOpen[key] = true;
+        }
+        state.activeSettings.asyncState.wardrobeFocus = '';
+        rememberSettingsPage(state.activeSettings);
+        return rerenderSettings();
+    }
+
     function createSettingsController() {
         return {
             getSnapshot() {
                 return state.activeSettings ? cloneData(state.activeSettings.snapshot) : null;
             },
+            // 点分类：进该分类的默认页；上次停在这一类里就回到那一页。旧的 basic / reader / scene / image 也认。
             switchTab(tab) {
                 if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
-                state.activeSettings.tab = normalizeSettingsTab(tab);
-                rememberSettingsPage(state.activeSettings);
-                return rerenderSettings();
-            },
-            switchImageSubTab(subTab) {
-                if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
-                state.activeSettings.asyncState.imageSubTab = normalizeImageSubTab(subTab);
-                rememberSettingsPage(state.activeSettings);
-                return rerenderSettings();
-            },
-            switchReaderSubTab(subTab) {
-                if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
-                state.activeSettings.asyncState.readerSubTab = normalizeReaderSubTab(subTab);
-                rememberSettingsPage(state.activeSettings);
-                return rerenderSettings();
-            },
-            // 设置搜索：跳到搜索结果所在的分页 / 子页，并展开所在分组与折叠区。
-            goToSetting(id) {
-                if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
-                const entry = SETTINGS_SEARCH_INDEX.find((item) => item.id === id);
-                if (!entry) return { ok: false, reason: 'unknown-setting' };
-                const asyncState = state.activeSettings.asyncState;
-                state.activeSettings.tab = normalizeSettingsTab(entry.target.tab);
-                if (entry.target.readerSubTab) asyncState.readerSubTab = normalizeReaderSubTab(entry.target.readerSubTab);
-                if (entry.target.sceneSubTab) asyncState.sceneSubTab = normalizeSceneSubTab(entry.target.sceneSubTab);
-                if (entry.target.imageSubTab) asyncState.imageSubTab = normalizeImageSubTab(entry.target.imageSubTab);
-                asyncState.advancedOpen = { ...(asyncState.advancedOpen || {}) };
-                for (const key of entry.target.open) asyncState.advancedOpen[key] = true;
-                asyncState.settingsSearch = '';
-                rememberSettingsPage(state.activeSettings);
-                return rerenderSettings();
-            },
-            switchSceneSubTab(subTab) {
-                if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
-                state.activeSettings.asyncState.sceneSubTab = normalizeSceneSubTab(subTab);
+                const page = resolveSettingsPage({ tab });
+                const remembered = state.activeSettings.asyncState.pageByCategory && state.activeSettings.asyncState.pageByCategory[String(tab).trim()];
+                const keep = isSettingsCategory(tab) && isSettingsPage(remembered) && defaultPageOfCategory(tab) === page;
+                openSettingsPage(state.activeSettings, keep ? remembered : page);
                 state.activeSettings.asyncState.wardrobeFocus = '';
                 rememberSettingsPage(state.activeSettings);
                 return rerenderSettings();
+            },
+            switchPage,
+            // 旧的子页切换：只作兼容入口，映射到新页面。
+            switchImageSubTab(subTab) {
+                return switchPage(resolveSettingsPage({ tab: 'image', imageSubTab: subTab }));
+            },
+            switchReaderSubTab(subTab) {
+                return switchPage(resolveSettingsPage({ tab: 'reader', readerSubTab: subTab }));
+            },
+            switchSceneSubTab(subTab) {
+                return switchPage(resolveSettingsPage({ tab: 'scene', sceneSubTab: subTab }));
+            },
+            // 设置搜索：跳到搜索结果所在页面，并展开所在折叠区。
+            goToSetting(id) {
+                if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
+                const entry = (ensureSearchIndex() || SETTINGS_SEARCH_INDEX).find((item) => item.id === id) || SETTINGS_SEARCH_INDEX.find((item) => item.id === id);
+                if (!entry) return { ok: false, reason: 'unknown-setting' };
+                return jumpToTarget(entry.target, entry);
+            },
+            // 搜索索引（手写条目 + 自动索引）；第一次取时才按页面渲染建一次，缓存在本次打开的设置状态上。
+            getSearchIndex() {
+                return state.activeSettings ? ensureSearchIndex() : null;
+            },
+            // 仪表盘「最近改过」：回到那一项所在页，找得到折叠位置就一并展开。
+            goToPath(path, page) {
+                if (!state.activeSettings) return { ok: false, reason: 'settings-not-open' };
+                const wanted = String(path || '');
+                const hit = (ensureSearchIndex() || []).find((item) => item.target.path === wanted && (!isSettingsPage(page) || item.target.page === page));
+                const target = hit ? hit.target : { page: isSettingsPage(page) ? page : 'dash', open: [], path: wanted };
+                return jumpToTarget(target, { label: '', target });
             },
             setValue(path, value, editOptions) {
                 return updateSettingsValue(path, value, editOptions);
@@ -244,9 +302,18 @@ export function createSettingsHost(deps) {
         }
 
         setPath(draft, path, normalizeSettingsValue(path, value));
+        // 题材包总开关打开时，该包全部细项一起开（defaultOn 通用包的细项本来就默认开，不再逐个写脏草稿）；关掉时细项原样保留。
+        if (value === true && path.startsWith('readerSettings.')) {
+            const pack = FX_PACKS_ACTIVE.find((p) => !p.defaultOn && `readerSettings.${packSwitchPath(p)}` === path);
+            if (pack) for (const kind of pack.kinds) setPath(draft, `readerSettings.dailyFx.${kind}`, true);
+        }
         // 台词朗读与角色语气音二选一：打开一个就关掉另一个。
         if (value === true && (path === 'readerSettings.tts.enabled' || path === 'readerSettings.voiceBark.enabled')) {
             setPath(draft, path === 'readerSettings.tts.enabled' ? 'readerSettings.voiceBark.enabled' : 'readerSettings.tts.enabled', false);
+        }
+        // 主界面选的皮肤记在角色卡上、会盖过全局；用户在这里亲手换风格时以此为准，清掉卡上那份。
+        if (path === 'readerSettings.dialogSkin' && state.activeSettings.asyncState && state.activeSettings.asyncState.assetScopeKey) {
+            delete draftAssetLibrary(state.activeSettings).dialogSkin;
         }
         const themeKey = path.startsWith('readerSettings.classicVnTheme.') ? 'classicVnTheme' : 'vnTheme';
         const themeRoot = `readerSettings.${themeKey}`;
@@ -330,7 +397,7 @@ export function createSettingsHost(deps) {
                 if (result === false || (result && result.ok === false)) reportDeleteFailure();
             }).catch(reportDeleteFailure);
         }
-        state.activeSettings.draft = cloneData(snapshot);
+        // 草稿不重拷：存储那份是从草稿深拷出来的，两边不共享；草稿继续作为设置里唯一可原地改的副本。
         if (state.activeReader) {
             const current = state.activeReader.payload;
             const filterChanged = JSON.stringify(current.sourceFilter) !== JSON.stringify(snapshot.bridge.sourceFilter);
@@ -423,10 +490,33 @@ export function createSettingsHost(deps) {
         // 独立层叠上下文，设置面板挂在 body 内时整体被压在 overlay 之下（z-index 翻不出 body），
         // 且 100vw/100dvh 取到受限的 body 尺寸而非视口。
         (doc.documentElement || doc.body).appendChild(root);
+        scheduleFontGuard(root);
         root.addEventListener('click', async (event) => {
-            const tab = event.target.closest('[data-tab]');
-            if (tab) {
-                controller.switchTab(tab.getAttribute('data-tab'));
+            // 窄屏侧边栏：☰ 和遮罩切换抽屉，开关记在遮罩根节点上（重绘不会丢）。
+            const navToggle = event.target.closest('[data-nav-toggle]');
+            if (navToggle) {
+                setNavOpen(root, !isNavOpen(root));
+                return;
+            }
+            const category = event.target.closest('[data-cat]');
+            if (category) {
+                setNavOpen(root, false);
+                controller.switchTab(category.getAttribute('data-cat'));
+                return;
+            }
+            const pageTab = event.target.closest('[data-page]');
+            if (pageTab) {
+                controller.switchPage(pageTab.getAttribute('data-page'));
+                return;
+            }
+            const recent = event.target.closest('[data-recent-path]');
+            if (recent) {
+                controller.goToPath(recent.getAttribute('data-recent-path'), recent.getAttribute('data-recent-page'));
+                return;
+            }
+            const legacyTab = event.target.closest('[data-tab]');
+            if (legacyTab) {
+                controller.switchTab(legacyTab.getAttribute('data-tab'));
                 return;
             }
             const imageSubTab = event.target.closest('[data-image-subtab]');
@@ -435,7 +525,7 @@ export function createSettingsHost(deps) {
                 return;
             }
             const readerSubTab = event.target.closest('[data-reader-subtab]');
-            if(readerSubTab) {
+            if (readerSubTab) {
                 controller.switchReaderSubTab(readerSubTab.getAttribute('data-reader-subtab'));
                 return;
             }
@@ -451,11 +541,13 @@ export function createSettingsHost(deps) {
             }
             const sw = event.target.closest('[data-switch]');
             if (sw) {
+                noteRecentChange(sw, sw.getAttribute('data-switch'));
                 controller.toggle(sw.getAttribute('data-switch'));
                 return;
             }
             const segment = event.target.closest('[data-segment-path]');
             if (segment) {
+                noteRecentChange(segment, segment.getAttribute('data-segment-path'));
                 controller.setValue(segment.getAttribute('data-segment-path'), segment.getAttribute('data-segment-value'));
                 return;
             }
@@ -538,7 +630,7 @@ export function createSettingsHost(deps) {
             // 设置搜索只就地刷新结果列表，不写草稿、不整页重绘，保留输入焦点与软键盘。
             if (target.getAttribute('data-settings-search') !== null) {
                 const list = root.querySelector('[data-settings-search-results]');
-                if (list) list.innerHTML = renderSettingsSearchResults(target.value);
+                if (list) list.innerHTML = renderSettingsSearchResults(target.value, target.value && String(target.value).trim() ? ensureSearchIndex() || SETTINGS_SEARCH_INDEX : SETTINGS_SEARCH_INDEX);
                 return;
             }
             if (target.tagName === 'SELECT') return; // change handles dependent fields once
@@ -569,6 +661,7 @@ export function createSettingsHost(deps) {
             if (target.type === 'color') return;
             const path = target.getAttribute('data-path');
             if (path) {
+                if (target.tagName === 'TEXTAREA') updateCharCounts(root, path, target.value);
                 controller.setValue(path, target.value, { liveInput: true });
                 return;
             }
@@ -697,6 +790,11 @@ export function createSettingsHost(deps) {
                 controller.invoke(`mood-review-assign:${encodeURIComponent(moodReviewWord)}:${encodeURIComponent(event.target.value)}`);
                 return;
             }
+            const formChar = event.target && event.target.getAttribute ? event.target.getAttribute('data-outfit-form-char') : '';
+            if (formChar) {
+                controller.invoke(`scene-set-outfit-form:${[formChar, event.target.getAttribute('data-outfit-form') || '', event.target.value, event.target.getAttribute('data-outfit-form-field') || 'gender'].map((value) => encodeURIComponent(value || '')).join(':')}`);
+                return;
+            }
             const wardrobeChar = event.target && event.target.getAttribute ? event.target.getAttribute('data-outfit-wardrobe-char') : '';
             if (wardrobeChar) {
                 const wardrobeOutfit = event.target.getAttribute('data-outfit-wardrobe') || '';
@@ -708,6 +806,14 @@ export function createSettingsHost(deps) {
                 controller.invoke('worldview:' + String(event.target.value || ''));
                 return;
             }
+            if (event.target && event.target.getAttribute && event.target.getAttribute('data-carry-phone') !== null) {
+                controller.invoke(event.target.checked ? 'carry-phone:on' : 'carry-phone:off');
+                return;
+            }
+            if (event.target && event.target.getAttribute && event.target.getAttribute('data-carry-phone-prompt') !== null) {
+                controller.invoke('carry-phone-prompt:' + encodeURIComponent(String(event.target.value || '')));
+                return;
+            }
             const horrorKind = event.target && event.target.getAttribute ? event.target.getAttribute('data-horror-select') : null;
             if (horrorKind === 'style' || horrorKind === 'gore') {
                 controller.invoke(`horror-${horrorKind}:` + String(event.target.value || ''));
@@ -715,6 +821,7 @@ export function createSettingsHost(deps) {
             }
             const target = event.target;
             const path = event.target && event.target.getAttribute ? event.target.getAttribute('data-path') : '';
+            if (path) noteRecentChange(target, path);
             if (event.target && event.target.type === 'range' && !/^readerSettings\.(typewriter\.sound|statusHud\.position)\./.test(path || '')) return;
             if (!path) return;
             controller.setValue(path, target.value, { liveInput: target.tagName !== 'SELECT' && target.type !== 'color' });
@@ -786,8 +893,22 @@ export function createSettingsHost(deps) {
         }, true);
         root.addEventListener('keydown', (event) => {
             if (onboarding.keydown(event, doc)) return;
+            const recording = state.activeSettings && state.activeSettings.asyncState && state.activeSettings.asyncState.shortcutRecording;
+            if (recording) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (event.key === 'Escape') {
+                    state.activeSettings.asyncState.shortcutRecording = '';
+                    rerenderSettings();
+                    return;
+                }
+                const combo = eventToShortcut(event);
+                if (combo) controller.invoke(`shortcut-set:${recording}:${combo}`);
+                return;
+            }
             if (event.key === 'Escape') {
                 event.preventDefault();
+                if (isNavOpen(root)) { setNavOpen(root, false); return; }
                 controller.close();
             }
         });
@@ -804,6 +925,33 @@ export function createSettingsHost(deps) {
             },
         };
         return domState;
+    }
+
+    // 「最近改过」：用户改了某一项时记一笔（path / 标签 / 所在页）。只在事件里写，失败静默。
+    function noteRecentChange(target, path) {
+        try {
+            const current = state.activeSettings;
+            if (!current || !path) return;
+            const label = settingsRecentLabel(target);
+            if (!label) return;
+            recordSettingsRecent((options.global || globalThis).localStorage, { path, label, page: currentSettingsPage(current) });
+        } catch { /* 记录失败不影响设置本身 */ }
+    }
+
+    // 重绘会沿用上一页的滚动位置，跳到别的分页后停在随机位置：这里改为滚到目标项并闪一下，找不到就回顶部。
+    function revealSetting(entry) {
+        const root = state.activeSettings && state.activeSettings.dom && state.activeSettings.dom.root;
+        const body = root && root.querySelector('.igs-settings-body');
+        if (!body) return;
+        const node = findSettingNode(body, entry);
+        if (!node || typeof node.getBoundingClientRect !== 'function' || typeof body.getBoundingClientRect !== 'function') {
+            body.scrollTop = 0;
+            return;
+        }
+        body.scrollTop = Math.max(0, body.scrollTop + node.getBoundingClientRect().top - body.getBoundingClientRect().top - 48);
+        if (!node.classList) return;
+        node.classList.add('igs-settings-search-flash');
+        (options.global || globalThis).setTimeout(() => node.classList.remove('igs-settings-search-flash'), 1600);
     }
 
     function updateMountedSettings(snapshot) {
@@ -843,8 +991,12 @@ export function createSettingsHost(deps) {
         if (current.dom.overlay) {
             attachSettingsViewportEvents(current.dom, current.dom.overlay);
         }
+        // 换了页面就回到顶部，同一页内重绘沿用滚动位置。
+        const pageChanged = current.renderedPage !== snapshot.page;
+        current.renderedPage = snapshot.page;
         const nextBody = container.querySelector('.igs-settings-body');
-        if (nextBody && scrollTop) nextBody.scrollTop = scrollTop;
+        if (nextBody && pageChanged) nextBody.scrollTop = 0;
+        else if (nextBody && scrollTop) nextBody.scrollTop = scrollTop;
         restoreSettingsFocus(container, focus);
         remountSettingsNotice(container, current.notice);
         remountSettingsProgress(container);
@@ -877,6 +1029,23 @@ export function createSettingsHost(deps) {
         settingsInteracting, openSettings, syncSettingsStagePause, rerenderSettings, closeSettings,
         persistSettingsDraft, reportSettingsFailure, renderImageJobLogList,
     };
+}
+
+// 窄屏分类抽屉的开关记在 #igs-unified-settings 的 data-igs-nav 上，整页重绘（只换内部）不会丢。
+function navHost(root) {
+    return root && typeof root.querySelector === 'function' ? root.querySelector('#igs-unified-settings') : null;
+}
+
+function isNavOpen(root) {
+    const host = navHost(root);
+    return Boolean(host && host.getAttribute('data-igs-nav') === 'open');
+}
+
+function setNavOpen(root, open) {
+    const host = navHost(root);
+    if (!host) return;
+    if (open) host.setAttribute('data-igs-nav', 'open');
+    else host.removeAttribute('data-igs-nav');
 }
 
 // note：大图底部的一行说明，比如淡色借图「这一格还没有自己的图」。

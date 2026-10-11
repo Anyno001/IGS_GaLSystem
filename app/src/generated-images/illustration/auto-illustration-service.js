@@ -1,6 +1,8 @@
+import { floorHasEventCg } from '../../scene/event-cg.js';
 import { numberParagraphs, formatNumberedParagraphs, insertMarkers, insertMarkersAtAnchors, findAnchorInsertIndex, appendedTail, reattachTail, transplantMarkers } from './marker-placer.js';
 import { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } from './floor-body-length.js';
-import { buildPlannerUserPrompt } from './planner-prompt.js';
+import { buildPlannerUserPrompt, formatTodayOutfitBlock } from './planner-prompt.js';
+import { summarizeFloorOutfits } from './floor-outfit-reference.js';
 import { requestWithSoftRetry, DEFAULT_ASSET_TEMPLATES } from './prompt-kit.js';
 import { parseIllustrationPlan } from './planner-parser.js';
 import { normalizeAutoIllustrationSettings } from './auto-illustration-settings.js';
@@ -127,9 +129,11 @@ export function summarizeCharacterDna(characters, sceneAssets) {
     return out;
 }
 
-// CG 顺序：triggerWords → identity → 规划得到的当前外观/动作；defaultAppearance 只交给 planner，不在这里追加。
+// CG 顺序：triggerWords → identity → 规划得到的当前外观/动作。
+// defaultAppearance 和今天的穿着都只交给写词那一步作参考，不在这里追加，避免正文已经换了衣服还被钉死。
 // 具名 char 直接绑定；旧格式无名 char 只在「本张单人且上下文只有一个角色」时绑定，否则不注入并给出 warning。
-export function bindCharacterDnaToSlots(slots, sceneAssets, contextCharacters = []) {
+// identityOnly：柏宝绘 / 智绘姬回退时只拼身份，DNA 负面词交给插件自己的角色库与负面预设，不再并进 uc。
+export function bindCharacterDnaToSlots(slots, sceneAssets, contextCharacters = [], { identityOnly = false } = {}) {
     const resolver = createDnaResolver(sceneAssets);
     const warnings = [];
     if (!resolver || !Array.isArray(slots)) return { slots, warnings };
@@ -151,7 +155,7 @@ export function bindCharacterDnaToSlots(slots, sceneAssets, contextCharacters = 
             return {
                 ...char,
                 tags: parts.positive ? mergePromptTags(parts.positive, char.tags) : char.tags,
-                uc: parts.negative ? mergePromptTags(parts.negative, char.uc) : char.uc,
+                uc: parts.negative && !identityOnly ? mergePromptTags(parts.negative, char.uc) : char.uc,
             };
         });
         if (ambiguous) warnings.push(`第 ${slot.slot || '?'} 张插图有角色未写名字且无法唯一确定，未注入角色 DNA`);
@@ -160,40 +164,6 @@ export function bindCharacterDnaToSlots(slots, sceneAssets, contextCharacters = 
     return { slots: next, warnings };
 }
 
-// 数据库生图返回的 NaiCaption 没有角色名：按同一规则（单人且上下文唯一角色）把 DNA 并进 char caption。
-export function bindCharacterDnaToCaption(caption, sceneAssets, contextCharacters = [], slotId) {
-    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
-    const neg = caption && caption.v4_negative_prompt && caption.v4_negative_prompt.caption;
-    const chars = pos && Array.isArray(pos.char_captions) ? pos.char_captions : [];
-    if (!chars.length) return { caption, warnings: [] };
-    const ucs = neg && Array.isArray(neg.char_captions) ? neg.char_captions : [];
-    const bound = bindCharacterDnaToSlots([{
-        slot: slotId,
-        chars: chars.map((item, i) => ({ tags: (item && item.char_caption) || '', uc: (ucs[i] && ucs[i].char_caption) || '' })),
-    }], sceneAssets, contextCharacters);
-    const next = bound.slots[0].chars;
-    return {
-        warnings: bound.warnings,
-        caption: {
-            ...caption,
-            v4_prompt: {
-                ...caption.v4_prompt,
-                caption: { ...pos, char_captions: chars.map((item, i) => ({ ...item, char_caption: next[i].tags })) },
-            },
-            v4_negative_prompt: {
-                ...(caption.v4_negative_prompt || {}),
-                caption: {
-                    ...(neg || {}),
-                    base_caption: (neg && neg.base_caption) || '',
-                    char_captions: chars.map((item, i) => ({
-                        ...(ucs[i] && typeof ucs[i] === 'object' ? ucs[i] : (item && item.centers ? { centers: item.centers } : {})),
-                        char_caption: next[i].uc || '',
-                    })),
-                },
-            },
-        },
-    };
-}
 
 export function createAutoIllustrationService(deps) {
     const { messageHost, llm, nai, store, getSettings, events } = deps;
@@ -253,13 +223,28 @@ export function createAutoIllustrationService(deps) {
         return null;
     }
 
+    function inheritedNsfw(messageId) {
+        const texts = typeof messageHost.readPreviousAiTexts === 'function' ? messageHost.readPreviousAiTexts(messageId, 5) : [];
+        for (let i = texts.length - 1; i >= 0; i -= 1) {
+            const { scenes } = numberParagraphs(texts[i]);
+            if (scenes.length) return scenes[scenes.length - 1].nsfw;
+        }
+        return false;
+    }
+
     async function ensureRegexesOnce() {
         if (regexesEnsured) return;
         try { regexesEnsured = (await messageHost.ensureMarkerRegexes()).ok === true; } catch (error) { regexesEnsured = false; }
     }
 
+    function todayOutfits(messageId, floorText, characters) {
+        const previousTexts = typeof messageHost.readPreviousAiTexts === 'function'
+            ? messageHost.readPreviousAiTexts(messageId, 3) : [];
+        return summarizeFloorOutfits(characters, readSceneAssets(), { floorText, previousTexts });
+    }
+
     // 数据库生图：只调插件的写词接口和出图接口。生成点按本插件的插图标记写回正文。
-    async function planDbgenCg(messageId, floor, key, s, expected, decision, base, characters = []) {
+    async function planDbgenCg(messageId, floor, key, s, expected, decision, base, outfits = []) {
         report('info', `第 ${messageId} 楼向数据库生图插件要 ${decision.want} 张 CG…`);
         progress(floor, { phase: 'write' });
         await store.putFloor(key, { ...base, status: 'planning', updatedAt: now() });
@@ -277,6 +262,7 @@ export function createAutoIllustrationService(deps) {
                 description: [
                     `为本楼生成${decision.want}张CG，CG点自行选择。slotid从1开始数。挂载点只从剧情正文里逐字摘原句，提示词、出图指导、标签和正文以外的内容不要拿来当挂载点，也不要画进CG。`,
                     cgFramePrompt(cgSize(s)),
+                    formatTodayOutfitBlock(outfits),
                 ].filter(Boolean).join('\n'),
             });
         } catch (error) {
@@ -297,7 +283,6 @@ export function createAutoIllustrationService(deps) {
             report('warn', `第 ${messageId} 楼数据库生图插件返回了 ${Array.isArray(written.captions) ? written.captions.length : 0} 张，按 ${returned.length} 张生成`);
         }
         const slots = [];
-        const sceneAssets = readSceneAssets();
         for (const item of returned) {
             const anchorSentence = String(item.anchorSentence || item.anchor || '').trim();
             const found = findAnchorInsertIndex(floor.text, anchorSentence);
@@ -306,9 +291,8 @@ export function createAutoIllustrationService(deps) {
                 continue;
             }
             const slot = Number(item.slotId) || slots.length + 1;
-            const bound = bindCharacterDnaToCaption(item.caption, sceneAssets, characters, slot);
-            for (const warning of bound.warnings) report('info', `第 ${messageId} 楼${warning}`);
-            slots.push({ slot, caption: bound.caption, anchorSentence });
+            // 返回的每个人身上没有名字，原样出图，不拼 DNA。
+            slots.push({ slot, caption: item.caption, anchorSentence });
         }
         if (!slots.length) {
             const error = '数据库生图插件没有返回能对上正文的生成点';
@@ -326,12 +310,12 @@ export function createAutoIllustrationService(deps) {
             return { ok: false, reason: 'stale' };
         }
         await ensureRegexesOnce();
-        let writtenText = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+        let writtenText = await messageHost.writeFloor(messageId, merged.text, merged.latest, { requireLatest: !floor.anyFloor });
         // 读和写之间又被插件改了一次：按最新正文重搬，最多再试两次。
         for (let retry = 0; retry < 2 && writtenText && writtenText.reason === 'stale'; retry += 1) {
             merged = mergeIntoLatest(messageId, floor, expected, markedText);
             if (!merged) break;
-            writtenText = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+            writtenText = await messageHost.writeFloor(messageId, merged.text, merged.latest, { requireLatest: !floor.anyFloor });
         }
         const keptSlots = merged && merged.slots ? slots.filter((item) => merged.slots.includes(item.slot)) : slots;
         if (!writtenText || !writtenText.ok) {
@@ -352,6 +336,7 @@ export function createAutoIllustrationService(deps) {
             remember(`${key}|${request.slot}`, { status: 'pending', dataUrl: '' });
         }
         let succeeded = 0;
+        let firstFailure = null;
         const errors = [];
         for (let index = 0; index < requests.length; index += 1) {
             const request = requests[index];
@@ -361,7 +346,7 @@ export function createAutoIllustrationService(deps) {
                 result = { ok: false, error: '没有可出图的提示词' };
             } else {
                 try {
-                    result = await nai.generateDbgenCaption({ caption: request.caption, size: cgSize(s), messageId });
+                    result = await nai.generateDbgenCaption({ caption: request.caption, size: cgSize(s), messageId, promptKind: base.kind === 'nsfw' ? 'nsfwCg' : 'cg' });
                 } catch (error) {
                     result = { ok: false, error: (error && error.message) || '出图失败' };
                 }
@@ -369,6 +354,7 @@ export function createAutoIllustrationService(deps) {
             if (result && result.ok) succeeded += 1;
             else {
                 errors.push((result && result.error) || '出图失败');
+                if (result && result.failure && !firstFailure) firstFailure = result.failure;
                 report('error', `第 ${messageId} 楼第 ${request.slot} 张插图生成失败：${(result && result.error) || '出图失败'}`);
             }
             const record = result && result.ok
@@ -386,15 +372,21 @@ export function createAutoIllustrationService(deps) {
         return {
             ok: false, reason: 'generation-failed', count: succeeded, failedCount,
             error: `${failedCount} 张插图失败${succeeded ? `（成功 ${succeeded} 张）` : ''}：${Array.from(new Set(errors)).join('；')}`,
+            ...(firstFailure && { failure: firstFailure }),
         };
     }
 
     // 规划期间正文被其他插件改了：只在末尾追加时原样接上；别处改过就把标记按前后文搬到新正文，对不上的那张丢掉。
     // 「最新楼」只看后面有没有用户发言，插件在后面另起的楼不影响写回。
     // 返回 { text, latest, slots }，slots 为 null 表示全部保留；一张都放不下返回 null。
+    // anyFloor：允许画不是最新的楼（工具栏手动出图、翻旧楼补 CG），写回时也不要求还是最新楼。
+    function withAnyFloor(floor, anyFloor) {
+        return floor && anyFloor ? { ...floor, anyFloor: true } : floor;
+    }
+
     function mergeIntoLatest(messageId, floor, expected, markedText) {
         const latest = messageHost.readFloor(messageId);
-        if (!latest || !latest.isAi || !latest.isLatest || latest.chatId !== floor.chatId || latest.swipeId !== floor.swipeId) return null;
+        if (!latest || !latest.isAi || !(latest.isLatest || floor.anyFloor) || latest.chatId !== floor.chatId || latest.swipeId !== floor.swipeId) return null;
         const tail = appendedTail(expected.text, latest.text);
         if (tail != null) {
             if (tail) report('info', `第 ${messageId} 楼末尾被其他插件追加了内容，插图照常插在原文里`);
@@ -427,16 +419,21 @@ export function createAutoIllustrationService(deps) {
         if (typeof nai.waitSourceFloorPrompts === 'function' && ['baibai', 'chatu8'].includes(backendReady().via)) {
             progress(floor, { phase: 'write' });
             await nai.waitSourceFloorPrompts(messageId);
-            floor = messageHost.readFloor(messageId) || floor;
+            floor = withAnyFloor(messageHost.readFloor(messageId), floor.anyFloor) || floor;
         }
         // 标记还在但记录丢了（换设备、清缓存）时先去掉旧标记再规划，避免重复插入；写回时仍按原文校验。
         const expected = floor;
         if (/(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/i.test(floor.text)) floor = { ...floor, text: stripIllustrationMarkers(floor.text) };
         const numbered = numberParagraphs(floor.text);
-        const decision = numbered.paragraphs.length ? decide(s, numbered.isNsfw, manual) : null;
+        // 本楼没写场景标签 = 场景延续：继承最近一个带场景标签的楼的 NSFW，不让 NSFW 掉进过场概率。
+        if (!numbered.scenes.length) numbered.isNsfw = inheritedNsfw(messageId);
+        // 作者在 CG 库里预置了这一幕：用库里的图，不再生成过场图（NSFW 照常）。
+        const presetCg = !numbered.isNsfw && typeof deps.getSceneAssets === 'function'
+            && floorHasEventCg(floor.text, (deps.getSceneAssets() || {}).eventCgs);
+        const decision = numbered.paragraphs.length && !presetCg ? decide(s, numbered.isNsfw, manual) : null;
         if (!decision) {
             await store.putFloor(key, { kind: 'none', status: 'done', updatedAt: now() });
-            const why = !numbered.paragraphs.length ? '本楼没有可读正文'
+            const why = !numbered.paragraphs.length ? '本楼没有可读正文' : presetCg ? '本楼命中 CG 库里的预置 CG'
                 : (!numbered.isNsfw && !s.interludeEnabled ? '本楼未标记 NSFW 场景（需正文含 [igs-scene:场景|时间|天气|nsfw]），且未开启过场插图'
                     : '过场插图本次未触发（按触发概率随机）');
             report('info', `第 ${messageId} 楼跳过：${why}`);
@@ -450,7 +447,8 @@ export function createAutoIllustrationService(deps) {
             report('error', `第 ${messageId} 楼插图未开始：${backend.ready.error}`);
             return { ok: false, reason: 'backend-unavailable', error: backend.ready.error };
         }
-        if (backend.via === 'dbgen') return planDbgenCg(messageId, floor, key, s, expected, decision, base, numbered.characters);
+        const outfits = todayOutfits(messageId, floor.text, numbered.characters);
+        if (backend.via === 'dbgen') return planDbgenCg(messageId, floor, key, s, expected, decision, base, outfits);
         report('info', `第 ${messageId} 楼开始规划插图（${decision.kind === 'nsfw' ? 'NSFW' : '过场'}），正在请求副 LLM…`);
         progress(floor, { phase: 'write' });
         await store.putFloor(key, { ...base, status: 'planning', updatedAt: now() });
@@ -463,6 +461,7 @@ export function createAutoIllustrationService(deps) {
                 scenes: numbered.scenes, characters: numbered.characters,
                 previousText, want: decision.want, exact: decision.exact, isNsfw: numbered.isNsfw,
                 characterDna: summarizeCharacterDna(numbered.characters, readSceneAssets()),
+                outfits,
                 frame: cgFramePrompt(cgSize(s)),
             });
             plan = await requestWithSoftRetry(llm, {
@@ -491,7 +490,7 @@ export function createAutoIllustrationService(deps) {
             return { ok: false, reason: 'plan-failed', error: plan.error };
         }
         {
-            const bound = bindCharacterDnaToSlots(plan.slots, readSceneAssets(), numbered.characters);
+            const bound = bindCharacterDnaToSlots(plan.slots, readSceneAssets(), numbered.characters, { identityOnly: backend.via === 'baibai' || backend.via === 'chatu8' });
             plan.slots = bound.slots;
             for (const warning of bound.warnings) report('info', `第 ${messageId} 楼${warning}`);
         }
@@ -505,11 +504,11 @@ export function createAutoIllustrationService(deps) {
             return { ok: false, reason: 'stale' };
         }
         await ensureRegexesOnce();
-        let written = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+        let written = await messageHost.writeFloor(messageId, merged.text, merged.latest, { requireLatest: !floor.anyFloor });
         for (let retry = 0; retry < 2 && written && written.reason === 'stale'; retry += 1) {
             merged = mergeIntoLatest(messageId, floor, expected, markedText);
             if (!merged) break;
-            written = await messageHost.writeFloor(messageId, merged.text, merged.latest);
+            written = await messageHost.writeFloor(messageId, merged.text, merged.latest, { requireLatest: !floor.anyFloor });
         }
         if (merged && merged.slots) plan.slots = plan.slots.filter((slot) => merged.slots.includes(Number(slot.slot)));
         if (!written || !written.ok) {
@@ -544,18 +543,20 @@ export function createAutoIllustrationService(deps) {
             remember(`${key}|${request.slot}`, { status: 'pending', dataUrl: '' });
         }
         let succeeded = 0;
+        let firstFailure = null;
         const errors = [];
         for (let index = 0; index < requests.length; index += 1) {
             const request = requests[index];
             progress(floor, { phase: 'paint', done: index + 1, total: requests.length });
             let result;
             const size = cgSize(s);
-            const meta = { messageId, slot: request.slot, description: request.description || request.scene, size, imageKind: 'cg' };
+            const meta = { messageId, slot: request.slot, description: request.description || request.scene, size, imageKind: 'cg', promptKind: base.kind === 'nsfw' ? 'nsfwCg' : 'cg' };
             try { result = await nai.generate(request, { ...s.nai, size }, meta); }
             catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
             if (result && result.ok) succeeded += 1;
             else {
                 errors.push((result && result.error) || 'NAI 生成失败');
+                if (result && result.failure && !firstFailure) firstFailure = result.failure;
                 report('error', `第 ${messageId} 楼第 ${request.slot} 张插图生成失败：${(result && result.error) || 'NAI 生成失败'}`);
             }
             const record = result && result.ok
@@ -573,6 +574,7 @@ export function createAutoIllustrationService(deps) {
         return {
             ok: false, reason: 'generation-failed', count: succeeded, failedCount,
             error: `${failedCount} 张插图失败${succeeded ? `（成功 ${succeeded} 张）` : ''}：${Array.from(new Set(errors)).join('；')}`,
+            ...(firstFailure && { failure: firstFailure }),
         };
     }
 
@@ -583,11 +585,14 @@ export function createAutoIllustrationService(deps) {
         return { all, retry: all.filter((slot) => slot.status !== 'done') };
     }
 
-    async function processMessage(messageId, { manual = false } = {}) {
+    // backfill：翻到旧楼时补 CG。和自动出图一样掷过场概率、看字数、跳过已经判定过的楼，只是放开最新楼的限制。
+    async function processMessage(messageId, { manual = false, backfill = false } = {}) {
         const s = settings();
         if (!s.nsfwEnabled && !s.interludeEnabled) return { ok: true, reason: 'disabled' };
-        const floor = messageHost.readFloor(messageId);
-        if (!floor || !floor.isAi || !floor.isLatest || !floor.chatId || !floor.text.trim()) {
+        if (backfill && !s.backfillOldFloors) return { ok: true, reason: 'disabled' };
+        // 手动（工具栏）可画旧楼：续读停在哪一楼就画哪一楼；自动出图仍只认最新楼。
+        const floor = withAnyFloor(messageHost.readFloor(messageId), manual || backfill);
+        if (!floor || !floor.isAi || !(floor.isLatest || floor.anyFloor) || !floor.chatId || !floor.text.trim()) {
             return { ok: true, reason: 'not-eligible' };
         }
         const key = floorKeyOf(floor);
@@ -716,8 +721,8 @@ export function createAutoIllustrationService(deps) {
     async function rerollSlot(query = {}) {
         const identity = identityOf(query, query.slot);
         if (!identity) return { ok: false, reason: 'invalid-identity' };
-        const floorInfo = messageHost.readFloor(identity.floor.messageId);
-        if (!floorInfo || !floorInfo.isAi || !floorInfo.isLatest || floorInfo.chatId !== identity.floor.chatId || floorInfo.swipeId !== identity.floor.swipeId) {
+        const floorInfo = withAnyFloor(messageHost.readFloor(identity.floor.messageId), true);
+        if (!floorInfo || !floorInfo.isAi || floorInfo.chatId !== identity.floor.chatId || floorInfo.swipeId !== identity.floor.swipeId) {
             return { ok: true, reason: 'not-eligible' };
         }
         const key = floorKeyOf(identity.floor);
@@ -742,8 +747,8 @@ export function createAutoIllustrationService(deps) {
     async function rerollFloor(messageId) {
         const s = settings();
         if (!s.nsfwEnabled && !s.interludeEnabled) return { ok: true, reason: 'disabled' };
-        const floor = messageHost.readFloor(messageId);
-        if (!floor || !floor.isAi || !floor.isLatest || !floor.chatId || !floor.text.trim()) return { ok: true, reason: 'not-eligible' };
+        const floor = withAnyFloor(messageHost.readFloor(messageId), true);
+        if (!floor || !floor.isAi || !floor.chatId || !floor.text.trim()) return { ok: true, reason: 'not-eligible' };
         const key = floorKeyOf(floor);
         if (locks.has(key)) return locks.get(key);
         const job = (async () => {
@@ -752,7 +757,7 @@ export function createAutoIllustrationService(deps) {
             const slots = await store.getSlots(key);
             await dropSlots(floor, key, slots);
             if (!slots.length) emit(floor, 1);
-            const latest = messageHost.readFloor(messageId) || { ...floor, text: stripIllustrationMarkers(floor.text) };
+            const latest = withAnyFloor(messageHost.readFloor(messageId), true) || { ...floor, text: stripIllustrationMarkers(floor.text) };
             return run(Number(messageId), latest, key, s, true);
         })().finally(() => { if (locks.get(key) === job) locks.delete(key); });
         locks.set(key, job);

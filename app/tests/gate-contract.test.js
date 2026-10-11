@@ -38,14 +38,13 @@ import { findTruncatedFontTables } from '../scripts/font-slices.js';
 import { getSettingsStyleText } from '../src/visual/igs-ui/settings-style.js';
 import { DIALOG_FONT_OPTIONS } from '../src/visual/igs-ui/reader-host-constants.js';
 import {
-    getReaderSubTabTemplate,
-    getSettingsTabTemplate,
-    normalizeReaderSubTab,
-    SCENE_SUBTAB_DEFS,
-    SCENE_RULES_TEMPLATE,
-    READER_SUBTAB_DEFS,
-    SETTINGS_TAB_DEFS,
+    getPageTemplate,
+    RULES_TEMPLATE,
+    WARDROBE_TEMPLATE,
+    EVENTCG_TEMPLATE,
+    SCENE_HEAD_TEMPLATE,
 } from '../src/visual/igs-ui/settings-tabs.js';
+import { SETTINGS_CATEGORIES, SETTINGS_PAGES, categoryOfPage, pagesOfCategory, resolveSettingsPage } from '../src/visual/igs-ui/settings-pages.js';
 
 const appRoot = path.resolve(import.meta.dirname, '..');
 const projectRoot = path.resolve(appRoot, '..');
@@ -166,21 +165,13 @@ test('gate:loader-json:matches loader source and references public bundle', () =
     });
     assert.match(loaderJson.content, /QR_BUTTON_NAME = 'Gal模拟'/);
     assert.match(loaderJson.content, /getButtonEvent\(QR_BUTTON_NAME\)/);
-    const version = readJson('package.json').version;
-    const releasePath = path.join(projectRoot, 'loader', `酒馆助手脚本-沉浸式Galgame系统（自动更新） v${version}.json`);
-    assert.deepEqual(JSON.parse(fs.readFileSync(releasePath, 'utf8')), loaderJson);
-
-    // 固定版 loader：锁定具体 tag、注入 IGS_LOADER_REF、不自动更新。按需生成（--pin），
-    // 不随升号自动产出。固定版是历史产物，只校验它仍锁定自己的 ref 且是可导入脚本体，
-    // 不再要求它包含当前 mutable 的 loader 源码。
-    const pinnedRef = 'v0.23.21';
-    const pinnedJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'loader', `沉浸式Galgame系统 ${pinnedRef}.json`), 'utf8'));
-    assert.equal(pinnedJson.name, `沉浸式Galgame系统 ${pinnedRef}`);
-    assert.match(pinnedJson.content, new RegExp(`IGS_LOADER_REF=["']${pinnedRef.replace(/\./g, '\\.')}["']`));
-    assert.equal(pinnedJson.type, 'script');
-    assert.equal(typeof pinnedJson.content, 'string');
-    assert.match(pinnedJson.content, /igs\.bundle\.js/);
-    assert.match(pinnedJson.content, /REPOSITORY = '\S+'/);
+    // 当前中文导入件与自动更新入口一致，不依赖未打的版本 tag。
+    const releaseRef = `v${readJson('package.json').version}`;
+    const releaseFiles = fs.readdirSync(path.join(projectRoot, 'loader')).filter((name) => / v\d+\.\d+\.\d+\.json$/.test(name));
+    const releaseName = `酒馆助手脚本-沉浸式Galgame系统（自动更新） ${releaseRef}.json`;
+    assert.ok(releaseFiles.includes(releaseName), 'current automatic-update import must exist');
+    const releaseJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'loader', releaseName), 'utf8'));
+    assert.deepEqual(releaseJson, loaderJson);
 });
 
 test('gate:dist-bundle:is-self-contained-for-loader-cache-bust', () => {
@@ -672,8 +663,10 @@ test('gate:igs-compat:api-shape', async () => {
     try {
         const settingsResult = vn.openSettings({ tab: 'basic' });
         assert.equal(settingsResult.ok, true);
-        assert.equal(settingsResult.snapshot.tabs.length, 4);
-        assert.equal(settingsResult.snapshot.tabs[0].label, '基础');
+        // 旧的 tab: 'basic' 落到仪表盘；契约按分类给出。
+        assert.equal(settingsResult.snapshot.tabs.length, 10);
+        assert.equal(settingsResult.snapshot.tabs[0].label, '仪表盘');
+        assert.equal(settingsResult.snapshot.page, 'dash');
         const generated = await vn.generateImage({ prompt: 'moon' });
         assert.equal(generated.ok, false);
         // 地址留空走 NAI 官方接口，缺的是 Key。
@@ -810,47 +803,62 @@ test('gate:igs-ui:reader-source-keeps-original-selectors', () => {
     assert.doesNotMatch(dbControllerText, /setProperty\('--igs-glass-bg'/);
 });
 
-test('gate:igs-ui:settings-shell-keeps-original-tabs', () => {
+test('gate:igs-ui:settings-shell-has-sidebar-and-page-registry', () => {
     const fixture = readJson('fixtures/igs-ui/settings-panel-snapshot.json');
     const shell = getSettingsShellTemplate();
 
     assert.match(shell, /igs-settings-shell/);
     assert.match(shell, /igs-settings-theme-switch/);
     assert.match(shell, /settingsThemeSwitch/);
-    assert.match(shell, /igs-settings-tabs/);
+    assert.match(shell, /igs-settings-nav/);
+    assert.match(shell, /data-nav-toggle/);
     assert.match(shell, /igs-settings-body/);
+    assert.doesNotMatch(shell, /igs-settings-tabs/, '旧的 4 格横条已经去掉');
 
-    for (const tab of fixture.tabs) {
-        const defined = SETTINGS_TAB_DEFS.find(([id]) => id === tab.id);
-        assert.ok(defined);
-        assert.equal(defined[1], tab.label);
-        assert.ok(getSettingsTabTemplate(tab.id).length > 0);
+    assert.deepEqual(SETTINGS_CATEGORIES.map(([id, label]) => ({ id, label })), fixture.tabs.map(({ id, label }) => ({ id, label })));
+    assert.deepEqual(SETTINGS_PAGES.map(([id, label, category]) => ({ id, label, category })), fixture.pages);
+    for (const [id] of SETTINGS_PAGES) {
+        assert.equal(categoryOfPage(id), SETTINGS_PAGES.find(([pid]) => pid === id)[2]);
+        // dash / chars / scenes / review 的内容是在渲染器里直接拼的，没有模板。
+        if (!['dash', 'chars', 'scenes', 'review'].includes(id)) assert.ok(getPageTemplate(id).length > 0, id);
     }
+    // 只有一个子页的分类不显示子页条；演出 5 页、角色 3 页、场景 3 页、生图与AI 5 页、数据 2 页。
+    assert.deepEqual(['perf', 'chars', 'scenes', 'ai', 'data', 'style', 'ui'].map((c) => pagesOfCategory(c).length), [5, 3, 3, 5, 2, 1, 4]);
 
-    // 素材页只有一层页签：角色 / 场景 / 待确认 / 规则。衣柜提示词在规则页。
-    assert.match(getSettingsTabTemplate('scene'), /sceneSubTabs/);
-    assert.match(getSettingsTabTemplate('scene'), /assetScopeBar/);
-    assert.deepEqual(SCENE_SUBTAB_DEFS.map(([id, label]) => ({ id, label })), fixture.sceneSubTabs);
-    assert.match(SCENE_RULES_TEMPLATE, /data-action="reset-prompt-rule"/);
-    assert.match(SCENE_RULES_TEMPLATE, /data-action="save-prompt-rule"/);
-    assert.match(SCENE_RULES_TEMPLATE, /data-result="prompt-rule"/);
-    assert.match(SCENE_RULES_TEMPLATE, /wardrobeSection/);
-    assert.doesNotMatch(SCENE_RULES_TEMPLATE, /scenePresetBar|sceneSubTabs/);
+    // 角色、场景分类的页面共用同一个头部：素材模式开关 + 当前角色卡。
+    assert.match(SCENE_HEAD_TEMPLATE, /sceneToggle/);
+    assert.match(SCENE_HEAD_TEMPLATE, /assetScopeBar/);
+    assert.match(RULES_TEMPLATE, /data-action="reset-prompt-rule"/);
+    assert.match(RULES_TEMPLATE, /data-action="save-prompt-rule"/);
+    assert.match(RULES_TEMPLATE, /data-result="prompt-rule"/);
+    assert.doesNotMatch(RULES_TEMPLATE, /wardrobeSection|moodSection|eventCgSection/);
+    assert.match(WARDROBE_TEMPLATE, /wardrobeSection/);
+    assert.match(WARDROBE_TEMPLATE, /moodSection/);
+    assert.match(EVENTCG_TEMPLATE, /eventCgSection/);
 
-    assert.match(getSettingsTabTemplate('reader'), /readerSubTabs/);
-    for (const subTab of fixture.readerSubTabs) {
-        const defined = READER_SUBTAB_DEFS.find(([id]) => id === subTab.id);
-        assert.ok(defined);
-        assert.equal(defined[1], subTab.label);
-        assert.ok(getReaderSubTabTemplate(subTab.id).length > 0);
-    }
+    // 旧 tab / 子页 id 都映射到新页面。
+    const legacy = [
+        [{ tab: 'basic' }, 'dash'], [{ tab: 'regex' }, 'parse'], [{ tab: 'basic', open: ['source-filter'] }, 'parse'], [{ tab: 'basic', open: ['body-format'] }, 'parse'],
+        [{ tab: 'reader' }, 'style'], [{ tab: 'reader', readerSubTab: 'display' }, 'style'], [{ tab: 'reader', readerSubTab: 'theme' }, 'text'],
+        [{ tab: 'reader', readerSubTab: 'toolbar' }, 'ui-reader'], [{ tab: 'reader', readerSubTab: 'visual' }, 'ui-reader'], [{ tab: 'reader', readerSubTab: 'options' }, 'ui-reader'], [{ page: 'ui' }, 'ui-reader'], [{ tab: 'ui' }, 'ui-reader'],
+        [{ tab: 'reader', readerSubTab: 'performance' }, 'perf-text'], [{ tab: 'reader', readerSubTab: 'performance', open: ['perf-group-sound'] }, 'sound'],
+        [{ tab: 'reader', readerSubTab: 'performance', open: ['perf-group-rhythm'] }, 'perf-rhythm'],
+        [{ tab: 'scene' }, 'chars'], [{ tab: 'scene', sceneSubTab: 'scenes' }, 'scenes'], [{ tab: 'scene', sceneSubTab: 'review' }, 'review'],
+        [{ tab: 'scene', sceneSubTab: 'generated' }, 'review'], [{ tab: 'scene', sceneSubTab: 'rules' }, 'rules'],
+        [{ tab: 'scene', sceneSubTab: 'rules', open: ['rules-mood'] }, 'wardrobe'], [{ tab: 'scene', sceneSubTab: 'rules', wardrobeFocus: '校服' }, 'wardrobe'],
+        [{ tab: 'scene', sceneSubTab: 'rules', open: ['rules-event-cg'] }, 'eventcg'],
+        [{ tab: 'image' }, 'source'], [{ tab: 'image', imageSubTab: 'llm' }, 'llm'], [{ tab: 'image', imageSubTab: 'auto' }, 'kinds'],
+        [{ tab: 'image', imageSubTab: 'prompts' }, 'kinds'], [{ tab: 'image', imageSubTab: 'content' }, 'kinds'], [{ tab: 'image', imageSubTab: 'logs' }, 'logs'],
+        [{ tab: 'image', imageSubTab: 'cg' }, 'cglib'], [{ tab: 'image', imageSubTab: 'other' }, 'source'],
+        [{ tab: 'perf' }, 'perf-text'], [{ tab: 'ai' }, 'source'], [{ page: 'wardrobe' }, 'wardrobe'], [{ tab: 'nonsense' }, 'dash'], [{}, 'dash'],
+    ];
+    for (const [spec, expected] of legacy) assert.equal(resolveSettingsPage(spec), expected, JSON.stringify(spec));
 
-    const dialogTemplate = getReaderSubTabTemplate('dialog');
-    const textTemplate = getReaderSubTabTemplate('text');
-    const performanceTemplate = getReaderSubTabTemplate('performance');
-    const interfaceTemplate = getReaderSubTabTemplate('interface');
-    const visualAliasTemplate = getReaderSubTabTemplate('visual');
-    const optionsAliasTemplate = getReaderSubTabTemplate('options');
+    // 页面模板的字段归属：对话框 / 文字 / 界面 / 演出各管各的。
+    const dialogTemplate = getPageTemplate('style');
+    const textTemplate = getPageTemplate('text');
+    const performanceTemplate = getPageTemplate('perf-stage');
+    const interfaceTemplate = ['ui-reader', 'ui-bg', 'ui-option', 'ui-bar'].map((id) => getPageTemplate(id)).join(' ');
     assert.match(dialogTemplate, /data-reader-pane="dialog"/);
     const dialogHierarchy = [
         '风格', 'dialogSkinField', 'gradientVeilFields', 'statusLineToggle',
@@ -883,22 +891,21 @@ test('gate:igs-ui:settings-shell-keeps-original-tabs', () => {
     assert.doesNotMatch(dialogTemplate, /optionBubbleToggle|pinnedButtonsField|typewriterToggle/);
     assert.match(performanceTemplate, /data-reader-pane="performance"/);
     assert.match(performanceTemplate, /performanceSections/);
+    assert.equal(getPageTemplate('sound'), performanceTemplate);
     assert.match(interfaceTemplate, /toolbarScaleField/);
     assert.match(interfaceTemplate, /pinnedButtonsField/);
     assert.match(interfaceTemplate, /statusHudSection/);
-    // 检测图像数量是解析排错项，挪到「基础 › 标签解析」。
+    // 「打开方式」「显示提示弹窗」放在界面页最上面一张「阅读器」卡里。
+    assert.ok(interfaceTemplate.indexOf('openModeField') > 0 && interfaceTemplate.indexOf('openModeField') < interfaceTemplate.indexOf('背景图'));
+    assert.match(interfaceTemplate, />阅读器<\/div>/);
+    // 检测图像数量是解析排错项，挪到「生图与AI › 正文解析」。
     assert.doesNotMatch(interfaceTemplate, /imageCountField/);
-    assert.match(getSettingsTabTemplate('basic'), /imageCountField/);
+    assert.match(getPageTemplate('parse'), /imageCountField/);
     assert.match(interfaceTemplate, /imgModeField/);
     assert.match(interfaceTemplate, /imgBrightnessField/);
     assert.match(interfaceTemplate, /optionFontSizeField/);
     assert.match(interfaceTemplate, /optionBubbleToggle/);
     assert.doesNotMatch(interfaceTemplate, /dialogWidthField|typewriterToggle/);
-    assert.equal(visualAliasTemplate, interfaceTemplate);
-    assert.equal(optionsAliasTemplate, interfaceTemplate);
-    assert.equal(normalizeReaderSubTab('display'), 'dialog');
-    assert.equal(normalizeReaderSubTab('theme'), 'text');
-    assert.equal(normalizeReaderSubTab('toolbar'), 'interface');
 });
 
 test('gate:igs-ui:settings-style-keeps-original-geometry', () => {
@@ -916,8 +923,9 @@ test('gate:igs-ui:settings-style-keeps-original-geometry', () => {
     assert.match(styleText, new RegExp(escapeRegExp(fixture.styleChecks.mobileMedia)));
     assert.match(styleText, new RegExp(escapeRegExp(fixture.styleChecks.segmentedDynamicSpacing)));
     assert.match(styleText, new RegExp(escapeRegExp(fixture.styleChecks.segmentedButtonBox)));
-    assert.match(styleText, new RegExp(escapeRegExp(fixture.styleChecks.mainTabsEqual)));
-    assert.match(styleText, /\.igs-settings-tab\{[^}]*width:100%[^}]*text-align:center/);
+    assert.match(styleText, new RegExp(escapeRegExp(fixture.styleChecks.wideShell)));
+    assert.match(styleText, new RegExp(escapeRegExp(fixture.styleChecks.navDrawer)));
+    assert.match(styleText, /\.igs-settings-nav-item\{[^}]*width:100%[^}]*text-align:left/);
     assert.doesNotMatch(styleText, /\.igs-segmented-btn\{[^}]*padding:0 (?:4|6)px/);
     assert.doesNotMatch(styleText, /@media \(max-width:640px\)[\s\S]*\.igs-segmented-btn\{/);
     assert.match(styleText, /\.igs-segmented-btn\{[^}]*min-width:0;[^}]*overflow:hidden/);
@@ -949,14 +957,11 @@ test('gate:igs-ui:settings-style-keeps-material-language', () => {
         'radiusSmall',
         'flatShell',
         'flatBackdrop',
-        'activeTab',
-        'mainTabsEqual',
+        'navItemActive',
+        'pageTabs',
+        'pageTabActive',
         'themeSwitch',
         'themeSwatch',
-        'sceneSettingsSubTabs',
-        'sceneSettingsSubTabActive',
-        'readerSubTabs',
-        'readerSubTabActive',
         'flatSegmentedIndicator',
     ]) {
         assert.match(styleText, new RegExp(escapeRegExp(checks[key])));
@@ -982,7 +987,10 @@ test('gate:igs-ui:settings-style-uses-soft-radius-tokens', () => {
     assert.match(styleText, /--igs-settings-radius-small:4px/);
     assert.match(styleText, /\.igs-settings-shell\{[^}]*border-radius:var\(--igs-settings-radius-shell\)/);
     assert.match(styleText, /\.igs-settings-field input,[^{]+\{[^}]*border-radius:var\(--igs-settings-radius-control\)/);
-    assert.match(styleText, /\.igs-settings-tab\{[^}]*border-radius:var\(--igs-settings-radius-small\)/);
+    assert.match(styleText, /\.igs-settings-nav-item\{[^}]*border-radius:var\(--igs-settings-radius-small\)/);
+    const pageTab = styleText.match(/\.igs-page-tab\{[^}]*\}/)[0];
+    assert.match(pageTab, /border:0;border-radius:var\(--igs-settings-radius-small\);background:transparent/);
+    assert.doesNotMatch(styleText, /.igs-page-tab.is-active::after/);
     assert.doesNotMatch(styleText, /border-radius:999px/);
     assert.doesNotMatch(styleText, /(?:linear|radial)-gradient\(/);
     const shadows = Array.from(styleText.matchAll(/box-shadow:([^;}]+)/g), (match) => match[1].trim());
@@ -1004,6 +1012,26 @@ test('gate:igs-ui:default-narration-adds-five-pixels-in-every-mode', () => {
     assert.match(source, /\.igs-mode-embedded \.igs-dialog\[data-igs-narration="1"\]\{padding-top:14px;\}/);
     assert.match(rendererText, /if \(!materialDialog && !snapshot\.content\.speaker\)/);
     assert.match(rendererText, /dialog\.removeAttribute\('data-igs-narration'\)/);
+});
+
+test('gate:igs-ui:reader-style-has-no-unclosed-rule', () => {
+    // 普通规则里再出现「{」说明上一条没闭合，后面整段样式会失效（下课铃图标曾因此铺成满屏黑块）。
+    const css = getOriginalReaderStyleText().replace(/\/\*[\s\S]*?\*\//g, '');
+    const stack = [];
+    let last = 0;
+    for (let i = 0; i < css.length; i += 1) {
+        if (css[i] === '{') {
+            const head = css.slice(last, i).trim();
+            if (stack.length && !stack[stack.length - 1].startsWith('@')) assert.fail(`未闭合的规则：${stack[stack.length - 1].slice(-80)}`);
+            stack.push(head);
+            last = i + 1;
+        } else if (css[i] === '}') {
+            assert.ok(stack.length, `多余的右括号，位置 ${i}`);
+            stack.pop();
+            last = i + 1;
+        } else if (css[i] === ';' && stack.length && stack[stack.length - 1].startsWith('@')) last = i + 1;
+    }
+    assert.equal(stack.length, 0);
 });
 
 test('gate:igs-ui:double-click-hides-chrome-and-keeps-cg-and-fx', () => {
@@ -1109,7 +1137,7 @@ test('gate:igs-ui:classic-dialog-assets-and-style', () => {
         assert.equal(bytes.readUInt32BE(20), height);
     }
     assert.match(CLASSIC_SKIN_CSS, /data-igs-dialog-skin="western-classic"/);
-    assert.match(CLASSIC_SKIN_CSS, /border-image:url\("__IGS_ASSET__western-classic\/dialog\.png__"\) 0 110 0 110 fill \/ 0 110px 0 110px \/ 0 stretch/);
+    assert.match(CLASSIC_SKIN_CSS, /border-image:url\("__IGS_ASSET__western-classic\/dialog\.png__"\) 0 110 0 110 fill \/ 0 calc\(110px \* var\(--igs-slice-k,1\)\) 0 calc\(110px \* var\(--igs-slice-k,1\)\) \/ 0 stretch/);
     assert.match(CLASSIC_SKIN_CSS, /\.igs-speaker\{[^}]*left:60px;top:-22px;width:max-content;min-width:150px;max-width:calc\(100% - 120px\);height:52px;line-height:44px/);
     assert.match(CLASSIC_SKIN_CSS, /\.igs-speaker\{[^}]*border-image:url\("__IGS_ASSET__western-classic\/name\.png__"\) 0 65 0 65 fill \/ 0 50px 0 50px \/ 0 stretch/);
     assert.match(CLASSIC_SKIN_CSS, /\.igs-speaker\{[^}]*white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:15px;font-weight:600/);
@@ -1161,15 +1189,15 @@ test('gate:igs-ui:classic-dialog-assets-and-style', () => {
 test('gate:igs-ui:illustrated-dialog-style-uses-three-slice-assets', () => {
     assert.match(ILLUSTRATED_SKIN_CSS, new RegExp(`data-igs-dialog-skin="${DIALOG_SKIN_PLANT_COFFEE}"`));
     assert.match(ILLUSTRATED_SKIN_CSS, /height:177px;min-height:177px;max-height:177px/);
-    assert.match(ILLUSTRATED_SKIN_CSS, /border-image:url\("__IGS_ASSET__plant-coffee\/dialog\.png__"\) 0 130 0 130 fill \/ 0 130px 0 130px \/ 0 stretch/);
+    assert.match(ILLUSTRATED_SKIN_CSS, /border-image:url\("__IGS_ASSET__plant-coffee\/dialog\.png__"\) 0 130 0 130 fill \/ 0 calc\(130px \* var\(--igs-slice-k,1\)\) 0 calc\(130px \* var\(--igs-slice-k,1\)\) \/ 0 stretch/);
     assert.match(ILLUSTRATED_SKIN_CSS, new RegExp(`data-igs-dialog-skin="${DIALOG_SKIN_BLACK_WHITE_MANGA}"`));
     assert.match(ILLUSTRATED_SKIN_CSS, /height:191px;min-height:191px;max-height:191px/);
-    assert.match(ILLUSTRATED_SKIN_CSS, /border-image:url\("__IGS_ASSET__black-white-manga\/dialog\.png__"\) 0 89 0 90 fill \/ 0 89px 0 90px \/ 0 stretch/);
+    assert.match(ILLUSTRATED_SKIN_CSS, /border-image:url\("__IGS_ASSET__black-white-manga\/dialog\.png__"\) 0 89 0 90 fill \/ 0 calc\(89px \* var\(--igs-slice-k,1\)\) 0 calc\(90px \* var\(--igs-slice-k,1\)\) \/ 0 stretch/);
     assert.match(ILLUSTRATED_SKIN_CSS, new RegExp(`data-igs-dialog-skin="${DIALOG_SKIN_CUTE_PINK}"`));
     assert.match(ILLUSTRATED_SKIN_CSS, /height:215px;min-height:215px;max-height:215px/);
-    assert.match(ILLUSTRATED_SKIN_CSS, /border-image:url\("__IGS_ASSET__cute-pink\/dialog\.png__"\) 0 145 0 120 fill \/ 0 145px 0 120px \/ 0 stretch/);
+    assert.match(ILLUSTRATED_SKIN_CSS, /border-image:url\("__IGS_ASSET__cute-pink\/dialog\.png__"\) 0 145 0 120 fill \/ 0 calc\(145px \* var\(--igs-slice-k,1\)\) 0 calc\(120px \* var\(--igs-slice-k,1\)\) \/ 0 stretch/);
     assert.match(ILLUSTRATED_SKIN_CSS, /plant-coffee"\] \.igs-speaker\{[^}]*0 35 0 35 fill \/ 0 31px 0 31px \/ 0 stretch/);
-    assert.match(ILLUSTRATED_SKIN_CSS, /black-white-manga"\] \.igs-speaker\{[^}]*0 68 0 68 fill \/ 0 56px 0 56px \/ 0 stretch/);
+    assert.match(ILLUSTRATED_SKIN_CSS, /black-white-manga"\] \.igs-speaker\{[^}]*0 68 0 68 fill \/ 0 66px 0 66px \/ 0 stretch/);
     assert.match(ILLUSTRATED_SKIN_CSS, /cute-pink"\] \.igs-speaker\{[^}]*0 100 0 40 fill \/ 0 85px 0 34px \/ 0 stretch/);
     for (const skin of [DIALOG_SKIN_PLANT_COFFEE, DIALOG_SKIN_BLACK_WHITE_MANGA, DIALOG_SKIN_CUTE_PINK]) {
         const speakerRule = ILLUSTRATED_SKIN_CSS.split('\n').find((line) => line.includes(`"${skin}"] .igs-speaker{`));

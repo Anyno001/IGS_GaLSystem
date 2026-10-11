@@ -2,6 +2,8 @@ import { esc } from './reader-value-utils.js';
 import { checkbox, field, rangeInput, segmentedInput, selectInput } from './settings-fields.js';
 import { collapsible, featureRow, perfItem, renderWordListField } from './fx-settings-fields.js';
 import {
+    CG_INTERLUDE_LABELS,
+    CG_INTERLUDE_STYLES,
     SCENE_TRANSITION_LABELS,
     SCENE_TRANSITION_STYLES,
     SPRITE_ACTION_KINDS,
@@ -10,6 +12,7 @@ import {
 import { normalizeStageDirectionSettings } from './stage-direction-runtime.js';
 import { AMBIENT_KINDS, AMBIENT_LABELS, normalizeAmbientSoundSettings, normalizeBgmSettings } from './scene-audio.js';
 import { normalizeTextFxSettings } from './text-fx.js';
+import { isPackKind } from '../../scene/fx-packs.js';
 import { BILINGUAL_DISPLAYS, BILINGUAL_DISPLAY_LABELS, BILINGUAL_FOREIGN_LABELS, BILINGUAL_LAYOUTS, BILINGUAL_LAYOUT_LABELS, BILINGUAL_TARGET_LABELS, normalizeBilingualSettings } from './bilingual-text.js';
 import { CLICK_WAIT_MARK_LABELS, normalizeClickWaitMarkSettings } from './click-wait-mark.js';
 import { DAILY_FX_LABELS, normalizeDailyFxSettings } from './fx-daily-model.js';
@@ -49,8 +52,15 @@ function renderStageFields(s, more) {
     const cast = featureRow(more, 'stage-cast', `${P}.stageCast.enabled`, s.stageCast.enabled, '多角色同屏（实验）', '电脑3人、手机2人', checkbox(`${P}.stageCast.alignHeads`, s.stageCast.alignHeads, '按腿对齐到底部（需抠图）')
         + checkbox(`${P}.stageCast.romanceDuo`, s.stageCast.romanceDuo, '亲密演出时保留同屏角色')
         + checkbox(`${P}.stageCast.castReact`, s.stageCast.castReact, '同屏角色反应')
-        + checkbox(`${P}.stageCast.castStage`, s.stageCast.castStage, '同屏角色走位'));
-    return { transition, tint, motion, actions, camera, cast };
+        + '<small class="igs-perf-item-hint">同屏角色靠近、拉开等走位，需同时开启「立绘转身与走位」</small>');
+    const turn = featureRow(more, 'sprite-turn', `${P}.stageCast.castStage`, s.stageCast.castStage, '立绘转身与走位', '单人立绘也能背对、回眸、甩头离开（不必开多角色同屏）', checkbox(`${P}.stageCast.backHint`, s.stageCast.backHint, '背影时对话框旁提示'));
+    const cgOn = CG_INTERLUDE_STYLES.some((id) => s.cgEntrance.styles[id]);
+    const nsfwOn = s.cgEntrance.nsfw !== 'off';
+    const cgEntrance = perfItem(more, 'cg-interlude', `<button type="button" class="igs-switch${cgOn ? ' is-on' : ''}" data-action="cg-entrance-all:${cgOn ? 'off' : 'on'}" aria-pressed="${cgOn ? 'true' : 'false'}"><i></i><span>过场CG出场</span></button>`, { on: cgOn, hint: cgOn ? '勾选的效果每次随机抽' : '全不勾即关闭', detail: grid(
+        CG_INTERLUDE_STYLES.map((id) => checkbox(`${P}.cgEntrance.styles.${id}`, s.cgEntrance.styles[id], CG_INTERLUDE_LABELS[id])).join('')) })
+        + perfItem(more, 'cg-nsfw', `<button type="button" class="igs-switch${nsfwOn ? ' is-on' : ''}" data-segment-path="${P}.cgEntrance.nsfw" data-segment-value="${nsfwOn ? 'off' : 'medium'}" aria-pressed="${nsfwOn ? 'true' : 'false'}"><i></i><span>NSFW模糊到清晰</span></button>`,
+            { on: nsfwOn, hint: 'CG由糊变清', detail: segmentedInput(`${P}.cgEntrance.nsfw`, s.cgEntrance.nsfw, [['fast', '快'], ['medium', '中'], ['slow', '慢']], 'NSFW模糊速度') });
+    return { transition, tint, motion, actions, camera, cast, turn, cgEntrance };
 }
 
 function renderTextFields(textFx, clickWait, more) {
@@ -81,7 +91,7 @@ function trackSummary(track) {
 function renderTrackRow(track) {
     const keywords = trackSummary(track);
     return `<div class="igs-bgm-track"><div class="igs-bgm-track-main"><b>${esc(track.name)}</b><span>${keywords}</span></div>`
-        + `<button type="button" class="igs-btn-mgr-icon" data-action="bgm-track-edit:${encSeg(track.id)}" title="编辑">✎</button>`
+        + `<button type="button" class="igs-btn-mgr-icon" data-action="bgm-track-edit:${encSeg(track.id)}" title="编辑">编辑</button>`
         + `<button type="button" class="igs-btn-mgr-icon" data-action="bgm-track-remove:${encSeg(track.id)}" title="删除">×</button></div>`;
 }
 
@@ -92,9 +102,9 @@ function renderBgmTracks(bgm, more) {
     const counts = BGM_PACKS.map((id) => [BGM_PACK_LABELS[id], pack.filter((track) => track.packs && track.packs.includes(id)).length])
         .filter(([, count]) => count).map(([label, count]) => `${label} ${count}`).join(' · ');
     const packBlock = pack.length
-        ? more('bgm-pack-tracks', `默认曲目 ${pack.length} 首（${counts}）`, `<div class="igs-bgm-tracks">${pack.map(renderTrackRow).join('')}</div>`
+        ? more('bgm-pack-tracks', `默认曲目${pack.length}首（${counts}）`, `<div class="igs-bgm-tracks">${pack.map(renderTrackRow).join('')}</div>`
             + '<button type="button" class="igs-settings-action" data-action="bgm-pack-remove">移除全部默认曲目</button>'
-            + '<div class="igs-source-filter-note">音乐来自魔王魂（maou.audio）与OpenGameArt，按各自授权再配布；曲名与作者可在地点栏的 ♪ 中查看。</div>')
+            + '<div class="igs-source-filter-note">音乐来自魔王魂（maou.audio）与OpenGameArt，按各自授权再配布；曲名与作者可在地点栏的音乐按钮中查看。</div>')
         : '';
     const ownBlock = own.length ? `<div class="igs-bgm-tracks">${own.map(renderTrackRow).join('')}</div>` : (pack.length ? '' : '<div class="igs-scene-empty">还没有曲目</div>');
     return packBlock + ownBlock;
@@ -107,7 +117,7 @@ function renderSoundFields(bgm, ambient, ui, master, more) {
         + grid('<button type="button" class="igs-settings-action" data-action="bgm-pack-download">下载默认曲目</button>'
             + '<button type="button" class="igs-settings-action" data-action="bgm-track-upload">上传本地音频</button>'
             + '<button type="button" class="igs-settings-action" data-action="bgm-track-add">添加音频直链</button>')
-        + '<div class="igs-source-filter-note">自行添加的曲目可勾选情绪或填写地点关键词（命中时优先播放）；点击地点栏的 ♪ 可查看曲名或切换曲目。</div>');
+        + '<div class="igs-source-filter-note">自行添加的曲目可勾选情绪或填写地点关键词（命中时优先播放）；点击地点栏的音乐按钮可查看曲名或切换曲目。</div>');
     const ambientBody = featureRow(more, 'ambient-kinds', `${P}.ambientSound.enabled`, ambient.enabled, '环境音', '鸟鸣、雨声、人声', field(`${P}.ambientSound.volume`, '环境音量', rangeInput(`${P}.ambientSound.volume`, ambient.volume, '环境音量'))
         + grid(AMBIENT_KINDS.map((kind) => checkbox(`${P}.ambientSound.${kind}`, ambient[kind], AMBIENT_LABELS[kind])).join('')));
     const uiBody = featureRow(more, 'ui-sound', `${P}.uiSound.enabled`, ui.enabled, '界面音效', '', field(`${P}.uiSound.volume`, '界面音量', rangeInput(`${P}.uiSound.volume`, ui.volume, '界面音量')));
@@ -120,7 +130,7 @@ function dailyKindsFor(worldview) {
     const foreign = new Set(Object.entries(FX_WORLDVIEW_ONLY)
         .filter(([owner]) => owner !== worldview)
         .flatMap(([, table]) => table.dailyFx || []));
-    return DAILY_FX_KINDS.filter((kind) => !foreign.has(kind));
+    return DAILY_FX_KINDS.filter((kind) => !foreign.has(kind) && !isPackKind(kind));
 }
 
 function renderDailyField(daily, more, worldview) {

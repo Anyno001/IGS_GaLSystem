@@ -1,6 +1,7 @@
 import { MAGIC_METAL, MAGIC_SPARKLE_MASK, magicTint, magicVeil } from './dialog-theme-css-skins.js';
 import { fairyPaper } from './dialog-theme-fairytale.js';
 import { qinglvSilk } from './dialog-theme-guofeng.js';
+import { MERMAID_PEARL, MERMAID_PEARL_DOT, mermaidDeep, mermaidPearl } from './dialog-theme-mermaid.js';
 import { HORROR_DROP_MASK, HORROR_HEART_MASK } from './dialog-theme-horror.js';
 import { SCIFI_CORNERS, SCIFI_GLASS, SCIFI_RETICLE_MASK, scifiHolo } from './dialog-theme-scifi.js';
 import { WASTELAND_HAZARD, WASTELAND_HAZARD_MASK, WASTELAND_STEEL, wastelandRivet, wastelandRust } from './dialog-theme-wasteland.js';
@@ -64,6 +65,14 @@ const FRAMES = {
         after: `right:8px;bottom:6px;width:9px;height:9px;background:${MAGIC_METAL};${mask(MAGIC_SPARKLE_MASK)}`,
         icon: `background:radial-gradient(circle at 50% 30%,${magicTint(MAGIC_METAL, 30)},${magicVeil(95)});border-radius:3px;box-shadow:inset 0 0 0 1px ${magicTint(MAGIC_METAL, 55)};color:#f3f1ff;`,
     },
+    'mermaid-deep': {
+        mention: '#b6d4ff',
+        ink: '#e6eef9',
+        card: `background:${mermaidDeep(0.9)};border:0;border-radius:0;box-shadow:inset 0 1px 0 ${mermaidPearl(0.6)},inset 0 -1px 0 ${mermaidPearl(0.4)},0 4px 16px rgba(0,0,0,.4);padding-left:20px;padding-right:22px;${NO_BLUR}`,
+        before: 'left:7px;top:6px;width:10px;height:10px;border-radius:50%;background:var(--igs-item-mark);',
+        after: `right:8px;bottom:6px;width:8px;height:8px;border-radius:50%;background:${MERMAID_PEARL_DOT};`,
+        icon: `background:radial-gradient(circle at 50% 30%,${mermaidPearl(0.3)},${mermaidDeep(0.95)});border-radius:3px;box-shadow:inset 0 0 0 1px ${mermaidPearl(0.55)};color:${MERMAID_PEARL};`,
+    },
     'fairy-tale': {
         mention: '#b04a3e',
         ink: '#4a4034',
@@ -82,6 +91,15 @@ const FRAMES = {
         after: 'right:6px;bottom:5px;width:7px;height:7px;background:#b8452f;border-radius:1px;',
         icon: 'background:rgba(79,143,127,.12);border-radius:0;box-shadow:inset 0 0 0 1px rgba(47,93,124,.35);color:#2f5d7c;',
         desc: 'color:#4f605a;opacity:1;',
+    },
+    'xianxia-ink': {
+        mention: '#5f7f86',
+        ink: '#1f2523',
+        card: 'background:rgba(244,241,234,.95);border:0;border-radius:2px;box-shadow:inset 0 1px 0 rgba(95,127,134,.45),inset 0 -1px 0 rgba(95,127,134,.45),0 2px 10px rgba(31,37,35,.14);padding-left:16px;',
+        before: 'left:5px;top:8px;bottom:8px;width:2px;background:linear-gradient(180deg,transparent,var(--igs-item-mark) 25%,var(--igs-item-mark) 75%,transparent);',
+        after: 'right:6px;bottom:5px;width:7px;height:7px;background:#b23a2a;border-radius:1px;',
+        icon: 'background:rgba(31,37,35,.08);border-radius:0;box-shadow:inset 0 0 0 1px rgba(95,127,134,.35);color:#5f7f86;',
+        desc: 'color:#4a524f;opacity:1;',
     },
     'horror-gore': {
         mention: '#ff5a52',

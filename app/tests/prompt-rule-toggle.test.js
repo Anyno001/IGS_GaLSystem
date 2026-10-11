@@ -56,7 +56,7 @@ test('gate:prompt-rule:off-drops-scene-block-and-keeps-other-grammar', () => {
         const value = off.extensionPrompts[MAIN].value;
         assert.doesNotMatch(value, /【场景与台词】|igs-char:角色名/);
         assert.match(value, /\[igs标签语法\]/);
-        assert.match(value, /线上聊天 igs-chat/);
+        assert.match(value, /【按需】.*线上聊天/);
     } finally {
         on.vn.destroy();
         off.vn.destroy();
@@ -96,14 +96,14 @@ test('gate:prompt-rule:settings-switch-shows-reminder-and-stops-injection', asyn
         let settings = (await opened.reader.controller.invokeAction('settings')).controller;
         settings.switchTab('scene');
         let html = settings.switchSceneSubTab('rules').snapshot.html;
-        assert.match(html, /AI 格式规则<span class="igs-outfit-muted">发给聊天模型<\/span>/);
+        assert.match(html, /AI格式规则<span class="igs-outfit-muted">发给聊天模型<\/span>/);
         assert.match(html, /class="igs-switch is-on" data-switch="bridge\.sceneAssets\.promptRuleEnabled" aria-pressed="true"><i><\/i><span>自动注入格式规则</);
         assert.ok(html.includes(PROMPT_RULE_PRESET_HINT));
-        assert.match(html, /data-action="copy-prompt-rule"[^>]*>复制到酒馆预设</);
+        assert.match(html, /data-action="copy-prompt-rule"[^>]*>复制预设</);
 
         settings.toggle('bridge.sceneAssets.promptRuleEnabled');
         html = settings.getSnapshot().html;
-        assert.match(html, /AI 格式规则<span class="igs-outfit-muted">已关闭<\/span>/);
+        assert.match(html, /AI格式规则<span class="igs-outfit-muted">已关闭<\/span>/);
         assert.match(html, /class="igs-switch" data-switch="bridge\.sceneAssets\.promptRuleEnabled" aria-pressed="false"/);
         assert.ok(html.includes(PROMPT_RULE_OFF_HINT));
         assert.match(html, /data-prompt-rule-draft="1"/, '关闭后仍可编辑和复制规则');
@@ -222,5 +222,5 @@ test('gate:prompt-rule:settings-search-finds-the-switch', () => {
         const [first] = searchSettings(query);
         assert.equal(first && first.id, 'prompt-rule-inject', query);
     }
-    assert.deepEqual({ ...searchSettings('酒馆预设')[0].target, open: [] }, { tab: 'scene', sceneSubTab: 'rules', open: [] });
+    assert.deepEqual({ ...searchSettings('酒馆预设')[0].target, open: [] }, { page: 'rules', open: [], path: 'bridge.sceneAssets.promptRuleEnabled' });
 });

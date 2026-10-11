@@ -210,7 +210,7 @@ test('gate:settings-a11y:touch-targets-and-range-labels', async () => {
     const css = getSettingsStyleText();
     const coarse = css.slice(css.indexOf('@media (pointer:coarse)'));
     assert.ok(coarse.length > 30, 'coarse pointer block exists');
-    for (const cls of ['igs-settings-action', 'igs-settings-tab', 'igs-reader-subtab', 'igs-settings-close']) assert.ok(coarse.includes(`.${cls}`), cls);
+    for (const cls of ['igs-settings-action', 'igs-page-tab', 'igs-settings-nav-item', 'igs-settings-close']) assert.ok(coarse.includes(`.${cls}`), cls);
     // 触屏只外扩透明点按区，按钮外观保持扁平，不再撑高按钮本身。
     assert.match(coarse, /::after\{content:"";position:absolute;[^}]*height:max\(100%,44px\)/);
     assert.doesNotMatch(coarse, /min-height:44px/);

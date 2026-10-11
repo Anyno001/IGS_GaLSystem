@@ -6,6 +6,10 @@ import { MAP_LIGHT_LAYER_STYLE_TEXT } from './map-light-layers.js';
 import { WEATHER_FX_STYLE_TEXT } from './weather-fx-style.js';
 import { FX_STYLE_TEXT } from './fx-style.js';
 import { DANMAKU_STYLE_TEXT } from './danmaku-style.js';
+import { FEED_STYLE_TEXT } from './feed-style.js';
+import { STORM_STYLE_TEXT } from './storm-style.js';
+import { NOTIFY_CENTER_STYLE_TEXT } from './notify-center-style.js';
+import { SPAM_SMS_STYLE_TEXT } from './spam-sms-style.js';
 import { STAGE_DIRECTION_STYLE_TEXT } from './stage-direction-style.js';
 import { STAGE_CAST_STYLE_TEXT } from './stage-cast-render.js';
 import { SCENE_GRADE_STYLE_TEXT } from './scene-grade.js';
@@ -34,6 +38,7 @@ import { RECORD_PAGE_SHELL_STYLE_TEXT } from './record-page-shell-style.js';
 import { HTML_CARD_LAYER_STYLE_TEXT } from './html-card-layer.js';
 import { CHAT_LAYER_STYLE_TEXT } from './chat-layer.js';
 import { SPRITE_OUTFIT_SWAP_STYLE_TEXT } from './sprite-outfit-swap.js';
+import { SPRITE_TURN_STYLE_TEXT } from './sprite-turn.js';
 import { STAGE_PAUSE_STYLE_TEXT } from './stage-pause.js';
 import { COMIC_STYLE_TEXT } from './comic-style.js';
 import { MANGA_BACK_STYLE_TEXT } from './manga-back.js';
@@ -59,10 +64,11 @@ export const ORIGINAL_READER_ICONS = Object.freeze({
     replay: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>',
     stop: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
     assets: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="9" cy="7" r="3.2"/><path d="M3.5 20v-1.5A4.5 4.5 0 0 1 8 14h2"/><path d="M13 20l3.2-4.2 2 2.5 1.3-1.6L22 20z"/><path d="M18 4v5M15.5 6.5h5"/></svg>',
-    regen: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M13 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M4 16l4.5-4.5a1.5 1.5 0 0 1 2.1 0L16 17"/><path d="M14 15l1.5-1.5a1.5 1.5 0 0 1 2.1 0L20 16"/><path d="M18.5 2.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" fill="currentColor"/></svg>',
+    // 绘制 / 重画系列：同一圆角画框与线宽。整楼 = 两层叠框 + 星芒，单张 = 单框 + 循环箭头；小尺寸只靠框内大符号区分。
+    regen: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M8 3h11a2 2 0 0 1 2 2v11"/><rect x="3" y="7" width="14" height="14" rx="2"/><path d="M10 9.6l1.1 2.6 2.6 1.1-2.6 1.1-1.1 2.6-1.1-2.6-2.6-1.1 2.6-1.1z" fill="currentColor"/></svg>',
     clearCg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 10v6M14 10v6"/></svg>',
     clearFloorCg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 10v6M14 10v6"/><path d="M4 3h16"/></svg>',
-    rerollCg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M20 11V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5"/><path d="M15 8h.01"/><path d="M4 16l4-4a1.5 1.5 0 0 1 2.1 0l2.4 2.4"/><path d="M21 17.5a3.5 3.5 0 1 1-1.03-2.47"/><path d="M21 13v2.5h-2.5"/></svg>',
+    rerollCg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M16.5 12a4.5 4.5 0 1 1-1.32-3.18"/><path d="M16.5 6.5v3h-3"/></svg>',
     rescan: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>',
     save: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
     settings: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 5 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 5a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.4.6.8 1 1 .3.2.7.3 1.1.3H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>',
@@ -218,6 +224,19 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-option-bubble{pointer-events:auto;cursor:pointer;border:1px solid var(--igs-choice-border,rgba(207,204,198,.08));background:var(--igs-choice-bg,var(--igs-glass-bg,rgba(31,34,37,.62)));-webkit-backdrop-filter:var(--igs-choice-blur,none);backdrop-filter:var(--igs-choice-blur,none);border-radius:var(--igs-choice-radius,6px);padding:10px 16px;color:#d8d5cf;font-size:var(--igs-option-font-size,14px);line-height:1.5;text-shadow:none;box-shadow:none;max-width:100%;word-break:break-word;transition:border-color .15s,color .15s,transform .1s;}
 .igs-option-bubble:hover{background:var(--igs-choice-bg,var(--igs-glass-bg,rgba(31,34,37,.62)));border-color:rgba(207,204,198,.16);color:#fff;}
 .igs-option-bubble:active{transform:scale(.97);}
+.igs-option-row{display:flex;flex-wrap:wrap;gap:6px;width:100%;}
+.igs-option-panel{display:flex;flex-direction:column;gap:6px;width:100%;}
+.igs-option-panel-title{font-size:var(--igs-option-font-size,14px);color:var(--igs-choice-text,#d8d5cf);padding:2px 4px;}
+.igs-option-panel-desc{font-size:calc(var(--igs-option-font-size,14px) - 2px);color:var(--igs-choice-text,#d8d5cf);opacity:.8;padding:0 4px;word-break:break-word;}
+.igs-option-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px;}
+#igs-option-bubbles[data-igs-width][data-igs-pos] .igs-option-row .igs-option-bubble,#igs-option-bubbles[data-igs-width][data-igs-pos] .igs-option-grid .igs-option-bubble{width:auto;}
+#igs-option-bubbles[data-igs-width][data-igs-pos] .igs-option-grid .igs-option-bubble{width:100%;}
+.igs-option-bubble.igs-option-mini{padding:8px 12px;min-height:40px;font-size:calc(var(--igs-option-font-size,14px) - 1px);transition:none;}
+.igs-option-bubble.igs-option-item{display:flex;flex-direction:column;align-items:center;gap:4px;min-height:48px;padding:8px;text-align:center;transition:none;}
+.igs-option-item-img{width:40px;height:40px;object-fit:contain;pointer-events:none;}
+.igs-option-item-name{font-weight:600;}
+.igs-option-item-desc{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(var(--igs-option-font-size,14px) - 3px);opacity:.75;}
+#igs-option-bubbles[data-igs-panel]{overscroll-behavior:contain;-webkit-overflow-scrolling:touch;}
 .igs-dialog{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);width:min(880px,calc(100vw - 32px));background:var(--igs-dialog-bg,var(--igs-glass-bg,rgba(31,34,37,.62)));border:0;-webkit-backdrop-filter:var(--igs-dialog-blur,none);backdrop-filter:var(--igs-dialog-blur,none);border-radius:var(--igs-dialog-radius,8px);box-shadow:none;padding:10px 26px 18px;z-index:4;overflow:visible;pointer-events:auto;transition:opacity .3s,transform .3s;}
 .igs-dialog[data-igs-narration="1"]{padding-top:15px;}
 .igs-dialog,.igs-dialog *{-webkit-user-select:none;user-select:none;}
@@ -280,6 +299,13 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-image-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:1;}
 .igs-image-spinner{width:32px;height:32px;border-width:3px;opacity:.7;}
 .igs-image-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:1;font-size:13px;color:rgba(255,255,255,.4);letter-spacing:.5px;}
+.igs-image-empty[data-retry]{flex-direction:column;gap:6px;}
+.igs-image-retry{padding:5px 16px;border:1px solid rgba(255,255,255,.28);border-radius:999px;color:rgba(255,255,255,.66);font-size:13px;}
+.igs-image-empty[data-busy] .igs-image-retry{border-style:dashed;opacity:.6;}
+.igs-image-retry-reason{font-size:11px;color:rgba(255,255,255,.34);}
+#igs-missed-hint{position:absolute;right:12%;top:-30px;z-index:2;max-width:70%;padding:3px 10px;border:0;border-radius:999px;background:var(--igs-dialog-bg,rgba(20,20,24,.82));color:inherit;font-size:12px;line-height:18px;cursor:pointer;opacity:.82;pointer-events:auto;}
+#igs-missed-hint:hover{opacity:1;}
+#igs-missed-hint[hidden]{display:none!important;}
 #igs-send-status{display:none;flex:1;align-items:center;gap:8px;padding:8px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:14px;font-size:13px;color:rgba(255,255,255,.55);letter-spacing:.3px;}
 #igs-overlay.igs-awaiting-reply #igs-send-status{display:flex;}
 #igs-send-status{gap:6px;}
@@ -326,6 +352,49 @@ ${TOAST_THEME_STYLE_TEXT}
 #igs-overlay.igs-default-reader-chrome .igs-ctrl-bar .igs-icon-btn{width:32px;height:32px;border:0;background:transparent;border-radius:0;box-shadow:none;color:rgba(255,255,255,.32);}
 #igs-overlay.igs-default-reader-chrome .igs-ctrl-bar .igs-icon-btn svg{width:11px;height:11px;transform:scale(1.2);transform-origin:center;}
 #igs-overlay.igs-default-reader-chrome .igs-ctrl-bar .igs-icon-btn:hover{background:transparent;border-color:transparent;color:rgba(255,255,255,.52);}
+/* 输入区：不描边，底色是正文色的一层薄纱，文字和占位跟正文色；悬浮时用对话框底色做底板。 */
+#igs-overlay .igs-controls{border-top:0;}
+#igs-overlay .igs-input,#igs-overlay .igs-send-btn,#igs-overlay #igs-send-status{border:0;box-shadow:none;color:var(--igs-bar-ink,#fff);}
+#igs-overlay .igs-input{border-radius:10px;background:color-mix(in srgb,var(--igs-bar-ink,#fff) 9%,transparent);}
+#igs-overlay .igs-input:focus{background:color-mix(in srgb,var(--igs-bar-ink,#fff) 14%,transparent);}
+#igs-overlay .igs-input::placeholder{color:color-mix(in srgb,var(--igs-bar-ink,#fff) 45%,transparent);}
+#igs-overlay .igs-send-btn{border-radius:10px;background:color-mix(in srgb,var(--igs-bar-ink,#fff) 14%,transparent);}
+#igs-overlay .igs-send-btn:hover{background:color-mix(in srgb,var(--igs-bar-ink,#fff) 22%,transparent);}
+#igs-overlay .igs-send-btn:focus{box-shadow:none;}
+#igs-overlay #igs-send-status{background:color-mix(in srgb,var(--igs-bar-ink,#fff) 7%,transparent);}
+#igs-overlay[data-igs-input="float"]>.igs-controls{position:absolute;z-index:7;left:50%;transform:translateX(-50%);bottom:calc(24px + var(--igs-dialog-h,160px) + 10px);width:min(620px,calc(100% - 32px));box-sizing:border-box;padding:6px;border-radius:14px;background:color-mix(in srgb,var(--igs-bar-plate,rgb(18,18,20)) 72%,transparent);}
+#igs-overlay[data-igs-input="float"]:not(.igs-toolbar-top)>.igs-controls{bottom:calc(24px + var(--igs-dialog-h,160px) + 50px);}
+#igs-overlay[data-igs-input="float"][data-igs-options-on]:not(.igs-free-input)>.igs-controls{display:none!important;}
+/* 工具栏统一：干净的半透明小底板，淡淡跟随皮肤（--igs-bar-plate 对话框底色、--igs-bar-ink 正文色，由渲染层写入）；单行、等大、等距，不用毛玻璃和阴影。 */
+#igs-overlay #igs-ctrl-bar{display:flex;flex-wrap:nowrap;align-items:center;gap:0;padding:2px 3px;border:0;border-radius:10px;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;background:color-mix(in srgb,var(--igs-bar-plate,rgb(18,18,20)) 5%,transparent);color:var(--igs-bar-ink,#fff);}
+#igs-overlay:not(.igs-toolbar-top):not(.igs-mode-embedded) #igs-ctrl-bar{top:auto;bottom:calc(100% + 8px);}
+#igs-overlay #igs-ctrl-bar{align-items:flex-start;}
+#igs-overlay #igs-bar-btns,#igs-overlay #igs-bar-pinned{gap:0!important;align-items:center;align-content:flex-start;height:auto;min-height:28px;}
+/* 放得下就一行；放不下按整格换行，每行右对齐、同一网格，不横向滚动。 */
+#igs-overlay #igs-bar-btns{flex-wrap:wrap;justify-content:flex-end;overflow:visible;max-width:calc(100vw - 120px);}
+#igs-overlay.igs-toolbar-top #igs-bar-btns.igs-bar-overflow{cursor:auto;}
+#igs-overlay.igs-toolbar-top #igs-bar-btns,#igs-overlay.igs-toolbar-top #igs-bar-btns.igs-bar-overflow{max-width:calc(100vw - 120px);flex-wrap:wrap;justify-content:flex-end;}
+#igs-overlay #igs-bar-btns::-webkit-scrollbar{display:none;}
+#igs-overlay #igs-ctrl-bar .igs-icon-btn{flex:0 0 auto;width:28px;height:28px;min-width:28px;padding:0;margin:0;border:0;border-radius:7px;background:transparent;box-shadow:none;color:inherit;opacity:.5;transition:opacity .15s,background-color .15s;}
+#igs-overlay #igs-ctrl-bar .igs-icon-btn:hover,#igs-overlay #igs-ctrl-bar .igs-icon-btn:focus-visible{opacity:.95;background:transparent;}
+#igs-overlay #igs-ctrl-bar .igs-icon-btn[aria-pressed="true"]{position:relative;opacity:.85;}
+/* 开着的按钮下方一个小圆点（图标同色，随皮肤正文色）；::after 留给触屏放大点击区。 */
+#igs-overlay #igs-ctrl-bar .igs-icon-btn[aria-pressed="true"]::before{content:"";position:absolute;left:50%;bottom:2px;width:3px;height:3px;margin-left:-1.5px;border-radius:50%;background:currentColor;pointer-events:none;}
+#igs-overlay #igs-ctrl-bar .igs-icon-btn:disabled{opacity:.2;}
+#igs-overlay #igs-ctrl-bar .igs-icon-btn svg{width:13px;height:13px;transform:none;}
+/* 分组、固定区、折叠钮与普通按钮同间距，第一排和折叠钮在同一条线上。 */
+#igs-overlay #igs-ctrl-bar .igs-icon-btn.igs-group-start,#igs-overlay #igs-bar-pinned,#igs-overlay #igs-ctrl-bar>.igs-icon-btn{margin-left:0;}
+#igs-overlay #igs-ctrl-bar>.igs-icon-btn{align-self:flex-start;}
+#igs-overlay #igs-ctrl-bar>[data-act="toggle-bar"] svg{transition:transform .2s ease;}
+#igs-overlay.igs-toolbar-expanded #igs-ctrl-bar>[data-act="toggle-bar"] svg{transform:rotate(180deg);}
+/* 未展开时没有底板也没有描边；展开后是一层羽化的轻毛玻璃（5% 皮肤对话框底色、四边渐隐），底色与模糊程度都跟随对话框，不描边。 */
+#igs-overlay #igs-ctrl-bar{background:transparent;isolation:isolate;}
+#igs-overlay.igs-toolbar-expanded.igs-toolbar-top #igs-ctrl-bar,#igs-overlay.igs-toolbar-expanded.igs-mode-embedded #igs-ctrl-bar{position:relative;}
+#igs-overlay.igs-toolbar-expanded #igs-ctrl-bar::before{content:"";position:absolute;inset:-6px -8px;z-index:-1;pointer-events:none;background:color-mix(in srgb,var(--igs-bar-plate,rgb(18,18,20)) 5%,transparent);-webkit-backdrop-filter:var(--igs-bar-blur,blur(6px));backdrop-filter:var(--igs-bar-blur,blur(6px));-webkit-mask-image:linear-gradient(90deg,transparent,#000 14px,#000 calc(100% - 14px),transparent),linear-gradient(180deg,transparent,#000 8px,#000 calc(100% - 8px),transparent);-webkit-mask-composite:source-in;mask-image:linear-gradient(90deg,transparent,#000 14px,#000 calc(100% - 14px),transparent),linear-gradient(180deg,transparent,#000 8px,#000 calc(100% - 8px),transparent);mask-composite:intersect;animation:igs-bar-plate-in .2s ease both;}
+@keyframes igs-bar-plate-in{from{opacity:0;}to{opacity:1;}}
+/* 底板三态：默认 blur 走上面的羽化毛玻璃；solid 实色不糊；off 完全无底板。 */
+#igs-overlay[data-igs-bar-plate="solid"].igs-toolbar-expanded #igs-ctrl-bar::before{background:color-mix(in srgb,var(--igs-bar-plate,rgb(18,18,20)) 88%,transparent);-webkit-backdrop-filter:none;backdrop-filter:none;}
+#igs-overlay[data-igs-bar-plate="off"].igs-toolbar-expanded #igs-ctrl-bar::before{display:none;}
 .igs-mode-embedded .igs-ctrl-bar,.igs-mode-embedded #igs-bar-btns,#igs-overlay.igs-default-reader-chrome:not(.igs-toolbar-top) .igs-ctrl-bar,#igs-overlay.igs-default-reader-chrome:not(.igs-toolbar-top) #igs-bar-btns{justify-content:flex-end;}
 .igs-mode-embedded #igs-option-bubbles[data-igs-pos]{top:calc(14px + var(--igs-toolbar-h,32px) + 8px);bottom:calc(14px + var(--igs-dialog-h,220px) + 10px);max-height:none;overflow-y:auto;overscroll-behavior:contain;}
 .igs-mode-embedded #igs-option-bubbles[data-igs-width="dialog"]{max-width:calc(100% - 24px);}
@@ -338,13 +407,13 @@ ${TOAST_THEME_STYLE_TEXT}
 .igs-embedded-loading-text{margin-left:6px;color:rgba(255,255,255,.5);}
 @keyframes igs-embedded-pulse{0%,100%{opacity:.25}50%{opacity:.9}}
 @media (prefers-reduced-motion: reduce){.igs-embedded-loading-dot{animation:none;opacity:.6;}}
-@keyframes igs-stage-shake-weak{0%,100%{transform:translate3d(0,0,0)}25%{transform:translate3d(3px,0,0)}50%{transform:translate3d(-3px,0,0)}75%{transform:translate3d(2px,0,0)}}
-@keyframes igs-stage-shake-medium{0%,100%{transform:translate3d(0,0,0)}20%{transform:translate3d(6px,0,0)}40%{transform:translate3d(-6px,0,0)}60%{transform:translate3d(4px,0,0)}80%{transform:translate3d(-2px,0,0)}}
-@keyframes igs-stage-shake-strong{0%,100%{transform:translate3d(0,0,0)}16%{transform:translate3d(10px,0,0)}32%{transform:translate3d(-10px,0,0)}48%{transform:translate3d(8px,0,0)}64%{transform:translate3d(-6px,0,0)}80%{transform:translate3d(3px,0,0)}}
+@keyframes igs-stage-shake-weak{0%,100%{transform:translate3d(0,0,0) rotate(0)}15%{transform:translate3d(5px,1px,0) rotate(.25deg)}35%{transform:translate3d(-4px,-1px,0) rotate(-.2deg)}55%{transform:translate3d(3px,0,0)}78%{transform:translate3d(-1.5px,0,0)}}
+@keyframes igs-stage-shake-medium{0%,100%{transform:translate3d(0,0,0) rotate(0)}12%{transform:translate3d(10px,2px,0) rotate(.4deg)}28%{transform:translate3d(-9px,-2px,0) rotate(-.35deg)}46%{transform:translate3d(6px,1px,0) rotate(.2deg)}64%{transform:translate3d(-4px,0,0)}82%{transform:translate3d(2px,0,0)}}
+@keyframes igs-stage-shake-strong{0%,100%{transform:translate3d(0,0,0) rotate(0)}10%{transform:translate3d(16px,3px,0) rotate(.55deg)}24%{transform:translate3d(-15px,-3px,0) rotate(-.5deg)}40%{transform:translate3d(11px,2px,0) rotate(.35deg)}56%{transform:translate3d(-8px,-1px,0) rotate(-.2deg)}72%{transform:translate3d(4px,0,0)}88%{transform:translate3d(-2px,0,0)}}
 #igs-stage-motion{position:absolute;inset:0;transform:translate3d(0,0,0);}
-#igs-stage-motion.igs-stage-shake-active[data-igs-stage-shake-intensity="weak"]{animation:igs-stage-shake-weak .18s ease-out both}
-#igs-stage-motion.igs-stage-shake-active[data-igs-stage-shake-intensity="medium"]{animation:igs-stage-shake-medium .28s ease-out both}
-#igs-stage-motion.igs-stage-shake-active[data-igs-stage-shake-intensity="strong"]{animation:igs-stage-shake-strong .38s ease-out both}
+#igs-stage-motion.igs-stage-shake-active[data-igs-stage-shake-intensity="weak"]{animation:igs-stage-shake-weak .24s ease-out both}
+#igs-stage-motion.igs-stage-shake-active[data-igs-stage-shake-intensity="medium"]{animation:igs-stage-shake-medium .36s ease-out both}
+#igs-stage-motion.igs-stage-shake-active[data-igs-stage-shake-intensity="strong"]{animation:igs-stage-shake-strong .48s ease-out both}
 @media (prefers-reduced-motion: reduce){#igs-stage-motion.igs-stage-shake-active{animation:none!important;transform:none!important;}}
 ${WEATHER_FX_STYLE_TEXT}
 ${ASSET_REVIEW_STYLE_TEXT}
@@ -358,6 +427,7 @@ ${DIALOG_THEME_CHOICE_BASE_STYLE_TEXT}
 ${HTML_CARD_LAYER_STYLE_TEXT}
 ${CHAT_LAYER_STYLE_TEXT}
 ${SPRITE_OUTFIT_SWAP_STYLE_TEXT}
+${SPRITE_TURN_STYLE_TEXT}
 ${FX_STYLE_TEXT}
 ${STAGE_DIRECTION_STYLE_TEXT}
 ${STAGE_CAST_STYLE_TEXT}
@@ -377,6 +447,10 @@ ${ITEM_FX_STYLE_TEXT}
 ${BATTLE_FX_STYLE_TEXT}
 ${RESULT_FX_STYLE_TEXT}
 ${DANMAKU_STYLE_TEXT}
+${FEED_STYLE_TEXT}
+${STORM_STYLE_TEXT}
+${NOTIFY_CENTER_STYLE_TEXT}
+${SPAM_SMS_STYLE_TEXT}
 ${COMIC_STYLE_TEXT}
 ${MANGA_BACK_STYLE_TEXT}
 ${CROWD_STYLE_TEXT}

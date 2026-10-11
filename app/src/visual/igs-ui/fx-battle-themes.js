@@ -1,6 +1,8 @@
 import { stroke } from './dialog-skin-frame.js';
 import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_METAL, MAGIC_METAL_HI, MAGIC_SPARKLE_MASK, MAGIC_VEIL, magicTint } from './dialog-theme-css-skins.js';
 import { DIALOG_SKIN_QINGLV, qinglvSilk } from './dialog-theme-guofeng.js';
+import { DIALOG_SKIN_XIANXIA_INK, xianxiaPaper } from './dialog-theme-xianxia.js';
+import { DIALOG_SKIN_MERMAID, MERMAID_PEARL_DOT, MERMAID_PEARL_HI, mermaidAbyss, mermaidPearl } from './dialog-theme-mermaid.js';
 import { DIALOG_SKIN_FAIRY_TALE, FAIRY_SPARKLE_MASK, fairyPaper } from './dialog-theme-fairytale.js';
 import { DIALOG_SKIN_HORROR_GORE, DIALOG_SKIN_HORROR_PSYCH, HORROR_DROP_MASK, HORROR_HEART_MASK } from './dialog-theme-horror.js';
 import { DIALOG_SKIN_SCIFI_HOLO, SCIFI_HOLO, SCIFI_RETICLE_MASK, scifiDeep, scifiHolo } from './dialog-theme-scifi.js';
@@ -91,6 +93,14 @@ const BATTLE_THEMES = Object.freeze({
         mark: `width:11px;height:11px;align-self:center;font-size:0;background:${MAGIC_METAL_HI};-webkit-mask:${MAGIC_SPARKLE_MASK} center/contain no-repeat;mask:${MAGIC_SPARKLE_MASK} center/contain no-repeat;filter:drop-shadow(0 0 3px ${magicTint(MAGIC_METAL_HI, 80)});`,
         title: 'font-style:normal;font-weight:600;',
     },
+    // 深海人鱼：深海薄纱、珠光细线，名牌标记换成一颗珍珠。
+    [DIALOG_SKIN_MERMAID]: {
+        accent: MERMAID_PEARL_HI,
+        font: DIALOG_FONT_HUIWEN,
+        vars: { veil: mermaidAbyss(0.8), rule: mermaidPearl(0.62), ink: '#eef4fb', halo: `0 0 10px ${mermaidPearl(0.5)},0 1px 3px rgba(0,0,0,.9)`, 'title-halo': `0 0 20px ${mermaidPearl(0.6)},0 2px 4px rgba(0,0,0,.7)`, wipe: mermaidAbyss(0.92) },
+        mark: `width:10px;height:10px;align-self:center;font-size:0;border-radius:50%;background:${MERMAID_PEARL_DOT};box-shadow:0 0 5px ${mermaidPearl(0.8)};`,
+        title: 'font-style:normal;font-weight:600;',
+    },
     // 西欧古典：橄榄墨底、金线。
     'western-classic': {
         accent: '#e2bf72',
@@ -117,6 +127,24 @@ const BATTLE_THEMES = Object.freeze({
         ],
         title: 'font-style:normal;font-weight:400;letter-spacing:.3em;text-indent:.3em;',
         veil: 'background:rgba(30,40,38,.22);',
+    },
+    // 仙侠水墨：宣纸底、淡青细线、朱砂印；古代背景下战斗节点另带 is-xianxia（青白剑气、冷白闪光、紫白雷劫），过场借这里的配色。
+    [DIALOG_SKIN_XIANXIA_INK]: {
+        accent: '#5f7f86',
+        light: true,
+        font: DIALOG_FONT_HUIWEN,
+        vars: { veil: xianxiaPaper('.92'), rule: 'rgba(95,127,134,.6)', ink: '#1f2523', halo: `0 1px 0 ${xianxiaPaper('.6')}`, 'title-halo': `0 1px 0 ${xianxiaPaper('.8')}`, wipe: xianxiaPaper('.94'), lose: '#8f2616', escape: '#56625d' },
+        mark: `padding:0 3px;border-radius:1px;background:#b23a2a;color:${xianxiaPaper(1)};font-size:0;line-height:1;text-shadow:none;--igs-bt-seal:"战";`,
+        extra: (scope) => [
+            `${scope} ${PART_SELECTORS.mark}::before{content:var(--igs-bt-seal);font-size:12px;letter-spacing:0;}`,
+            `${scope} ${PART_SELECTORS.pop}{color:#1f2523;font-style:normal;font-weight:700;letter-spacing:.2em;text-shadow:${stroke(xianxiaPaper('.85'))},0 0 14px ${xianxiaPaper('.9')};}`,
+            `${scope} .igs-fx-battle-hit:not(.is-ancient)[data-igs-battle-result="crit"] .igs-fx-battle-pop-label{color:#5a4a9a;}`,
+            `${scope} .igs-fx-battle-hit:not(.is-ancient)[data-igs-battle-result="ko"] .igs-fx-battle-pop-label{color:#8f2616;}`,
+            `${scope} ${PART_SELECTORS.dice},${scope} ${PART_SELECTORS.target}{color:#1f2523;text-shadow:${stroke(xianxiaPaper('.8'))};}`,
+            `${scope} ${PART_SELECTORS.foe}{text-shadow:${stroke(xianxiaPaper('.7'))},0 0 18px ${xianxiaPaper('.9')};}`,
+        ],
+        title: 'font-style:normal;font-weight:400;letter-spacing:.3em;text-indent:.3em;',
+        veil: 'background:rgba(31,37,35,.2);',
     },
     // 童话小镇：奶油纸通栏、鼠尾草绿细线，名牌标记是一颗灯火色小星。
     [DIALOG_SKIN_FAIRY_TALE]: {

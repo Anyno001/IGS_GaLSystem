@@ -1,4 +1,5 @@
 import { moodPresetAct, moodPresetTags, moodPresetUse } from '../scene/mood-groups.js';
+import { BUILTIN_PROMPTS } from './prompt-registry.js';
 
 // 楼内补立绘一次最多写 8 份，超过则平分 2 批。
 export const EXPRESSION_WRITE_BATCH_MAX = 8;
@@ -146,9 +147,9 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
     ].filter(Boolean).join('\n');
 }
 
-const UPRIGHT_POSITIVE = 'cowboy shot, standing, facing viewer, straight-on';
-const UPRIGHT_NEGATIVE = 'dutch angle, from side, profile, full body, feet';
-const EXPRESSION_DROP_POSITIVE = new Set(['arms at sides'].map(tagKey));
+const UPRIGHT_POSITIVE = BUILTIN_PROMPTS.expression.positive;
+const UPRIGHT_NEGATIVE = BUILTIN_PROMPTS.expression.negative;
+const EXPRESSION_DROP_POSITIVE = new Set(splitTags(BUILTIN_PROMPTS.expression.dropPositive).map(tagKey));
 
 // 景别回到大腿以上。只拿掉双手下垂，避免表情动作被锁死。
 export function expressionSpritePrompts(positive, negative) {
@@ -210,8 +211,7 @@ function characterDnaLines(name, dna) {
     ].filter(Boolean);
 }
 
-// 立绘站得太板正：要一个不挡身体的日常小动作。
-const SPRITE_DAILY_POSE_LINE = '姿势带一个轻量的日常小动作（如一只手拨头发、手背在身后、手插口袋、轻抓衣角），不要双手僵直下垂，也不要大幅动作或拿道具挡住身体。';
+const SPRITE_DAILY_POSE_LINE = BUILTIN_PROMPTS.sprite.poseRule;
 
 function spriteGroundLine(transparent) {
     return transparent === false ? '白色背景，不要透明底。' : '无背景，透明底。';
@@ -251,15 +251,17 @@ export function buildCharacterAvatarDescription(name, dna) {
 // 勾选「瑟瑟加强」后追加。只告诉模型这是成年人的色情服装、不要改成普通衣服，不附带成套标签。
 export function nsfwClothingBoostLine(kind = 'clothes') {
     return kind === 'character'
-        ? '这套是色情服装。不要回避，不要审查，不要改成普通、得体或日常衣服，也不要用衣物遮住这套该露的地方。按服装提示词加强暴露和色情。'
-        : '这是色情服装。不要回避，不要审查，不要改成普通、得体或日常衣服，也不要把暴露的设计改成遮盖。按这个服装名加强色情和暴露，把款式、颜色、材质和露出的位置写清楚。';
+        ? BUILTIN_PROMPTS.wardrobe.nsfwBoostCharacter
+        : BUILTIN_PROMPTS.wardrobe.nsfwBoostClothes;
 }
 
 // 待确认服装：只写这一套衣服的生图标签，不写出图。
-export function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false } = {}) {
+export function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false, note = '' } = {}) {
     const outfit = String(outfitName || '').trim();
+    const request = String(note || '').trim();
     return [
         `为服装「${outfit}」写一份生图用的服装提示词。`,
+        request ? `用户对这套服装的具体要求（必须照办）：${request}` : '',
         '一定要注意：生成的是一套衣服，而不是角色，没有角色。',
         '这是一整套穿着，从上到下写完整：头上、上身、下身、腿和脚，以及配套的饰品。不要只写其中一件。',
         '每件都写清款式、颜色和材质。',
@@ -385,8 +387,8 @@ export function applyMoodToCaption(caption, mood, { nsfw = false } = {}) {
     return prependCharTags(caption, tags, (tag) => !NEUTRAL_FACE_TAGS.has(tagKey(tag)));
 }
 
-// 衣服跟着同一份来源走，不靠写词插件每份重写：换装有服装词就用服装词；
-// 原装或这套有自己的立绘时，用那张立绘的提示词去掉表情、姿势后剩下的长相和衣服。
+// 服装提示词只发给写词，不拼进最终出图词。
+// 原装或这套有自己的立绘、又没有服装提示词时，用那张立绘的提示词去掉表情、姿势后剩下的长相和衣服。
 const LOOK_SKIP_TAGS = new Set(['solo', 'cowboy shot', 'facing viewer', 'straight-on', 'centered', 'transparent background', 'simple background', 'grey background', 'light grey background', 'flat color background', 'no background'].map(tagKey));
 
 function storedCharTags(prompt) {
@@ -402,8 +404,7 @@ function storedCharTags(prompt) {
 export function expressionLookTags(basePrompt, outfit) {
     const clothes = outfit && typeof outfit === 'object' ? outfit : null;
     const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
-    if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
-    if (clothes && !clothes.ownImage) return '';
+    if (clothesPrompt || (clothes && !clothes.ownImage)) return '';
     return splitTags(storedCharTags(basePrompt))
         .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)))
         .join(', ');
@@ -412,7 +413,18 @@ export function expressionLookTags(basePrompt, outfit) {
 // 换了衣服的那一套，DNA 的默认外观里是原装的衣服，硬合会和新衣服打架。
 export function expressionPaintDna(dna, outfit) {
     if (!dna || typeof dna !== 'object' || !outfit || typeof outfit !== 'object') return dna;
+    if (outfit.form) return formPaintDna(dna, outfit.form);
     return { ...dna, defaultAppearance: '' };
+}
+
+// 变身形态：身份、外观整段让给这一套的生图词；触发词里的性别 / 年龄标签摘掉，再按 form.gender 补一个。
+const FORM_BODY_TAG_RE = new RegExp(`^(?:${BUILTIN_PROMPTS.form.bodyTagPattern})$`, 'i');
+const FORM_GENDER_TAG = BUILTIN_PROMPTS.form.gender;
+function formPaintDna(dna, form) {
+    const triggers = String(dna.triggerWords || '').split(/[,，]/).map((t) => t.trim()).filter((t) => t && !FORM_BODY_TAG_RE.test(t));
+    const gender = FORM_GENDER_TAG[form && form.gender];
+    const age = BUILTIN_PROMPTS.form.age[form && form.age];
+    return { ...dna, identity: '', defaultAppearance: '', triggerWords: [gender, age, ...triggers].filter(Boolean).join(', ') };
 }
 
 export function applyLookToCaption(caption, tags) {

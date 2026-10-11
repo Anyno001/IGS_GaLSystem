@@ -1,8 +1,12 @@
 import { prefersReducedMotion } from './reduced-motion.js';
-import { STAGE_DIRECTION_NORMALIZERS, pickCloseUp, pickSpriteAction } from './stage-direction-settings.js';
+import { CG_INTERLUDE_STYLES, STAGE_DIRECTION_NORMALIZERS, pickCloseUp, pickSpriteAction } from './stage-direction-settings.js';
 import { SPEAK_BOUNCE, SPRITE_ACTION_FRAMES, playSpriteSpec } from './sprite-actions.js';
 import { cancelCameraImpact, planCameraImpact, playCameraImpact, playCameraImpactSfx } from './camera-impact.js';
 import { normalizeFxSoundSettings } from './fx-settings.js';
+import { cancelCameraExtras, playCameraExtras, resolveCameraMod, resolveCameraShot } from './camera-shots.js';
+import { cutStyleOf, impliedCam } from './fx-camera-gate.js';
+
+export { resolveCameraShot };
 
 export const BG_TRANSITION_MS = Object.freeze({ fast: 350, medium: 650, slow: 1100 });
 export const BLACK_TRANSITION_MS = Object.freeze({ fast: 700, medium: 1000, slow: 1500 });
@@ -12,7 +16,7 @@ export const SPRITE_EXIT_MS = 380;
 const DECODE_TIMEOUT_MS = 1500;
 const DECODED_LIMIT = 64;
 const BLIND_COUNT = 8;
-const ROOT_ATTRS = Object.freeze(['data-igs-sd-breathe', 'data-igs-cast-breathe', 'data-igs-sd-kenburns', 'data-igs-sd-parallax', 'data-igs-sd-closeup', 'data-igs-sd-cam']);
+const ROOT_ATTRS = Object.freeze(['data-igs-sd-breathe', 'data-igs-cast-breathe', 'data-igs-sd-kenburns', 'data-igs-sd-parallax', 'data-igs-sd-closeup', 'data-igs-sd-cam', 'data-igs-sd-cam-mod']);
 const ROOT_VARS = Object.freeze(['--igs-sd-px', '--igs-sd-py', '--igs-sd-origin-x']);
 
 // 叠加合成：动作与呼吸（CSS 动画）同时作用在 transform 上而不互相覆盖。
@@ -20,6 +24,8 @@ const ADD = 'add';
 
 const states = new WeakMap();
 const decoded = new Set();
+const cgRevealToken = new WeakMap();
+const cgRevealPending = new WeakMap();
 
 function text(value) {
     return String(value == null ? '' : value).trim();
@@ -33,7 +39,7 @@ export function normalizeStageDirectionSettings(reader) {
 }
 
 export function isStageDirectionActive(settings) {
-    return Object.entries(settings).some(([key, item]) => key !== 'stageCast' && item.enabled);
+    return Object.entries(settings).some(([key, item]) => key !== 'stageCast' && key !== 'cgEntrance' && item.enabled);
 }
 
 function getState(root) {
@@ -56,15 +62,6 @@ function later(state, fn, delay) {
     }, delay);
     state.timers.add(timer);
     return timer;
-}
-
-function animate(el, frames, options) {
-    if (!el || typeof el.animate !== 'function') return null;
-    try {
-        return el.animate(frames, options);
-    } catch {
-        return null;
-    }
 }
 
 function removeNode(node) {
@@ -93,45 +90,228 @@ function sharpenCg(bg) {
     bg.style.setProperty('-webkit-filter', 'none', 'important');
 }
 
+const CG_ENTRANCE_PROPS = ['clip-path', '-webkit-clip-path', 'translate', 'scale', 'rotate', 'box-shadow', 'opacity'];
+
 function clearCgFilter(bg) {
     if (!bg || !bg.style || typeof bg.style.removeProperty !== 'function') return;
     bg.style.removeProperty('transition');
     bg.style.removeProperty('filter');
     bg.style.removeProperty('-webkit-filter');
+    for (const prop of CG_ENTRANCE_PROPS) bg.style.removeProperty(prop);
+}
+
+// NSFW 模糊到清晰：[先停多久, 变清晰用时]。
+const CG_FOCUS_TIMING = { fast: [200, 900], medium: [450, 2400], slow: [600, 4000] };
+
+// 过场 CG 出场：从勾选的效果里随机抽一种，一张图一个效果。只动 opacity / transform / clip-path，
+// 不做滤镜和大阴影动画；碎片效果的块数压在 12 以内，播完立刻移除。省电画质下只用淡入类的便宜效果。
+const CG_CHEAP_STYLES = new Set(['cinema', 'ink', 'flash', 'photo']);
+
+function animate(el, frames, options) {
+    if (!el || typeof el.animate !== 'function') return null;
+    try {
+        return el.animate(frames, options);
+    } catch {
+        return null;
+    }
+}
+
+// 按当前情绪优先挑出场：只在勾选的效果里挑，对不上情绪或对上的都没勾就全池随机。
+const CG_MOOD_STYLES = [
+    [/开心|高兴|快乐|兴奋|笑|得意|期待|活泼/, ['photo', 'panels', 'flash', 'puzzle']],
+    [/悲|哭|难过|伤心|寂寞|失落|怀念|回忆|思念|忧/, ['ink', 'film', 'blinds']],
+    [/怒|生气|愤|震惊|惊讶|吃惊|激动|决意|认真/, ['flash', 'tear', 'cinema']],
+    [/害羞|羞|心动|温柔|爱|甜|喜欢|脸红|撒娇|感动/, ['ripple', 'focus', 'ink']],
+    [/紧张|恐惧|害怕|不安|惊恐|阴沉|绝望|冷/, ['tear', 'cinema', 'focus', 'blinds']],
+    [/平静|安静|淡然|困|疲|思考|沉思/, ['cinema', 'film', 'blinds']],
+];
+
+function pickInterludeStyle(entrance, lowQuality, random = Math.random) {
+    let pool = CG_INTERLUDE_STYLES.filter((id) => entrance.styles && entrance.styles[id]);
+    if (lowQuality) pool = pool.filter((id) => CG_CHEAP_STYLES.has(id));
+    const mood = String(entrance.mood || '');
+    const hit = mood && CG_MOOD_STYLES.find(([re]) => re.test(mood));
+    const preferred = hit ? pool.filter((id) => hit[1].includes(id)) : [];
+    const from = preferred.length ? preferred : pool;
+    return from.length ? from[Math.floor(random() * from.length)] : '';
+}
+
+// 碎片带延迟入场，没有 fill 的话开播前会先整块露出来闪一下。
+const cgAnimate = (el, frames, options) => animate(el, frames, { fill: 'both', ...options });
+
+function cgLayer(doc, bg, extra = '') {
+    if (!bg.parentNode || typeof doc.createElement !== 'function') return null;
+    const layer = doc.createElement('div');
+    layer.className = 'igs-sd-cg-entrance';
+    layer.style.cssText = `position:absolute;inset:0;pointer-events:none;z-index:2;overflow:hidden;${extra}`;
+    bg.parentNode.insertBefore(layer, bg.nextSibling);
+    return layer;
+}
+
+function cgPiece(doc, layer, url, [l, t, w, h], extra = '') {
+    const piece = doc.createElement('div');
+    piece.style.cssText = `position:absolute;left:${l}%;top:${t}%;width:${w}%;height:${h}%;overflow:hidden;${extra}`;
+    const img = doc.createElement('div');
+    img.style.cssText = `position:absolute;left:${-l / w * 100}%;top:${-t / h * 100}%;width:${10000 / w}%;height:${10000 / h}%;`
+        + `background:center/cover no-repeat url("${String(url).replace(/"/g, '%22')}")`;
+    piece.appendChild(img);
+    layer.appendChild(piece);
+    return piece;
+}
+
+function playInterludeEntrance(state, { doc, bg, style, key, url }) {
+    const set = (prop, value) => bg.style.setProperty(prop, value, 'important');
+    const moving = [];
+    let holdFor = 0;
+    const done = (layer, after) => later(state, () => layer && layer.remove(), after);
+    const hideBg = (ms) => { set('opacity', '0'); later(state, () => bg.style.removeProperty('opacity'), ms); holdFor = Math.max(holdFor, ms); };
+    set('transition', 'none');
+    {
+        if (style === 'cinema') { set('clip-path', 'inset(47% 0 47% 0)'); set('-webkit-clip-path', 'inset(47% 0 47% 0)'); moving.push('clip-path 1.1s cubic-bezier(.7,0,.2,1)', '-webkit-clip-path 1.1s cubic-bezier(.7,0,.2,1)'); }
+        if (style === 'ink') { set('clip-path', 'circle(0% at 50% 50%)'); set('-webkit-clip-path', 'circle(0% at 50% 50%)'); moving.push('clip-path 1.6s cubic-bezier(.3,0,.2,1)', '-webkit-clip-path 1.6s cubic-bezier(.3,0,.2,1)'); }
+        if (style === 'ripple') {
+            const at = `${20 + Math.round(Math.random() * 60)}% ${25 + Math.round(Math.random() * 50)}%`;
+            set('clip-path', `circle(0% at ${at})`); set('-webkit-clip-path', `circle(0% at ${at})`);
+            moving.push('clip-path 1.3s ease-out', '-webkit-clip-path 1.3s ease-out');
+            const layer = cgLayer(doc, bg);
+            for (let n = 0; layer && n < 3; n += 1) {
+                const ring = doc.createElement('div');
+                ring.style.cssText = `position:absolute;left:${at.split(' ')[0]};top:${at.split(' ')[1]};width:20px;height:20px;margin:-10px;border-radius:50%;border:2px solid rgba(255,255,255,.7)`;
+                layer.appendChild(ring);
+                cgAnimate(ring, [{ transform: 'scale(1)', opacity: 0.9 }, { transform: 'scale(90)', opacity: 0 }], { duration: 1400, delay: n * 220, easing: 'ease-out' });
+            }
+            done(layer, 2000);
+        }
+        if (style === 'photo') {
+            set('translate', '0 -38%'); set('scale', '.52'); set('rotate', '-5deg'); set('box-shadow', '0 0 0 14px #fff, 0 18px 40px rgba(0,0,0,.45)');
+            moving.push('translate .7s cubic-bezier(.2,.8,.3,1.1)', 'rotate .7s ease-out', 'scale .9s cubic-bezier(.6,0,.3,1) .9s');
+        }
+        if (style === 'focus') {
+            set('scale', '2.8'); set('translate', `${Math.round(Math.random() * 40 - 20)}% ${Math.round(Math.random() * 30 - 15)}%`);
+            moving.push('scale 1.6s cubic-bezier(.5,0,.2,1) .2s', 'translate 1.6s cubic-bezier(.5,0,.2,1) .2s');
+        }
+        if (style === 'film') {
+            const layer = cgLayer(doc, bg, 'background:'
+                + 'repeating-linear-gradient(90deg,transparent 0 18px,rgba(255,255,255,.85) 18px 30px,transparent 30px 48px) top/100% 14px no-repeat,'
+                + 'repeating-linear-gradient(90deg,transparent 0 18px,rgba(255,255,255,.85) 18px 30px,transparent 30px 48px) bottom/100% 14px no-repeat,'
+                + 'linear-gradient(#111,#111) top/100% 28px no-repeat,linear-gradient(#111,#111) bottom/100% 28px no-repeat,'
+                + 'repeating-linear-gradient(90deg,transparent 0 37%,rgba(255,255,255,.18) 37% 37.2%,transparent 37.2% 71%,rgba(0,0,0,.25) 71% 71.15%,transparent 71.15%),'
+                + 'repeating-radial-gradient(circle at 30% 40%,rgba(0,0,0,.08) 0 1px,transparent 1px 3px);mix-blend-mode:normal');
+            cgAnimate(layer, [{ opacity: 1 }, { opacity: 1, offset: 0.7 }, { opacity: 0 }], { duration: 1800 });
+            done(layer, 1900);
+            set('translate', '0 2%');
+            moving.push('translate .3s steps(3) .7s');
+        }
+        if (style === 'flash') {
+            const layer = cgLayer(doc, bg, 'background:#fff');
+            cgAnimate(layer, [{ opacity: 1 }, { opacity: 0 }], { duration: 550, delay: 60, easing: 'ease-out' });
+            done(layer, 700);
+        }
+        if (style === 'panels' && url) {
+            const layer = cgLayer(doc, bg, 'background:#fff');
+            const cells = [[2, 3, 46, 55], [50, 3, 48, 55], [2, 60, 96, 37]];
+            cells.forEach((cell, n) => {
+                const piece = cgPiece(doc, layer, url, cell, 'box-shadow:0 0 0 3px #111');
+                cgAnimate(piece, [{ transform: 'scale(.6)', opacity: 0 }, { transform: 'scale(1.04)', opacity: 1, offset: 0.7 }, { transform: 'scale(1)', opacity: 1 }], { duration: 380, delay: n * 300, easing: 'ease-out' });
+            });
+            cgAnimate(layer, [{ opacity: 1 }, { opacity: 0 }], { duration: 400, delay: 1300 });
+            hideBg(1300); done(layer, 1800);
+        }
+        if (style === 'blinds' && url) {
+            const layer = cgLayer(doc, bg);
+            for (let n = 0; layer && n < 8; n += 1) {
+                const piece = cgPiece(doc, layer, url, [0, n * 12.5, 100, 12.5]);
+                cgAnimate(piece, [{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }], { duration: 420, delay: n * 80, easing: 'cubic-bezier(.4,0,.2,1)' });
+            }
+            hideBg(1100); done(layer, 1200);
+        }
+        if (style === 'puzzle' && url) {
+            const layer = cgLayer(doc, bg);
+            for (let n = 0; layer && n < 12; n += 1) {
+                const piece = cgPiece(doc, layer, url, [(n % 4) * 25, Math.floor(n / 4) * (100 / 3), 25, 100 / 3]);
+                const dx = Math.round(Math.random() * 160 - 80); const dy = Math.round(Math.random() * 160 - 80); const rot = Math.round(Math.random() * 90 - 45);
+                cgAnimate(piece, [{ transform: `translate(${dx}vw,${dy}vh) rotate(${rot}deg)`, opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 700, delay: Math.random() * 450, easing: 'cubic-bezier(.2,.8,.3,1)' });
+            }
+            hideBg(1250); done(layer, 1350);
+        }
+        if (style === 'tear') {
+            const layer = cgLayer(doc, bg);
+            const edge = Array.from({ length: 13 }, (_, n) => `${48 + (n % 2 ? 3 : -2) + Math.round(Math.random() * 2)}% ${n * (100 / 12)}%`);
+            const halves = [
+                `polygon(0 0,${edge.join(',')},0 100%)`,
+                `polygon(100% 0,${edge.join(',')},100% 100%)`,
+            ];
+            halves.forEach((shape, n) => {
+                const half = doc.createElement('div');
+                half.style.cssText = `position:absolute;inset:0;background:#f3ead8 radial-gradient(rgba(0,0,0,.06) 1px,transparent 1px) 0 0/6px 6px;clip-path:${shape};-webkit-clip-path:${shape};box-shadow:inset 0 0 12px rgba(0,0,0,.25)`;
+                layer && layer.appendChild(half);
+                cgAnimate(half, [{ transform: 'none' }, { transform: 'none', offset: 0.25 }, { transform: `translateX(${n ? 70 : -70}%) rotate(${n ? 8 : -8}deg)` }], { duration: 1200, easing: 'cubic-bezier(.5,0,.2,1)' });
+            });
+            done(layer, 1300);
+        }
+    }
+    if (!moving.length) {
+        later(state, () => { if (state.cgFocusUrl === key) state.cgFocusing = false; }, holdFor);
+        return;
+    }
+    later(state, () => {
+        if (state.cgFocusUrl !== key) return;
+        set('transition', moving.join(', '));
+        for (const prop of CG_ENTRANCE_PROPS) bg.style.removeProperty(prop);
+        if (style === 'film') sharpenCg(bg);
+        later(state, () => {
+            if (state.cgFocusUrl !== key) return;
+            state.cgFocusing = false;
+            bg.style.removeProperty('transition');
+        }, 2200);
+    }, 120);
 }
 
 // CG 出场：先模糊，再在同一张图上变清晰。同一张翻页不重放。
-function playCgFocus(state, bg, url, reduced) {
-    if (!bg || !url) return;
-    if (reduced) {
-        state.cgFocusUrl = url;
+// 认快照里的原地址，不认解码后的缓存地址。缓存地址会变（blob 换成新的、被挤掉再读回来），
+// 用它当「换了一张图」会把正在变清晰的滤镜立刻拨回最糊，看起来就是眨一下；变几次就眨几次。
+function playCgFocus(state, bg, url, reduced, identity, entrance = {}) {
+    const key = String(identity || url || '');
+    if (!bg || !key || !url) return;
+    const timing = entrance.nsfw === true ? CG_FOCUS_TIMING[entrance.speed] : null;
+    if (entrance.nsfw !== true && !reduced && state.cgFocusUrl !== key) {
+        state.cgFocusUrl = key;
+        sharpenCg(bg);
+        const style = pickInterludeStyle(entrance, entrance.lowQuality === true);
+        state.cgFocusing = Boolean(style);
+        if (style) playInterludeEntrance(state, { ...entrance, bg, style, key, url });
+        return;
+    }
+    if (reduced || (entrance.nsfw === true && !timing)) {
+        state.cgFocusUrl = key;
         state.cgFocusing = false;
         sharpenCg(bg);
         return;
     }
-    if (state.cgFocusUrl === url) {
+    if (state.cgFocusUrl === key) {
         if (!state.cgFocusing) sharpenCg(bg);
         return;
     }
-    state.cgFocusUrl = url;
+    const [hold, sharpen] = timing || CG_FOCUS_TIMING.medium;
+    state.cgFocusUrl = key;
     state.cgFocusing = true;
     bg.style.setProperty('transition', 'none', 'important');
     bg.style.setProperty('filter', 'blur(28px)', 'important');
     bg.style.setProperty('-webkit-filter', 'blur(28px)', 'important');
     later(state, () => {
-        if (state.cgFocusUrl !== url) return;
-        bg.style.setProperty('transition', 'filter 2.4s ease-in-out, -webkit-filter 2.4s ease-in-out', 'important');
+        if (state.cgFocusUrl !== key) return;
+        bg.style.setProperty('transition', `filter ${sharpen}ms ease-in-out, -webkit-filter ${sharpen}ms ease-in-out`, 'important');
         sharpenCg(bg);
         later(state, () => {
-            if (state.cgFocusUrl !== url) return;
+            if (state.cgFocusUrl !== key) return;
             state.cgFocusing = false;
             const transition = bg.style && typeof bg.style.getPropertyValue === 'function'
                 ? bg.style.getPropertyValue('transition') : '';
             if (bg.style && typeof bg.style.removeProperty === 'function' && String(transition || '').includes('filter')) {
                 bg.style.removeProperty('transition');
             }
-        }, 2500);
-    }, 450);
+        }, sharpen + 100);
+    }, hold);
 }
 
 function setAttr(el, name, on, value = '1') {
@@ -175,6 +355,57 @@ export function decodeSpriteImage(doc, url, { schedule = (fn, delay) => setTimeo
             finish();
         }
     });
+}
+
+function cgFocusEntrance(root, snapshot) {
+    const s = normalizeStageDirectionSettings(snapshot && snapshot.readerSettings);
+    const content = (snapshot && snapshot.content) || {};
+    return {
+        nsfw: content.sceneNsfw === true || content.cgNsfw === true,
+        speed: s.cgEntrance.nsfw,
+        styles: s.cgEntrance.styles,
+        mood: content.statusEmotion,
+        doc: root && root.ownerDocument,
+        root,
+        lowQuality: typeof root.getAttribute === 'function' && root.getAttribute('data-igs-quality') === 'low',
+    };
+}
+
+// 换 CG：新图像素还没解码时先留着旧图。解码完直接换上，不先糊、不先空。
+export function cancelCgReveal(bg) {
+    if (!bg) return;
+    cgRevealToken.delete(bg);
+    cgRevealPending.delete(bg);
+}
+
+export function revealCgImage(root, snapshot, bg, url, identity, write) {
+    if (!bg || typeof write !== 'function') return false;
+    const paintUrl = text(url);
+    const paintKey = text(identity);
+    const pendingNow = cgRevealPending.get(bg);
+    if (pendingNow && pendingNow.url === paintUrl && pendingNow.key === paintKey) return true;
+    const token = {};
+    cgRevealToken.set(bg, token);
+    cgRevealPending.set(bg, { url: paintUrl, key: paintKey });
+    const settings = normalizeStageDirectionSettings(snapshot && snapshot.readerSettings);
+    const focus = isStageDirectionActive(settings);
+    const apply = () => {
+        if (cgRevealToken.get(bg) !== token) return;
+        cgRevealToken.delete(bg);
+        cgRevealPending.delete(bg);
+        write();
+        if (focus && root) {
+            const state = getState(root);
+            playCgFocus(state, bg, paintUrl, prefersReducedMotion(), paintKey, cgFocusEntrance(root, snapshot));
+        }
+    };
+    const pending = decodeSpriteImage(root && root.ownerDocument, paintUrl);
+    if (!pending) {
+        apply();
+        return false;
+    }
+    pending.then(apply);
+    return true;
 }
 
 function whenDecoded(doc, url, state) {
@@ -475,24 +706,12 @@ export function cancelStageDirection(root) {
     flushGhosts(state.bgGhosts);
     flushGhosts(state.spriteGhosts);
     syncParallax(state, root, false);
+    cancelCameraExtras(state);
     cancelCameraImpact(typeof root.querySelector === 'function' ? root.querySelector('#igs-stage-motion') : null);
     for (const name of ROOT_ATTRS) setAttr(root, name, false);
     for (const name of ROOT_VARS) setVar(root, name, null);
     states.delete(root);
     return true;
-}
-
-// AI 镜头指令 [igs-fx:cam|…] 落到本页的镜头；返回值写进 data-igs-sd-cam。
-// 特写写了别的角色、特写 / 拉远 / 虚化时本页没有立绘都不推；摇镜在减少动态效果时不播，虚化在低画质档不做。
-export function resolveCameraShot(cam, { speakers = [], spriteUrl = '', reduced = false, lowQuality = false } = {}) {
-    const shot = cam && typeof cam === 'object' ? text(cam.shot) : '';
-    if (!shot || shot === 'reset') return '';
-    if (shot === 'pan') return reduced ? '' : `pan-${cam.target === 'left' ? 'left' : 'right'}`;
-    if (shot === 'tilt') return 'tilt';
-    if (!spriteUrl) return '';
-    if (shot === 'focus') return lowQuality ? '' : 'focus';
-    if (shot === 'closeup' && text(cam.target) && !speakers.map(text).includes(text(cam.target))) return '';
-    return shot === 'closeup' || shot === 'wide' ? shot : '';
 }
 
 // ctx.bgUrl / ctx.spriteUrl 为渲染层已解析、实际写入 DOM 的地址（隐藏立绘时为空）。
@@ -529,7 +748,8 @@ export function applyStageDirection(root, snapshot, ctx = {}) {
     if (!cg && state.initialized && bg && bgUrl !== state.bgUrl && s.sceneTransition.enabled) {
         // 同一地点只是换时段的底图时总用淡入，换地点才用所选转场。
         const sameLocation = text(content.sceneLocation) && text(content.sceneLocation) === state.location;
-        const style = reduced || sameLocation ? 'fade' : s.sceneTransition.style;
+        const cut = reduced ? '' : cutStyleOf(content.fx, snapshot.readerSettings);
+        const style = reduced ? 'fade' : cut || (sameLocation ? 'fade' : s.sceneTransition.style);
         const kind = bgUrl ? playBgTransition(state, { doc, bg, root, style, speed, nextUrl: bgUrl }) : '';
         if (kind) played.push(`bg:${kind}`);
         black = kind === 'black';
@@ -537,7 +757,8 @@ export function applyStageDirection(root, snapshot, ctx = {}) {
     if (cg) {
         flushGhosts(state.bgGhosts);
         flushGhosts(state.spriteGhosts);
-        playCgFocus(state, bg, bgUrl, reduced);
+        // 图还没画上时不要先糊旧图。等解码完由 revealCgImage 在换图的同一刻开始对焦。
+        if (ctx.deferCgFocus !== true) playCgFocus(state, bg, bgUrl, reduced, text(ctx.bgKey), cgFocusEntrance(root, snapshot));
     } else {
         state.cgFocusUrl = '';
         state.cgFocusing = false;
@@ -571,11 +792,15 @@ export function applyStageDirection(root, snapshot, ctx = {}) {
     setAttr(root, 'data-igs-cg', cg);
     setAttr(root, 'data-igs-sd-kenburns', !cg && !reduced && s.camera.enabled && s.camera.kenBurns && Boolean(bgUrl));
     const lowQuality = typeof root.getAttribute === 'function' && root.getAttribute('data-igs-quality') === 'low';
-    const camShot = !cg && eligible && !ctx.spriteEditMode && s.camera.enabled && s.camera.aiShots
-        ? resolveCameraShot(content.fx && content.fx.cam, { speakers: [content.speaker, content.spriteCharacter], spriteUrl, reduced, lowQuality })
-        : '';
+    const cam = !cg && eligible && !ctx.spriteEditMode && s.camera.enabled && s.camera.aiShots
+        ? (content.fx && content.fx.cam) || impliedCam(content.fx, snapshot.readerSettings)
+        : null;
+    const camShot = cam ? resolveCameraShot(cam, { speakers: [content.speaker, content.spriteCharacter], spriteUrl, reduced, lowQuality }) : '';
+    const camMod = camShot ? resolveCameraMod(cam, { reduced, lowQuality }) : '';
     setAttr(root, 'data-igs-sd-cam', Boolean(camShot), camShot);
+    setAttr(root, 'data-igs-sd-cam-mod', Boolean(camMod), camMod);
     if (camShot && newPage) played.push(`camera:${camShot}`);
+    played.push(...playCameraExtras(state, root, { key: pageKey, shot: camShot, mod: camMod, lowQuality, newPage }));
     // AI 指定了镜头的页不再按情绪自动特写。
     setAttr(root, 'data-igs-sd-closeup', !camShot && !cg && !reduced && eligible && Boolean(spriteUrl) && pickCloseUp(content.statusEmotion, s.camera));
     syncParallax(state, root, !cg && !reduced && s.camera.enabled && s.camera.parallax);

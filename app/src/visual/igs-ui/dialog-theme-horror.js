@@ -156,7 +156,7 @@ export const GORE_DIALOG_STYLE = [
         rise: 20,
         flush: true,
         frameCss: 'isolation:isolate;background:rgba(10,10,10,.86);border:0;border-radius:0;box-shadow:0 -18px 36px -12px rgba(0,0,0,.55);-webkit-backdrop-filter:none;backdrop-filter:none;',
-        speakerCss: `left:84px;top:-21px;width:max-content;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:calc(100% - 140px);height:42px;line-height:42px;padding:0 30px 0 26px;background:${RED};border:0;border-radius:0;${SLANT}font-size:24px;font-weight:700;letter-spacing:.12em;text-shadow:none;transition:background-color .4s;`,
+        speakerCss: `left:84px;top:-21px;width:max-content;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:calc(100% - 140px);height:42px;line-height:42px;padding:0 26px 0 30px;background:${RED};border:0;border-radius:0;${SLANT}font-size:24px;font-weight:700;letter-spacing:.06em;text-shadow:none;transition:background-color .4s;`,
         textCss: 'letter-spacing:.06em;text-shadow:0 1px 2px rgba(0,0,0,.9);',
     }),
     scalePx(`${goreScope}::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;z-index:-1;pointer-events:none;transform-origin:50% 0;background:${RED};}`),
@@ -174,8 +174,8 @@ export const GORE_DIALOG_STYLE = [
     `${gore(3)}::after{background:${HALFTONE('rgba(10,10,10,.45)', 1.3)};-webkit-mask:linear-gradient(transparent 55%,#000);mask:linear-gradient(transparent 55%,#000);opacity:1;}`,
     `${gore(3)} .igs-text{text-shadow:0 1px 3px rgba(0,0,0,.85);}`,
     // 名牌：2 档字带黑色套印错位、随心跳轻轻一缩；3 档翻成黑块，骨白字压一层错开的红色套印，心跳变成急促的双跳。
-    `${gore(2)} .igs-speaker{text-shadow:3px 3px 0 ${BLACK};animation:igs-hg-beat 2.4s ease-out infinite;}`,
-    `${gore(3)} .igs-speaker{background:${BLACK};color:${BONE} !important;text-shadow:4px 3px 0 ${RED};animation:igs-hg-beat-hard 1.1s ease-out infinite;}`,
+    `${gore(2)} .igs-speaker{text-shadow:2px 2px 0 ${BLACK};animation:igs-hg-beat 2.4s ease-out infinite;}`,
+    `${gore(3)} .igs-speaker{background:${BLACK};color:${BONE} !important;text-shadow:2px 2px 0 ${RED};animation:igs-hg-beat-hard 1.1s ease-out infinite;}`,
     '@keyframes igs-hg-beat{0%,100%{transform:none;}8%{transform:scale(1.06);}18%{transform:none;}}',
     '@keyframes igs-hg-beat-hard{0%,100%{transform:rotate(-2deg);}7%{transform:rotate(-2deg) scale(1.14);}16%{transform:rotate(-2deg) scale(.98);}24%{transform:rotate(-2deg) scale(1.1);}36%{transform:rotate(-2deg);}}',
     '@keyframes igs-hg-pour1{from{transform:scaleY(.2);}}',
@@ -312,7 +312,7 @@ const DECO = LEVELS.map((variant) => [true, false].map((animated) => (variant ==
     decoSvg('top', '0 0 80 32', variant, animated),
 ])));
 const decoImages = (variant, animated = true) => `background-image:${DECO[variant][animated ? 0 : 1].join(',')};`;
-const decoLayer = (variant) => `${decoImages(variant)}background-repeat:no-repeat;${variant === 3 ? `background-repeat:repeat-y;inset:0 0 0 auto;width:${PACK[0]}px;background-position:0 0;background-size:${PACK[0]}px ${PACK[1]}px;-webkit-mask:radial-gradient(ellipse 100% 120% at 100% 100%,#000 40%,transparent 95%);mask:radial-gradient(ellipse 100% 120% at 100% 100%,#000 40%,transparent 95%);animation:igs-hp-rise 30s linear infinite;` : 'background-position:right 14px bottom 8px,right 26px top 10px;background-size:150px 92px,80px 32px;'}`;
+const decoLayer = (variant) => `${decoImages(variant)}background-repeat:no-repeat;${variant === 3 ? `background-repeat:repeat-y;inset:0 0 0 auto;width:${PACK[0]}px;background-position:0 0;background-size:${PACK[0]}px ${PACK[1]}px;-webkit-mask:radial-gradient(ellipse 100% 120% at 100% 100%,#000 40%,transparent 95%);mask:radial-gradient(ellipse 100% 120% at 100% 100%,#000 40%,transparent 95%);animation:igs-hp-rise 30s steps(${PACK[1]},end) infinite;` : 'background-position:right 14px bottom 8px,right 26px top 10px;background-size:150px 92px,80px 32px;'}`;
 const POLKA = (color) => `radial-gradient(circle,${color} 0 1.6px,transparent 2.1px) 0 0/18px 18px`;
 const HEART_ICON = svgUrl(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="-11 -10 22 19"><path d="${HEART}" fill="#fff"/></svg>`);
 const EYE_ICON = svgUrl(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="-12 -8 24 16"><path d="M-11 0Q0-11 11 0Q0 11-11 0Z" fill="#fff"/><circle r="4" fill="#3a2e30"/></svg>`);
@@ -358,6 +358,7 @@ export const PSYCH_DIALOG_STYLE = [
     // 描边只留顶边，两侧自上而下渐隐，底边不描。
     scalePx(`${psych(3)}::after{inset:-3px;opacity:1;border:2px solid ${BLOOD};border-bottom:0;-webkit-mask:linear-gradient(#000 20%,transparent 85%);mask:linear-gradient(#000 20%,transparent 85%);}`),
     scalePx(`${psych(3)}{padding-right:240px;}`),
+    // 侧边纹样上浮按 1px 一步走（约每秒 14 次重绘），不再满帧重绘。
     `@keyframes igs-hp-rise{to{background-position:0 -${PACK[1]}px;}}`,
     '@keyframes igs-hp-slip{0%,93%{transform:none;text-shadow:none;}93.4%{transform:translateX(3px);text-shadow:-2px 0 rgba(200,30,40,.55),2px 0 rgba(30,140,170,.45);}94.4%{transform:translateX(-2px) skewX(-4deg);}95.2%,100%{transform:none;text-shadow:none;}}',
     '@keyframes igs-hp-slip-hard{0%{transform:translateX(-6px);text-shadow:none;}70%{transform:translate(4px,1px) skewX(-6deg);text-shadow:-3px 0 rgba(220,20,30,.8),3px 0 rgba(20,160,190,.6);}76%{transform:translateX(-10px);}82%,100%{transform:translateX(-6px);text-shadow:none;}}',

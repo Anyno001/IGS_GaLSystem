@@ -1,5 +1,16 @@
 import { resolveCharacterKey } from './scene-directives.js';
 
+// 变身形态三栏：性别 / 年龄档 / 其他变化（自由文字，比如兽化）。
+export const FORM_AGES = Object.freeze(['child', 'teen', 'adult', 'elder']);
+export function normalizeOutfitForm(form) {
+    const src = form && typeof form === 'object' ? form : {};
+    const out = { gender: ['male', 'female', 'other'].includes(src.gender) ? src.gender : '' };
+    if (FORM_AGES.includes(src.age)) out.age = src.age;
+    const note = typeof src.note === 'string' ? src.note.trim() : '';
+    if (note) out.note = note;
+    return out;
+}
+
 export const OUTFIT_RESET = '默认';
 export const BUILTIN_NUDE_OUTFIT = '裸体';
 const OUTFIT_BASE_WORDS = new Set([OUTFIT_RESET, '原装']);
@@ -74,13 +85,16 @@ export function normalizeCharacterOutfits(value) {
             if (note) outfits[name].note = note;
             const base = typeof entry.base === 'string' ? entry.base.trim() : '';
             if (base) outfits[name].base = base;
+            // 变身形态（性转 / 成长 / 返老还童）：这一套的生图词替换 DNA 的身份与外观，gender 覆盖 DNA 推断的性别。
+            const form = plain(entry.form);
+            if (form) outfits[name].form = normalizeOutfitForm(form);
         }
         out[character] = outfits;
     }
     return out;
 }
 
-// 衣柜：服装名 → 手写生图提示词。角色的某一套服装可点名引用，没点名时按同名服装取。
+// 衣柜：服装名 → 手写生图提示词。下拉选「同名服装」时按这套衣服的名字取；选了别的就只用那一条，没有就是空。
 export function normalizeWardrobe(raw) {
     const out = {};
     for (const [key, value] of Object.entries(plain(raw) || {})) {
@@ -92,6 +106,9 @@ export function normalizeWardrobe(raw) {
         out[name] = { prompt };
         if (reference.startsWith('igs-gen:')) out[name].reference = reference;
         if (source.nsfwBoost === true) out[name].nsfwBoost = true;
+        // 新建时填的具体要求，写提示词时带上；不进生图词。
+        const note = typeof source.note === 'string' ? source.note.replace(/\r\n?/g, '\n').trim() : '';
+        if (note) out[name].note = note;
     }
     return out;
 }
@@ -99,8 +116,8 @@ export function normalizeWardrobe(raw) {
 export function resolveWardrobePrompt(wardrobe, outfitEntry, outfitName) {
     const map = plain(wardrobe) || {};
     const linked = outfitEntry && typeof outfitEntry.wardrobe === 'string' ? outfitEntry.wardrobe.trim() : '';
-    const key = linked && hasOwn(map, linked) ? linked : (hasOwn(map, outfitName) ? outfitName : '');
-    if (!key) return null;
+    const key = linked || String(outfitName || '').trim();
+    if (!key || !hasOwn(map, key)) return null;
     const entry = map[key] || {};
     const resolved = { name: key, prompt: String(entry.prompt || '').trim() };
     if (entry.nsfwBoost === true) resolved.nsfwBoost = true;
@@ -127,7 +144,36 @@ export function resolveOutfitToken(outfits, token) {
     for (const [name, entry] of Object.entries(map)) {
         if (Array.isArray(entry && entry.words) && entry.words.includes(text)) return name;
     }
-    return '';
+    return fuzzyOutfitName(map, text);
+}
+
+// 模糊兜底：正文写「绿裙」也能认「墨绿色长裙」。去掉虚字后一方按顺序包含另一方、且末字（裙 / 服 / 衣等中心词）相同；
+// 取重合比例最高者，同分冲突时放弃。
+const OUTFIT_FILLER_RE = /[色的款件套条身之\s·・]/g;
+const outfitCore = (word) => Array.from(String(word || '').replace(OUTFIT_FILLER_RE, '').toLowerCase());
+function isSubsequence(short, long) {
+    let at = 0;
+    for (const ch of long) if (ch === short[at]) at += 1;
+    return at === short.length;
+}
+export function fuzzyOutfitName(outfits, token) {
+    const want = outfitCore(token);
+    if (want.length < 2) return '';
+    let best = '';
+    let bestScore = 0;
+    let tie = false;
+    for (const [name, entry] of Object.entries(plain(outfits) || {})) {
+        let score = 0;
+        for (const candidate of [name, ...(Array.isArray(entry && entry.words) ? entry.words : [])]) {
+            const have = outfitCore(candidate);
+            if (have.length < 2 || have[have.length - 1] !== want[want.length - 1]) continue;
+            const [short, long] = have.length <= want.length ? [have, want] : [want, have];
+            if (isSubsequence(short, long)) score = Math.max(score, short.length / long.length);
+        }
+        if (!score) continue;
+        if (score > bestScore) { best = name; bestScore = score; tie = false; } else if (score === bestScore) tie = true;
+    }
+    return tie ? '' : best;
 }
 
 export function createOutfitResolver(sceneAssets) {

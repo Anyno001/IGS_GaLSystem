@@ -242,7 +242,7 @@ test('gate:fx-runtime:dom-apply-spawns-transients-sets-ranges-and-cleans-up', ()
     assert.deepEqual(result.played, ['symbol', 'call']);
     assert.deepEqual(result.ranges, { flashback: true, dream: true, letterbox: false });
     assert.equal(result.phone, true);
-    assert.deepEqual(sounds, ['ring']);
+    assert.deepEqual(sounds, ['range-flashback', 'range-dream', 'ring']);
     assert.equal(motion.getAttribute('data-igs-fx-flashback'), '1');
     assert.equal(motion.getAttribute('data-igs-fx-dream'), '1');
     assert.equal(motion.getAttribute('data-igs-fx-call'), 'voice');

@@ -1,4 +1,10 @@
+import { normalizeMyPhone } from './my-phone.js';
+import { normalizeQuickActions } from '../../choices/option-sources.js';
+import { normalizePromptEntries } from '../../scene/prompt-entries.js';
+import { normalizeDlcFxSettings } from '../../scene/fx-registry.js';
 // 设置快照的规范化（bridge 配置与阅读器设置）：纯函数，阅读器和设置器共用。
+import { MERMAID_ACCENT_DEFAULT, MERMAID_TONE_DEFAULT, normalizeMermaidAccent, normalizeMermaidTone } from './dialog-theme-mermaid.js';
+import { normalizeEventCgs } from '../../scene/event-cg.js';
 import { normalizeSourceFilter, normalizeVirtualRegex } from '../../scene/message-source.js';
 import { normalizeSpriteEnhance } from './sprite-enhance.js';
 import { normalizeAssetCards } from '../../scene/asset-scope.js';
@@ -11,8 +17,9 @@ import { normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { normalizeSettingsTheme } from './settings-theme.js';
 import { DEFAULT_IMAGE_API, DIALOG_FONT_OPTIONS, DEFAULT_PINNED_TOOLBAR_BUTTONS, normalizeScenePromptRule, READER_SETTINGS_SCHEMA_VERSION, TOOLBAR_ACTIONS, VN_THEME_PRESETS } from './reader-host-constants.js';
+import { normalizeShortcutOverrides } from './reader-shortcuts.js';
 import { cloneData, clampNumber, normalizeBoolean, normalizeFiniteNumber, normalizeNullableNumber, normalizeOpacity } from './reader-value-utils.js';
-import { normalizeBtnOrder, normalizeDialogBarAlign, normalizeDialogBarButtons, normalizeToolbarSplit, normalizeHiddenButtons, normalizePerformanceSettings, normalizePinnedButtons, normalizeReaderMode, normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale, normalizeSpriteLayouts } from './settings-normalize.js';
+import { normalizeBtnOrder, normalizeCastSlotLayouts, normalizeDialogBarAlign, normalizeDialogBarButtons, normalizeToolbarPlate, normalizeToolbarSplit, normalizeHiddenButtons, normalizePerformanceSettings, normalizePinnedButtons, normalizeReaderMode, normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale, normalizeSpriteLayouts } from './settings-normalize.js';
 import { normalizeCharacterSpriteScales } from './sprite-height.js';
 import { normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
 import { CLASSIC_DIALOG_WIDTH_PERCENT_DEFAULT, CLASSIC_DIALOG_THEME_DEFAULTS, normalizeClassicDialogWidthPercent, normalizeDialogSkin } from './classic-dialog-skin.js';
@@ -31,7 +38,8 @@ import { normalizeSystemRoleSettings } from './system-role.js';
 import { normalizePromptPlacement } from './tag-grammar.js';
 
 export function normalizeBridgeConfig(bridge) {
-    const normalized = cloneData(bridge || {});
+    // 不改入参、不深拷：入参可能是存储里共享的只读配置。改到哪层就浅拷哪层，没动的子树（素材库）原样共享。
+    const normalized = { ...(bridge || {}) };
     normalized.openMode = normalizeReaderMode(normalized.openMode, normalized);
     normalized.showToasts = normalizeBoolean(normalized.showToasts, true);
     normalized.settingsTheme = normalizeSettingsTheme(normalized.settingsTheme);
@@ -58,6 +66,9 @@ export function normalizeOptionBubble(value) {
         position,
         clickAction: src.clickAction === 'fill' ? 'fill' : 'send',
         widthFollowsText: normalizeBoolean(src.widthFollowsText, false),
+        itemButton: normalizeBoolean(src.itemButton, true),
+        bodyFallback: normalizeBoolean(src.bodyFallback, true),
+        quickActions: normalizeQuickActions(src.quickActions),
     };
 }
 
@@ -81,33 +92,37 @@ export function normalizeImageApi(value) {
 }
 
 export function normalizeSceneAssets(value) {
-    // normalizeBridgeConfig already cloned the entire bridge before calling here.
-    // Re-cloning a large sceneAssets library on every settings redraw is redundant.
-    const normalized = value || {};
+    // 写时复制：顶层与场景三层（场景/时段/天气，条目很少）浅拷后再迁移，角色等大库原样共享，入参不被改动。
+    const normalized = { ...(value || {}) };
     normalized.enabled = normalizeBoolean(normalized.enabled, false);
     normalized.generated = normalizeGeneratedLibrary(normalized.generated);
     normalized.promptRule = normalizeScenePromptRule(normalized.promptRule);
     normalized.promptPlacement = normalizePromptPlacement(normalized.promptPlacement);
     normalized.spriteEnhance = normalizeSpriteEnhance(normalized.spriteEnhance);
     normalized.promptAdaptive = normalized.promptAdaptive !== false;
+    if (normalized.promptEntries != null) normalized.promptEntries = normalizePromptEntries(normalized.promptEntries);
     normalized.promptRuleEnabled = normalized.promptRuleEnabled !== false;
     if (!normalized.scenes || typeof normalized.scenes !== 'object' || Array.isArray(normalized.scenes)) {
         normalized.scenes = {};
     }
     // migrate old string-value scenes to object format
+    normalized.scenes = { ...normalized.scenes };
     for (const key of Object.keys(normalized.scenes)) {
         const v = normalized.scenes[key];
         if (typeof v === 'string') normalized.scenes[key] = { url: v, times: {} };
-        else if (v && typeof v === 'object' && !v.times) normalized.scenes[key].times = {};
+        else if (v && typeof v === 'object') normalized.scenes[key] = { ...v, times: { ...(v.times || {}) } };
         const sceneObj = normalized.scenes[key];
-        for (const tKey of Object.keys(sceneObj.times || {})) {
+        if (!sceneObj || typeof sceneObj !== 'object') continue;
+        for (const tKey of Object.keys(sceneObj.times)) {
             const tv = sceneObj.times[tKey];
             if (typeof tv === 'string') sceneObj.times[tKey] = { url: tv, weathers: {} };
-            else if (tv && typeof tv === 'object' && !tv.weathers) sceneObj.times[tKey].weathers = {};
+            else if (tv && typeof tv === 'object') sceneObj.times[tKey] = { ...tv, weathers: { ...(tv.weathers || {}) } };
             const timeObj = sceneObj.times[tKey];
-            for (const wKey of Object.keys(timeObj.weathers || {})) {
+            if (!timeObj || typeof timeObj !== 'object') continue;
+            for (const wKey of Object.keys(timeObj.weathers)) {
                 const wv = timeObj.weathers[wKey];
                 if (typeof wv === 'string') timeObj.weathers[wKey] = { url: wv, words: [] };
+                else if (wv && typeof wv === 'object') timeObj.weathers[wKey] = { ...wv };
             }
         }
     }
@@ -136,10 +151,11 @@ export function normalizeSceneAssets(value) {
     normalized.characterVoices = normalizeCharacterVoices(normalized.characterVoices);
     normalized.characterSpriteScales = normalizeCharacterSpriteScales(normalized.characterSpriteScales);
     normalized.wardrobe = normalizeWardrobe(normalized.wardrobe);
+    normalized.eventCgs = normalizeEventCgs(normalized.eventCgs);
     normalized.moodGroups = normalizeMoodGroups(normalized.moodGroups);
-    // init group arrays
-    if (!Array.isArray(normalized.timeGroups)) normalized.timeGroups = [];
-    if (!Array.isArray(normalized.weatherGroups)) normalized.weatherGroups = [];
+    // init group arrays（组内 words 会被下面的迁移追加，按组浅拷）
+    normalized.timeGroups = Array.isArray(normalized.timeGroups) ? normalized.timeGroups.map((g) => (g && typeof g === 'object' ? { ...g, words: Array.isArray(g.words) ? [...g.words] : g.words } : g)) : [];
+    normalized.weatherGroups = Array.isArray(normalized.weatherGroups) ? normalized.weatherGroups.map((g) => (g && typeof g === 'object' ? { ...g, words: Array.isArray(g.words) ? [...g.words] : g.words } : g)) : [];
     // migrate any embedded time/weather words into global groups
     for (const sceneObj of Object.values(normalized.scenes)) {
         for (const [tKey, timeObj] of Object.entries(sceneObj.times || {})) {
@@ -203,7 +219,8 @@ export function normalizeReaderSettings(settings, legacyTheme) {
         : {};
     const base = {
         _v: currentVersion,
-        dialogSkin: 'default',
+        // 新装默认用渐变黑幕；已存过的皮肤（含原来的「磨砂玻璃」= default）照旧。
+        dialogSkin: 'gradient-veil',
         gradientVeil: normalizeGradientVeil(null),
         classicDialogWidthPercent: CLASSIC_DIALOG_WIDTH_PERCENT_DEFAULT,
         skinDialogScale: SKIN_DIALOG_SCALE_DEFAULT,
@@ -223,6 +240,7 @@ export function normalizeReaderSettings(settings, legacyTheme) {
         glassBackdropFilter: false,
         toolbarScale: 100,
         toolbarDock: 'top',
+        inputPlacement: 'dialog',
         inputScale: 100,
         imgMode: 'adaptive',
         imgBrightness: 100,
@@ -234,6 +252,10 @@ export function normalizeReaderSettings(settings, legacyTheme) {
         dblclickCgOnly: false,
         titleScreen: true,
         dialogAutoHeight: false,
+        // 场景在水下时对话框自动换成深海人鱼。
+        underwaterSkin: true,
+        mermaidTone: MERMAID_TONE_DEFAULT,
+        mermaidAccent: MERMAID_ACCENT_DEFAULT,
         cinemaBars: false,
         typewriter: { ...TYPEWRITER_DEFAULTS },
         stageShake: normalizeStageShakeSettings(null),
@@ -244,10 +266,12 @@ export function normalizeReaderSettings(settings, legacyTheme) {
         weatherFx: normalizeWeatherFxSettings(null),
         ...normalizeFxReaderSettings(null),
         imageCountOverride: null,
+        shortcuts: {},
         pinnedBtns: Array.from(DEFAULT_PINNED_TOOLBAR_BUTTONS),
         hiddenBtns: [],
         btnOrder: TOOLBAR_ACTIONS.map(([id]) => id),
         toolbarSplit: 'split',
+        toolbarPlate: 'off',
         dialogBarAlign: 'auto',
         dialogBarBtns: normalizeDialogBarButtons(null),
         spriteLayouts: {},
@@ -257,6 +281,8 @@ export function normalizeReaderSettings(settings, legacyTheme) {
     const normalized = { ...base, ...src, _v: currentVersion };
     delete normalized.emptyBackgroundColor;
     normalized.dialogSkin = normalizeDialogSkin(normalized.dialogSkin);
+    // DLC 演出开关只记关掉的；对应 DLC 这次没加载也保留，下次加载照旧关着。
+    normalized.dlcFx = normalizeDlcFxSettings(normalized.dlcFx);
     normalized.gradientVeil = normalizeGradientVeil(normalized.gradientVeil);
     normalized.classicDialogWidthPercent = normalizeClassicDialogWidthPercent(normalized.classicDialogWidthPercent);
     normalized.skinDialogScale = normalizeSkinDialogScale(normalized.skinDialogScale);
@@ -290,6 +316,7 @@ export function normalizeReaderSettings(settings, legacyTheme) {
     normalized.glassBackdropFilter = normalizeBoolean(normalized.glassBackdropFilter, base.glassBackdropFilter);
     normalized.toolbarScale = normalizeFiniteNumber(normalized.toolbarScale, base.toolbarScale);
     normalized.toolbarDock = normalized.toolbarDock === 'float' ? 'float' : 'top';
+    normalized.inputPlacement = normalized.inputPlacement === 'float' ? 'float' : 'dialog';
     normalized.inputScale = normalizeFiniteNumber(normalized.inputScale, base.inputScale);
     normalized.imgMode = normalized.imgMode === 'contain' ? 'contain' : 'adaptive';
     normalized.imgBrightness = clampNumber(normalizeFiniteNumber(normalized.imgBrightness, base.imgBrightness), 10, 100);
@@ -297,6 +324,9 @@ export function normalizeReaderSettings(settings, legacyTheme) {
     normalized.dblclickCgOnly = normalizeBoolean(normalized.dblclickCgOnly, false);
     normalized.titleScreen = normalizeBoolean(normalized.titleScreen, true);
     normalized.dialogAutoHeight = normalizeBoolean(normalized.dialogAutoHeight, false);
+    normalized.underwaterSkin = normalizeBoolean(normalized.underwaterSkin, true);
+    normalized.mermaidTone = normalizeMermaidTone(normalized.mermaidTone);
+    normalized.mermaidAccent = normalizeMermaidAccent(normalized.mermaidAccent);
     normalized.cinemaBars = normalizeBoolean(normalized.cinemaBars, false);
     normalized.typewriter = normalizeTypewriterSettings(normalized.typewriter);
     normalized.stageShake = normalizeStageShakeSettings(normalized.stageShake);
@@ -306,13 +336,16 @@ export function normalizeReaderSettings(settings, legacyTheme) {
     normalized.systemRole = normalizeSystemRoleSettings(normalized.systemRole);
     normalized.weatherFx = normalizeWeatherFxSettings(normalized.weatherFx);
     normalized.performance = normalizePerformanceSettings(normalized.performance);
+    normalized.myPhone = normalizeMyPhone(normalized.myPhone, normalized.liveFx);
     for (const [key, normalize] of Object.entries(FX_SETTINGS_NORMALIZERS)) normalized[key] = normalize(normalized[key]);
     normalized.statusHud = normalizeStatusHudSettings(normalized.statusHud);
     normalized.imageCountOverride = normalizeNullableNumber(normalized.imageCountOverride);
+    normalized.shortcuts = normalizeShortcutOverrides(normalized.shortcuts);
     normalized.pinnedBtns = normalizePinnedButtons(normalized.pinnedBtns);
     normalized.hiddenBtns = normalizeHiddenButtons(normalized.hiddenBtns);
     normalized.btnOrder = normalizeBtnOrder(normalized.btnOrder);
     normalized.toolbarSplit = normalizeToolbarSplit(normalized.toolbarSplit);
+    normalized.toolbarPlate = normalizeToolbarPlate(normalized.toolbarPlate);
     normalized.dialogBarAlign = normalizeDialogBarAlign(normalized.dialogBarAlign);
     normalized.dialogBarBtns = normalizeDialogBarButtons(normalized.dialogBarBtns);
     normalized.spriteLayouts = normalizeSpriteLayouts(normalized.spriteLayouts);
@@ -320,7 +353,7 @@ export function normalizeReaderSettings(settings, legacyTheme) {
     normalized.spriteGenderScale = normalizeSpriteGenderScale(normalized.spriteGenderScale);
     normalized.spriteDisplayScale = normalizeSpriteDisplayScale(normalized.spriteDisplayScale);
     normalized.spriteHeads = normalizeSpriteHeads(normalized.spriteHeads);
-    normalized.castSlotLayouts = normalizeSpriteLayouts(normalized.castSlotLayouts);
+    normalized.castSlotLayouts = normalizeCastSlotLayouts(normalized.castSlotLayouts);
     // 对话主题（vnTheme）按模式存进 readerSettings。独立于 _v 门控处理，避免 schema 版本
     // 不符时被清空。settings.vnTheme 缺失时回退到旧的全局 bridge.vnTheme（legacyTheme），
     // 实现从全局存储到按模式存储的平滑迁移。旧的全局 dialogFont 只在读取时迁移为

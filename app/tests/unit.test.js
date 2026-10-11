@@ -231,11 +231,11 @@ test('gate:igs-ui:embedded-frame-locks-configured-size', () => {
     });
     const landscape = host();
     syncEmbeddedHostFrame({ className: 'igs-mode-embedded', closest: () => landscape }, '1216x832');
-    assert.equal(landscape.style.aspectRatio, '1216 / 832');
+    assert.equal(landscape.style.aspectRatio, '1216 / 957');
     assert.equal(landscape.getAttribute('data-igs-frame'), 'size');
     const portrait = host();
     syncEmbeddedHostFrame({ className: 'igs-mode-embedded', closest: () => portrait }, '832x1216');
-    assert.equal(portrait.style.aspectRatio, '832 / 1216');
+    assert.equal(portrait.style.aspectRatio, '832 / 1398');
 });
 
 test('gate:igs-ui:embedded-frame-keeps-pinned-ratio-when-host-unmeasured', () => {
@@ -252,18 +252,18 @@ test('gate:igs-ui:embedded-frame-keeps-pinned-ratio-when-host-unmeasured', () =>
     const win = { innerWidth: 390, innerHeight: 844 };
     const root = { className: 'igs-mode-embedded', closest: () => host, ownerDocument: { defaultView: win } };
     pinEmbeddedHostFrame(root, '1216x832', 'embedded');
-    assert.equal(host.style.aspectRatio, '832 / 1216');
+    assert.equal(host.style.aspectRatio, '832 / 1398');
     width = 0;
     pinEmbeddedHostFrame(root, '1216x832', 'embedded');
-    assert.equal(host.style.aspectRatio, '832 / 1216');
+    assert.equal(host.style.aspectRatio, '832 / 1398');
     width = 900;
     pinEmbeddedHostFrame(root, '1216x832', 'embedded');
-    assert.equal(host.style.aspectRatio, '1216 / 832');
+    assert.equal(host.style.aspectRatio, '1216 / 957');
 
     // 第一次就量不到：按窗口宽度判断，手机钉竖屏。
     const fresh = { ...host, style: {}, attrs: {}, getBoundingClientRect: () => ({ width: 0, height: 0 }) };
     pinEmbeddedHostFrame({ ...root, closest: () => fresh }, '1216x832', 'embedded');
-    assert.equal(fresh.style.aspectRatio, '832 / 1216');
+    assert.equal(fresh.style.aspectRatio, '832 / 1398');
 });
 
 test('gate:igs-ui:embedded-frame-relocks-on-orientation-crossing', () => {
@@ -294,22 +294,22 @@ test('gate:igs-ui:embedded-frame-relocks-on-orientation-crossing', () => {
         },
     };
     syncEmbeddedHostFrame(overlay, '1216x832');
-    assert.equal(host.style.aspectRatio, '1216 / 832');
+    assert.equal(host.style.aspectRatio, '1216 / 957');
     const unwatch = watchEmbeddedFrameResize(overlay, { backgroundSize: '1216x832', mode: 'embedded' });
     assert.equal(typeof unwatch, 'function');
     width = 390;
     observerCallback();
-    assert.equal(host.style.aspectRatio, '832 / 1216');
+    assert.equal(host.style.aspectRatio, '832 / 1398');
     width = 844;
     observerCallback();
-    assert.equal(host.style.aspectRatio, '1216 / 832');
+    assert.equal(host.style.aspectRatio, '1216 / 957');
     observerCallback();
-    assert.equal(host.style.aspectRatio, '1216 / 832');
+    assert.equal(host.style.aspectRatio, '1216 / 957');
     host.isConnected = false;
     width = 390;
     observerCallback();
     assert.equal(disconnected, 1);
-    assert.equal(host.style.aspectRatio, '1216 / 832');
+    assert.equal(host.style.aspectRatio, '1216 / 957');
 });
 
 test('gate:igs-ui:embedded-frame-watch-unobserve-stops-relock', () => {
@@ -337,7 +337,7 @@ test('gate:igs-ui:embedded-frame-watch-unobserve-stops-relock', () => {
         },
     };
     syncEmbeddedHostFrame(overlay, '832x1216');
-    assert.equal(host.style.aspectRatio, '832 / 1216');
+    assert.equal(host.style.aspectRatio, '832 / 1398');
     const unwatch = watchEmbeddedFrameResize(overlay, { backgroundSize: '1216x832', mode: 'embedded' });
     unwatch();
     assert.equal(disconnected, 1);
@@ -2267,8 +2267,7 @@ test('gate:scene:mood-group-list-shows-the-containers-and-their-count', () => {
         saveUnifiedSettings: () => ({ ok: true }),
     });
     host.openReader({ message: { text: '旁白。' } }, { mode: 'pc' });
-    const opened = host.openSettings({ tab: 'scene' });
-    opened.controller.switchSceneSubTab('rules');
+    const opened = host.openSettings({ page: 'wardrobe' });
     const html = opened.controller.getSnapshot().html;
     assert.match(html, new RegExp(`data-mood-group-count="${extra.length}"`));
     assert.match(html, new RegExp(`class="igs-mood-group-total">${extra.length}</`));
@@ -2276,7 +2275,7 @@ test('gate:scene:mood-group-list-shows-the-containers-and-their-count', () => {
         assert.match(html, new RegExp(`data-mood-group="${group.label}"`));
     }
     assert.match(html, /嘲讽/);
-    assert.match(html, /2 个词/);
+    assert.match(html, /2个词/);
     host.destroy();
 });
 
@@ -2979,6 +2978,32 @@ test('gate:api:public api attaches stable global aliases', async () => {
     assert.equal(api.api.textFilterPresets.getCurrent().id, 'preset.text-filter.content-only');
     assert.equal(api.api.textFilterPresets.exportAll().type, 'igs-import-bundle');
     assert.equal(api.ensureMagicWandEntry().reason, 'magic-wand-entry-not-mounted');
+});
+
+test('gate:host:adjacent-message-reads-chat-once-per-task-on-long-chat', async () => {
+    // 千楼聊天：同一轮里连续往前回看 60 次，只应重读整份聊天一次；下一个宏任务后重新读取。
+    const messages = Array.from({ length: 1000 }, (_, id) => ({ id, text: `第${id}楼`, role: 'assistant' }));
+    let reads = 0;
+    const adapter = createTavernHelperAdapter({
+        TavernHelper: {
+            getLastMessageId: () => 999,
+            getChatMessages: () => { reads += 1; return messages; },
+        },
+        document: { querySelectorAll: () => [] },
+        setTimeout,
+    });
+    let cursor = 999;
+    for (let step = 0; step < 60; step += 1) {
+        const previous = await adapter.getAdjacentMessage(cursor, -1);
+        assert.equal(previous.id, cursor - 1);
+        cursor = previous.id;
+    }
+    const firstRound = reads;
+    assert.ok(firstRound <= 2, `同一轮读了 ${firstRound} 次整份聊天`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    messages.push({ id: 1000, text: '新楼', role: 'assistant' });
+    assert.equal((await adapter.getAdjacentMessage(999, 1)).id, 1000);
+    assert.ok(reads > firstRound);
 });
 
 test('gate:host:tavern-helper-adapter-detects-user-messages-from-role-flags-and-dom', async () => {
@@ -3880,12 +3905,12 @@ test('gate:scene:scene-assets-indent-without-horizontal-overflow', () => {
             },
         },
     };
-    // 时间 / 天气行默认收起，场景行上只有「1 个时间 · 1 个天气」。
+    // 时间 / 天气行默认收起，场景行上只有「1个时间 · 1个天气」。
     const collapsed = renderSceneAssetList(scenes);
-    assert.match(collapsed, /data-action="scene-toggle-times:%E6%97%A7%E5%9F%8E" aria-expanded="false">1 个时间 · 1 个天气<\/button>/);
+    assert.match(collapsed, /data-action="scene-toggle-times:%E6%97%A7%E5%9F%8E" aria-expanded="false">1个时间 · 1个天气<\/button>/);
     assert.doesNotMatch(collapsed, /igs-scene-time-group/);
     const html = renderSceneAssetList(scenes, { expandedSlots: new Set(['times\x00旧城']) });
-    assert.match(html, /aria-expanded="true">1 个时间 · 1 个天气/);
+    assert.match(html, /aria-expanded="true">1个时间 · 1个天气/);
     assert.match(html, /class="igs-scene-char-group igs-scene-time-group"/);
     assert.match(html, /class="igs-btn-mgr-row igs-scene-mood-row igs-scene-weather-row"/);
     assert.doesNotMatch(html, /style="margin-left:(?:16|32)px"/);
@@ -4397,7 +4422,7 @@ test('gate:scene:character-dna-lifecycle', async () => {
 test('gate:igs-ui:character-dna-editor-renders-escaped-name-and-values', async () => {
     const { renderCharacterAssetList, renderCharacterDnaEditor } = await import('../src/visual/igs-ui/settings-fields.js');
     const empty = renderCharacterDnaEditor('白墨', null);
-    assert.ok(empty.includes('角色DNA（未填写）'));
+    assert.ok(empty.includes('外貌（DNA）（未填写）'));
     assert.equal((empty.match(/data-dna-field="/g) || []).length, 4);
     // DNA 在角色那一行的 ⋯ 里（「角色设定」），点开才出编辑区。
     const closed = renderCharacterAssetList({ 'A.<b>': { '默认': '' } }, {
@@ -4605,6 +4630,11 @@ test('gate:generated-images:cg-planner-binds-character-dna-safely', async () => 
     assert.equal(single.warnings.length, 1);
     assert.equal(slots[0].chars[0].tags, 'smile, Silver Hair');
 
+    // 柏宝绘 / 智绘姬回退：只拼身份，DNA 负面词不并进 uc。
+    const idOnly = bindCharacterDnaToSlots([slots[0]], sceneAssets, ['爱丽'], { identityOnly: true });
+    assert.equal(idOnly.slots[0].chars[0].tags, 'alice_v2, silver hair, blue eyes, smile');
+    assert.equal(idOnly.slots[0].chars[0].uc, 'frown');
+
     // 上下文多人时无名单人角色不猜人。
     const multi = bindCharacterDnaToSlots([slots[1]], sceneAssets, ['爱丽', '白墨']);
     assert.equal(multi.slots[0].chars[0].tags, 'sitting');
@@ -4679,11 +4709,12 @@ test('gate:scene:dna-candidate-accept-does-not-overwrite-and-dismiss-clears', as
 
 
 test('gate:igs-ui:image-settings-open-character-dna-jumps-without-copying-data', async () => {
-    const tabsSource = fs.readFileSync(new URL('../src/visual/igs-ui/settings-tabs.js', import.meta.url), 'utf8');
-    assert.ok(tabsSource.includes('data-action="open-character-dna"'));
+    // 「角色 DNA」按钮和角色卡片一起由 render 层拼（分类页的 slots 里），不在模板文件里。
+    const renderSource = fs.readFileSync(new URL('../src/visual/igs-ui/settings-host-render.js', import.meta.url), 'utf8');
+    assert.ok(renderSource.includes('data-action="open-character-dna"'));
     const dna = { '爱丽丝': { identity: 'silver hair' } };
     const draft = { bridge: { sceneAssets: { enabled: true, characters: {}, characterAliases: {}, characterDna: dna } }, readerSettings: {} };
-    const settingsState = { tab: 'image', draft, readerMode: 'pc', asyncState: { sceneSubTab: 'scenes' } };
+    const settingsState = { tab: 'ai', draft, readerMode: 'pc', asyncState: { page: 'kinds' } };
     let persistCount = 0;
     const ctx = {
         state: { activeSettings: settingsState },
@@ -4694,8 +4725,8 @@ test('gate:igs-ui:image-settings-open-character-dna-jumps-without-copying-data',
         buildRegexPreview: () => '',
     };
     await handleSettingsAction('open-character-dna', ctx);
-    assert.equal(settingsState.tab, 'scene');
-    assert.equal(settingsState.asyncState.sceneSubTab, 'characters');
+    assert.equal(settingsState.tab, 'chars');
+    assert.equal(settingsState.asyncState.page, 'chars');
     assert.equal(draft.bridge.sceneAssets.characterDna, dna);
     assert.equal(persistCount, 0);
 });

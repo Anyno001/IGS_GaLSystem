@@ -54,10 +54,10 @@ test('gate:performance-layout:groups-collapsed-with-summary-and-word-lists-hidde
     assert.match(html, /<div class="igs-settings-subhead">情绪<\/div>[\s\S]*<div class="igs-settings-subhead">剧情提示<\/div>[\s\S]*<div class="igs-settings-subhead">事件演出<\/div>/);
     // 镜头环境与立绘合成「画面」：5 个画面开关 + 立绘活动、情绪动作、多角色同屏。
     assert.match(html, /<b>画面<\/b><span class="igs-perf-count">0\/9<\/span>/);
-    // 战斗、直播、线上交流、亲密这类只在特定剧情用的，收进「题材专属」，由用户自己勾；演出页不再有剧情题材胶囊。
-    assert.match(html, /<b>题材专属<\/b><span class="igs-perf-count">0\/8<\/span>/);
+    // 战斗、直播、手机社区、线上交流、亲密这类只在特定剧情用的，收进「题材专属」，由用户自己勾；演出页不再有剧情题材胶囊。
+    assert.match(html, /<b>题材专属<\/b><span class="igs-perf-count">0\/9<\/span>/);
     assert.doesNotMatch(html, /剧情题材|perf-type:/);
-    assert.match(html, /<details data-advanced="perf-group-rhythm"><summary><b>节奏与互动<\/b>/);
+    assert.match(html, /<details data-advanced="perf-group-rhythm"><summary><b>节奏<\/b>/);
     assert.equal(PERFORMANCE_GROUPS.length, 5);
     // 每项一行：开着且有细项时只露 › 按钮，细项默认收起，不再有「自定义触发情绪」之类的二级折叠。
     assert.match(html, /data-action="ui-toggle-open:perf-manga-words" aria-expanded="false"/);
@@ -131,7 +131,7 @@ test('gate:perf-presets:home-tab-shows-same-preset-bar-and-custom-state', async 
     const home = renderPerformancePresetBar(reader, { home: true });
     assert.match(home, /演出档位/);
     assert.match(home, /data-action="perf-preset:standard" aria-pressed="true"/);
-    assert.match(home, /细项前往「阅读器 › 演出」调整。/);
+    assert.match(home, /细项在「演出」「声音」里调整。/);
     reader.typewriter = { ...reader.typewriter, enabled: false };
     const custom = renderPerformancePresetBar(reader, { home: true });
     assert.doesNotMatch(custom, /aria-pressed="true"/);
@@ -139,13 +139,13 @@ test('gate:perf-presets:home-tab-shows-same-preset-bar-and-custom-state', async 
     assert.match(renderPerformancePresetBar(reader, { home: true, extraRows: '<div data-x></div>' }), /igs-perf-preset-row">.*<\/div><div data-x><\/div><div class="igs-source-filter-note"/);
 });
 
-test('gate:perf-presets:basic-tab-renders-preset-bar-first', async () => {
+test('gate:perf-presets:dash-renders-preset-bar-first', async () => {
     const { bootstrapIGS } = await import('../src/index.js');
     const vn = bootstrapIGS({ global: {}, autoAttachMagicWand: false, hostAdapter: { getCurrentMessage: async () => null, typeAndSend: async () => ({ ok: true }) } });
     try {
-        const controller = vn.openSettings({ tab: 'basic', mode: 'pc' }).controller;
+        const controller = vn.openSettings({ tab: 'dash', mode: 'pc' }).controller;
         const html = controller.getSnapshot().html;
-        assert.ok(html.indexOf('igs-perf-presets') >= 0 && html.indexOf('igs-perf-presets') < html.indexOf('>通用<'));
+        assert.ok(html.indexOf('igs-perf-presets') >= 0 && html.indexOf('igs-perf-presets') < html.indexOf('igs-dash-list'));
         const applied = await controller.invoke('perf-preset:light');
         assert.notEqual(applied.ok, false);
         assert.match(controller.getSnapshot().html, /data-action="perf-preset:light" aria-pressed="true"/);

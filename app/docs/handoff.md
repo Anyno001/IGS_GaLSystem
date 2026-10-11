@@ -4,7 +4,7 @@
 
 ## 项目
 
-- 路径：`G:/奶龙Code/gal/Immersive-Galgame-System-AnyNo001/app`。这个目录不是 git 仓库，改动之前没有提交记录可以回退。
+- 路径及提交状态以当前仓库为准；本文仅保留当时的历史交接记录。
 - 项目是一个 SillyTavern 沉浸式 galgame 阅读器插件，用原生 JS 写，没有框架。
 - 样式以字符串形式注入，主要在 `src/visual/igs-ui/*-style.js`、`original-reader-source.js` 和 `dialog-theme-*.js` 里。
 - 门禁：`npm run gate`，依次跑结构检查、静态检查、单元测试（402 项）、模拟（135 项）、性能冒烟和构建。**交接时全部通过。**

@@ -6,6 +6,7 @@ import { moodFallbackChain, resolvePresetGroup } from '../../scene/mood-groups.j
 import { busInput, resumeAudioBus } from './audio-bus.js';
 import { duckSceneAudio } from './scene-audio.js';
 import { spritePan, yieldTypewriterAudio } from './typewriter-audio.js';
+import { getVoiceFilter, insertVoiceFilter, voiceFilterGain, voiceFilterParams, voiceFilterUsesDry } from './voice-filter.js';
 
 export const VOICE_BARK_FREQUENCIES = Object.freeze([
     ['change', '换人或情绪变化时'],
@@ -135,10 +136,29 @@ export function detectVoiceGender(text) {
 }
 
 // 按主名查 DNA 判断性别（声线和立绘默认高度共用）；没有 DNA 或看不出时返回 ''。
+// 变身形态的当前性别：阅读器每页按在场角色的服装写入，盖过 DNA 推断（高度、语气音、朗读一起跟着变）。
+const activeFormGenders = new Map();
+export function setActiveFormGenders(entries) {
+    activeFormGenders.clear();
+    for (const [name, gender] of entries || []) noteFormGender(name, gender);
+}
+export function noteFormGender(name, gender) {
+    if (!name) return;
+    if (gender) activeFormGenders.set(name, gender);
+    else activeFormGenders.delete(name);
+}
+
 export function characterDnaGender(sceneAssets, name) {
+    if (name && activeFormGenders.has(name)) return activeFormGenders.get(name);
+    return detectVoiceGender(characterDnaText(sceneAssets, name));
+}
+
+// 主名 DNA 里描述角色本身的文字（触发词、固定身份、默认外观；不含负面词）；没有 DNA 时为 ''。
+// 立绘默认高度在没有 DNA 时改看生成立绘的 tag，故把取文本和判性别拆开，两处共用。
+export function characterDnaText(sceneAssets, name) {
     const dnaMap = plainObject(sceneAssets && sceneAssets.characterDna) || {};
     const dna = name && hasOwn(dnaMap, name) ? plainObject(dnaMap[name]) : null;
-    return dna ? detectVoiceGender(`${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}`) : '';
+    return dna ? `${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}` : '';
 }
 
 function hashName(name) {
@@ -357,7 +377,9 @@ export function stopVoiceBark() {
 // gain →（听筒带通 / 声像）→ 总线；返回链头。
 export function buildBarkChain(context, out, { volume, pan, phone }, nodes) {
     const gain = context.createGain();
-    gain.gain.value = Math.max(0, Math.min(GAIN_CAP, Number(volume) || 0));
+    const filter = getVoiceFilter();
+    const earPan = (voiceFilterParams(filter) || {}).pan || 0;
+    gain.gain.value = Math.max(0, Math.min(GAIN_CAP, (Number(volume) || 0) * voiceFilterGain(filter)));
     nodes.push(gain);
     let tail = gain;
     const link = (node) => {
@@ -374,11 +396,13 @@ export function buildBarkChain(context, out, { volume, pan, phone }, nodes) {
         low.type = 'lowpass';
         low.frequency.value = PHONE_BAND.low;
         link(low);
-    } else if (pan && typeof context.createStereoPanner === 'function') {
+    } else if ((pan || earPan) && typeof context.createStereoPanner === 'function') {
         const panner = context.createStereoPanner();
-        panner.pan.value = Math.max(-1, Math.min(1, pan));
+        panner.pan.value = Math.max(-1, Math.min(1, pan || earPan));
         link(panner);
     }
+    // 贴耳 / 隔墙：局部滤镜只插在语音声链里，不碰 BGM 与环境声。
+    if (!phone) insertVoiceFilter(context, link, filter);
     tail.connect(out);
     return gain;
 }
@@ -387,7 +411,7 @@ export function buildBarkChain(context, out, { volume, pan, phone }, nodes) {
 // close / phone 走 dry（不进房间混响）；yieldTyping 为真时这一句的打字音让到语气音念完；duck 为真时 BGM 与环境音让一下。
 export function playVoiceBark({ url, volume = 1, pitch = 0, speed = 1, pan = 0, close = false, phone = false, yieldTyping = false, duck = false } = {}) {
     if (!url) return null;
-    const bus = busInput(close || phone ? 'dry' : 'voice');
+    const bus = busInput(close || phone || voiceFilterUsesDry() ? 'dry' : 'voice');
     if (!bus) return null;
     stopVoiceBark();
     const context = bus.context;

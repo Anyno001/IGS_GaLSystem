@@ -8,7 +8,7 @@ test('gate:preset:generated-pane-does-not-offer-transfer', () => {
         resolveUrl: () => '',
     });
     assert.doesNotMatch(html, /data-gen-transfer|data-asset-preset-transfer/);
-    assert.match(html, /入库到角色/);
+    assert.match(html, /存为立绘/);
 });
 
 test('gate:scene:rows-offer-download-and-stored-prompt', () => {

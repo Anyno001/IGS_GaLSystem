@@ -2,7 +2,7 @@
 export const CLICK_WAIT_MARK_GLYPHS = Object.freeze([
     'auto', 'diamond', 'fleuron', 'pendant', 'crescent', 'sparkle', 'strawberry', 'seal', 'triangle-brush',
     'compass', 'chevron', 'leaf', 'star', 'caret', 'triangle', 'heart', 'triangle-hollow', 'blood-drop', 'ribbon', 'eye',
-    'reticle', 'hazard',
+    'reticle', 'hazard', 'bubbles', 'sword',
 ]);
 
 export const CLICK_WAIT_MARK_LABELS = Object.freeze({
@@ -11,6 +11,7 @@ export const CLICK_WAIT_MARK_LABELS = Object.freeze({
     fleuron: '金色笔尖',
     pendant: '珍珠垂坠',
     crescent: '星月',
+    bubbles: '气泡',
     sparkle: '四芒星',
     strawberry: '草莓',
     seal: '朱砂小印',
@@ -28,6 +29,7 @@ export const CLICK_WAIT_MARK_LABELS = Object.freeze({
     eye: '眼睛',
     reticle: '全息准星',
     hazard: '警示三角',
+    sword: '倒悬飞剑',
 });
 
 export const CLICK_WAIT_MARK_STYLES = Object.freeze(
@@ -78,8 +80,12 @@ const SHAPES = Object.freeze({
     pendant: "<path fill-rule='evenodd' d='M12 2.2A2.3 2.3 0 1 0 12 6.8A2.3 2.3 0 1 0 12 2.2ZM12 3.4A1.1 1.1 0 1 1 12 5.6A1.1 1.1 0 1 1 12 3.4Z'/><path d='M12 8C14.6 11.4 17 13.9 17 16.8A5 5 0 0 1 7 16.8C7 13.9 9.4 11.4 12 8Z'/>",
     // 魔法星夜：一弯新月伴一颗小星。
     crescent: "<path d='M14.6 3.6A8.6 8.6 0 1 0 20.6 16.4A6.8 6.8 0 0 1 14.6 3.6Z'/><path d='M19.4 3.2Q19.8 6.2 22.6 6.6Q19.8 7 19.4 10Q19 7 16.2 6.6Q19 6.2 19.4 3.2Z'/>",
+    // 深海人鱼：三颗往上冒的气泡，大泡留一点高光。
+    bubbles: "<path fill-rule='evenodd' d='M9.5 11.5A5.5 5.5 0 1 0 9.5 22.5A5.5 5.5 0 1 0 9.5 11.5ZM7.6 14.2A1.3 1.3 0 1 0 7.6 16.8A1.3 1.3 0 1 0 7.6 14.2Z'/><circle cx='16.8' cy='8.6' r='3.1'/><circle cx='20.4' cy='3.2' r='1.8'/>",
     // 冒险旅途：朝下的罗盘指针，顶上一颗铆钉。
     compass: "<path d='M12 22.2L6.6 9.4L12 12.2L17.4 9.4Z'/><circle cx='12' cy='4.6' r='2'/>",
+    // 仙侠水墨：一柄倒悬的飞剑（剑尖朝下）。
+    sword: "<path d='M12 22.6L9.6 13.6V4.6H14.4V13.6Z'/><rect x='7' y='2.4' width='10' height='2' rx='.6'/>",
     seal: "<rect x='6.5' y='6.5' width='11' height='11' rx='1.4'/>",
     // 童话小镇的草莓：籽镂空（evenodd），单色遮罩下也认得出。
     strawberry: "<path fill-rule='evenodd' d='M12 6.5C17.5 6.5 20 10 18.6 14.8C17.4 18.8 14 21.6 12 22.5C10 21.6 6.6 18.8 5.4 14.8C4 10 6.5 6.5 12 6.5ZM8.6 11.5a.75 1.05 0 1 0 1.5 0a.75 1.05 0 1 0-1.5 0ZM14 11.5a.75 1.05 0 1 0 1.5 0a.75 1.05 0 1 0-1.5 0ZM11.25 14.4a.75 1.05 0 1 0 1.5 0a.75 1.05 0 1 0-1.5 0ZM9.1 17.2a.7 1 0 1 0 1.4 0a.7 1 0 1 0-1.4 0ZM13.5 17.2a.7 1 0 1 0 1.4 0a.7 1 0 1 0-1.4 0Z'/><path d='M6.6 6.6L10.2 6.4L12 2.2L13.8 6.4L17.4 6.6L14.4 8.6H9.6Z'/>",
@@ -108,7 +114,7 @@ const ANIMATIONS = Object.freeze({
 
 const GLYPH_ANIMATIONS = Object.freeze({
     pendant: 'tap-soft', seal: 'tap-soft', caret: 'tap-soft', 'triangle-hollow': 'tap-soft', eye: 'tap-soft',
-    strawberry: 'tap-hop', star: 'tap-hop', heart: 'tap-hop', ribbon: 'tap-hop', reticle: 'tap-soft',
+    strawberry: 'tap-hop', star: 'tap-hop', heart: 'tap-hop', ribbon: 'tap-hop', reticle: 'tap-soft', bubbles: 'tap-hop',
 });
 const GLYPH_MARKS = Object.freeze(Object.fromEntries(CLICK_WAIT_MARK_GLYPHS.filter((id) => id !== 'auto')
     .map((id) => [id, { shape: id, animation: GLYPH_ANIMATIONS[id] || 'tap' }])));
@@ -119,8 +125,10 @@ export const CLICK_WAIT_MARK_SKINS = Object.freeze({
     'western-classic': mark('fleuron', '#e2bd6b'),
     'elegant-european': mark('pendant', '#dccff7'),
     'magic-academy': mark('crescent', '#f0cf78'),
+    'mermaid-deep': mark('bubbles', '#c8dcf6'),
     'fairy-tale': mark('strawberry', '#dc6a5c'),
     'qinglv-shanshui': mark('seal', '#b23a2a'),
+    'xianxia-ink': mark('sword', '#b23a2a'),
     'retro-japanese': mark('triangle-brush', '#c23a24'),
     'adventure-journey': mark('compass', '#9a6a2c'),
     'plant-coffee': mark('leaf', '#6f8446'),

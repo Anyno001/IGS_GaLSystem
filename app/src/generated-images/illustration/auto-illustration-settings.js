@@ -1,4 +1,5 @@
 import { NAI_DEFAULT_SETTINGS } from '../request-builders/nai-v4-builder.js';
+import { normalizeArtistByKind } from '../prompt-artists.js';
 import { DEFAULT_ASSET_TEMPLATES } from './prompt-kit.js';
 import { PLANNER_SYSTEM_PROMPT, PLANNER_SOFT_SYSTEM_PROMPT } from './planner-prompt.js';
 import { ASSET_PLANNER_SYSTEM_PROMPT, ASSET_PLANNER_SOFT_SYSTEM_PROMPT } from './asset-prompt.js';
@@ -61,6 +62,8 @@ export function normalizeAutoIllustrationSettings(value) {
         interludeEnabled: bool(src.interludeEnabled),
         interludeProbability: clampInt(src.interludeProbability, 0, 100, 30),
         interludeMaxCount: clampInt(src.interludeMaxCount, 1, 16, 1),
+        backfillOldFloors: bool(src.backfillOldFloors),
+        retry: { enabled: !(src.retry && src.retry.enabled === false), times: clampInt(src.retry && src.retry.times, 0, 5, 2) },
         assets: {
             spriteEnabled: bool(assets.spriteEnabled),
             backgroundEnabled: bool(assets.backgroundEnabled),
@@ -91,6 +94,7 @@ export function normalizeAutoIllustrationSettings(value) {
             noiseSchedule: str(nai.noiseSchedule, NAI_DEFAULT_SETTINGS.noiseSchedule) || NAI_DEFAULT_SETTINGS.noiseSchedule,
             artistPrefix: str(nai.artistPrefix),
             negativePrompt: typeof nai.negativePrompt === 'string' ? nai.negativePrompt : NAI_DEFAULT_SETTINGS.negativePrompt,
+            artistByKind: normalizeArtistByKind(nai.artistByKind),
             timeoutMs: clampInt(nai.timeoutMs, 10000, 300000, NAI_DEFAULT_SETTINGS.timeoutMs),
         },
     };

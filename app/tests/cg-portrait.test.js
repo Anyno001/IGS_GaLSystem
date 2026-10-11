@@ -26,20 +26,59 @@ test('CG 头像：没有裸体服装就不显示，不退回穿衣立绘', () =>
     assert.equal(resolveNudeSpriteAsset('', '默认', { sceneAssets }).url, '');
 });
 
-test('CG 头像：地址暂时解析为空时保留已挂上的头像', () => {
-    const attrs = new Map([['data-igs-cgp', ''], ['data-igs-cgp-src', 'sprite.png']]);
+function portraitDialog(initial = []) {
+    const attrs = new Map(initial);
     const dialog = {
         getAttribute: (name) => (attrs.has(name) ? attrs.get(name) : null),
         hasAttribute: (name) => attrs.has(name),
         setAttribute: (name, value) => attrs.set(name, String(value)),
         removeAttribute: (name) => attrs.delete(name),
+        querySelector: () => null,
     };
     const root = { querySelector: (selector) => (selector === '#igs-dialog' ? dialog : null) };
+    return { dialog, root };
+}
+
+test('CG 头像：地址暂时解析为空时保留已挂上的头像', () => {
+    const { dialog, root } = portraitDialog([['data-igs-cgp', ''], ['data-igs-cgp-src', 'sprite.png']]);
     applyCgPortrait(root, { content: { nsfwCgPortrait: 'sprite.png' }, readerSettings: {} }, {
         resolveAssetUrl: () => '',
     });
     assert.equal(dialog.getAttribute('data-igs-cgp'), '');
     assert.equal(dialog.getAttribute('data-igs-cgp-src'), 'sprite.png');
+});
+
+test('CG 头像：图还没解码时边距已经占好', () => {
+    const { dialog, root } = portraitDialog();
+    applyCgPortrait(root, { content: { nsfwCgPortrait: 'sprite.png' }, readerSettings: {} }, {
+        resolveAssetUrl: () => '',
+    });
+    assert.equal(dialog.getAttribute('data-igs-cgp'), '');
+    assert.equal(dialog.getAttribute('data-igs-cgp-src'), 'sprite.png');
+});
+
+test('CG 头像：换人且新图未解码时拿掉旧图，边距不动', () => {
+    const removed = [];
+    const old = { parentNode: null, remove() { removed.push(this); } };
+    const box = { children: [old], dataset: { key: 'old-url|0|0|100' } };
+    old.parentNode = box;
+    const { dialog, root } = portraitDialog([['data-igs-cgp', ''], ['data-igs-cgp-src', 'alice.png']]);
+    dialog.querySelector = () => box;
+    applyCgPortrait(root, { content: { nsfwCgPortrait: 'bob.png' }, readerSettings: {} }, {
+        resolveAssetUrl: () => '',
+    });
+    assert.equal(dialog.getAttribute('data-igs-cgp'), '');
+    assert.equal(dialog.getAttribute('data-igs-cgp-src'), 'bob.png');
+    assert.deepEqual(removed, [old]);
+});
+
+test('CG 头像：旁白页撤下头像和边距', () => {
+    const { dialog, root } = portraitDialog([['data-igs-cgp', ''], ['data-igs-cgp-src', 'sprite.png']]);
+    applyCgPortrait(root, { content: { nsfwCgPortrait: '' }, readerSettings: {} }, {
+        resolveAssetUrl: () => '',
+    });
+    assert.equal(dialog.hasAttribute('data-igs-cgp'), false);
+    assert.equal(dialog.hasAttribute('data-igs-cgp-src'), false);
 });
 
 test('CG 头像：取景以头位为中心，缩放放大脸、偏移下移取景', () => {
@@ -63,8 +102,10 @@ test('CG 头像开关默认关闭，拖动偏移和捏合缩放取整并限幅',
     const custom = normalizeStatusHudSettings({ nsfwCgPortrait: true, nsfwCgPortraitShift: '10', nsfwCgPortraitZoom: 33 });
     assert.equal(custom.nsfwCgPortrait, true);
     assert.equal(custom.nsfwCgPortraitShift, 10);
-    assert.equal(custom.nsfwCgPortraitZoom, 50);
+    assert.equal(custom.nsfwCgPortraitZoom, 33);
+    assert.equal(normalizeStatusHudSettings({ nsfwCgPortraitZoom: 400 }).nsfwCgPortraitZoom, 400);
+    assert.equal(normalizeStatusHudSettings({ nsfwCgPortraitZoom: 8 }).nsfwCgPortraitZoom, 8);
     const dragged = normalizeStatusHudSettings({ nsfwCgPortraitShift: 17.6, nsfwCgPortraitShiftX: -999 });
     assert.equal(dragged.nsfwCgPortraitShift, 18);
-    assert.equal(dragged.nsfwCgPortraitShiftX, -120);
+    assert.equal(dragged.nsfwCgPortraitShiftX, -999);
 });

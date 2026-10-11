@@ -20,7 +20,7 @@ export const SETTINGS_SECTIONS = Object.freeze({
         label: '标签解析',
         paths: () => ['enabled', 'stripHtmlComments', 'allowUntaggedFallback', 'textIncludeTags', 'textExcludeTags', 'htmlCardTags', 'imageIncludeTags'].map((key) => `bridge.sourceFilter.${key}`).concat('readerSettings.imageCountOverride'),
     },
-    'reader-dialog-style': { label: '风格', paths: () => reader('dialogSkin', 'gradientVeil', 'magicHouse', 'magicAccent', 'showStatusLine', 'dblclickCgOnly', 'titleScreen', 'dialogAutoHeight') },
+    'reader-dialog-style': { label: '风格', paths: () => reader('dialogSkin', 'gradientVeil', 'magicHouse', 'magicAccent', 'showStatusLine', 'dblclickCgOnly', 'titleScreen', 'dialogAutoHeight', 'underwaterSkin', 'mermaidTone', 'mermaidAccent') },
     'reader-dialog-size': { label: '尺寸', paths: () => reader('dialogWidth', 'classicDialogWidthPercent', 'skinDialogScale', 'dialogHeight', 'inputScale') },
     'reader-dialog-background': { label: '面板玻璃', paths: (draft) => [...reader('glassOpacity', 'glassBackdropFilter'), `${themePath(draft)}.bgOpacity`, `${themePath(draft)}.dialogBg`] },
     'reader-text-layout': { label: '排版', paths: () => reader('fontSize', 'dialogFontWeight', 'dialogTextEffect', 'dialogTextEffectColor', 'dialogTextEffectStrength', 'dialogTextEffectSize') },
@@ -31,7 +31,8 @@ export const SETTINGS_SECTIONS = Object.freeze({
         paths: () => ['enabled', 'showEmotion', 'showLocation', 'showLocationDetails', 'avatarRadius', 'size', 'position', 'background', 'barColor', 'tables'].map((key) => `readerSettings.statusHud.${key}`),
     },
     'reader-interface-option-bubble': { label: '选项气泡', paths: () => ['bridge.optionBubble', 'readerSettings.optionFontSize'] },
-    'reader-interface-toolbar': { label: '工具栏', paths: () => reader('toolbarScale', 'toolbarDock', 'toolbarSplit', 'dialogBarAlign', 'pinnedBtns', 'hiddenBtns', 'btnOrder', 'dialogBarBtns') },
+    'reader-interface-toolbar': { label: '工具栏', paths: () => reader('toolbarScale', 'toolbarDock', 'inputPlacement', 'toolbarSplit', 'toolbarPlate', 'dialogBarAlign', 'pinnedBtns', 'hiddenBtns', 'btnOrder', 'dialogBarBtns') },
+    'reader-interface-shortcuts': { label: '快捷键', paths: () => reader('shortcuts') },
 });
 
 export function settingsSectionPaths(sectionId, draft) {
@@ -160,9 +161,9 @@ export function settingsExportFileName(version, now = new Date()) {
 // 只做格式校验与密钥回填；字段合法性交给宿主 normalizeUnifiedSettings。
 export function parseSettingsImport(text, current = {}) {
     let data;
-    try { data = typeof text === 'string' ? JSON.parse(text) : text; } catch (error) { return { ok: false, reason: 'invalid-json', message: '文件不是有效的 JSON' }; }
+    try { data = typeof text === 'string' ? JSON.parse(text) : text; } catch (error) { return { ok: false, reason: 'invalid-json', message: '文件不是有效的JSON' }; }
     if (!isPlainObject(data)) return { ok: false, reason: 'invalid-format', message: '文件内容不是设置对象' };
-    if (data.format != null && data.format !== SETTINGS_EXPORT_FORMAT) return { ok: false, reason: 'invalid-format', message: '这不是 IGS 设置文件' };
+    if (data.format != null && data.format !== SETTINGS_EXPORT_FORMAT) return { ok: false, reason: 'invalid-format', message: '这不是IGS设置文件' };
     const hasBridge = isPlainObject(data.bridge);
     const hasReader = isPlainObject(data.readerSettings);
     if (!hasBridge && !hasReader) return { ok: false, reason: 'invalid-format', message: '文件里没有可导入的设置' };

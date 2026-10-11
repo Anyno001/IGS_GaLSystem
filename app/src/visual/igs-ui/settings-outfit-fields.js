@@ -127,7 +127,7 @@ function shownUrl(url, resolveUrl) {
 }
 
 // note：点开大图时底部的说明（淡色借图要说清楚这不是这一格自己的图）。
-function thumb(url, alt, extraClass = '', resolveUrl, note = '') {
+export function thumb(url, alt, extraClass = '', resolveUrl, note = '') {
     const value = shownUrl(url, resolveUrl);
     if (isImageUrl(value)) {
         return `<img loading="lazy" decoding="async" class="igs-outfit-thumb${extraClass}" src="${esc(value)}" alt="${esc(alt)}" data-action="sprite-preview"${note ? ` data-preview-note="${esc(note)}"` : ''} onerror="this.classList.add('igs-sprite-thumb-broken')">`;
@@ -140,7 +140,7 @@ function previewOf(sceneAssets, charName, mood, outfit) {
     const hit = resolveSpriteAsset(charName, mood, { sceneAssets }, outfit);
     // 这一套里没有、借的是角色默认立绘：说成回落原装，不说成借这一套的格子。
     if (hit.source === 'user-outfit' && hit.slot !== '默认') return { url: hit.url, label: `借用「${hit.slot}」`, kind: 'borrow', slot: hit.slot };
-    if (hit.url) return { url: hit.url, label: `回落原装「${hit.slot || mood}」`, kind: 'base', slot: hit.slot || mood };
+    if (hit.url) return { url: hit.url, label: `改用原装图「${hit.slot || mood}」`, kind: 'base', slot: hit.slot || mood };
     return { url: '', label: '无图可显示', kind: 'none', slot: '' };
 }
 
@@ -149,7 +149,7 @@ function ghostNote(mood, preview, status) {
     if (!preview.url) return '';
     const lead = preview.kind === 'borrow'
         ? `「${mood}」尚无专属图片，此处显示的是阅读器暂时借用的「${preview.slot}」。`
-        : `「${mood}」尚无专属图片，此处显示的是阅读器暂时回落使用的原装「${preview.slot}」。`;
+        : `「${mood}」尚无专属图片，此处显示的是阅读器暂时改用的原装图「${preview.slot}」。`;
     return status ? `${lead}\n${status.text}` : lead;
 }
 
@@ -181,18 +181,39 @@ function wardrobeChoices(charName, outfitName, entry, wardrobe) {
     const names = Object.keys(plain(wardrobe)).filter((item) => !isBuiltinNudeOutfit(item));
     const selected = typeof entry.wardrobe === 'string' ? entry.wardrobe.trim() : '';
     const nude = isBuiltinNudeOutfit(selected);
-    const choice = (value, label) => menuItem(
-        `scene-set-outfit-wardrobe-url:${encSeg(charName)}:${encSeg(outfitName)}:${encSeg(value)}`,
-        label,
-        (value ? value === selected : !selected) ? ' is-current' : '',
-    );
+    const choice = (value, label) => `<option value="${esc(value)}"${(value ? value === selected : !selected) ? ' selected' : ''}>${esc(label)}</option>`;
     const options = [choice('', '同名服装'), choice(BUILTIN_NUDE_OUTFIT, BUILTIN_NUDE_OUTFIT)]
         .concat(names.map((item) => choice(item, item)));
     if (selected && !nude && !names.includes(selected)) options.push(choice(selected, selected));
-    const current = nude ? BUILTIN_NUDE_OUTFIT : (selected || '同名服装');
     const edit = nude ? '' : `<button type="button" class="igs-settings-action igs-outfit-wardrobe-edit" data-action="wardrobe-for-outfit:${encSeg(charName)}:${encSeg(outfitName)}">${names.includes(selected || outfitName) ? '编辑提示词' : '写提示词'}</button>`;
-    return `<details class="igs-add-menu igs-wardrobe-pick"><summary class="igs-asset-move" aria-label="使用衣柜">${esc(current)}</summary>`
-        + `<div class="igs-add-menu-list" role="listbox">${options.join('')}</div></details>${edit}`;
+    return `<select class="igs-asset-move igs-wardrobe-pick" aria-label="使用衣柜" data-outfit-wardrobe-char="${esc(charName)}" data-outfit-wardrobe="${esc(outfitName)}">${options.join('')}</select>${edit}`;
+}
+
+// 变身形态（性转 / 成长）：这套的生图词替换 DNA 的身份与外观，性别盖过 DNA；切入切出时播变身转场。
+const FORM_CHOICES = [['', '不是变身'], ['keep', '变身·性别不变'], ['female', '变身·女'], ['male', '变身·男']];
+function formChoices(charName, outfitName, entry) {
+    const form = entry.form && typeof entry.form === 'object' ? entry.form : null;
+    const selected = form ? (form.gender || 'keep') : '';
+    const options = FORM_CHOICES.map(([value, label]) => `<option value="${esc(value)}"${value === selected ? ' selected' : ''}>${esc(label)}</option>`);
+    const attrs = (fieldName) => `data-outfit-form-char="${esc(charName)}" data-outfit-form="${esc(outfitName)}" data-outfit-form-field="${fieldName}"`;
+    const age = FORM_AGE_CHOICES.map(([value, label]) => `<option value="${esc(value)}"${value === ((form && form.age) || '') ? ' selected' : ''}>${esc(label)}</option>`);
+    return `<select class="igs-asset-move igs-wardrobe-pick" aria-label="变身性别" ${attrs('gender')}>${options.join('')}</select>`
+        + `<select class="igs-asset-move igs-wardrobe-pick" aria-label="变身年龄" ${attrs('age')}>${age.join('')}</select>`
+        + `<input class="igs-scene-url-input" aria-label="其他变化" ${attrs('note')} value="${esc((form && form.note) || '')}" placeholder="其他变化，如兽耳化">`;
+}
+const FORM_AGE_CHOICES = [['', '年龄不变'], ['child', '幼'], ['teen', '少年'], ['adult', '成年'], ['elder', '年长']];
+
+// 服装标签上的变身徽章：性转 / 年龄 / 其他变化，可同时出现。
+function formBadges(entry) {
+    if (!entry || !entry.form || typeof entry.form !== 'object') return '';
+    const form = entry.form;
+    const ages = Object.fromEntries(FORM_AGE_CHOICES);
+    return [
+        form.gender === 'male' || form.gender === 'female' ? ['sex', '⚧', `性转·${form.gender === 'male' ? '男' : '女'}`] : null,
+        form.age ? ['age', '⏳', `年龄·${ages[form.age]}`] : null,
+        form.note ? ['other', '✦', `变身·${form.note}`] : null,
+        !form.gender && !form.age && !form.note ? ['other', '✦', '变身'] : null,
+    ].filter(Boolean).map(([kind, icon, title]) => `<span class="igs-form-badge is-${kind}" title="${esc(title)}">${icon}</span>`).join('');
 }
 
 function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen) {
@@ -207,10 +228,11 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
     const metaKey = `outfit-meta:${charName}\u0001${name}`;
     const metaOpen = isOpen(metaKey);
     const meta = !metaOpen ? '' : `<div class="igs-outfit-meta-body"><div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">衣柜</span>${wardrobeChoices(charName, name, entry, sceneAssets.wardrobe)}</div>`
+        + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">变身形态</span>${formChoices(charName, name, entry)}</div>`
         + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">说明</span><input class="igs-scene-url-input" data-scene-outfit-note-char="${esc(charName)}" data-scene-outfit-note="${esc(name)}" value="${esc(note)}" placeholder="什么情形穿这套"></div>`
         + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">别名</span>${chipList(words, `scene-remove-outfit-word:${c}:${o}`, `scene-add-outfit-word:${c}:${o}`, '', '添加别名：正文或表格里出现这个词，就按这套服装显示')}</div>`
         + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">适用场景</span>${chipList(scenes, `scene-remove-outfit-scene:${c}:${o}`, `scene-add-outfit-scene:${c}:${o}`, '不限', '添加适用场景（换到其他场景时，继承来的这套服装自动失效）')}</div>`
-        + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">状态栏头像</span>${thumb(avatar, `${name} 头像`, ' igs-outfit-avatar', resolveUrl)}`
+        + `<div class="igs-outfit-meta-row"><span class="igs-outfit-meta-label">状态栏头像</span>${thumb(avatar, `${name}头像`, ' igs-outfit-avatar', resolveUrl)}`
         + `<input class="igs-scene-url-input" data-scene-outfit-avatar-char="${esc(charName)}" data-scene-outfit-avatar="${esc(name)}" value="${esc(avatar)}" placeholder="留空沿用角色头像">`
         + (avatar ? `<button type="button" class="igs-btn-mgr-icon" data-action="scene-clear-outfit-avatar:${c}:${o}" title="清除服装头像">${icons.trash}</button>` : '')
         + `</div></div>`;
@@ -250,16 +272,16 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
             + `<span class="igs-outfit-acts"><button type="button" class="igs-btn-mgr-icon" data-action="scene-add-outfit-mood:${c}:${o}:${encSeg(mood)}" title="给这套补上「${esc(mood)}」">+</button></span></div>`;
     }).join('');
     const fillAll = missing.length > 1
-        ? `<div class="igs-outfit-fill-all"><button type="button" class="igs-review-link" data-action="scene-outfit-copy-slots:${c}:${o}">缺的 ${missing.length} 格全部补上</button></div>`
+        ? `<div class="igs-outfit-fill-all"><button type="button" class="igs-review-link" data-action="scene-outfit-copy-slots:${c}:${o}">补上缺的${missing.length}格</button></div>`
         : '';
-    const rows = ownRows + fallbackRows || '<div class="igs-scene-empty">暂无情绪槽，可点击右上角「+」添加</div>';
+    const rows = ownRows + fallbackRows || '<div class="igs-scene-empty">暂无情绪，可点击右上角「+」添加</div>';
     return `<div class="igs-outfit-panel" data-outfit-panel="${esc(name)}">${meta}<div class="igs-btn-mgr-list igs-outfit-slots">${rows}</div>${fillAll}</div>`;
 }
 
 // 角色卡的立绘区：「原装 · 服装…」标签切换。原装标签显示原有情绪槽；服装标签显示该服装的槽、词、场景、头像与缺图预览。
 export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, isOpen = () => false }) {
     const map = plain(outfits);
-    const names = Object.keys(map).filter((item) => !isBuiltinNudeOutfit(item));
+    const names = Object.keys(map);
     const active = names.includes(activeOutfit) ? activeOutfit : '';
     const c = encSeg(charName);
     const tab = (value, label, extra = '', title = '') => (
@@ -268,7 +290,7 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
     const tabs = [tab('', '原装')].concat(names.map((name) => {
         const moods = plain(map[name] && map[name].moods);
         const filled = Object.values(moods).filter((url) => String(url || '').trim()).length;
-        return tab(name, esc(name), `<span class="igs-outfit-tab-count">${filled}</span>`, `AI 写法：[igs-char:${charName}|表情|${name}|对白]`);
+        return tab(name, esc(name) + formBadges(map[name]), `<span class="igs-outfit-tab-count">${filled}</span>`, `AI 写法：[igs-char:${charName}|表情|${name}|对白]`);
     })).join('');
     const o = encSeg(active);
     const metaKey = `outfit-meta:${charName}\u0001${active}`;
@@ -305,8 +327,9 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
 }
 
 // 规则页的衣柜提示词。focus 是从服装面板跳过来的那一条，高亮显示。
-export function renderWardrobe(wardrobe, { resolveUrl, scopeTag, focus = '', lead = '' } = {}) {
+export function renderWardrobe(wardrobe, { resolveUrl, scopeTag, scopeMenu, focus = '', lead = '' } = {}) {
     const tag = typeof scopeTag === 'function' ? scopeTag : () => '';
+    const ownItem = typeof scopeMenu === 'function' ? scopeMenu : () => '';
     const rows = Object.entries(plain(wardrobe)).filter(([name]) => !isBuiltinNudeOutfit(name)).map(([name, entry]) => {
         const reference = entry && typeof entry.reference === 'string' ? entry.reference : '';
         const encoded = encSeg(name);
@@ -317,10 +340,11 @@ export function renderWardrobe(wardrobe, { resolveUrl, scopeTag, focus = '', lea
             menuItem(`wardrobe-reference:${encoded}`, '生图参考'),
             `<button type="button" class="igs-add-menu-item igs-wardrobe-nsfw${nsfwBoost ? ' is-on' : ''}" data-action="wardrobe-nsfw:${encoded}" role="menuitem" aria-pressed="${nsfwBoost ? 'true' : 'false'}">${nsfwBoost ? '关闭瑟瑟加强' : '瑟瑟加强'}</button>`,
             menuItem(`wardrobe-rename:${encoded}`, '重命名'),
+            ownItem('wardrobe', name),
             menuItem(`wardrobe-remove:${encoded}`, '删除', ' is-danger'),
         ], `「${name}」的操作`);
         const rowThumb = reference
-            ? thumb(reference, `${name} 参考图`, '', resolveUrl)
+            ? thumb(reference, `${name}参考图`, '', resolveUrl)
             : '<span class="igs-outfit-thumb igs-outfit-thumb-empty" aria-hidden="true"></span>';
         return `<div class="igs-sprite-slot igs-wardrobe-item${name === focus ? ' is-focus' : ''}" data-wardrobe-item="${esc(name)}"><div class="igs-btn-mgr-row igs-scene-mood-row">`
             + rowThumb
@@ -368,7 +392,7 @@ export function renderOutfitReviewList(items, characterOutfits, characters) {
         key: 'outfit',
         title: '服装词',
         count: list.length,
-        hint: 'AI 写出、尚未在该角色名下登记的服装词。归入已有服装后，之后即可识别。',
+        hint: 'AI写出、尚未在该角色名下登记的服装词。归入已有服装后，之后即可识别。',
         clearAction: 'outfit-review-clear',
         body: rows ? `<div class="igs-review-list">${rows}</div>` : '',
         empty: '没有待确认的服装词',

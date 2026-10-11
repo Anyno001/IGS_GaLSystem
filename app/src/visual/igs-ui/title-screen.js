@@ -8,12 +8,13 @@ import { applySceneAudio } from './scene-audio.js';
 import { applyDialogSkinAssets, normalizeDialogSkin } from './classic-dialog-skin.js';
 import { syncDialogSkinStyle } from './dialog-skin-style.js';
 import { getBattleTheme } from './fx-battle-themes.js';
-import { DIALOG_SKIN_CHOICES, dialogSkinLabel } from './dialog-skin-catalog.js';
+import { DIALOG_SKIN_CHOICES, dialogSkinLabel, getDialogSkinChoices } from './dialog-skin-catalog.js';
+import { dlcBorrowSkin, dlcSkinVersion, getDlcSkin, listDlcSkins } from './dlc-skin-registry.js';
 import { pickWorldviewDialogSkin, worldviewDialogSkins } from './worldview-skins.js';
 import { getReferenceDialogTypography } from './dialog-theme-typography.js';
 
-// 第 0 层的主界面：阅读器停在开场白第一页时先盖一层标题画面（开始 / 继续 / 世界观 / 设置），
-// 新聊天点开始先进世界观页，确认后写进角色卡、过一张开场标题卡再演出第 0 层。
+// 第 0 层的主界面：阅读器停在开场白第一页时先盖一层标题画面（开始 / 继续 / 世界风格 / 设置 / 生成主角立绘），
+// 点开始直接过开场标题卡再演出第 0 层；世界风格页只负责保存选择。
 // 画面只读快照与传入的回调，不碰存档；外观按皮肤取过场标题卡同一份主题（字体、墨色、底纱、卡片底）。
 export const TITLE_SCREEN_ID = 'igs-title-screen';
 export const TITLE_SKIN_ATTR = 'data-igs-title-skin';
@@ -59,7 +60,7 @@ export function reduceTitleAction(gate, model, act, value) {
     const pickFor = (id) => pickWorldviewDialogSkin(id, { cardSkin: model.cardSkin, globalSkin: model.globalSkin, horrorStyle: model.horrorStyle });
     switch (act) {
         case 'start':
-            return model.newChat ? { gate: { ...base, view: 'worldview', pick: null } } : { gate: base, effect: 'start' };
+            return { gate: base, effect: 'start' };
         case 'continue':
         case 'settings':
         case 'close':
@@ -76,7 +77,7 @@ export function reduceTitleAction(gate, model, act, value) {
         case 'skin':
             return { gate: { ...base, pick: { worldview: model.pick.worldview, skin: normalizeDialogSkin(value) } } };
         case 'confirm':
-            return { gate: base, effect: model.newChat ? 'save-start' : 'save', pick: { ...model.pick } };
+            return { gate: base, effect: 'save', pick: { ...model.pick } };
         default:
             return { gate: base };
     }
@@ -96,7 +97,7 @@ export function playTitleBgm(overlay, snapshot) {
 }
 
 // 主界面要画的东西全在这里算好；renderTitleScreen 只拼 HTML。
-// userName：酒馆当前用户名。有名字时世界观页多一个「生成主角立绘」，开局前就能按用户设定画好主角。
+// userName：酒馆当前用户名。有名字时主菜单「设置」下多一个「生成主角立绘」，开局前就能按用户设定画好主角。
 export function buildTitleScreenModel({ snapshot, gate, card = {}, globalSkin, resolveUrl, userName = '' } = {}) {
     const readerSettings = plain(snapshot && snapshot.readerSettings);
     const content = plain(snapshot && snapshot.content);
@@ -140,7 +141,7 @@ function worldLabel(id) {
 function backdropHtml(model) {
     const kind = model.background ? '' : model.avatar ? ' is-avatar' : ' is-empty';
     const sprite = model.sprite ? '<img class="igs-ts-sprite" alt="">' : '';
-    return `<div class="igs-ts-bg${kind}"></div><div class="igs-ts-shade"></div>${sprite}`;
+    return `<div class="igs-ts-bg${kind}"></div><div class="igs-ts-bg-blur${kind}"></div><div class="igs-ts-shade"></div>${sprite}`;
 }
 
 function syncMedia(layer, model) {
@@ -148,6 +149,8 @@ function syncMedia(layer, model) {
     const url = model.background || model.avatar;
     const value = url ? `url("${url.replace(/"/g, '&quot;')}")` : '';
     if (bg && bg.style.backgroundImage !== value) bg.style.backgroundImage = value;
+    const blur = layer.querySelector('.igs-ts-bg-blur');
+    if (blur && blur.style.backgroundImage !== value) blur.style.backgroundImage = value;
     const sprite = layer.querySelector('.igs-ts-sprite');
     if (sprite && sprite.getAttribute('src') !== model.sprite) sprite.setAttribute('src', model.sprite);
 }
@@ -157,8 +160,9 @@ function menuHtml(model) {
     const items = [
         ['start', start],
         model.hasLater ? ['continue', '继续'] : null,
-        ['worldview', '世界观'],
+        ['worldview', '世界风格'],
         ['settings', '设置'],
+        model.userName ? ['user-char', '生成主角立绘'] : null,
     ].filter(Boolean).map(([act, label]) => `<button type="button" class="igs-ts-btn" data-ts-act="${act}"${model.busy ? ' disabled' : ''}>${esc(label)}</button>`).join('');
     return `${backdropHtml(model)}
 <button type="button" class="igs-ts-close" data-ts-act="close" aria-label="关闭阅读器">×</button>
@@ -181,7 +185,7 @@ function previewDialogHtml(skin, name) {
 function worldviewHtml(model) {
     const name = model.title === '序章' ? '旁白' : model.title;
     const recommended = worldviewDialogSkins(model.pick.worldview);
-    const others = DIALOG_SKIN_CHOICES.filter(([skin]) => !recommended.includes(skin));
+    const others = getDialogSkinChoices(model.pick.skin).filter(([skin]) => !recommended.includes(skin));
     const otherOn = !recommended.includes(model.pick.skin);
     const skinButtons = recommended.map((skin) => {
         const on = skin === model.pick.skin;
@@ -199,11 +203,10 @@ function worldviewHtml(model) {
     // 没有立绘时右侧空着：铺一行很淡的英文描边大字，随所选世界观换。
     const mark = model.sprite ? '' : '<div class="igs-ts-mark" aria-hidden="true">' + esc(WORLD_EN[model.pick.worldview] || '') + '</div>';
     return backdropHtml(model) + mark + '\n' + previewDialogHtml(model.pick.skin, name)
-        + '\n<div class="igs-ts-pick" role="dialog" aria-label="选择世界观"><ul class="igs-ts-worlds">' + worlds + '</ul></div>'
+        + '\n<div class="igs-ts-pick" role="dialog" aria-label="选择世界风格"><ul class="igs-ts-worlds">' + worlds + '</ul></div>'
         + '\n<div class="igs-ts-actions">'
-        + (model.userName ? '<button type="button" class="igs-ts-link" data-ts-act="user-char" title="读酒馆的用户设定，给「' + esc(model.userName) + '」画一张立绘"' + disabled + '>生成主角立绘</button>' : '')
         + '<button type="button" class="igs-ts-link" data-ts-act="back"' + disabled + '>返回</button>'
-        + '<button type="button" class="igs-ts-link is-primary" data-ts-act="confirm"' + disabled + '>' + (model.newChat ? '开始' : '保存') + '<span aria-hidden="true">›</span></button></div>';
+        + '<button type="button" class="igs-ts-link is-primary" data-ts-act="confirm"' + disabled + '>保存<span aria-hidden="true">›</span></button></div>';
 }
 
 function dispatch(layer, act, value) {
@@ -240,7 +243,7 @@ function ensureLayer(overlay) {
 
 export function renderTitleScreen(overlay, model, handlers = {}) {
     if (!overlay || !model) return null;
-    ensureStyleTag(overlay.ownerDocument, STYLE_ID, TITLE_SCREEN_STYLE_TEXT);
+    ensureStyleTag(overlay.ownerDocument, STYLE_ID, getTitleScreenStyleText());
     const layer = ensureLayer(overlay);
     handlersByLayer.set(layer, handlers);
     const view = model.view === 'worldview' ? 'worldview' : 'menu';
@@ -306,7 +309,10 @@ const FALLBACK_THEME = Object.freeze({
 });
 
 function themeRules(skin) {
-    const theme = getBattleTheme(skin) || FALLBACK_THEME;
+    // DLC 皮肤借内置那套的字体与纱色，主色用作者给的 accent。
+    const dlc = getDlcSkin(skin);
+    const borrowed = getBattleTheme(skin) || (dlc && getBattleTheme(dlcBorrowSkin(skin))) || FALLBACK_THEME;
+    const theme = dlc && dlc.accent ? { ...borrowed, accent: dlc.accent } : borrowed;
     const v = theme.vars || {};
     const scope = `[${TITLE_SKIN_ATTR}="${skin}"]`;
     const veil = v.veil || v.wipe || FALLBACK_THEME.vars.veil;
@@ -328,14 +334,18 @@ const BASE_STYLE = `
 #${TITLE_SCREEN_ID}{position:absolute;inset:0;z-index:36;overflow:hidden;color:var(--igs-ts-ink,#fff);font-family:var(--igs-ts-font,inherit);container-type:size;-webkit-tap-highlight-color:transparent;}
 #${TITLE_SCREEN_ID} *{box-sizing:border-box;}
 .igs-ts-bg{position:absolute;inset:0;background:#0d0f14 center/cover no-repeat;}
-.igs-ts-bg.is-avatar{inset:-24px;filter:blur(18px) brightness(.62) saturate(1.1);background-position:center 22%;}
+.igs-ts-bg.is-avatar{filter:brightness(.78) saturate(1.05);background-position:center 22%;}
+/* 右下（立绘与菜单落脚处）最糊，往左上、左边渐清：模糊副本用斜向遮罩淡出。 */
+.igs-ts-bg-blur{position:absolute;inset:-24px;background:center/cover no-repeat;filter:blur(16px) brightness(.72) saturate(1.1);-webkit-mask-image:linear-gradient(to top left,#000 0%,rgba(0,0,0,.85) 30%,transparent 72%);mask-image:linear-gradient(to top left,#000 0%,rgba(0,0,0,.85) 30%,transparent 72%);pointer-events:none;}
+.igs-ts-bg-blur.is-avatar{background-position:center 22%;}
+.igs-ts-bg-blur.is-empty{display:none;}
 .igs-ts-bg.is-empty{background:radial-gradient(ellipse 70% 60% at 72% 38%,color-mix(in srgb,var(--igs-ts-accent,#ffd98a) 22%,#14161d),transparent 70%),radial-gradient(ellipse 60% 70% at 18% 80%,color-mix(in srgb,var(--igs-ts-accent,#ffd98a) 10%,#101218),transparent 72%),linear-gradient(160deg,#16181f,#08090c);transition:background .4s ease;}
 .igs-ts-shade{position:absolute;inset:0;background:linear-gradient(90deg,rgba(0,0,0,.5),rgba(0,0,0,.12) 55%,rgba(0,0,0,0)),linear-gradient(0deg,rgba(0,0,0,.35),transparent 40%);pointer-events:none;}
 .igs-ts-sprite{position:absolute;right:6%;bottom:0;height:92%;max-width:46%;object-fit:contain;object-position:bottom;pointer-events:none;filter:drop-shadow(0 6px 18px rgba(0,0,0,.35));animation:igs-ts-rise .8s ease both;}
 .igs-ts-main{position:absolute;left:max(7%,env(safe-area-inset-left,0px));top:50%;transform:translateY(-50%);max-width:60%;display:flex;flex-direction:column;gap:clamp(22px,5cqmin,40px);animation:igs-ts-fade .6s ease both;}
-.igs-ts-title{font-size:clamp(40px,11cqmin,88px);font-weight:600;line-height:1.1;letter-spacing:.12em;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.55),0 0 28px rgba(0,0,0,.35);word-break:break-word;}
-.igs-ts-tag{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:14px;letter-spacing:.24em;color:#fff;opacity:.75;text-shadow:0 1px 3px rgba(0,0,0,.8);}
-.igs-ts-tag::before{content:"";width:22px;height:1px;background:var(--igs-ts-accent);}
+.igs-ts-title{font-size:clamp(52px,16cqmin,132px);font-weight:700;line-height:1.02;letter-spacing:.14em;margin-right:-.14em;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.5),0 0 36px color-mix(in srgb,var(--igs-ts-accent,#ffd98a) 26%,transparent),0 0 2px rgba(0,0,0,.6);word-break:break-word;text-wrap:balance;}
+.igs-ts-tag{display:flex;align-items:center;gap:12px;margin-top:clamp(12px,2.6cqmin,22px);font-size:clamp(13px,2.4cqmin,16px);letter-spacing:.32em;color:#fff;opacity:.75;text-shadow:0 1px 3px rgba(0,0,0,.8);}
+.igs-ts-tag::before{content:"";width:clamp(28px,7cqmin,56px);height:1px;background:var(--igs-ts-accent);}
 .igs-ts-menu{display:flex;flex-direction:column;align-items:flex-start;gap:2px;}
 .igs-ts-btn{appearance:none;position:relative;display:flex;align-items:center;min-height:46px;padding:2px 0 2px 26px;border:0;background:none;color:#fff;font:inherit;font-size:clamp(20px,4cqmin,28px);letter-spacing:.3em;text-align:left;text-shadow:0 1px 3px rgba(0,0,0,.8),0 0 16px rgba(0,0,0,.35);opacity:.72;cursor:pointer;transform-origin:0 50%;transition:opacity .25s ease,transform .28s cubic-bezier(.2,.8,.2,1);}
 .igs-ts-btn::before{content:"";position:absolute;left:0;top:50%;width:16px;height:1px;background:var(--igs-ts-accent);transform:scaleX(0);transform-origin:left;transition:transform .28s cubic-bezier(.2,.8,.2,1);}
@@ -380,7 +390,7 @@ const BASE_STYLE = `
 @container (max-width:560px){
   .igs-ts-sprite{left:50%;right:auto;transform:translateX(-50%);height:74%;max-width:90%;opacity:.92;animation:none;}
   .igs-ts-main{left:6%;right:6%;top:auto;bottom:max(28px,env(safe-area-inset-bottom,0px));transform:none;max-width:none;gap:20px;}
-  .igs-ts-title{font-size:clamp(40px,13cqw,60px);}
+  .igs-ts-title{font-size:clamp(46px,17cqw,88px);}
   .igs-ts-menu{gap:0;}
   .igs-ts-btn{min-height:46px;font-size:22px;letter-spacing:.26em;}
   #${TITLE_SCREEN_ID}[data-igs-title-view="worldview"] .igs-ts-sprite{opacity:.4;}
@@ -392,7 +402,7 @@ const BASE_STYLE = `
 }
 @container (max-height:420px){
   .igs-ts-main{gap:12px;}
-  .igs-ts-title{font-size:clamp(30px,11cqh,44px);}
+  .igs-ts-title{font-size:clamp(34px,14cqh,60px);}
   .igs-ts-btn{min-height:34px;font-size:18px;}
   .igs-ts-pick{top:max(8px,env(safe-area-inset-top,0px));left:4%;right:4%;max-width:none;bottom:auto;align-items:flex-start;}
   .igs-ts-worlds{flex-direction:row;flex-wrap:wrap;gap:0 14px;padding-right:140px;}
@@ -409,3 +419,14 @@ const BASE_STYLE = `
 `;
 
 export const TITLE_SCREEN_STYLE_TEXT = [BASE_STYLE.trim(), ...DIALOG_SKIN_CHOICES.map(([skin]) => themeRules(skin))].join('\n');
+
+// 含已登记 DLC 皮肤的主界面样式；登记表没变就复用上次的结果。
+let titleStyleCache = { version: -1, text: TITLE_SCREEN_STYLE_TEXT };
+export function getTitleScreenStyleText() {
+    const version = dlcSkinVersion();
+    if (titleStyleCache.version !== version) {
+        const extra = listDlcSkins().map((def) => themeRules(def.id));
+        titleStyleCache = { version, text: extra.length ? [TITLE_SCREEN_STYLE_TEXT, ...extra].join('\n') : TITLE_SCREEN_STYLE_TEXT };
+    }
+    return titleStyleCache.text;
+}

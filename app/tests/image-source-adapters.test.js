@@ -105,7 +105,7 @@ test('gate:caption-writer:reminds-when-llm-not-connected', async () => {
     const written = await backend.writeDbgenPrompt({ description: '画角色「阿黛尔」的立绘。' });
     assert.equal(written.ok, false);
     assert.match(written.error, /还没接副 LLM/);
-    assert.match(written.error, /生图 → 副 LLM/);
+    assert.match(written.error, /生图与AI › 备用模型/);
     assert.equal(llmCalls.length, 0);
 });
 

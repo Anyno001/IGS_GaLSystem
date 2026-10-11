@@ -10,6 +10,8 @@ import { buildIgsTextPayload, getMessagePrimaryText } from '../scene/message-sou
 import { extractSceneDirectives, resolveLatestSceneDirective } from '../scene/scene-directives.js';
 import { BATTLE_CHAIN_MAX_FLOORS, createBattleHistoryScanner } from '../scene/battle-context.js';
 import { collectPromises } from '../scene/promise-reminder.js';
+import { createLiveHistoryScanner, liveFallbackOf } from '../scene/live-context.js';
+import { createStormHistoryScanner } from '../scene/storm-context.js';
 import { PUBLIC_READER_MODES } from '../schemas/reader-mode.js';
 
 export function createIgsCompatApi(app) {
@@ -26,16 +28,17 @@ export function createIgsCompatApi(app) {
         },
 
         getConfig() {
-            return cloneData(app.getState().config || {});
+            return cloneData(readAppConfig(app));
         },
 
         getUnifiedSettings(options = {}) {
             if (typeof app.getUnifiedSettingsSnapshot === 'function') {
-                return app.getUnifiedSettingsSnapshot(options);
+                // 内部共享只读的那份，对外交副本：外部怎么改都碰不到内部配置。
+                return cloneData(app.getUnifiedSettingsSnapshot(options));
             }
 
             const legacy = getLegacySettings(app);
-            const bridge = cloneData(app.getState().config || {});
+            const bridge = cloneData(readAppConfig(app));
             const readerMode = resolveReaderMode(options, legacy, bridge);
             const readerSettingsByMode = legacy.readerSettingsByMode || {};
             // 全模式共用 default 桶；老用户 default 空时回退旧分桶。
@@ -58,7 +61,7 @@ export function createIgsCompatApi(app) {
         async openViewerFromMessage(messageId, mode, openOptions = {}) {
             const normalizedId = normalizeMessageId(messageId);
             const resolved = normalizeViewerRequest(mode, openOptions);
-            const readerMode = resolveReaderMode({ mode: resolved.mode }, getLegacySettings(app), app.getState().config || {});
+            const readerMode = resolveReaderMode({ mode: resolved.mode }, getLegacySettings(app), readAppConfig(app));
             if (normalizedId == null) {
                 return { ok: false, reason: 'invalid-message-id', messageId, mode: readerMode, options: cloneViewerOptions(resolved.options) };
             }
@@ -81,6 +84,7 @@ export function createIgsCompatApi(app) {
                 render: refreshed.render,
                 scene: refreshed.scene,
                 startAtEnd: resolved.options.startAtEnd === true,
+                ...(resolved.options.turnOffset != null ? { turnOffset: resolved.options.turnOffset } : {}),
                 ...(resolved.options.skipTitle === true ? { skipTitle: true } : {}),
             };
             const payload = resolved.options.skipImageCollection === true
@@ -108,7 +112,7 @@ export function createIgsCompatApi(app) {
         },
 
         async openLatestAvailable(mode, options = {}) {
-            const readerMode = resolveReaderMode({ mode }, getLegacySettings(app), app.getState().config || {});
+            const readerMode = resolveReaderMode({ mode }, getLegacySettings(app), readAppConfig(app));
             if (!app.hostAdapter || typeof app.hostAdapter.getCurrentMessage !== 'function') {
                 return { ok: false, reason: 'missing-host-message-api', mode: readerMode, options: cloneData(options) };
             }
@@ -179,6 +183,12 @@ function normalizeMessageId(messageId) {
     return value;
 }
 
+// 只读配置走 getConfig()：getState() 会连整份阅读器快照和预设库一起深拷贝。
+function readAppConfig(app) {
+    const config = typeof app.getConfig === 'function' ? app.getConfig() : app.getState().config;
+    return config || {};
+}
+
 function cloneData(value) {
     if (value == null) return value;
     if (Array.isArray(value)) return value.map(cloneData);
@@ -226,6 +236,47 @@ async function resolveBattleContext(app, messageId) {
     if (!Number.isFinite(cursor) || cursor < 0) return null;
     const scanner = createBattleHistoryScanner();
     for (let step = 0; step < BATTLE_CHAIN_MAX_FLOORS * 2 + 1; step += 1) {
+        let previous = null;
+        try {
+            previous = await app.hostAdapter.getAdjacentMessage(cursor, -1);
+        } catch (error) {
+            break;
+        }
+        if (!previous || previous.id == null || Number(previous.id) === cursor) break;
+        cursor = Number(previous.id);
+        if (scanner.push({ isUser: previous.isUser === true, text: getMessagePrimaryText(previous) })) break;
+    }
+    return scanner.result();
+}
+
+// 直播跨楼继承：只在直播间开启时向前读宿主原文，找到最近的开播 / 下播信号为止。
+async function resolveLiveContext(app, messageId) {
+    if (!app || !app.hostAdapter || typeof app.hostAdapter.getAdjacentMessage !== 'function') return null;
+    let cursor = Number(messageId);
+    if (!Number.isFinite(cursor) || cursor < 0) return null;
+    const context = getSillyTavernContext() || {};
+    const scanner = createLiveHistoryScanner(liveFallbackOf(context.name1));
+    for (;;) {
+        let previous = null;
+        try {
+            previous = await app.hostAdapter.getAdjacentMessage(cursor, -1);
+        } catch (error) {
+            break;
+        }
+        if (!previous || previous.id == null || Number(previous.id) === cursor) break;
+        cursor = Number(previous.id);
+        if (scanner.push({ isUser: previous.isUser === true, text: getMessagePrimaryText(previous) })) break;
+    }
+    return scanner.result();
+}
+
+// 舆论风暴跨楼继承：只在手机社区与风暴都开启时向前读宿主原文，找到最近的 storm / storm-end 为止。
+async function resolveStormContext(app, messageId) {
+    if (!app || !app.hostAdapter || typeof app.hostAdapter.getAdjacentMessage !== 'function') return null;
+    let cursor = Number(messageId);
+    if (!Number.isFinite(cursor) || cursor < 0) return null;
+    const scanner = createStormHistoryScanner();
+    for (;;) {
         let previous = null;
         try {
             previous = await app.hostAdapter.getAdjacentMessage(cursor, -1);
@@ -321,7 +372,7 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
     const bridge = cloneData(
         unifiedSettings && unifiedSettings.bridge && typeof unifiedSettings.bridge === 'object'
             ? unifiedSettings.bridge
-            : app.getState().config || {},
+            : readAppConfig(app),
     );
     const visualNovelText = buildIgsTextPayload(message, {
         sourceFilter: bridge.sourceFilter,
@@ -346,6 +397,14 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
     const battleContext = battleFxSettings && battleFxSettings.enabled === true
         ? await resolveBattleContext(app, messageId)
         : null;
+    const liveFxSettings = unifiedSettings && unifiedSettings.readerSettings && unifiedSettings.readerSettings.liveFx;
+    const liveContext = liveFxSettings && liveFxSettings.enabled === true
+        ? await resolveLiveContext(app, messageId)
+        : null;
+    const feedFxSettings = unifiedSettings && unifiedSettings.readerSettings && unifiedSettings.readerSettings.feedFx;
+    const stormContext = feedFxSettings && feedFxSettings.enabled === true && !(feedFxSettings.storm && feedFxSettings.storm.enabled === false)
+        ? await resolveStormContext(app, messageId)
+        : null;
     const fxTagSettings = unifiedSettings && unifiedSettings.readerSettings && unifiedSettings.readerSettings.fxTags;
     const promiseHistory = fxTagSettings && fxTagSettings.enabled === true && fxTagSettings.promise === true
         ? await resolvePromiseHistory(app, message, messageId)
@@ -364,6 +423,8 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
         inheritedOutfits,
         inheritedDread,
         battleContext,
+        liveContext,
+        stormContext,
         promiseHistory,
         message,
         messageId,

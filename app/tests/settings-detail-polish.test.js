@@ -1,24 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { IMAGE_SUBTAB_DEFS, getImageSubTabTemplate } from '../src/visual/igs-ui/settings-tabs.js';
+import { getPageTemplate } from '../src/visual/igs-ui/settings-tabs.js';
+import { SETTINGS_PAGES, pagesOfCategory, resolveSettingsPage } from '../src/visual/igs-ui/settings-pages.js';
 import { renderMoodReviewList } from '../src/visual/igs-ui/settings-fields.js';
 import { renderStageDirectionFields } from '../src/visual/igs-ui/stage-direction-fields.js';
 
 test('gate:settings-polish:image-tab-has-cg-gallery-pane', () => {
-    assert.deepEqual(IMAGE_SUBTAB_DEFS.map(([id]) => id), ['source', 'llm', 'auto', 'logs', 'cg']);
-    const cg = getImageSubTabTemplate('cg');
+    assert.deepEqual(pagesOfCategory('ai').map(([id]) => id), ['source', 'kinds', 'llm', 'rules', 'parse']);
+    assert.ok(pagesOfCategory('scenes').some(([id]) => id === 'cglib'));
+    const cg = getPageTemplate('cglib');
     assert.match(cg, /data-image-pane="cg"/);
     assert.match(cg, /\{\{imageCgList\}\}/);
     assert.match(cg, /data-action="image-cg-refresh"/);
     assert.match(cg, /data-action="image-cg-delete-selected"/);
     assert.match(cg, /data-action="image-cg-delete-all"/);
     assert.match(cg, /data-action="image-cache-clear"/);
-    assert.match(cg, /\{\{imageCacheCountField\}\}/);
-    // 生图内容页模板保持完整，且不再重复放 CG 库按钮。
-    const auto = getImageSubTabTemplate('auto');
+    // 本地缓存张数与清缓存挪到「数据 › 备份」。
+    assert.doesNotMatch(cg, /imageCacheCountField|purge-asset-cache/);
+    assert.match(getPageTemplate('data'), /\{\{imageCacheCountField\}\}/);
+    assert.match(getPageTemplate('data'), /data-action="purge-asset-cache"/);
+    // 「分类」页把提示词并了进来：开关与模型由 slots 注入，模板只留说明和分区画师串面板。
+    const auto = getPageTemplate('kinds');
     assert.match(auto, /data-image-pane="auto"/);
-    assert.match(auto, /\{\{autoNsfwField\}\}/);
+    assert.match(auto, /\{\{promptKindsPanel\}\}/);
     assert.doesNotMatch(auto, /open-cg-gallery/);
+    // 旧的「提示词」「生图内容」「分类」子页都落到「画师与模型」。
+    for (const sub of ['prompts', 'content', 'auto']) assert.equal(resolveSettingsPage({ tab: 'image', imageSubTab: sub }), 'kinds');
 });
 
 test('gate:settings-polish:mood-review-actions-sit-outside-chip', () => {
@@ -95,16 +102,19 @@ test('gate:settings-polish:toast-follows-dialog-skin', async () => {
     assert.ok(!getDialogSkinStyleText('default').includes('#igs-toast'));
 });
 
-// 子页标签栏随正文滚动：吸顶时半透明底会和下面的内容叠在一起（横屏矮屏尤其明显）；生图 5 个子页排一行。
+// 子页标签栏随正文滚动：吸顶时半透明底会和下面的内容叠在一起（横屏矮屏尤其明显）；演出 5 个子页排一行，放不下就横向滚动。
 test('gate:settings-polish:subtab-bars-scroll-with-content', async () => {
     const { getSettingsStyleText } = await import('../src/visual/igs-ui/settings-style.js');
     const css = getSettingsStyleText();
-    for (const bar of ['igs-scene-settings-subtabs', 'igs-reader-subtabs', 'igs-image-subtabs']) {
-        const rule = css.match(new RegExp(`\\.${bar}\\{[^}]*\\}`))[0];
-        assert.doesNotMatch(rule, /position:sticky/, bar);
-    }
-    assert.match(css, /\.igs-image-subtabs\{[^}]*grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/);
-    assert.equal(IMAGE_SUBTAB_DEFS.length, 5);
+    const rule = css.match(/\.igs-page-tabs\{[^}]*\}/)[0];
+    assert.doesNotMatch(rule, /position:sticky/);
+    assert.match(rule, /display:grid/);
+    assert.match(rule, /grid-auto-flow:column/);
+    assert.match(rule, /grid-auto-columns:1fr/);
+    assert.match(rule, /overflow-x:auto/);
+    assert.doesNotMatch(rule, /flex-wrap:wrap|grid-template-columns/);
+    assert.equal(pagesOfCategory('perf').length, 5);
+    assert.ok(SETTINGS_PAGES.every(([id, label, category]) => id && label && category));
     // 仍吸顶的批量选择栏要垫不透明底色，内容滚过去时不透出来；高亮色叠在伪元素上（设置器不用渐变）。
     assert.match(css, /\.igs-asset-select-bar\{[^}]*position:sticky[^}]*background:var\(--igs-settings-panel\)/);
     assert.match(css, /\.igs-asset-select-bar::before\{[^}]*z-index:-1;[^}]*background:var\(--igs-settings-highlight\)/);
@@ -116,13 +126,13 @@ test('gate:settings-polish:advanced-details-drop-sub-border', async () => {
     const css = getSettingsStyleText();
     assert.ok(css.includes('details.igs-settings-advanced{display:block;margin-top:4px;margin-left:0;padding:0;border-left:0;'));
     assert.ok(css.includes('details.igs-settings-advanced[open]>summary{margin-bottom:0}'));
-    assert.match(getImageSubTabTemplate('source'), /<details class="igs-settings-sub igs-settings-advanced" data-advanced="nai"/);
+    assert.match(getPageTemplate('source'), /<details class="igs-settings-sub igs-settings-advanced" data-advanced="nai"/);
 });
 
 // CG 库：「查看」行有倒序切换；翻页条和状态行在缩略图网格里独占一整行，不再被挤进一个格子竖排。
 test('gate:settings-polish:cg-pane-order-toggle-and-full-width-pager', async () => {
     const { getSettingsStyleText } = await import('../src/visual/igs-ui/settings-style.js');
-    const cg = getImageSubTabTemplate('cg');
+    const cg = getPageTemplate('cglib');
     assert.match(cg, /data-action="image-cg-order" type="button" aria-pressed="\{\{imageCgOldestFirst\}\}"[^>]*>\{\{imageCgOrderLabel\}\}<\/button>/);
     assert.ok(getSettingsStyleText().includes('.igs-image-cg-grid>:not(.igs-image-cg-tile){grid-column:1/-1}'));
 });

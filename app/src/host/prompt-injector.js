@@ -10,6 +10,8 @@ export function createPromptInjector(globalObject) {
     const root = globalObject || globalThis.window || globalThis;
     let handle = null;
     let active = false;
+    // 本次注入过的分段 key（按条目位置 / 深度分出来的段），clear 时一并清掉。
+    let extraIds = [];
 
     function getTavernHelper() {
         try {
@@ -38,12 +40,17 @@ export function createPromptInjector(globalObject) {
 
     // placement=system：content 进 prompt 区（IN_PROMPT，相对静态、可命中前缀缓存），depth0Content 进 depth 0；
     // placement=depth0（旧行为）：两段合并为一条 IN_CHAT depth 0。
-    function inject(content, { placement = 'depth0', depth0Content = '' } = {}) {
+    // segments：[{ id, position: 'system'|'depth0'|'depth', depth, content }]，各条目按自己的位置与深度单独成段，
+    // 每段一个独立的 extension prompt key（system 进 IN_PROMPT；depth0 / depth 进 IN_CHAT，深度即酒馆的 @D）。
+    function inject(content, { placement = 'depth0', depth0Content = '', segments = [] } = {}) {
         clear();
         if (!content) return { ok: false, reason: 'empty-content' };
         const split = placement === 'system';
-        const merged = [content, depth0Content].filter(Boolean).join('\n\n');
-        const main = split ? content : merged;
+        const extras = (Array.isArray(segments) ? segments : []).filter((seg) => seg && seg.id && seg.content);
+        const mergedMain = [content, depth0Content].filter(Boolean).join('\n\n');
+        // 酒馆助手回退只有聊天内位置：所有分段并进同一条。
+        const merged = [mergedMain, ...extras.map((seg) => seg.content)].filter(Boolean).join('\n\n');
+        const main = split ? content : mergedMain;
         const position = split ? EXTENSION_PROMPT_IN_PROMPT : EXTENSION_PROMPT_IN_CHAT;
 
         const context = getContext();
@@ -59,6 +66,11 @@ export function createPromptInjector(globalObject) {
                 );
                 if (split && depth0Content) {
                     context.setExtensionPrompt(DEPTH0_INJECTION_ID, depth0Content, EXTENSION_PROMPT_IN_CHAT, 0, false, EXTENSION_PROMPT_SYSTEM);
+                }
+                for (const seg of extras) {
+                    const inPrompt = seg.position === 'system';
+                    context.setExtensionPrompt(seg.id, seg.content, inPrompt ? EXTENSION_PROMPT_IN_PROMPT : EXTENSION_PROMPT_IN_CHAT, inPrompt ? 0 : Math.max(0, Number(seg.depth) || 0), false, EXTENSION_PROMPT_SYSTEM);
+                    extraIds.push(seg.id);
                 }
                 const verification = verifyContextPrompt(context, main, position);
                 if (verification.ok) {
@@ -107,7 +119,9 @@ export function createPromptInjector(globalObject) {
         handle = null;
         active = false;
         const context = getContext();
-        for (const id of [INJECTION_ID, DEPTH0_INJECTION_ID]) {
+        const ids = [INJECTION_ID, DEPTH0_INJECTION_ID, ...extraIds];
+        extraIds = [];
+        for (const id of ids) {
             if (context && context.extensionPrompts && typeof context.extensionPrompts === 'object') {
                 try { delete context.extensionPrompts[id]; } catch (error) { /* */ }
             }

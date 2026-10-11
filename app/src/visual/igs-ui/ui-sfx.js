@@ -1,5 +1,6 @@
 // 界面音效：翻页、选项悬停/确认、菜单开合，音色族随对话框皮肤切换；默认关闭，全部实时合成。
 import { createSynthPartial as p, playSynthPartials } from './chat-sfx.js';
+import { dlcBorrowSkin, getDlcSkin } from './dlc-skin-registry.js';
 
 export const UI_SFX_KINDS = Object.freeze(['page', 'hover', 'confirm', 'open', 'close']);
 export const UI_SOUND_DEFAULTS = Object.freeze({ enabled: false, volume: 0.4 });
@@ -67,6 +68,7 @@ const SKIN_FAMILIES = Object.freeze({
     'retro-japanese': 'wood',
     'adventure-journey': 'wood',
     'qinglv-shanshui': 'wood',
+    'xianxia-ink': 'wood',
     'black-white-manga': 'paper',
     'warm-picturebook': 'paper',
     'fairy-tale': 'paper',
@@ -76,6 +78,7 @@ const SKIN_FAMILIES = Object.freeze({
     'day-minimal': 'soft',
     'elegant-european': 'glass',
     'magic-academy': 'glass',
+    'mermaid-deep': 'glass',
     'gradient-veil': 'glass',
     'horror-gore': 'dread',
     'horror-psych': 'soft',
@@ -84,7 +87,9 @@ const SKIN_FAMILIES = Object.freeze({
 });
 
 export function resolveUiSfxFamily(dialogSkin) {
-    return SKIN_FAMILIES[dialogSkin] || 'glass';
+    const dlc = getDlcSkin(dialogSkin);
+    if (dlc && Object.values(SKIN_FAMILIES).includes(dlc.sfx)) return dlc.sfx;
+    return SKIN_FAMILIES[dialogSkin] || SKIN_FAMILIES[dlcBorrowSkin(dialogSkin)] || 'glass';
 }
 
 export function normalizeUiSoundSettings(value) {

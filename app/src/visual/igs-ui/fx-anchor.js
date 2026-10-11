@@ -145,13 +145,26 @@ export function measureStage(motion) {
     const dialog = motion.querySelector('#igs-dialog-layer .igs-dialog');
     // 漫画模式的对话框铺满舞台、只是透明的点击面，不算遮挡。
     const comicHost = dialog && dialog.getAttribute && dialog.getAttribute('data-igs-comic-host') === '1';
-    if (dialog && !comicHost && typeof dialog.getBoundingClientRect === 'function' && typeof motion.getBoundingClientRect === 'function') {
+    // 手机焦点：对话框用 class 淡出（不 display:none），几何上当作隐藏。
+    const focused = typeof motion.closest === 'function' && Boolean(motion.closest('.igs-phone-focus'));
+    if (dialog && !comicHost && !focused && typeof dialog.getBoundingClientRect === 'function' && typeof motion.getBoundingClientRect === 'function') {
         const d = dialog.getBoundingClientRect();
         const m = motion.getBoundingClientRect();
         // 舞台可能被外层 transform 缩放：矩形差值换回舞台自身的 CSS 像素。
         if (d.height > 0 && m.height > 0) dialogTop = (d.top - m.top) * (stageH / m.height);
     }
-    return { stageW, stageH, dialogTop };
+    // 顶部固定的工具栏（含地点栏）下沿：手机这类贴顶的层从它下面开始，不和顶栏叠字。
+    let topInset = 0;
+    const doc = motion.ownerDocument;
+    const bar = doc && typeof doc.getElementById === 'function' ? doc.getElementById('igs-ctrl-bar') : null;
+    if (bar && typeof bar.getBoundingClientRect === 'function' && typeof motion.getBoundingClientRect === 'function') {
+        const b = bar.getBoundingClientRect();
+        const m = motion.getBoundingClientRect();
+        const k = m.height > 0 ? stageH / m.height : 1;
+        const bottom = (b.bottom - m.top) * k;
+        if (b.height > 0 && (b.top - m.top) * k < stageH * 0.2 && bottom > 0) topInset = Math.min(stageH * 0.25, bottom);
+    }
+    return { stageW, stageH, dialogTop, topInset };
 }
 
 // 纯函数：返回符号中心点（舞台像素）与符号边长；没有立绘时落在舞台右上方。

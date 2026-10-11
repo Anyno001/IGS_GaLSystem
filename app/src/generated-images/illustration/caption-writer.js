@@ -3,7 +3,7 @@
 // 供表情差分、Q 版头像、默认立绘与衣柜服装提示词共用；出图仍按当前图像来源。
 import { FICTION_FRAME, SOFT_MODE_NOTE, TAG_WRITING_RULES, requestWithSoftRetry } from './prompt-kit.js';
 
-export const LLM_SETUP_HINT = '请到「生图 → 副 LLM」页接好副 LLM';
+export const LLM_SETUP_HINT = '请到「生图与AI › 备用模型」页接好备用模型';
 
 const CAPTION_WRITER_RULES = [
     '用户给出一段中文画面要求，你按要求写 NovelAI 生图标签。要求里写了几份（slotid），就按顺序写几份，不要多也不要少。',

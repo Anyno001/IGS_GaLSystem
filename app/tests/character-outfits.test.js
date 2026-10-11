@@ -61,6 +61,7 @@ test('gate:outfits:wardrobe-prompt-is-shared-and-named-link-wins', () => {
     assert.deepEqual(resolveWardrobePrompt(wardrobe, { wardrobe: '泳装' }, '校服'), { name: '泳装', prompt: 'swimsuit' });
     assert.deepEqual(resolveWardrobePrompt(wardrobe, {}, '校服'), { name: '校服', prompt: 'school uniform, pleated skirt' });
     assert.equal(resolveWardrobePrompt(wardrobe, { wardrobe: '没有' }, '便服'), null);
+    assert.equal(resolveWardrobePrompt(wardrobe, { wardrobe: '没有' }, '校服'), null);
     assert.deepEqual(normalizeWardrobe({ 校服: { prompt: 'a', reference: 'igs-gen:ref' } }).校服, { prompt: 'a', reference: 'igs-gen:ref' });
     assert.equal(normalizeWardrobe({ 校服: { prompt: 'a', reference: 'https://x' } }).校服.reference, undefined);
     assert.equal(Object.prototype.hasOwnProperty.call(normalizeWardrobe({ 裸体: { prompt: 'nude' }, 校服: { prompt: 'a' } }), '裸体'), false);
@@ -74,15 +75,15 @@ test('gate:outfits:wardrobe-prompt-is-shared-and-named-link-wins', () => {
     assert.deepEqual(kept['冬月']['裸体'], { words: [], moods: {}, wardrobe: '裸体' });
 });
 
-// 衣柜提示词在规则页：只列已有的条目；AI 写出的陌生服装词在「待确认」页处理，不在这里。
+// 衣柜提示词在「衣柜与情绪」页：只列已有的条目；AI 写出的陌生服装词在「待确认」页处理，不在这里。
 test('gate:outfits:wardrobe-rules-list-and-scope-tag', async () => {
     const { renderWardrobe } = await import('../src/visual/igs-ui/settings-outfit-fields.js');
     const html = renderWardrobe({});
     assert.match(html, /暂无衣柜提示词/);
     assert.doesNotMatch(html, /待确认|outfit-review-dismiss/);
     // 和场景页一样：「+」在标题右边，筛选在下一行左边。
-    const { SCENE_RULES_TEMPLATE } = await import('../src/visual/igs-ui/settings-tabs.js');
-    assert.match(SCENE_RULES_TEMPLATE, /衣柜提示词<span[^>]*>生图用<\/span><button[^>]*data-action="wardrobe-add"/);
+    const { WARDROBE_TEMPLATE } = await import('../src/visual/igs-ui/settings-tabs.js');
+    assert.match(WARDROBE_TEMPLATE, /衣柜提示词<span[^>]*>生图用<\/span><button[^>]*data-action="wardrobe-add"/);
     assert.match(renderWardrobe({}, { lead: '<b>筛选</b>' }), /^<div class="igs-wardrobe-group"><div class="igs-asset-folder-bar"><b>筛选<\/b><\/div>/);
     const tagged = renderWardrobe({ 校服: { prompt: '' } }, { scopeTag: (collection, name) => `<i>${collection}:${name}</i>`, focus: '校服' });
     assert.match(tagged, /<i>wardrobe:校服<\/i>/);
@@ -116,11 +117,22 @@ test('gate:outfits:wardrobe-rules-list-and-scope-tag', async () => {
         isOpen: () => true,
     });
     assert.match(tabs, /igs-wardrobe-pick/);
-    assert.match(tabs, /scene-set-outfit-wardrobe-url:[^"]*%E8%A3%B8%E4%BD%93/);
+    assert.match(tabs, /data-outfit-wardrobe-char="[^"]*"[^>]*>[\s\S]*?<option value="裸体"/);
     assert.match(tabs, /outfit-expression-set:/);
     assert.doesNotMatch(tabs, /生成立绘|outfit-generate-nude:|char-generate-sprite:/);
     assert.equal(tabs.includes('scene-outfit-tab:%E5%86%AC%E6%9C%88:%E8%A3%B8%E4%BD%93'), false);
     assert.equal(tabs.includes('编辑提示词'), false);
+    const nudeSet = renderCharacterSlotTabs({
+        charName: '冬月',
+        baseMoods: [],
+        baseListHtml: '',
+        outfits: { 裸体: { words: [], moods: { 害羞: 'nude-shy.png' }, wardrobe: '裸体' } },
+        activeOutfit: '裸体',
+        sceneAssets: {},
+    });
+    assert.match(nudeSet, /scene-outfit-tab:%E5%86%AC%E6%9C%88:%E8%A3%B8%E4%BD%93/);
+    assert.match(nudeSet, /igs-outfit-tab is-active/);
+    assert.match(nudeSet, />裸体<span/);
 });
 
 test('gate:outfits:prompt-groups-text', () => {

@@ -1,5 +1,5 @@
 import { prefersReducedMotion } from './reduced-motion.js';
-import { isStagePaused } from './stage-pause.js';
+import { isStageIdle } from './stage-pause.js';
 import { WEATHER_FLASH_EVENT, normalizeWeatherFxSettings, resolveWeatherFxPlan, resolveWeatherFxScene, resolveWeatherFxTime } from './weather-fx-runtime.js';
 import { normalizeTimeTintSettings } from './stage-direction-settings.js';
 
@@ -43,6 +43,7 @@ const SUNLIT_TIMES = Object.freeze(['', 'day', 'dawn']);
 const NIGHT_TIMES = Object.freeze(['night', 'midnight']);
 
 const states = new WeakMap();
+const GRADE_FRAME_MS = 33;
 let filterSeq = 0;
 
 // 触屏设备一律用普通叠色：mix-blend-mode 会把整个 #igs-stage-motion 变成离屏合成面，
@@ -252,8 +253,16 @@ function tweenTo(state, root, target, instant, duration = GRADE_FADE_MS) {
     }
     const from = state.current;
     const start = state.now();
+    let lastWrite = -Infinity;
+    // 渐变限到约 30 帧：每次写入都要让背景、模糊背景、立绘三层滤镜重算，满帧写手机明显发烫；末帧一定落地。
     const step = () => {
-        const t = Math.min(1, (state.now() - start) / duration);
+        const now = state.now();
+        const t = Math.min(1, (now - start) / duration);
+        if (t < 1 && now - lastWrite < GRADE_FRAME_MS) {
+            state.frame = state.requestFrame(step);
+            return;
+        }
+        lastWrite = now;
         const eased = t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2;
         state.current = lerpTarget(from, target, eased);
         writeFrame(state, root, state.current);
@@ -339,7 +348,7 @@ function paintLayers(state, plan) {
 // 闪电时背景与立绘一起被照亮，再回落到当前调色；回忆、梦境与减弱动效时不闪。
 function onFlash(state, root) {
     // 设置、记录等面板盖住舞台时不闪：闪屏本身已暂停，照亮渐变只会让面板毛玻璃跟着每帧重算。
-    if (!state.flashOn || isStagePaused(root)) return;
+    if (!state.flashOn || isStageIdle(root)) return;
     const target = state.target || neutralTarget();
     const lit = (value) => ({ ...value, b: value.b * FLASH_BOOST });
     state.current = { bg: lit(target.bg), sprite: { ...lit(target.sprite), tint: target.sprite.tint.slice() } };

@@ -6,6 +6,7 @@ import { audioMasterVolume, busInput, resumeAudioBus, watchPageAway } from './au
 import { duckSceneAudio } from './scene-audio.js';
 import { stripTextFxMarkup } from './text-fx.js';
 import { yieldTypewriterAudio } from './typewriter-audio.js';
+import { voiceFilterGain, voiceFilterUsesDry } from './voice-filter.js';
 import { buildBarkChain, canonicalName, characterDnaGender, normalizeCharacterVoice, resolveBarkMood, resolveBarkShape } from './voice-bark.js';
 
 export const TTS_PROVIDERS = Object.freeze([
@@ -399,7 +400,7 @@ function speakSystem(job, { text, voice, volume, rate, pitch, lang }, synth = gl
         } else {
             u.lang = LANG_TAGS[lang] || LANG_TAGS.zh;
         }
-        u.volume = clamp(volume * audioMasterVolume(), 0, 1);
+        u.volume = clamp(volume * audioMasterVolume() * voiceFilterGain(), 0, 1);
         u.rate = rate;
         u.pitch = pitch;
         if (i === 0) {
@@ -537,7 +538,7 @@ function requestSpeech(api, plan) {
 }
 
 function speakApi(job, plan, api) {
-    const bus = busInput(plan.close || plan.phone ? 'dry' : 'voice');
+    const bus = busInput(plan.close || plan.phone || voiceFilterUsesDry() ? 'dry' : 'voice');
     if (!bus) {
         reportError('浏览器音频不可用', job);
         finish(job);

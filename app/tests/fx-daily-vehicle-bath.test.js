@@ -49,10 +49,54 @@ test('gate:fx-daily-vehicle-bath place words: vehicles, baths and false friends'
     assert.deepEqual(resolvePlaceAmbience('车里', { worldview: 'ancient' }), { kind: 'carriage', variant: '' });
     assert.deepEqual(resolvePlaceAmbience('列车', { worldview: 'fantasy' }), { kind: 'carriage', variant: '' });
     assert.deepEqual(resolvePlaceAmbience('游轮甲板'), { kind: 'ship', variant: '' });
+    assert.deepEqual(resolvePlaceAmbience('飞机客舱'), { kind: 'plane', variant: '' });
+    assert.deepEqual(resolvePlaceAmbience('直升机'), { kind: 'plane', variant: '' });
+    assert.deepEqual(resolvePlaceAmbience('飞艇'), { kind: 'plane', variant: 'airship' });
+    assert.deepEqual(resolvePlaceAmbience('热气球'), { kind: 'plane', variant: 'airship' });
+    assert.deepEqual(resolvePlaceAmbience('飞机', { worldview: 'fantasy' }), { kind: 'plane', variant: 'airship' });
     assert.deepEqual(resolvePlaceAmbience('游轮上的浴场'), { kind: 'bath', variant: '' });
     assert.deepEqual(resolvePlaceAmbience('露天温泉'), { kind: 'bath', variant: 'onsen' });
     assert.deepEqual(resolvePlaceAmbience('宿舍淋浴间'), { kind: 'bath', variant: 'shower' });
-    for (const place of ['温泉街', '海水浴场', '车站', '停车场', '船坞', '浴衣店', '摩天轮', '']) assert.equal(resolvePlaceAmbience(place), null, place);
+    for (const place of ['温泉街', '海水浴场', '车站', '停车场', '船坞', '浴衣店', '摩天轮', '机场', '候机厅', '航站楼', '飞机场', '停机坪', '']) assert.equal(resolvePlaceAmbience(place), null, place);
+});
+
+test('gate:fx-daily-vehicle-bath plane words: shared cabin words, airport ground, spaceships', () => {
+    // 客舱、舷窗、头等舱邮轮也有：带船字样归船，单独出现才算机舱。
+    assert.deepEqual(resolvePlaceAmbience('游轮客舱'), { kind: 'ship', variant: '' });
+    assert.deepEqual(resolvePlaceAmbience('邮轮舷窗边'), { kind: 'ship', variant: '' });
+    assert.deepEqual(resolvePlaceAmbience('头等舱'), { kind: 'plane', variant: '' });
+    assert.deepEqual(resolvePlaceAmbience('飞机上'), { kind: 'plane', variant: '' });
+    // 在机场里只有明说进了机舱才算。
+    assert.deepEqual(resolvePlaceAmbience('机场的直升机'), { kind: 'plane', variant: '' });
+    // 飞船有空气不在水上、潜艇在水下、纸飞机不是坐飞机：都不挂机舱。
+    for (const place of ['候机厅等航班', '停机坪看飞机', '飞船舷窗', '宇宙飞船驾驶舱', '潜艇舷窗', '纸飞机']) assert.equal(resolvePlaceAmbience(place), null, place);
+});
+
+test('gate:fx-daily-vehicle-bath sky: sword, dragon and cloud flight in the open air', () => {
+    // 不分世界观；机舱、飞艇里不算露天。
+    for (const [place, worldview] of [['御剑飞行', 'ancient'], ['龙背上', 'fantasy'], ['腾云驾雾', 'ancient'], ['仙鹤背上', ''], ['骑扫帚飞过城堡上空', 'magic'], ['半空中', '']]) {
+        assert.deepEqual(resolvePlaceAmbience(place, { worldview }), { kind: 'sky', variant: '' }, place);
+    }
+    assert.equal(resolvePlaceAmbience('飞行中的客机').kind, 'plane');
+    assert.equal(resolvePlaceAmbience('飞艇甲板').kind, 'plane');
+    // 空中花园、高空餐厅在地上；山上看云海在古代世界观归云海氛围（cloudsea），不是载具。
+    for (const place of ['空中花园', '高空餐厅']) assert.equal(resolvePlaceAmbience(place, { worldview: 'ancient' }), null, place);
+    for (const place of ['云海', '山顶云端']) assert.equal(resolvePlaceAmbience(place, { worldview: 'ancient' }).kind, 'cloudsea', place);
+    assert.equal(resolvePlaceAmbience('云海', { worldview: 'modern' }), null, '现代不出云海');
+    assert.equal(resolvePlaceAmbience('御剑穿云海', { worldview: 'ancient' }).kind, 'sky', '御剑仍归露天飞行');
+    // 环境音换成高空风声；单次演出是腾空风声、乱风、落地，字样「飞向 / 呼—— / 落地」。
+    assert.ok(resolveAmbientPlan({ location: '御剑飞行' }, { enabled: true }).some((l) => l.kind === 'sky'));
+    const flight = render({ sceneLocation: '龙背上', fx: { daily: [{ type: 'depart', to: '王都' }, { type: 'brake' }] } });
+    assert.deepEqual(flight.sounds, ['soar', 'gust']);
+    assert.match(flight.root.querySelector('#igs-fx-stage').children.map((n) => n.innerHTML).join(''), /飞向[\s\S]*呼——/);
+    assert.match(ambienceOf(flight.root).className, /is-sky/);
+    cancelDailyFx(flight.root);
+    const landed = render({ sceneLocation: '御剑飞行', fx: { daily: [{ type: 'arrive', station: '' }] } });
+    assert.deepEqual(landed.sounds, ['alight']);
+    assert.match(landed.root.querySelector('#igs-fx-front').children[0].innerHTML, /落地/);
+    cancelDailyFx(landed.root);
+    // 露天飞行是载具：NSFW 页不挂。
+    assert.equal(render({ sceneLocation: '龙背上', sceneNsfw: true }).result.ambience, '');
 });
 
 test('gate:fx-daily-vehicle-bath ambient sound follows the same place table', () => {
@@ -63,6 +107,9 @@ test('gate:fx-daily-vehicle-bath ambient sound follows the same place table', ()
     assert.ok(kinds('车里', { worldview: 'ancient' }).includes('carriage'));
     assert.ok(kinds('地铁车厢').includes('train'));
     assert.ok(kinds('甲板').includes('ship'));
+    assert.ok(kinds('飞机客舱').includes('plane'));
+    const airship = resolveAmbientPlan({ location: '热气球' }, on).find((l) => l.kind === 'plane');
+    assert.equal(airship.variant, 'airship');
     const bath = resolveAmbientPlan({ location: '浴室淋浴间' }, on).find((l) => l.kind === 'bath');
     assert.equal(bath.variant, 'shower');
     assert.equal(kinds('出租车后座', {}).includes('bath'), false);
@@ -96,6 +143,25 @@ test('gate:fx-daily-vehicle-bath sounds and words follow the vehicle in the scen
     // 认不出地点时：古代按马车，现代按汽车。
     assert.deepEqual(render({ fx: { daily: [{ type: 'depart', to: '' }] } }, { readerSettings: { _ancientEra: true } }).sounds, ['giddyup']);
     assert.deepEqual(render({ fx: { daily: [{ type: 'depart', to: '' }] } }).sounds, ['engine']);
+    // 飞机：起飞喷气、降落触地（同页最多两个），字样是「飞往」。
+    const plane = render({ sceneLocation: '飞机客舱', fx: { daily: [{ type: 'depart', to: '那霸' }, { type: 'brake' }] } });
+    assert.deepEqual(plane.sounds, ['jet', 'touchdown']);
+    assert.match(plane.root.querySelector('#igs-fx-stage').children.map((n) => n.innerHTML).join(''), /飞往[\s\S]*咚——/);
+    cancelDailyFx(plane.root);
+    // 到站：客机也用列车那套提示音。
+    assert.deepEqual(render({ sceneLocation: '机舱', fx: { daily: [{ type: 'arrive', station: '那霸' }] } }).sounds, ['arrive-chime']);
+    // 飞艇 / 热气球 / 西幻的「飞机」：螺旋桨启航、颠簸吱呀、靠港鸣笛，不放喷气与触地。
+    const airship = render({ sceneLocation: '飞艇', fx: { daily: [{ type: 'depart', to: '浮空城' }, { type: 'brake' }] } });
+    assert.deepEqual(airship.sounds, ['propeller', 'creak']);
+    const stage = airship.root.querySelector('#igs-fx-stage').children;
+    assert.ok(stage.some((n) => /is-airship/.test(n.className)));
+    assert.match(stage.map((n) => n.innerHTML).join(''), /启航[\s\S]*晃——/);
+    cancelDailyFx(airship.root);
+    const docked = render({ sceneLocation: '热气球', fx: { daily: [{ type: 'arrive', station: '' }] } });
+    assert.deepEqual(docked.sounds, ['horn']);
+    assert.match(docked.root.querySelector('#igs-fx-front').children[0].innerHTML, /抵达/);
+    cancelDailyFx(docked.root);
+    assert.deepEqual(render({ sceneLocation: '飞机', fx: { daily: [{ type: 'depart', to: '' }] } }, { readerSettings: { _worldview: 'fantasy' } }).sounds, ['propeller']);
 });
 
 test('gate:fx-daily-vehicle-bath ticket label and reduced motion skips sprite jolt', () => {
@@ -104,6 +170,8 @@ test('gate:fx-daily-vehicle-bath ticket label and reduced motion skips sprite jo
     assert.deepEqual(plane.sounds, ['punch']);
     const ship = render({ sceneLocation: '渡轮', fx: { daily: [{ type: 'ticket', from: '', to: '小豆岛', note: '' }] } });
     assert.match(ship.root.querySelector('#igs-fx-front').children[0].innerHTML, /船票/);
+    const airship = render({ sceneLocation: '飞空艇', fx: { daily: [{ type: 'ticket', from: '', to: '浮空城', note: '' }] } });
+    assert.match(airship.root.querySelector('#igs-fx-front').children[0].innerHTML, /船票/);
     const calm = render({ sceneLocation: '出租车', fx: { daily: [{ type: 'brake' }] } }, { reducedMotion: true });
     assert.equal((calm.root.querySelector('#igs-sprite').animations || []).length, 0);
     assert.deepEqual(calm.result.played, ['brake']);
@@ -177,9 +245,38 @@ test('gate:fx-daily-underwater-space ambience shows on nsfw pages and one-shots 
     assert.equal(render({ sceneLocation: '舱外', sceneNsfw: true }).result.ambience, 'space');
     const deep = render({ sceneLocation: '海底', fx: { daily: [{ type: 'dive' }, { type: 'bubble' }] } });
     assert.deepEqual(deep.result.played, ['dive', 'bubble']);
-    assert.deepEqual(deep.sounds, ['dive', 'blub']);
+    assert.deepEqual(deep.sounds, ['dive', 'blub', 'bubble-pop']);
     // 认不出载具时水下不当成船：刹车按汽车。
     assert.deepEqual(render({ sceneLocation: '海底', fx: { daily: [{ type: 'brake' }] } }).sounds, ['screech']);
     assert.deepEqual(render({ fx: { daily: [{ type: 'vacuum' }] } }, { readerSettings: { _ancientEra: true } }).sounds, ['vacuum']);
     for (const kind of ['dive', 'bubble', 'vacuum']) assert.equal(normalizeDailyFxSettings({ enabled: true })[kind], false, kind);
+});
+
+test('gate:fx-daily-underwater-space mermaid places, abyss variant and submarines', () => {
+    for (const place of ['人鱼王国', '海藻林', '亚特兰蒂斯遗迹', '湖中']) assert.equal(resolvePlaceAmbience(place).kind, 'underwater', place);
+    assert.equal(resolvePlaceAmbience('海底').variant, '');
+    assert.equal(resolvePlaceAmbience('海沟底部').variant, 'abyss');
+    for (const place of ['海底潜艇内', '深海潜水艇', '海底世界水族馆']) assert.equal(resolvePlaceAmbience(place), null, place);
+    assert.match(ambienceOf(render({ sceneLocation: '深海' }).root).className, /is-abyss/);
+    assert.match(DAILY_FX_STYLE_TEXT, /\.is-abyss \.igs-dfx-amb-rays\{[^}]*animation:igs-amb-drift/);
+    // 立绘漂浮只换呼吸的关键帧，仍受呼吸开关、低画质与减少动态约束，亲密呼吸优先。
+    assert.match(DAILY_FX_STYLE_TEXT, /@media \(prefers-reduced-motion: no-preference\)\{\n#igs-overlay\[data-igs-underwater\]\[data-igs-sd-breathe\]:not\(\[data-igs-quality="low"\]\) #igs-stage-motion:not\(\[data-igs-rm-breathe\]\) #igs-sprite/);
+    assert.match(DAILY_FX_STYLE_TEXT, /@keyframes igs-uw-float\{[^}]*transform:/);
+});
+
+test('gate:fx-daily-underwater-space changing place into or out of the water plays dive / surface once', () => {
+    const root = makeStage({ waapi: true });
+    const timers = makeTimers();
+    const page = (index, content, readerSettings) => render({ currentIndex: index, ...content }, { root, timers, readerSettings });
+    assert.deepEqual(page(0, { sceneLocation: '海底' }).result.played, [], 'first page after opening stays quiet');
+    assert.deepEqual(page(1, { sceneLocation: '海滩' }).sounds, ['splash']);
+    const dive = page(2, { sceneLocation: '珊瑚礁' });
+    assert.deepEqual(dive.result.played, ['dive']);
+    assert.deepEqual(dive.sounds, ['dive']);
+    assert.deepEqual(page(2, { sceneLocation: '珊瑚礁' }).result.played, [], 'same page re-render');
+    assert.deepEqual(page(3, { sceneLocation: '深海' }).result.played, [], 'still underwater');
+    assert.deepEqual(page(4, { sceneLocation: '海滩', sceneNsfw: true }).result.played, [], 'nsfw pages stay quiet');
+    assert.deepEqual(page(5, { sceneLocation: '海底', fx: { daily: [{ type: 'dive' }] } }).result.played, ['dive'], 'tag and crossing do not double up');
+    assert.deepEqual(page(6, { sceneLocation: '海滩' }, { dailyFx: { enabled: true, ambience: false } }).result.played, [], 'follows the ambience switch');
+    assert.match(DAILY_FX_STYLE_TEXT, /\.igs-dfx-surface-veil\{/);
 });

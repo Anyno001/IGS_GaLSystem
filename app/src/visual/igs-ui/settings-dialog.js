@@ -3,7 +3,8 @@
 export const SETTINGS_DIALOG_STYLE_TEXT = `
 #igs-unified-settings .igs-settings-dialog{position:absolute;left:50%;top:50%;bottom:auto;transform:translate(-50%,-50%);z-index:6;box-sizing:border-box;width:min(480px,calc(100% - 32px));max-height:min(80%,calc(var(--igs-settings-vh,100dvh) - 48px));overflow:auto;padding:14px 16px;border-radius:var(--igs-settings-radius-control);background:var(--igs-settings-panel);color:var(--igs-settings-ink);border:1px solid var(--igs-settings-line-strong);display:flex;flex-direction:column;gap:10px;pointer-events:auto}
 #igs-unified-settings .igs-settings-dialog.is-view,#igs-unified-settings .igs-settings-dialog.is-edit{width:min(640px,calc(100% - 32px))}
-#igs-unified-settings .igs-settings-dialog-text{width:100%;min-height:220px;max-height:min(46vh,320px);box-sizing:border-box;resize:vertical;padding:8px 10px;border:0;border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-field);color:var(--igs-settings-ink);font:inherit;font-size:12px;line-height:1.5}
+#igs-unified-settings .igs-settings-dialog-text{width:100%;min-height:220px;max-height:min(46vh,320px);box-sizing:border-box;resize:vertical;padding:8px 10px;border:1px solid var(--igs-settings-line,rgba(128,128,128,.22));border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-field);color:var(--igs-settings-ink);font:inherit;font-size:12px;line-height:1.5;outline:none}
+#igs-unified-settings .igs-settings-dialog-text:focus{border-color:var(--igs-settings-accent)}
 #igs-unified-settings .igs-settings-dialog-msg{font-size:13px;line-height:1.6;white-space:pre-line;word-break:break-word}
 #igs-unified-settings .igs-settings-dialog-msg.is-scroll{max-height:min(50vh,360px);overflow:auto;white-space:pre-wrap}
 #igs-unified-settings .igs-settings-dialog .igs-settings-field{margin:0}
@@ -16,6 +17,11 @@ export const SETTINGS_DIALOG_STYLE_TEXT = `
 #igs-unified-settings .igs-settings-dialog-choice span{font-size:12px;line-height:1.3;opacity:.72}
 #igs-unified-settings .igs-settings-dialog-choice.is-current{border-color:var(--igs-settings-accent)}
 #igs-unified-settings .igs-settings-dialog-choice.is-current b{color:var(--igs-settings-accent)}
+#igs-unified-settings .igs-settings-dialog.is-pick .igs-settings-dialog-choices{grid-template-columns:repeat(auto-fill,minmax(72px,1fr));max-height:min(46vh,320px);overflow:auto}
+#igs-unified-settings .igs-settings-dialog.is-pick .igs-settings-dialog-choice{min-height:40px;font-size:13px}
+#igs-unified-settings .igs-settings-dialog.is-pick .igs-settings-dialog-choice.is-current{background:var(--igs-settings-accent);color:var(--igs-settings-on-accent)}
+#igs-unified-settings .igs-settings-dialog-actions [data-settings-dialog="all"]{margin-right:auto}
+#igs-unified-settings .igs-settings-dialog-select{display:block;width:100%;margin:10px 0 4px;padding:6px 8px;font-size:14px}
 #igs-unified-settings .igs-settings-dialog-choice:focus-visible{outline:2px solid var(--igs-settings-accent);outline-offset:2px}
 `;
 
@@ -30,6 +36,11 @@ function nativeFallback(globalObj) {
             if (!globalObj || typeof globalObj.prompt !== 'function') return value;
             const answer = globalObj.prompt(message, value);
             return answer == null ? null : String(answer).trim();
+        }
+        if (kind === 'pick') {
+            if (!globalObj || typeof globalObj.prompt !== 'function') return null;
+            const answer = globalObj.prompt(`${message}（用顿号或逗号分隔）`, value);
+            return answer == null ? null : String(answer).split(/[、,，\s]+/).map((item) => item.trim()).filter(Boolean);
         }
         if (kind === 'edit') {
             if (!globalObj || typeof globalObj.prompt !== 'function') return null;
@@ -73,7 +84,7 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
         const doc = host.ownerDocument;
         if (!doc || typeof doc.createElement !== 'function') return null;
         const el = doc.createElement('div');
-        el.className = entry.kind === 'view' || entry.kind === 'edit' || entry.kind === 'choose'
+        el.className = entry.kind === 'view' || entry.kind === 'edit' || entry.kind === 'choose' || entry.kind === 'pick'
             ? `igs-settings-dialog is-${entry.kind}`
             : 'igs-settings-dialog';
         el.setAttribute('role', entry.kind === 'confirm' || entry.kind === 'alert' ? 'alertdialog' : 'dialog');
@@ -97,7 +108,21 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
             el.appendChild(wrap);
         }
         let current = null;
-        if (entry.kind === 'choose') {
+        // 下拉式选择：一个下拉框加确定 / 取消，选项少而说明短时比一排大按钮清爽。
+        if (entry.kind === 'choose' && entry.dropdown) {
+            const select = doc.createElement('select');
+            select.className = 'igs-asset-move igs-settings-dialog-select';
+            for (const choice of entry.choices) {
+                const opt = doc.createElement('option');
+                opt.value = choice.value;
+                opt.textContent = choice.note ? `${choice.label} · ${choice.note}` : choice.label;
+                if (choice.value === entry.value) opt.selected = true;
+                select.appendChild(opt);
+            }
+            select.addEventListener('change', () => { entry.value = select.value; });
+            el.appendChild(select);
+            current = select;
+        } else if (entry.kind === 'choose') {
             const list = doc.createElement('div');
             list.className = 'igs-settings-dialog-choices';
             for (const choice of entry.choices) {
@@ -119,10 +144,30 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
             }
             el.appendChild(list);
         }
+        // 多选：点一下选中、再点取消，选中的记在 entry.selected，面板重绘补回时照样亮着。
+        if (entry.kind === 'pick') {
+            const list = doc.createElement('div');
+            list.className = 'igs-settings-dialog-choices';
+            for (const choice of entry.choices) {
+                const on = entry.selected.has(choice.value);
+                const btn = doc.createElement('button');
+                btn.type = 'button';
+                btn.className = on ? 'igs-settings-dialog-choice is-current' : 'igs-settings-dialog-choice';
+                btn.setAttribute('data-settings-dialog', 'toggle');
+                btn.setAttribute('data-settings-choice', choice.value);
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+                btn.textContent = choice.label;
+                if (choice.note) btn.title = choice.note;
+                if (!current) current = btn;
+                list.appendChild(btn);
+            }
+            el.appendChild(list);
+        }
         const actions = doc.createElement('div');
         actions.className = 'igs-settings-dialog-actions';
         const buttons = entry.kind === 'view' || entry.kind === 'alert' ? [['ok', entry.okLabel]]
-            : entry.kind === 'choose' ? [['cancel', entry.cancelLabel]]
+            : entry.kind === 'choose' && !entry.dropdown ? [['cancel', entry.cancelLabel]]
+            : entry.kind === 'pick' ? [['all', '全选/清空'], ['cancel', entry.cancelLabel], ['ok', entry.okLabel]]
                 : [['cancel', entry.cancelLabel], ['ok', entry.okLabel]];
         for (const [role, label] of buttons) {
             const btn = doc.createElement('button');
@@ -133,13 +178,31 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
             actions.appendChild(btn);
         }
         el.appendChild(actions);
-        const accept = () => settle(entry, entry.kind === 'confirm' || entry.kind === 'alert' ? true : (input ? input.value : entry.value));
+        const picked = () => entry.choices.map((choice) => choice.value).filter((value) => entry.selected.has(value));
+        const syncPick = () => {
+            for (const btn of el.querySelectorAll('[data-settings-dialog="toggle"]')) {
+                const on = entry.selected.has(btn.getAttribute('data-settings-choice'));
+                btn.classList.toggle('is-current', on);
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            }
+        };
+        const accept = () => settle(entry, entry.kind === 'pick' ? picked() : entry.kind === 'confirm' || entry.kind === 'alert' ? true : (input ? input.value : entry.value));
         el.addEventListener('click', (event) => {
             event.stopPropagation();
             const btn = event.target && typeof event.target.closest === 'function' ? event.target.closest('[data-settings-dialog]') : null;
             if (!btn) return;
             const role = btn.getAttribute('data-settings-dialog');
             if (role === 'choice') settle(entry, btn.getAttribute('data-settings-choice'));
+            else if (role === 'toggle') {
+                const value = btn.getAttribute('data-settings-choice');
+                if (entry.selected.has(value)) entry.selected.delete(value);
+                else entry.selected.add(value);
+                syncPick();
+            } else if (role === 'all') {
+                if (entry.selected.size === entry.choices.length) entry.selected.clear();
+                else entry.choices.forEach((choice) => entry.selected.add(choice.value));
+                syncPick();
+            }
             else if (role === 'ok') accept();
             else settle(entry, cancelValue(entry));
         });
@@ -176,7 +239,7 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
         return el;
     }
 
-    function open(kind, message, value, labels = {}, choices = []) {
+    function open(kind, message, value, labels = {}, choices = [], selected = []) {
         const container = getContainer();
         if (!findHost(container)) return Promise.resolve(askNative(kind, message, value));
         if (pending) settle(pending, cancelValue(pending));
@@ -189,6 +252,8 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
                 cancelLabel: labels.cancelLabel || '取消',
                 multiline: kind === 'edit',
                 choices,
+                selected: new Set(selected),
+                dropdown: kind === 'choose' && labels.dropdown === true,
                 resolve,
                 el: null,
             };
@@ -210,6 +275,10 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
         choose: (message, choices = [], value = '', labels) => open('choose', message, value, labels || {}, (Array.isArray(choices) ? choices : [])
             .map((item) => ({ value: String(item && item.value != null ? item.value : ''), label: String(item && item.label != null ? item.label : item && item.value), note: String((item && item.note) || '') }))
             .filter((item) => item.value)),
+        // 多选：choices 同 choose，selected 为预先勾上的 value；确定返回勾选的 value 数组（按 choices 顺序），取消返回 null。
+        pick: (message, choices = [], selected = [], labels) => open('pick', message, (Array.isArray(selected) ? selected : []).join('、'), labels || {}, (Array.isArray(choices) ? choices : [])
+            .map((item) => ({ value: String(item && item.value != null ? item.value : ''), label: String(item && item.label != null ? item.label : item && item.value), note: String((item && item.note) || '') }))
+            .filter((item) => item.value), (Array.isArray(selected) ? selected : []).map(String)),
         remount(container) {
             const el = mount(container || getContainer());
             if (!el && pending) settle(pending, cancelValue(pending));

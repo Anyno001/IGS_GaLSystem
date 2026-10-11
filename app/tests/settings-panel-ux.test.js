@@ -278,8 +278,8 @@ test('gate:expression-set:fills-groups-that-have-no-image', async () => {
     const missingTier8 = moodTierLabels(8).filter((mood) => mood !== '喜悦' && mood !== '愤怒');
     const character = await handleSettingsAction('char-expression-set:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(character.ok, true);
-    assert.match(asks[0], new RegExp(`这一档还有 ${missingTier8.length} 张尚未生成：${missingTier8.join('、')}`));
-    assert.match(asks[0], /已有的 2 张保持不变/);
+    assert.match(asks[0], new RegExp(`这一档还有${missingTier8.length}张尚未生成：${missingTier8.join('、')}`));
+    assert.match(asks[0], /已有的2张保持不变/);
     assert.deepEqual(seen[0], missingTier8);
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['喜悦'], 'igs-gen:old-joy');
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['愤怒'], 'https://kept.example/a.png');
@@ -291,7 +291,7 @@ test('gate:expression-set:fills-groups-that-have-no-image', async () => {
     const outfit = await handleSettingsAction('outfit-expression-set:%E5%86%AC%E6%9C%88:%E6%97%A5%E5%B8%B8', ctx);
     assert.equal(outfit.ok, true);
     const missingOutfit = moodTierLabels(8).filter((mood) => mood !== '喜悦');
-    assert.match(asks[1], new RegExp(`这一档还有 ${missingOutfit.length} 张尚未生成：${missingOutfit.join('、')}`));
+    assert.match(asks[1], new RegExp(`这一档还有${missingOutfit.length}张尚未生成：${missingOutfit.join('、')}`));
     assert.equal(draft.bridge.sceneAssets.characterOutfits['冬月']['日常'].moods['喜悦'], 'igs-gen:old-outfit');
     assert.equal(draft.bridge.sceneAssets.characterOutfits['冬月']['日常'].moods['愤怒'], 'igs-gen:new-愤怒');
 });
@@ -338,10 +338,10 @@ test('gate:expression-set:new-outfit-can-paint-one-default-first', async () => {
     };
     const action = 'outfit-expression-set:%E5%86%AC%E6%9C%88:%E6%B3%B3%E8%A3%85';
     assert.equal((await handleSettingsAction(action, ctx)).ok, true);
-    assert.deepEqual(choose[0].values, ['1', '8', '12', '16', '20']);
+    assert.deepEqual(choose[0].values, ['1', '8', '12', '16', '20', 'pick']);
     assert.equal(choose[0].current, '1', '新衣服默认选「1 张」');
     assert.deepEqual(seen[0], ['平和']);
-    assert.match(asks[0], /给「冬月」的服装「泳装」画 1 张「平和」/);
+    assert.match(asks[0], /给「冬月」的服装「泳装」画1张「平和」/);
     const outfit = draft.bridge.sceneAssets.characterOutfits['冬月']['泳装'];
     assert.equal(outfit.moods['平和'], 'igs-gen:new-平和');
     assert.deepEqual(Object.keys(outfit.moods), ['平和']);
@@ -350,7 +350,7 @@ test('gate:expression-set:new-outfit-can-paint-one-default-first', async () => {
     pick = '8';
     promptIds.length = 0;
     assert.equal((await handleSettingsAction(action, ctx)).ok, true);
-    assert.deepEqual(choose[1].values, ['8', '12', '16', '20']);
+    assert.deepEqual(choose[1].values, ['8', '12', '16', '20', 'pick']);
     assert.equal(promptIds[0], 'new-平和');
     assert.deepEqual(seen[1], moodTierLabels(8).filter((mood) => mood !== '平和'));
 });
@@ -403,7 +403,7 @@ test('gate:expression-set:repaints-failed-slots-without-rewriting-prompts', asyn
     };
     const allReady = await handleSettingsAction('char-expression-set:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(allReady.ok, true);
-    assert.match(asks[0], /只补画这 8 张，不重写提示词/);
+    assert.match(asks[0], /只补画这8张，不重写提示词/);
     assert.deepEqual(written, []);
     assert.deepEqual(painted[0], moods);
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['愤怒'], 'igs-gen:paint-愤怒');
@@ -970,8 +970,8 @@ test('gate:expression-set:custom-groups-only-when-asked', async () => {
         return { asks, seen };
     };
     const skipped = await run(false);
-    assert.match(skipped.asks[0], /另有 2 个自建情绪组尚无图片：旧组乙、旧组丙/);
-    assert.match(skipped.asks[1], /生成「冬月」的 20 张表情差分/);
+    assert.match(skipped.asks[0], /另有2个自建情绪组尚无图片：旧组乙、旧组丙/);
+    assert.match(skipped.asks[1], /生成「冬月」的20张表情差分/);
     assert.equal(skipped.seen[0].length, 20);
     const taken = await run(true);
     assert.equal(taken.seen[0].length, 22);
@@ -1023,7 +1023,7 @@ test('gate:status-avatar:generates-a-chibi-avatar-and-default-slot-can-regenerat
     };
     const made = await handleSettingsAction('status-avatar-generate:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(made.ok, true);
-    assert.match(asks[0], /生成「冬月」的 Q 版头像/);
+    assert.match(asks[0], /生成「冬月」的Q版头像/);
     assert.equal(seen[0].dna.identity, 'black hair');
     assert.equal(draft.bridge.sceneAssets.statusAvatars['冬月'], 'data:image/png;base64,QUJD');
     await handleSettingsAction('status-avatar-generate:%E5%86%AC%E6%9C%88', ctx);

@@ -12,6 +12,19 @@ const LEGACY_IMAGE_PLACEHOLDER_SELECTOR = '.igs-img-ph';
 
 export function createTavernHelperAdapter(globalObject = globalThis.window || globalThis) {
     let hiddenMessageCache = { at: 0, ids: null };
+    // 可读楼列表在同一轮任务内复用：组装一页时场景、服装、约定、恐怖档位等会连续逐楼回看，
+    // 每次都重读整份聊天并复制楼层 DOM，长聊天会按楼数平方增长。下一个宏任务即作废，不会读到旧内容。
+    // 列表与索引只读共享，调用方不得原地修改。
+    let readableCache = null;
+    const readableTurns = () => {
+        if (readableCache) return readableCache;
+        const list = getNormalizedMessages(globalObject, hiddenMessageCache).filter(isReadableTurn);
+        const index = new Map(list.map((message, i) => [message.id, i]));
+        readableCache = { list, index };
+        const timer = typeof globalObject.setTimeout === 'function' ? globalObject.setTimeout.bind(globalObject) : setTimeout;
+        timer(() => { readableCache = null; }, 0);
+        return readableCache;
+    };
 
     return {
         async getLastMessageId() {
@@ -46,9 +59,13 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
             const normalizedId = normalizeMessageId(messageId);
             if (normalizedId == null) return null;
             const step = Number(delta) < 0 ? -1 : 1;
-            const messages = getNormalizedMessages(globalObject, hiddenMessageCache).filter(isReadableTurn);
-            const currentIndex = messages.findIndex((message) => message.id === normalizedId);
-            if (currentIndex < 0) return null;
+            const { list: messages, index } = readableTurns();
+            const currentIndex = index.has(normalizedId) ? index.get(normalizedId) : -1;
+            // 当前楼不在列表里（被删、被改成系统楼）时按楼号找最近的一楼，不当作没有。
+            if (currentIndex < 0) {
+                return (step > 0 ? messages.find((message) => message.id > normalizedId)
+                    : messages.slice().reverse().find((message) => message.id < normalizedId)) || null;
+            }
             return messages[currentIndex + step] || null;
         },
 

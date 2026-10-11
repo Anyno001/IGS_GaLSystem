@@ -6,6 +6,7 @@ import { dailyGrammarLines } from '../src/visual/igs-ui/fx-daily-prompt.js';
 import { DAILY_FX_STYLE_TEXT } from '../src/visual/igs-ui/fx-daily-style.js';
 import { cancelDailyFx, renderDailyFx } from '../src/visual/igs-ui/fx-daily.js';
 import { applyFxEra } from '../src/scene/fx-era.js';
+import { DAILY_SFX_KINDS } from '../src/visual/igs-ui/fx-daily-sfx.js';
 import { makeStage, makeTimers } from './helpers/fake-dom.js';
 
 const KINDS = ['cheers', 'cook', 'cat'];
@@ -43,17 +44,29 @@ function render(item) {
 test('gate:fx-daily-misc render cards with reused sounds and escaped dish', () => {
     const cook = render({ type: 'cook', dish: '<i>咖喱</i>' });
     assert.deepEqual(cook.result.played, ['cook']);
-    assert.deepEqual(cook.sounds, ['lantern']);
+    assert.deepEqual(cook.sounds, ['cook']);
     const card = cook.root.querySelector('#igs-fx-front').children[0];
     assert.doesNotMatch(card.innerHTML, /<i>咖喱/);
     cancelDailyFx(cook.root);
     const cat = render({ type: 'cat' });
     assert.deepEqual(cat.result.played, ['cat']);
-    assert.deepEqual(cat.sounds, ['sticky']);
+    assert.deepEqual(cat.sounds, ['cat']);
     cancelDailyFx(cat.root);
     const cheers = render({ type: 'cheers' });
-    assert.deepEqual(cheers.sounds, ['touch']);
+    assert.deepEqual(cheers.sounds, ['clink-glass']);
     cancelDailyFx(cheers.root);
+});
+
+test('gate:fx-daily-cheers-material-picks-sound', () => {
+    assert.deepEqual(parseDailyFxBody('cheers', ['塑料瓶']), ['cheers', 'plastic']);
+    assert.deepEqual(parseDailyFxBody('cheers', ['看不懂']), ['cheers']);
+    assert.deepEqual(dailyFxOf(['cheers', 'can']), { type: 'cheers', material: 'can' });
+    for (const material of ['glass', 'ceramic', 'plastic', 'can', 'wood', 'metal']) {
+        const fx = render({ type: 'cheers', material });
+        assert.deepEqual(fx.sounds, [`clink-${material}`], material);
+        cancelDailyFx(fx.root);
+    }
+    assert.ok(DAILY_SFX_KINDS.includes('clink-plastic'));
 });
 
 test('gate:fx-daily-touch-skipped-inside-battle', async () => {

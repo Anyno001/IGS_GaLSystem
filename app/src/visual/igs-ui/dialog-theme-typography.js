@@ -1,3 +1,4 @@
+import { dlcBorrowSkin, getDlcSkin } from './dlc-skin-registry.js';
 export const DIALOG_FONT_SERIF = '"Source Han Serif CN","Noto Serif CJK SC","Songti SC",serif';
 export const DIALOG_FONT_ROUNDED = '"IGS Rounded","Microsoft YaHei",sans-serif';
 export const DIALOG_FONT_CHILL_ROUND = '"ChillRoundF","IGS Rounded","Microsoft YaHei",sans-serif';
@@ -135,6 +136,18 @@ const REFERENCE_DIALOG_TYPOGRAPHY = Object.freeze({
         thoughtColor: '#b8c3ff',
         narrationColor: '#c9c7dd',
     }),
+    // 深海人鱼：珠光白，内心独白取淡海蓝，旁白再淡一层；姓名同星夜用纤细的 Cormorant 衬线。
+    'mermaid-deep': Object.freeze({
+        nameAlign: 'left',
+        nameFont: DIALOG_FONT_CORMORANT,
+        textFont: DIALOG_FONT_HUIWEN,
+        thoughtFont: DIALOG_FONT_HUIWEN,
+        narrationFont: DIALOG_FONT_HUIWEN,
+        nameColor: '#f4f8ff',
+        textColor: '#eaf1fb',
+        thoughtColor: '#b6cdf4',
+        narrationColor: '#c2cde0',
+    }),
     // 童话小镇：姓名用圆润的站酷快乐体，正文文楷，心里话转鼠尾草绿；墨色取暖棕，不用纯黑。
     'fairy-tale': Object.freeze({
         nameAlign: 'left',
@@ -158,6 +171,18 @@ const REFERENCE_DIALOG_TYPOGRAPHY = Object.freeze({
         textColor: '#26332f',
         thoughtColor: '#2f5d7c',
         narrationColor: '#56625d',
+    }),
+    // 仙侠水墨：明朝体托住宣纸气质，内心独白换楷书；墨色取焦墨，心里话转淡青，旁白淡一层。
+    'xianxia-ink': Object.freeze({
+        nameAlign: 'left',
+        nameFont: DIALOG_FONT_HUIWEN,
+        textFont: DIALOG_FONT_HUIWEN,
+        thoughtFont: DIALOG_FONT_WENKAI,
+        narrationFont: DIALOG_FONT_HUIWEN,
+        nameColor: '#1a201e',
+        textColor: '#1f2523',
+        thoughtColor: '#5f7f86',
+        narrationColor: '#545d5a',
     }),
     // 血色噩梦（波普血浆）：名字是红块上的骨白得意黑，正文用干脆的新晰黑；心里话亮红，旁白褪成灰。
     'horror-gore': Object.freeze({
@@ -210,7 +235,12 @@ const REFERENCE_DIALOG_TYPOGRAPHY = Object.freeze({
 });
 
 export function getReferenceDialogTypography(dialogSkin) {
-    return REFERENCE_DIALOG_TYPOGRAPHY[dialogSkin] || null;
+    if (Object.hasOwn(REFERENCE_DIALOG_TYPOGRAPHY, dialogSkin)) return REFERENCE_DIALOG_TYPOGRAPHY[dialogSkin];
+    // DLC 皮肤：作者给的排版盖在借来那套的排版上；什么都没给就跟借的那套一样。
+    const dlc = getDlcSkin(dialogSkin);
+    if (!dlc) return null;
+    const borrowed = REFERENCE_DIALOG_TYPOGRAPHY[dlcBorrowSkin(dialogSkin)] || null;
+    return borrowed || Object.keys(dlc.typography).length ? Object.freeze({ ...(borrowed || {}), ...dlc.typography }) : null;
 }
 
 // 同一字号下各字体的字面大小与字形疏密差异明显：手写/楷体字面偏小、笔画密，需略放大并加行距，

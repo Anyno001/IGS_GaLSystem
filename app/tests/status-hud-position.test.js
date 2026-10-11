@@ -83,7 +83,7 @@ test('gate:status-hud-position:field-renders-chosen-device-stage-and-sliders', (
     assert.match(html, /<output data-hud-pos-value="x">最右<\/output>/);
     assert.match(html, /<output data-hud-pos-value="y">30%<\/output>/);
     assert.match(html, /data-hud-pos-stage data-device="mobile" style="--igs-hp-x:100;--igs-hp-y:30;--igs-hp-w:[\d.]+%;--igs-hp-h:[\d.]+%;--igs-hp-ex:3\.59%;--igs-hp-ey:1\.66%"/);
-    assert.match(html, /data-action="status-hud-pos-reset:mobile" data-hud-pos-reset>回到左上角/);
+    assert.match(html, /data-action="status-hud-pos-reset:mobile" data-hud-pos-reset>复位/);
     assert.match(html, /当前设备按「电脑」这份显示/);
     assert.match(renderStatusHudPositionField(normalizeStatusHudSettings({ enabled: true }), 'pc', 'pc'), /data-hud-pos-reset disabled>/);
     // 小舞台上的状态栏按「大小」档和有没有 HUD 条换算宽度。
@@ -141,6 +141,6 @@ test('gate:status-hud-position:drag-previews-stage-and-reset-state-only', () => 
 test('gate:status-hud-position:settings-search-finds-it', () => {
     const [first] = searchSettings('状态栏位置');
     assert.equal(first.id, 'status-hud-position');
-    assert.deepEqual({ ...first.target, open: [...first.target.open] }, { tab: 'reader', readerSubTab: 'interface', open: [] });
+    assert.deepEqual({ ...first.target, open: [...first.target.open] }, { page: 'ui-bg', open: [] });
     assert.ok(searchSettings('挡住').some((entry) => entry.id === 'status-hud-position'));
 });

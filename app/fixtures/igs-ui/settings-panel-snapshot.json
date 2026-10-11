@@ -4,136 +4,20 @@
     ".igs-settings-shell",
     ".igs-settings-head",
     ".igs-settings-theme-switch",
-    ".igs-settings-tabs",
+    ".igs-settings-nav",
+    ".igs-settings-content",
     ".igs-settings-body",
     ".igs-segmented",
-    ".igs-scene-settings-subtabs",
-    ".igs-reader-subtabs",
     ".igs-source-filter",
     ".igs-settings-preview"
   ],
   "tabs": [
     {
-      "id": "basic",
-      "label": "基础",
-      "requiredPaths": [
-        "bridge.openMode",
-        "bridge.showToasts",
-        "bridge.settingsTheme",
-        "bridge.sourceFilter.enabled",
-        "bridge.sourceFilter.textIncludeTags",
-        "bridge.sourceFilter.textExcludeTags",
-        "bridge.sourceFilter.imageIncludeTags",
-        "bridge.virtualRegex.enabled",
-        "bridge.virtualRegex.pattern",
-        "bridge.virtualRegex.flags",
-        "bridge.virtualRegex.replacement"
-      ],
-      "requiredActions": [
-        "reset-virtual-regex",
-        "test-virtual-regex"
-      ]
+      "id": "dash",
+      "label": "仪表盘"
     },
     {
-      "id": "reader",
-      "label": "阅读器",
-      "requiredPaths": [
-        "readerSettings.fontSize",
-        "readerSettings.dialogFontWeight",
-        "readerSettings.dialogSkin",
-        "readerSettings.gradientVeil.color",
-        "readerSettings.gradientVeil.heightPercent",
-        "readerSettings.gradientVeil.opacity",
-        "readerSettings.gradientVeil.speakerStyle",
-        "readerSettings.classicDialogWidthPercent",
-        "readerSettings.optionFontSize",
-        "readerSettings.dialogWidth",
-        "readerSettings.dialogHeight",
-        "readerSettings.glassOpacity",
-        "readerSettings.glassBackdropFilter",
-        "readerSettings.imageCountOverride",
-        "readerSettings.inputScale",
-        "readerSettings.toolbarScale",
-        "readerSettings.toolbarDock",
-        "readerSettings.imgMode",
-        "readerSettings.imgBrightness",
-        "readerSettings.showStatusLine",
-        "readerSettings.typewriter.enabled",
-        "readerSettings.typewriter.speed",
-        "readerSettings.typewriter.mode",
-        "readerSettings.typewriter.sound.enabled",
-        "readerSettings.typewriter.sound.volume",
-        "readerSettings.typewriter.sound.dialogueVolume",
-        "readerSettings.typewriter.sound.narrationVolume",
-        "readerSettings.typewriter.sound.dialoguePreset",
-        "readerSettings.typewriter.sound.thoughtPreset",
-        "readerSettings.typewriter.sound.narrationPreset",
-        "readerSettings.typewriter.sound.speakerPitch",
-        "readerSettings.pinnedBtns",
-        "readerSettings.hiddenBtns",
-        "readerSettings.btnOrder",
-        "readerSettings.spriteLayouts",
-        "readerSettings.vnTheme.preset",
-        "readerSettings.classicVnTheme.preset"
-      ]
-    },
-    {
-      "id": "scene",
-      "label": "素材",
-      "requiredPaths": [
-        "bridge.sceneAssets.enabled",
-        "bridge.sceneAssets.promptRule"
-      ],
-      "requiredActions": [
-        "reset-prompt-rule",
-        "save-prompt-rule"
-      ]
-    },
-    {
-      "id": "image",
-      "label": "生图",
-      "requiredPaths": [
-        "bridge.imageApi.mode",
-        "bridge.imageApi.externalAdapter",
-        "bridge.imageApi.endpoint",
-        "bridge.imageApi.apiKey",
-        "bridge.imageApi.model",
-        "bridge.imageApi.size",
-        "bridge.imageApi.steps",
-        "bridge.imageApi.sampler",
-        "bridge.imageApi.requestTimeoutMs",
-        "bridge.imageApi.pollIntervalMs",
-        "bridge.imageApi.pollAttempts",
-        "bridge.imageApi.promptPrefix",
-        "bridge.autoIllustration.nsfwEnabled",
-        "bridge.autoIllustration.nsfwCount",
-        "bridge.autoIllustration.interludeEnabled",
-        "bridge.autoIllustration.interludeProbability",
-        "bridge.autoIllustration.interludeMaxCount",
-        "bridge.autoIllustration.llm.source",
-        "bridge.autoIllustration.llm.endpoint",
-        "bridge.autoIllustration.llm.apiKey",
-        "bridge.autoIllustration.llm.model",
-        "bridge.autoIllustration.llm.contextFloors",
-        "bridge.autoIllustration.nai.transport",
-        "bridge.autoIllustration.nai.apiKey",
-        "bridge.autoIllustration.nai.model",
-        "bridge.autoIllustration.nai.size",
-        "bridge.autoIllustration.nai.steps",
-        "bridge.autoIllustration.nai.scale",
-        "bridge.autoIllustration.nai.sampler",
-        "bridge.autoIllustration.nai.artistPrefix",
-        "bridge.autoIllustration.nai.negativePrompt"
-      ],
-      "requiredActions": [
-        "fetch-image-models",
-        "test-image"
-      ]
-    }
-  ],
-  "readerSubTabs": [
-    {
-      "id": "dialog",
+      "id": "style",
       "label": "对话框"
     },
     {
@@ -141,12 +25,32 @@
       "label": "文字"
     },
     {
-      "id": "performance",
+      "id": "ui",
+      "label": "界面"
+    },
+    {
+      "id": "perf",
       "label": "演出"
     },
     {
-      "id": "interface",
-      "label": "界面"
+      "id": "sound",
+      "label": "声音"
+    },
+    {
+      "id": "chars",
+      "label": "角色"
+    },
+    {
+      "id": "scenes",
+      "label": "场景"
+    },
+    {
+      "id": "ai",
+      "label": "生图与AI"
+    },
+    {
+      "id": "data",
+      "label": "数据"
     }
   ],
   "styleChecks": {
@@ -163,35 +67,148 @@
     "radiusSmall": "--igs-settings-radius-small:4px",
     "flatShell": "background:var(--igs-settings-shell-bg);border:0;border-radius:var(--igs-settings-radius-shell);box-shadow:none",
     "flatBackdrop": "backdrop-filter:none",
-    "activeTab": ".igs-settings-tab.is-active{background:var(--igs-settings-raised);color:var(--igs-settings-ink);font-weight:600;box-shadow:none",
-    "mainTabsEqual": ".igs-settings-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px",
     "themeSwitch": ".igs-settings-theme-switch{display:inline-flex;align-items:center;gap:5px",
     "themeSwatch": ".igs-settings-theme-option{position:relative;width:20px;height:20px",
-    "sceneSettingsSubTabs": ".igs-scene-settings-subtabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))",
-    "sceneSettingsSubTabActive": ".igs-scene-settings-subtab.is-active{background:var(--igs-settings-raised);color:var(--igs-settings-ink);font-weight:600;box-shadow:none",
-    "readerSubTabs": ".igs-reader-subtabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))",
-    "readerSubTabActive": ".igs-reader-subtab.is-active{background:var(--igs-settings-raised);color:var(--igs-settings-ink);font-weight:600;box-shadow:none",
     "segmentedDynamicSpacing": ".igs-segmented{--igs-segment-pad:clamp(0px,calc(2cqi - 5px),6px);--igs-segment-gap:clamp(0px,calc(1.5cqi - 4px),5px);--igs-segment-font:clamp(9px,calc(5px + 1.5cqi),12px);--igs-segment-icon:clamp(8px,calc(3px + 2cqi),15px);container-type:inline-size",
     "segmentedButtonBox": ".igs-segmented-btn{box-sizing:border-box;width:100%;height:32px;min-width:0;margin:0;padding:0 var(--igs-segment-pad)",
     "flatSegmentedIndicator": ".igs-segmented-indicator{display:none",
-    "mobileMedia": "@media (max-width:640px)"
+    "mobileMedia": "@media (max-width:640px)",
+    "navItemActive": ".igs-settings-nav-item.is-active{background:var(--igs-settings-raised);color:var(--igs-settings-ink);font-weight:600",
+    "pageTabs": ".igs-page-tabs{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;margin:0 0 12px;padding:3px;overflow-x:auto",
+    "pageTabActive": ".igs-page-tab.is-active{background:var(--igs-settings-raised)",
+    "navDrawer": "transform:translateX(-100%)",
+    "wideShell": "--igs-settings-width:min(980px,calc(var(--igs-settings-vw) - 48px))"
   },
-  "sceneSubTabs": [
+  "pages": [
     {
-      "id": "characters",
-      "label": "角色"
+      "id": "dash",
+      "label": "仪表盘",
+      "category": "dash"
     },
     {
-      "id": "scenes",
-      "label": "场景"
+      "id": "style",
+      "label": "对话框",
+      "category": "style"
+    },
+    {
+      "id": "text",
+      "label": "文字",
+      "category": "text"
+    },
+    {
+      "id": "ui-reader",
+      "label": "阅读器",
+      "category": "ui"
+    },
+    {
+      "id": "ui-bg",
+      "label": "背景状态",
+      "category": "ui"
+    },
+    {
+      "id": "ui-option",
+      "label": "选项",
+      "category": "ui"
+    },
+    {
+      "id": "ui-bar",
+      "label": "工具栏",
+      "category": "ui"
+    },
+    {
+      "id": "perf-text",
+      "label": "台词",
+      "category": "perf"
+    },
+    {
+      "id": "perf-stage",
+      "label": "画面",
+      "category": "perf"
+    },
+    {
+      "id": "perf-story",
+      "label": "情绪与提示",
+      "category": "perf"
+    },
+    {
+      "id": "perf-special",
+      "label": "题材",
+      "category": "perf"
+    },
+    {
+      "id": "perf-rhythm",
+      "label": "节奏",
+      "category": "perf"
+    },
+    {
+      "id": "sound",
+      "label": "声音",
+      "category": "sound"
+    },
+    {
+      "id": "chars",
+      "label": "角色",
+      "category": "chars"
+    },
+    {
+      "id": "wardrobe",
+      "label": "衣柜与情绪",
+      "category": "chars"
     },
     {
       "id": "review",
-      "label": "待确认"
+      "label": "待确认",
+      "category": "chars"
+    },
+    {
+      "id": "scenes",
+      "label": "背景",
+      "category": "scenes"
+    },
+    {
+      "id": "eventcg",
+      "label": "预置CG",
+      "category": "scenes"
+    },
+    {
+      "id": "cglib",
+      "label": "CG库",
+      "category": "scenes"
+    },
+    {
+      "id": "source",
+      "label": "图像来源",
+      "category": "ai"
+    },
+    {
+      "id": "kinds",
+      "label": "画师与模型",
+      "category": "ai"
+    },
+    {
+      "id": "llm",
+      "label": "备用模型",
+      "category": "ai"
     },
     {
       "id": "rules",
-      "label": "规则"
+      "label": "写法规则",
+      "category": "ai"
+    },
+    {
+      "id": "parse",
+      "label": "正文解析",
+      "category": "ai"
+    },
+    {
+      "id": "data",
+      "label": "备份",
+      "category": "data"
+    },
+    {
+      "id": "logs",
+      "label": "日志",
+      "category": "data"
     }
   ]
 }

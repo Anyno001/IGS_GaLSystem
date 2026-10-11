@@ -106,5 +106,5 @@ test('gate:assets:purge-asset-cache-clears-thumbnails', async () => {
     const actions = fs.readFileSync(path.join(appRoot, 'src', 'visual', 'igs-ui', 'settings-actions.js'), 'utf8');
     assert.match(actions, /'purge-asset-cache'/);
     const tabs = fs.readFileSync(path.join(appRoot, 'src', 'visual', 'igs-ui', 'settings-tabs.js'), 'utf8');
-    assert.match(tabs, /data-action="purge-asset-cache"[^>]*>清除素材缓存</);
+    assert.match(tabs, /data-action="purge-asset-cache"[^>]*>清素材缓存</);
 });

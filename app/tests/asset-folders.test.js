@@ -109,3 +109,16 @@ test('asset-folder-view: touch menu leaves the folder selector clickable', () =>
     assert.match(css, /\.igs-add-menu-item:not\(\.igs-folder-pick-item\)::after\{content:/);
     assert.doesNotMatch(css, /\.igs-add-menu-item::after\{content:/);
 });
+
+test('asset-folders: 角色文件夹和场景文件夹都按卡分', () => {
+    const storage = createMemoryStorage();
+    let a = loadAssetFolders(storage, 'card:A');
+    a = moveAssetToFolder(addAssetFolder(a, 'characters', '咒术'), 'characters', '五条悟', '咒术');
+    a = moveAssetToFolder(addAssetFolder(a, 'scenes', '高专'), 'scenes', '教室', '高专');
+    saveAssetFolders(storage, 'card:A', a);
+    const b = loadAssetFolders(storage, 'card:B');
+    assert.equal(b.characters.assign.五条悟, undefined);
+    assert.deepEqual(b.scenes.folders, []);
+    assert.deepEqual(loadAssetFolders(storage, 'card:A').characters.folders, ['咒术']);
+    assert.deepEqual(loadAssetFolders(storage, 'card:A').scenes.folders, ['高专']);
+});

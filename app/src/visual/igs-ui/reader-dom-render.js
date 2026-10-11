@@ -1,4 +1,5 @@
 import { magicHouseVars } from './dialog-theme-css-skins.js';
+import { mermaidToneVars } from './dialog-theme-mermaid.js';
 import { resolveSpeakerMagicHouse } from './magic-house.js';
 import { normalizeSkinDialogScale } from './dialog-skin-frame.js';
 import { RECORD_ICONS } from './record-icons.js';
@@ -11,6 +12,7 @@ import { normalizeDialogBarAlign, normalizeDialogBarButtons, normalizeToolbarSpl
 import {
     ensureImageLoadingSpinner,
     ensureImageEmptyPlaceholder,
+    isImageRetryTap,
     getOwnerWindow,
     readElementHeight,
     readElementWidth,
@@ -25,6 +27,7 @@ import {
     renderDialogueHtml,
     resolveActiveTheme,
     resolveSpriteLayout,
+    spriteHeightLayoutKey,
 } from './settings-normalize.js';
 import { applyReaderModeRuntime } from './reader-runtime.js';
 import { applyTypewriterEffect, cancelTypewriter } from './typewriter-runtime.js';
@@ -32,17 +35,23 @@ import { applyVoiceBark } from './voice-bark.js';
 import { applyTts, normalizeTtsSettings } from './tts.js';
 import { resolveSpriteBaseScale } from './sprite-height.js';
 import { applyStageShakeEffect } from './stage-shake-runtime.js';
+import { playCameraImpactSfx } from './camera-impact.js';
+import { normalizeFxSoundSettings } from './fx-settings.js';
+import { normalizeStageCastSettings } from './stage-direction-settings.js';
 import { applyFxToDom, repositionFxSymbols } from './fx-runtime.js';
 import { applyDanmakuToDom } from './danmaku-runtime.js';
 import { applyItemMentionMarkup, itemMentionsOf, renderItemFx, showItemMention } from './fx-item-render.js';
 import { renderBattleFx } from './fx-battle-render.js';
 import { repositionBattleImpacts } from './fx-battle.js';
 import { renderDailyFx } from './fx-daily.js';
+import { enabledPackIds } from './fx-daily-model.js';
+import { audioCuesOf } from './fx-camera-gate.js';
 import { peekSpriteHead, probeSpriteHead, resolveSpriteHead, spriteBackgroundSize, spriteWidthPercent } from './fx-anchor.js';
 import { applyWeatherFx, resolveWeatherFxTime } from './weather-fx-runtime.js';
 import { applySceneGrade } from './scene-grade.js';
-import { applyStageDirection } from './stage-direction-runtime.js';
-import { applyCastToDom, castRomanceAttr, castSlotKey, clearCastDom, isCastAlignEnabled, isCastCollapsed, isCastRomanceDuoEnabled, isStageCastEnabled, layoutCastSlots, resolveCastCapacity, resolveCastRomanceMode, resolveCastRomanceTarget, isCastLeanEnabled, markCalledCast, playCastBeats, resolveCastPosePlan, resolveCastReactPage, applySpeakerFlip, castStageEntrances } from './stage-cast-render.js';
+import { applyStageDirection, cancelCgReveal, decodeSpriteImage, revealCgImage } from './stage-direction-runtime.js';
+import { applyCastToDom, castRomanceAttr, castSlotKey, clearCastDom, isCastAlignEnabled, isCastCollapsed, isCastRomanceDuoEnabled, isStageCastEnabled, layoutCastSlots, resolveCastCapacity, resolveCastRomanceMode, resolveCastRomanceTarget, isCastLeanEnabled, markCalledCast, playCastBeats, resolveCastPosePlan, resolveCastReactPage, applySpeakerFlip, castStageEntrances, castKeyOfSnapshot, resolveSpeakerPose } from './stage-cast-render.js';
+import { BACK_HINT_DEFAULT, cancelSpriteTurn, playSpriteTurn } from './sprite-turn.js';
 import { applySavedCastSlot } from './cast-slot-edit.js';
 import { spriteIdentity } from '../../scene/character-outfits.js';
 import { planCastLayouts, playSpeakerCastMotion, playSpeakerMove, resolveCastHandoff } from './stage-cast-motion.js';
@@ -56,9 +65,9 @@ import { applyBgmNoteToDom } from './bgm-note.js';
 import { isConfessionLine } from './bgm-library.js';
 import { applyTextFxMarkup, armTextFx, disarmTextFx } from './text-fx.js';
 import { fitBilingualRuby, normalizeBilingualSettings, renderBilingualHtml, resolveBilingualDisplay } from './bilingual-text.js';
-import { preloadDialogFonts, resolveDialogFontMetrics } from './dialog-theme-typography.js';
+import { getReferenceDialogTypography, preloadDialogFonts, resolveDialogFontMetrics } from './dialog-theme-typography.js';
 import { loadCustomFonts, registerCustomFonts } from '../../media/custom-fonts.js';
-import { clearSpriteOutfitSwap, spriteLookOf } from './sprite-outfit-swap.js';
+import { clearSpriteOutfitSwap, isFormOutfit, isOutfitSwap, playSpriteFormShift, spriteLookOf } from './sprite-outfit-swap.js';
 import { spriteEnhanceFilter } from './sprite-enhance.js';
 import { cgSizeForMode, EMBEDDED_PHONE_MAX_WIDTH, isPortraitTouchWindow } from '../../generated-images/illustration/auto-illustration-service.js';
 import { applyClickWaitMark } from './click-wait-mark.js';
@@ -82,6 +91,13 @@ import {
 } from './classic-dialog-skin.js';
 import { syncDialogSkinStyle } from './dialog-skin-style.js';
 import { gradientVeilColorToRgba, normalizeGradientVeil } from './gradient-veil-dialog-skin.js';
+
+// 直播全屏（layout=full）时点在舞台左半边。
+export function isLiveFullLeftTap(root, clientX) {
+    if (!root || typeof root.getAttribute !== 'function' || !root.getAttribute('data-igs-live-full') || !Number.isFinite(clientX)) return false;
+    const rect = typeof root.getBoundingClientRect === 'function' ? root.getBoundingClientRect() : null;
+    return Boolean(rect && rect.width > 0 && clientX < rect.left + rect.width / 2);
+}
 
 export function createReaderButton(doc, id, title, html) {
     const button = doc.createElement('button');
@@ -400,9 +416,16 @@ export function buildFallbackSettingsOverlay(doc, snapshot, ctx = {}) {
     head.className = 'igs-settings-head';
     shell.appendChild(head);
 
+    const navToggle = doc.createElement('button');
+    navToggle.className = 'igs-settings-nav-toggle';
+    navToggle.type = 'button';
+    navToggle.setAttribute('data-nav-toggle', '');
+    navToggle.setAttribute('aria-label', '分类菜单');
+    head.appendChild(navToggle);
+
     const title = doc.createElement('div');
     title.className = 'igs-settings-title';
-    title.textContent = '设置';
+    title.textContent = snapshot.tab && snapshot.tab !== 'dash' ? ((snapshot.tabs || []).find((tab) => tab.active) || {}).label || '设置' : '设置';
     head.appendChild(title);
 
     const themeSwitch = doc.createElement('div');
@@ -429,24 +452,36 @@ export function buildFallbackSettingsOverlay(doc, snapshot, ctx = {}) {
     close.textContent = '×';
     head.appendChild(close);
 
-    const tabs = doc.createElement('div');
-    tabs.className = 'igs-settings-tabs';
-    shell.appendChild(tabs);
+    const main = doc.createElement('div');
+    main.className = 'igs-settings-main';
+    shell.appendChild(main);
+
+    const nav = doc.createElement('nav');
+    nav.className = 'igs-settings-nav';
+    main.appendChild(nav);
     for (const tab of snapshot.tabs || []) {
         const button = doc.createElement('button');
-        button.className = `igs-settings-tab${tab.active ? ' is-active' : ''}`;
+        button.className = `igs-settings-nav-item${tab.active ? ' is-active' : ''}`;
         button.type = 'button';
-        button.setAttribute('data-tab', tab.id);
+        button.setAttribute('data-cat', tab.id);
         button.textContent = tab.label;
-        tabs.appendChild(button);
+        nav.appendChild(button);
     }
+
+    const mask = doc.createElement('div');
+    mask.className = 'igs-settings-nav-mask';
+    mask.setAttribute('data-nav-toggle', '');
+    main.appendChild(mask);
+
+    const content = doc.createElement('div');
+    content.className = 'igs-settings-content';
+    main.appendChild(content);
 
     const body = doc.createElement('div');
     body.className = 'igs-settings-body';
     if (typeof ctx.renderSettingsBody === 'function') {
-        body.innerHTML = ctx.renderSettingsBody(snapshot.tab, snapshot.draft, {
-            readerSubTab: snapshot.readerSubTab,
-            sceneSubTab: snapshot.sceneSubTab,
+        body.innerHTML = ctx.renderSettingsBody(snapshot.page, snapshot.draft, {
+            page: snapshot.page,
             promptRuleStatus: snapshot.resultText && snapshot.resultText.promptRule,
             promptRuleDraft: snapshot.resultText && snapshot.resultText.promptRuleDraft,
             imageResult: snapshot.resultText && snapshot.resultText.image,
@@ -454,7 +489,7 @@ export function buildFallbackSettingsOverlay(doc, snapshot, ctx = {}) {
             virtualRegexPreview: snapshot.resultText && snapshot.resultText.virtualRegex,
         });
     }
-    shell.appendChild(body);
+    content.appendChild(body);
     return overlay;
 }
 
@@ -642,6 +677,31 @@ function resolveFrozenDialogHeight(current, snapshot, requestedHeight, win, over
     return px;
 }
 
+// 高度自适应压矮时，三片素材两端按「实际高 ÷ 原高」等比缩小（--igs-slice-k），不被纵向压扁；没开自适应恒为 1。
+// 改两端宽度不影响布局高度，观察回调不会自激。
+const sliceScaleWatchers = new WeakMap();
+function watchSliceScale(dialog, win) {
+    if (!dialog || !dialog.style || typeof dialog.style.getPropertyValue !== 'function' || typeof dialog.hasAttribute !== 'function') return;
+    const update = () => {
+        let k = 1;
+        if (dialog.hasAttribute('data-igs-auto-h') && win && typeof win.getComputedStyle === 'function') {
+            const full = parseFloat(win.getComputedStyle(dialog).maxHeight);
+            const now = dialog.offsetHeight;
+            if (full > 0 && now > 0) k = Math.max(0.3, Math.min(1, now / full));
+        }
+        const value = k === 1 ? '' : k.toFixed(3);
+        if (dialog.style.getPropertyValue('--igs-slice-k') === value) return;
+        if (value) dialog.style.setProperty('--igs-slice-k', value);
+        else dialog.style.removeProperty('--igs-slice-k');
+    };
+    if (!sliceScaleWatchers.has(dialog) && win && typeof win.ResizeObserver === 'function') {
+        const observer = new win.ResizeObserver(update);
+        observer.observe(dialog);
+        sliceScaleWatchers.set(dialog, observer);
+    }
+    update();
+}
+
 function clearFrozenDialogHeight(current) {
     if (current) current.dialogHeightFreeze = null;
 }
@@ -675,6 +735,7 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
         const speaker = byCharacter ? (content.spriteCharacter || content.speaker) : '';
         const house = resolveSpeakerMagicHouse(readerSettings._sceneAssets, speaker, readerSettings.magicHouse);
         for (const [name, value] of Object.entries(magicHouseVars(house, readerSettings.magicAccent))) root.style.setProperty(name, value);
+        for (const [name, value] of Object.entries(mermaidToneVars(readerSettings.mermaidTone, readerSettings.mermaidAccent))) root.style.setProperty(name, value);
     }
     applyGradientVeilToDom(root, dialog, readerSettings);
 
@@ -692,6 +753,7 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
             dialog.style.maxHeight = '';
             if (readerSettings.dialogAutoHeight === true && supportsDialogAutoHeight(readerSettings)) dialog.setAttribute('data-igs-auto-h', '');
             else dialog.removeAttribute('data-igs-auto-h');
+            watchSliceScale(dialog, win);
         } else {
             const viewportHeight = Number(win && win.visualViewport && win.visualViewport.height)
                 || Number(win && win.innerHeight)
@@ -751,6 +813,10 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
     if (root && root.classList) {
         root.classList.toggle('igs-toolbar-top', toolbarDock === 'top');
         root.classList.toggle('igs-cinema-bars', readerSettings.cinemaBars === true);
+    }
+    if (root && typeof root.setAttribute === 'function') {
+        const plateMode = ['blur', 'solid', 'off'].includes(readerSettings.toolbarPlate) ? readerSettings.toolbarPlate : 'off';
+        root.setAttribute('data-igs-bar-plate', plateMode);
     }
     if (toolbar) {
         toolbar.setAttribute('data-igs-toolbar-dock', toolbarDock);
@@ -1087,6 +1153,13 @@ function applyAlignStyleImpl(element, align) {
 const backgroundImageKeys = new WeakMap();
 const backgroundImageSources = new WeakMap();
 
+// 内嵌框比图再高一截：楼层里读起来更舒展，背景按 cover 铺满，只多裁左右一点。
+export const EMBEDDED_FRAME_TALLER = 1.15;
+
+function embeddedAspectRatio(width, height) {
+    return `${width} / ${Math.round(Number(height) * EMBEDDED_FRAME_TALLER)}`;
+}
+
 // 内嵌框只跟横竖尺寸走。横屏钉背景尺寸，竖屏钉对调后的尺寸。图的像素不参与。
 export function syncEmbeddedHostFrame(root, sizeText) {
     if (!root || !String(root.className || '').includes('igs-mode-embedded')) return;
@@ -1098,7 +1171,7 @@ export function syncEmbeddedHostFrame(root, sizeText) {
         if (typeof host.removeAttribute === 'function') host.removeAttribute('data-igs-frame');
         return;
     }
-    host.style.aspectRatio = `${match[1]} / ${match[2]}`;
+    host.style.aspectRatio = embeddedAspectRatio(match[1], match[2]);
     if (typeof host.setAttribute === 'function') host.setAttribute('data-igs-frame', 'size');
 }
 
@@ -1148,7 +1221,7 @@ export function watchEmbeddedFrameResize(overlay, frameState) {
         const sizeText = cgSizeForMode(frameState.backgroundSize, frameState.mode, { width, height: 0, portrait: phone });
         const match = String(sizeText || '').match(/^(\d+)\s*[xX×]\s*(\d+)$/);
         if (!match) return;
-        if (host.style && host.style.aspectRatio === `${match[1]} / ${match[2]}`) return;
+        if (host.style && host.style.aspectRatio === embeddedAspectRatio(match[1], match[2])) return;
         syncEmbeddedHostFrame(overlay, sizeText);
     });
     observer.observe(host);
@@ -1161,6 +1234,61 @@ function writeBackgroundImage(element, url, source = url) {
     backgroundImageKeys.set(element, value);
     backgroundImageSources.set(element, source);
     element.style.backgroundImage = value;
+}
+
+// 立绘出现：新图还没解码时不要先把全屏立绘层亮出来。
+// 这一轮渲染后面会读布局，浏览器会把当时那一帧画出来。图没好就是空的，带滤镜的空层是一闪黑。
+// 和换 CG 一样：等解码完再换上，回调里不再读布局。
+const spriteRevealToken = new WeakMap();
+
+function cancelSpriteReveal(element) {
+    if (element) spriteRevealToken.delete(element);
+}
+
+function cancelSpriteExit(current, element) {
+    const exit = current && current.spriteExit;
+    if (!exit) return;
+    current.spriteExit = null;
+    try { exit.anim.cancel(); } catch (error) { /* 动画已结束 */ }
+    if (element) element.style.opacity = '';
+}
+
+// 旁白写了这个人离场：立绘朝画外淡出，动效关闭或低画质直接消失。
+function playSpriteExit(current, element, { reduced = false, lowQuality = false } = {}) {
+    if (reduced || lowQuality || !element || typeof element.animate !== 'function') return false;
+    const x = parseFloat(String(element.style.backgroundPosition || '').split(/\s+/)[0]);
+    const shift = Number.isFinite(x) && x < 50 ? '-9%' : '9%';
+    const token = {};
+    const finish = () => {
+        if (current.spriteExit !== token) return;
+        current.spriteExit = null;
+        element.style.display = 'none';
+        writeBackgroundImage(element, '');
+        element.style.opacity = '';
+    };
+    token.anim = element.animate([{ opacity: 1, translate: '0 0' }, { opacity: 0, translate: shift + ' 0' }], { duration: 320, easing: 'ease-in', fill: 'forwards' });
+    current.spriteExit = token;
+    token.anim.onfinish = finish;
+    token.anim.oncancel = finish;
+    return true;
+}
+
+function revealSpriteImage(element, url, paint) {
+    if (!element || typeof paint !== 'function') return false;
+    const token = {};
+    spriteRevealToken.set(element, token);
+    const pending = decodeSpriteImage(element.ownerDocument, String(url || ''));
+    const apply = () => {
+        if (spriteRevealToken.get(element) !== token) return;
+        spriteRevealToken.delete(element);
+        paint();
+    };
+    if (!pending) {
+        apply();
+        return false;
+    }
+    pending.then(apply);
+    return true;
 }
 
 const ROOT_TOGGLED_CLASSES = new Set(['igs-default-reader-chrome', 'igs-gradient-veil-active', 'igs-scene-nsfw']);
@@ -1235,14 +1363,39 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     }
     pinEmbeddedHostFrame(root, snapshot.readerSettings && snapshot.readerSettings._cgBackgroundSize, snapshot.mode);
 
+    let deferCgFocus = false;
     if (bg && backgroundAssetUrl) {
-        writeBackgroundImage(bg, backgroundAssetUrl, backgroundSource);
-        bg.setAttribute('data-igs-has-image', '1');
-        removeImageLoadingSpinner(bg);
-        removeImageEmptyPlaceholder(bg);
+        const cgImageChanged = cgActive && backgroundImageSources.get(bg) !== backgroundSource;
+        if (cgImageChanged) {
+            const url = backgroundAssetUrl;
+            const source = backgroundSource;
+            const deferred = revealCgImage(root, snapshot, bg, url, source, () => {
+                writeBackgroundImage(bg, url, source);
+                bg.setAttribute('data-igs-has-image', '1');
+                removeImageLoadingSpinner(bg);
+                removeImageEmptyPlaceholder(bg);
+            });
+            if (deferred) {
+                deferCgFocus = true;
+                if (backgroundImageKeys.get(bg)) {
+                    bg.setAttribute('data-igs-has-image', '1');
+                    removeImageLoadingSpinner(bg);
+                    removeImageEmptyPlaceholder(bg);
+                }
+            }
+        } else {
+            cancelCgReveal(bg);
+            writeBackgroundImage(bg, backgroundAssetUrl, backgroundSource);
+            bg.setAttribute('data-igs-has-image', '1');
+            removeImageLoadingSpinner(bg);
+            removeImageEmptyPlaceholder(bg);
+        }
     } else if (bg && backgroundSource && backgroundImageSources.get(bg) === backgroundSource && backgroundImageKeys.get(bg)) {
         // 同一张还没解码出来：留着已经画上的这张。换了素材（比如场景背景换成 CG）就不能留。
+    } else if (bg && cgActive && backgroundImageKeys.get(bg)) {
+        // 下一张 CG 还没有可画的地址：留着当前这张，不要先清成空白再补上。
     } else if (bg) {
+        cancelCgReveal(bg);
         writeBackgroundImage(bg, '', backgroundSource);
         bg.removeAttribute('data-igs-has-image');
         const expectsImage = snapshot.content.imageExpectedCount > 0
@@ -1255,7 +1408,9 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             removeImageEmptyPlaceholder(bg);
             ensureImageLoadingSpinner(bg);
         } else if (expectsImage) {
-            ensureImageEmptyPlaceholder(bg, '图片未生成');
+            ensureImageEmptyPlaceholder(bg, '图片未生成', snapshot.content.illustrationSlot
+                ? { busy: snapshot.content.imageRetrying === true, reason: snapshot.content.imageFailureReason }
+                : null);
         } else {
             removeImageLoadingSpinner(bg);
             removeImageEmptyPlaceholder(bg);
@@ -1308,34 +1463,36 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const castSpeakerMood = snapshot.content.spriteMood || '';
     const castSpeakerOutfit = snapshot.content.spriteOutfit || '';
     const castSlotLayouts = snapshot.readerSettings.castSlotLayouts || {};
+    const spriteLayouts = snapshot.readerSettings.spriteLayouts;
     const presentSpriteLayout = (character, mood, outfit) => {
         const height = resolveSpriteBaseScale(snapshot.readerSettings._sceneAssets, snapshot.readerSettings, character);
         return applySpriteDisplayScale(
-            resolveSpriteLayout(snapshot.readerSettings.spriteLayouts, snapshot.mode, character, mood, outfit, height.defaultScale, height.characterScale),
+            resolveSpriteLayout(spriteLayouts, snapshot.mode, character, mood, outfit, height.defaultScale, height.characterScale),
             snapshot.readerSettings.spriteDisplayScale,
         );
     };
-    const castBaseHeight = (character) => {
-        const height = resolveSpriteBaseScale(snapshot.readerSettings._sceneAssets, snapshot.readerSettings, character);
-        return height.characterScale ?? height.defaultScale;
-    };
+    const heightMeta = (character, mood, outfit, layout) => ({
+        layoutKey: spriteHeightLayoutKey(spriteLayouts, snapshot.mode, character, mood, outfit),
+        heightPos: { posX: layout.posX, posY: layout.posY },
+    });
     const withCastSlot = (entry, character, outfit, slotIndex) => {
         const slotKey = slotIndex == null ? '' : castSlotKey(snapshot.mode, castLayout.count, slotIndex, spriteIdentity(character, outfit));
         const saved = slotKey ? castSlotLayouts[slotKey] : null;
-        return { ...applySavedCastSlot(entry, saved, snapshot.readerSettings.spriteDisplayScale), slotKey };
+        return { ...applySavedCastSlot(entry, saved), slotKey };
     };
+    const speakerLayout = presentSpriteLayout(castSpeakerKey, castSpeakerMood, castSpeakerOutfit);
     const castPlanInput = castLayout.multi && !current.spriteEditMode ? {
         stageW: stageMotion.clientWidth,
         stageH: stageMotion.clientHeight,
         align: isCastAlignEnabled(snapshot),
         speaker: spriteAssetUrl ? withCastSlot({
-            ...presentSpriteLayout(castSpeakerKey, castSpeakerMood, castSpeakerOutfit),
-            ...(speakerSlotX != null ? { posX: speakerSlotX } : {}),
+            ...speakerLayout,
+            ...(speakerSlotX != null ? { posX: speakerSlotX, centerX: castLayout.speakerCenterX } : {}),
+            ...heightMeta(castSpeakerKey, castSpeakerMood, castSpeakerOutfit, speakerLayout),
             character: castSpeakerKey,
             url: spriteAssetUrl,
             order: Number.isFinite(snapshot.content.speakerCastOrder) ? snapshot.content.speakerCastOrder : Number.MAX_SAFE_INTEGER,
             head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, castSpeakerKey, castSpeakerMood, castSpeakerOutfit),
-            baseHeight: castBaseHeight(castSpeakerKey),
         }, castSpeakerKey, castSpeakerOutfit, castLayout.speakerSlot) : null,
         members: castLayout.members.map((m) => {
             const layout = presentSpriteLayout(m.character, m.mood, m.outfit);
@@ -1344,10 +1501,11 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 url: resolveAssetUrl(m.image),
                 order: m.order,
                 posX: m.posX == null ? layout.posX : m.posX,
+                centerX: m.centerX,
                 posY: layout.posY,
                 scale: layout.scale,
                 head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, m.character, m.mood, m.outfit),
-                baseHeight: castBaseHeight(m.character),
+                ...heightMeta(m.character, m.mood, m.outfit, layout),
             }, m.character, m.outfit, m.slotIndex);
         }).filter((m) => m.url),
         peek: peekSpriteHead,
@@ -1355,54 +1513,101 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     // 站位姿态（castStage）只作用于多人布局：收成单人或槽位编辑时 castPlanInput 为空，姿态自然暂停。
     const castPlan = castPlanInput ? resolveCastPosePlan(snapshot, planCastLayouts(castPlanInput), castSpeakerKey) : null;
     const castFocus = castRomancePin;
+    let speakerBack = null;
+    const castTurnKinds = {};
+    if (castPlan) {
+        const turnKey = castKeyOfSnapshot(snapshot);
+        for (const [name, kind] of Object.entries((snapshot.content.fx && snapshot.content.fx.turns) || {})) castTurnKinds[turnKey(name) || name] = kind;
+    }
     const castFxTargets = castPlan ? castPlan.members.map((m) => ({ character: m.character, url: m.url, posX: m.posX, posY: m.posY, scale: m.scale, head: m.head, flip: m.flip === true })) : [];
     if (spriteEl && spriteAssetUrl) {
+        cancelSpriteExit(current, spriteEl);
         if (spriteEnhance && !current.spriteEditMode) spriteEl.style.setProperty('--igs-sprite-enhance', spriteEnhance);
         else spriteEl.style.removeProperty('--igs-sprite-enhance');
         const spriteNarration = ['narration', 'chat', 'system'].includes(snapshot.content.textType) && spriteSettings.dimSpriteOnNarration !== false;
         // 旁白压暗由 .igs-sprite-narration 写入 --igs-sprite-dim，与环境滤镜在样式表里合成。
         spriteEl.classList.toggle('igs-sprite-narration', spriteNarration);
-        current.spriteLook = spriteLookOf(snapshot.content, spriteAssetUrl);
-        writeBackgroundImage(spriteEl, spriteAssetUrl);
-        spriteEl.style.display = 'block';
-        spriteEl.style.position = 'absolute';
-        spriteEl.style.inset = '0';
-        spriteEl.style.width = '100%';
-        spriteEl.style.height = '100%';
-        spriteEl.style.transform = 'none';
-        // 立绘编辑时显示基础站位：先清翻转，非编辑时在下方按姿态重新写入。
-        applySpeakerFlip(spriteEl, false);
-        spriteEl.style.bottom = 'auto';
-        spriteEl.style.left = 'auto';
-        spriteEl.style.filter = '';
-        spriteEl.style.setProperty('-webkit-filter', '');
+        const nextLook = spriteLookOf(snapshot.content, spriteAssetUrl);
+        const formAssets = snapshot.readerSettings && snapshot.readerSettings._sceneAssets;
+        if (!current.spriteEditMode && isOutfitSwap(current.spriteLook, nextLook)
+            && (isFormOutfit(formAssets, nextLook.character, current.spriteLook.outfit) || isFormOutfit(formAssets, nextLook.character, nextLook.outfit))) playSpriteFormShift(spriteEl);
+        current.spriteLook = nextLook;
+        // 尺寸在换图之前读完。换上还没解码的图再读布局，会把空的全屏立绘层画出来，就是一闪黑。
+        const stageW = stageMotion.clientWidth || castView.innerWidth;
+        const stageH = stageMotion.clientHeight || castView.innerHeight;
+        let spritePose = null;
+        speakerBack = null;
         if (!current.spriteEditMode) {
             const spriteKey = snapshot.content.spriteCharacter || snapshot.content.speaker;
             const spriteMood = snapshot.content.spriteMood || '';
             const spriteOutfit = snapshot.content.spriteOutfit || '';
             const layout = { ...presentSpriteLayout(spriteKey, spriteMood, spriteOutfit) };
+            const speakerPose = castPlan && castPlan.speaker
+                ? { flip: castPlan.speaker.flip === true, back: castPlan.speaker.back === true, backText: castPlan.speaker.backText || '', turn: resolveSpeakerPose(snapshot, spriteKey).turn }
+                : resolveSpeakerPose(snapshot, spriteKey);
             if (castPlan && castPlan.speaker) Object.assign(layout, { posX: castPlan.speaker.posX, posY: castPlan.speaker.posY, scale: castPlan.speaker.scale });
             else if (speakerSlotX != null) layout.posX = speakerSlotX;
-            spriteEl.style.backgroundSize = spriteBackgroundSize(layout.scale);
-            spriteEl.style.backgroundPosition = `${layout.posX}% ${layout.posY}%`;
             stageSprite = { url: spriteAssetUrl, key: spriteKey, posX: Number(layout.posX) };
-            fxSprite = { url: spriteAssetUrl, posX: Number(layout.posX), posY: Number(layout.posY), scale: Number(layout.scale), head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, spriteKey, spriteMood, spriteOutfit), multi: Boolean(castPlan && castPlan.members.length), flip: Boolean(castPlan && castPlan.speaker && castPlan.speaker.flip) };
+            fxSprite = { url: spriteAssetUrl, posX: Number(layout.posX), posY: Number(layout.posY), scale: Number(layout.scale), head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, spriteKey, spriteMood, spriteOutfit), multi: Boolean(castPlan && castPlan.members.length), flip: speakerPose.flip };
             const probed = peekSpriteHead(spriteAssetUrl);
-            applySpeakerFlip(spriteEl, fxSprite.flip, layout.posX, spriteWidthPercent(stageMotion.clientWidth, stageMotion.clientHeight, { ...layout, naturalW: probed && probed.naturalW, naturalH: probed && probed.naturalH }));
-            igsDebug('[DEBUG-sprite] apply-layout', { mode: snapshot.mode, speaker: spriteKey, mood: spriteMood, outfit: spriteOutfit, index: snapshot.content.currentIndex, layout: { ...layout } });
+            speakerBack = speakerPose.back ? speakerPose.backText || BACK_HINT_DEFAULT : null;
+            spritePose = { layout, flip: fxSprite.flip, back: speakerPose.back, turn: speakerPose.turn, widthPct: spriteWidthPercent(stageW, stageH, { ...layout, naturalW: probed && probed.naturalW, naturalH: probed && probed.naturalH }), spriteKey, spriteMood, spriteOutfit };
         }
+        revealSpriteImage(spriteEl, spriteAssetUrl, () => {
+            writeBackgroundImage(spriteEl, spriteAssetUrl);
+            spriteEl.style.display = 'block';
+            spriteEl.style.position = 'absolute';
+            spriteEl.style.inset = '0';
+            spriteEl.style.width = '100%';
+            spriteEl.style.height = '100%';
+            spriteEl.style.transform = 'none';
+            // 立绘编辑时显示基础站位：先清翻转，非编辑时在下方按姿态重新写入。
+            applySpeakerFlip(spriteEl, false);
+            spriteEl.style.bottom = 'auto';
+            spriteEl.style.left = 'auto';
+            spriteEl.style.filter = '';
+            spriteEl.style.setProperty('-webkit-filter', '');
+            if (!spritePose) return;
+            spriteEl.style.backgroundSize = spriteBackgroundSize(spritePose.layout.scale);
+            spriteEl.style.backgroundPosition = `${spritePose.layout.posX}% ${spritePose.layout.posY}%`;
+            applySpeakerFlip(spriteEl, spritePose.flip, spritePose.layout.posX, spritePose.widthPct);
+            if (spritePose.back) spriteEl.setAttribute('data-igs-sprite-back', '1');
+            else spriteEl.removeAttribute('data-igs-sprite-back');
+            const turnPage = `${snapshot.messageId}:${snapshot.content.currentIndex}`;
+            const prevTurn = current.spriteTurn;
+            if (!prevTurn || prevTurn.page !== turnPage) cancelSpriteTurn(spriteEl);
+            if (prevTurn && prevTurn.page !== turnPage && prevTurn.key === spritePose.spriteKey && prevTurn.flip !== spritePose.flip) {
+                playSpriteTurn(spriteEl, {
+                    from: prevTurn.flip, to: spritePose.flip, prop: 'rotate', variant: spritePose.turn, posX: spritePose.layout.posX,
+                    reduced: prefersReducedMotion(), lowQuality: root.getAttribute('data-igs-quality') === 'low', stage: stageMotion,
+                    sound: normalizeFxSoundSettings(snapshot.readerSettings && snapshot.readerSettings.fxSound),
+                });
+            }
+            current.spriteTurn = { page: turnPage, key: spritePose.spriteKey, flip: spritePose.flip };
+            igsDebug('[DEBUG-sprite] apply-layout', { mode: snapshot.mode, speaker: spritePose.spriteKey, mood: spritePose.spriteMood, outfit: spritePose.spriteOutfit, index: snapshot.content.currentIndex, layout: { ...spritePose.layout } });
+        });
+    } else if (spriteEl && current.spriteExit) {
+        cancelSpriteReveal(spriteEl);
     } else if (spriteEl) {
+        cancelSpriteReveal(spriteEl);
+        const exiting = snapshot.content.spriteLeft === true && Boolean(current.spriteLook) && spriteEl.style.display === 'block' && !current.spriteEditMode;
         spriteEl.style.removeProperty('--igs-sprite-enhance');
         current.spriteLook = null;
+        current.spriteTurn = null;
+        cancelSpriteTurn(spriteEl);
+        spriteEl.removeAttribute('data-igs-sprite-back');
         clearSpriteOutfitSwap(spriteEl);
-        applySpeakerFlip(spriteEl, false);
-        spriteEl.classList.remove('igs-sprite-narration');
-        applySpeakerFlip(spriteEl, false);
-
-        writeBackgroundImage(spriteEl, '');
-        spriteEl.style.display = 'none';
-        spriteEl.style.filter = '';
-        spriteEl.style.setProperty('-webkit-filter', '');
+        const fading = exiting && playSpriteExit(current, spriteEl, { reduced: prefersReducedMotion(), lowQuality: root.getAttribute('data-igs-quality') === 'low' });
+        if (!fading) {
+            applySpeakerFlip(spriteEl, false);
+            spriteEl.classList.remove('igs-sprite-narration');
+            applySpeakerFlip(spriteEl, false);
+            // 先藏再清图。清掉图时层还亮着，下一回读布局会把空层画成一闪黑。
+            spriteEl.style.display = 'none';
+            writeBackgroundImage(spriteEl, '');
+            spriteEl.style.filter = '';
+            spriteEl.style.setProperty('-webkit-filter', '');
+        }
     }
     const castReduced = prefersReducedMotion();
     // 陪衬朝向说话人：减少动效、暧昧退场或开关关闭时不倾；旁白页（无说话人槽位）保持上一页朝向。
@@ -1423,10 +1628,10 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         // 陪衬反应：点名提亮每次渲染都带上；动作只在进入新页时播一次，同页重绘不重播。
         const castReact = resolveCastReactPage(snapshot, castPlan.members);
         castReactMarks = castReact.marks;
-        // 头部对齐探测未就绪时，新上台的陪衬等下方对齐重排完成再滑入（applyCastToDom 内有超时兜底）。
+        // 贴底探测未就绪时，新上台的陪衬等下方重排完成再滑入（applyCastToDom 内有超时兜底）。
         let releaseCastAlign = () => {};
         const castAlignReady = castPlan.pending.length ? new Promise((resolve) => { releaseCastAlign = resolve; }) : null;
-        applyCastToDom(root, markCalledCast(castPlan.members, castReact.called), { reduced: castReduced, handoff, focus: castFocus, lean: castLean, entrances: castStageEntrances(snapshot), ready: castAlignReady, spriteEnhance });
+        applyCastToDom(root, markCalledCast(castPlan.members, castReact.called), { reduced: castReduced, handoff, focus: castFocus, lean: castLean, entrances: castStageEntrances(snapshot), ready: castAlignReady, spriteEnhance, turn: castTurnKinds, lowQuality: root.getAttribute('data-igs-quality') === 'low', turnStage: stageMotion, turnSound: normalizeFxSoundSettings(snapshot.readerSettings && snapshot.readerSettings.fxSound) });
         const castReactKey = `${snapshot.messageId}:${snapshot.content.currentIndex}`;
         if (current.castReactKey !== castReactKey) {
             current.castReactKey = castReactKey;
@@ -1441,8 +1646,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             members: castPlan.members.map((m) => m.character),
             memberX: Object.fromEntries(castPlan.members.map((m) => [m.character, m.posX])),
             entries: [
-                ...(castPlan.speaker && stageSprite ? [{ character: speakerKey, speaker: true, key: castPlan.speaker.slotKey, url: castPlan.speaker.url, posX: castPlan.speaker.posX, posY: castPlan.speaker.posY, scale: castPlan.speaker.scale, auto: castPlan.speaker.auto }] : []),
-                ...castPlan.members.map((m) => ({ character: m.character, speaker: false, key: m.slotKey, url: m.url, posX: m.posX, posY: m.posY, scale: m.scale, auto: m.auto })),
+                ...(castPlan.speaker && stageSprite ? [{ character: speakerKey, speaker: true, key: castPlan.speaker.slotKey, layoutKey: castPlan.speaker.layoutKey, heightPos: castPlan.speaker.heightPos, heightScale: castPlan.speaker.heightScale, url: castPlan.speaker.url, posX: castPlan.speaker.posX, posY: castPlan.speaker.posY, scale: castPlan.speaker.scale, auto: castPlan.speaker.auto }] : []),
+                ...castPlan.members.map((m) => ({ character: m.character, speaker: false, key: m.slotKey, layoutKey: m.layoutKey, heightPos: m.heightPos, heightScale: m.heightScale, url: m.url, posX: m.posX, posY: m.posY, scale: m.scale, auto: m.auto })),
             ],
         };
         if (castPlan.pending.length) {
@@ -1465,12 +1670,12 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 relayoutComic(root);
                 repositionFxSymbols(root, { speaker: fxSprite, cast: castFxTargets });
                 repositionBattleImpacts(root, { speaker: fxSprite, cast: castFxTargets });
-                // 对齐改了大小和高度，槽位编辑的起点要跟着更新，否则拖动从旧值开始。
+                // 贴底改了位置，槽位编辑的起点要跟着更新，否则拖动从旧值开始。高度不变。
                 if (current.castStage && Array.isArray(current.castStage.entries)) {
                     const byChar = new Map(again.members.map((m) => [m.character, m]));
                     current.castStage.entries = current.castStage.entries.map((e) => {
                         const next = e.speaker ? again.speaker : byChar.get(e.character);
-                        return next ? { ...e, posX: next.posX, posY: next.posY, scale: next.scale, auto: next.auto || e.auto } : e;
+                        return next ? { ...e, posX: next.posX, posY: next.posY, scale: next.scale, auto: next.auto || e.auto, heightScale: next.heightScale ?? e.heightScale } : e;
                     });
                 }
             }).finally(() => releaseCastAlign());
@@ -1554,11 +1759,43 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         } else {
             textEl.style.fontFamily = '';
         }
+        // 手机演出（社区 / 风暴 / 直播）的文字跟随旁白字体：自选了就写变量，没选就移除，样式里回落到阅读器默认字体。
+        const narrationFont = themeEnabled && theme.narrationFont && theme.narrationFont !== 'inherit' ? theme.narrationFont : '';
+        if (root.style) {
+            if (narrationFont) root.style.setProperty('--igs-narration-font', narrationFont);
+            else root.style.removeProperty('--igs-narration-font');
+        }
         applyDialogFontMetrics(textEl, themeEnabled ? segFont : '');
         if (themeEnabled && segColor) {
             textEl.style.color = segColor;
         } else {
             textEl.style.color = '';
+        }
+        // 对话框底部快捷栏跟正文同色：颜色只写在正文上，按钮栏继承到的是对话框外层的浅色，浅色对话框上就看不见。
+        const quickBar = dialog && dialog.querySelector('#igs-dialog-bar');
+        const view = textEl.ownerDocument && textEl.ownerDocument.defaultView;
+        // 正文与对话框的计算样式各只取一次，先读后写（下面写样式不会再触发重算）。
+        const canComputed = Boolean(view && typeof view.getComputedStyle === 'function');
+        const textComputed = canComputed ? view.getComputedStyle(textEl) : null;
+        const dialogComputed = canComputed && dialog ? view.getComputedStyle(dialog) : null;
+        const inkNow = textComputed ? textComputed.color || '' : '';
+        const plateRaw = dialogComputed ? dialogComputed.backgroundColor : '';
+        const blurRaw = dialogComputed ? dialogComputed.backdropFilter : '';
+        if (quickBar && canComputed) quickBar.style.color = inkNow;
+        // 顶部工具栏淡淡跟随皮肤：底板取对话框底色、图标取正文色；切图皮肤的对话框没有底色，按正文深浅配一块反差底。
+        if (view && typeof view.getComputedStyle === 'function' && root.style && typeof root.style.setProperty === 'function') {
+            const ink = inkNow;
+            const rgba = (value) => (String(value).match(/[\d.]+/g) || []).map(Number);
+            const [r = 255, g = 255, b = 255] = rgba(ink);
+            const plateParts = rgba(plateRaw);
+            const plateAlpha = plateParts.length > 3 ? plateParts[3] : (plateParts.length ? 1 : 0);
+            const lightInk = (r * 299 + g * 587 + b * 114) / 1000 > 140;
+            const plate = plateAlpha >= 0.15 ? `rgb(${plateParts.slice(0, 3).join(',')})` : (lightInk ? 'rgb(18,18,20)' : 'rgb(246,244,240)');
+            if (ink) root.style.setProperty('--igs-bar-ink', ink);
+            root.style.setProperty('--igs-bar-plate', plate);
+            // 展开工具栏的羽化底板也跟对话框的毛玻璃走：有就照搬（封顶 10px 保持轻量），没有用 6px。
+            const dialogBlur = dialog ? Number((String(blurRaw || '').match(/blur\(([\d.]+)px\)/) || [])[1]) : 0;
+            root.style.setProperty('--igs-bar-blur', `blur(${dialogBlur > 0 ? Math.min(dialogBlur, 10) : 6}px)`);
         }
         // 字体、字号定下后再量：放不下一行的注音改成译文单独成行，打字机随后按改好的排版测量。
         if (bilingualDisplay === 'ruby') fitBilingualRuby(textEl);
@@ -1574,6 +1811,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         settings: stageShakeSettings,
         emotion: snapshot.content && snapshot.content.statusEmotion,
         key: stageShakeKey,
+        playSfx: () => playCameraImpactSfx(normalizeFxSoundSettings(snapshot.readerSettings && snapshot.readerSettings.fxSound)),
     });
     const fxTheme = resolveActiveTheme(snapshot);
     const fxResult = applyFxToDom(root, snapshot, {
@@ -1593,10 +1831,10 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         cast: castFxTargets,
         resolveAssetUrl,
     });
-    renderDailyFx(root, snapshot, { onPhoto: ctx.onDailyPhoto });
+    renderDailyFx(root, snapshot, { onPhoto: ctx.onDailyPhoto, sprite: fxSprite, cast: castFxTargets });
     // 弹幕：直播间 / 观众弹幕 / 内心弹幕，默认全关，全关时不建层。
     // userName 为用户角色名：直播主播名与之相同时自动切主播视角。
-    applyDanmakuToDom(root, snapshot, { sprite: fxSprite, resolveAssetUrl, userName: ctx.userName });
+    applyDanmakuToDom(root, snapshot, { autoPlay: Boolean(current && current.autoPlay && current.autoPlay.enabled), sprite: fxSprite, resolveAssetUrl, userName: ctx.userName, chatId: ctx.chatId, onLivePortraitMove: ctx.onLivePortraitMove });
     applyHtmlCardToDom(root, snapshot.content, ctx);
     applyChatToDom(root, snapshot, ctx);
     const effectLayer = root.querySelector('#igs-effect-layer');
@@ -1632,10 +1870,15 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const sceneTime = resolveWeatherFxTime(snapshot.content && snapshot.content.sceneTime);
     if (sceneTime) root.setAttribute('data-igs-scene-time', sceneTime);
     else root.removeAttribute('data-igs-scene-time');
+    // 水下：立绘的呼吸换成随水漂浮（样式见 fx-daily-style），不分世界观。
+    if (isUnderwaterScene(snapshot.content, snapshot.readerSettings)) root.setAttribute('data-igs-underwater', '1');
+    else root.removeAttribute('data-igs-underwater');
     applyClickWaitMark(root, snapshot.readerSettings && snapshot.readerSettings.clickWaitMark);
     applyHorrorDread(root, { level: snapshot.content && snapshot.content.sceneDread, cap: snapshot.readerSettings && snapshot.readerSettings.horrorDreadCap });
     const stageDirection = applyStageDirection(root, snapshot, {
         bgUrl: backgroundAssetUrl,
+        bgKey: backgroundSource,
+        deferCgFocus,
         spriteUrl: stageSprite ? stageSprite.url : '',
         spriteKey: stageSprite ? stageSprite.key : '',
         spritePosX: stageSprite ? stageSprite.posX : 50,
@@ -1677,6 +1920,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             battle: Boolean(snapshot.content && snapshot.content.fx && snapshot.content.fx.battle),
             romance: Boolean(snapshot.content && snapshot.content.fx && snapshot.content.fx.romance),
             worldview: snapshot.readerSettings && snapshot.readerSettings._worldview,
+            packs: enabledPackIds(snapshot.readerSettings),
+            ...audioCuesOf(snapshot.content && snapshot.content.fx, snapshot.readerSettings),
             // 留白：告白标签或说出口的告白台词让音乐停几页；按页计数，同一页重绘不重复算。
             confess: Boolean(snapshot.content && snapshot.content.fx && snapshot.content.fx.confess),
             confessText: typewriterTextType === 'dialogue' && isConfessionLine(snapshot.content && snapshot.content.text),
@@ -1686,19 +1931,24 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     });
     const speakerEl = root.querySelector('#igs-speaker');
     if (speakerEl) {
+        if (speakerBack && normalizeStageCastSettings(snapshot.readerSettings.stageCast).backHint) speakerEl.setAttribute('data-igs-back-hint', speakerBack);
+        else speakerEl.removeAttribute('data-igs-back-hint');
         const theme = resolveActiveTheme(snapshot);
         const sceneAssetsEnabled = snapshot.readerSettings._sceneAssets && snapshot.readerSettings._sceneAssets.enabled;
         if (sceneAssetsEnabled && snapshot.content.speaker) {
             speakerEl.textContent = snapshot.content.speaker;
             speakerEl.style.display = 'block';
-            applyAlignStyle(speakerEl, theme.nameAlign);
-            speakerEl.style.fontFamily = theme.nameFont && theme.nameFont !== 'inherit' ? theme.nameFont : '';
-            if (String(theme.nameFont || '').includes('IGSUserFont-')) {
+            // 素材 / 插画皮肤的姓名牌是成套设计：字体、字重、颜色、对齐只认皮肤自带排版，不跟用户在主题页自选的文字。
+            const plate = materialDialog ? (getReferenceDialogTypography(dialogSettings.dialogSkin) || {}) : null;
+            const nameTheme = plate ? { nameAlign: plate.nameAlign, nameFont: plate.nameFont, nameColor: plate.nameColor } : theme;
+            applyAlignStyle(speakerEl, nameTheme.nameAlign);
+            speakerEl.style.fontFamily = nameTheme.nameFont && nameTheme.nameFont !== 'inherit' ? nameTheme.nameFont : '';
+            if (String(nameTheme.nameFont || '').includes('IGSUserFont-')) {
                 const hostDoc = speakerEl.ownerDocument;
                 registerCustomFonts(hostDoc, loadCustomFonts((hostDoc && hostDoc.defaultView) || globalThis));
             }
-            speakerEl.style.fontWeight = snapshot.readerSettings.dialogFontWeight == null ? '' : String(snapshot.readerSettings.dialogFontWeight);
-            speakerEl.style.color = theme.nameColor || '';
+            speakerEl.style.fontWeight = plate || snapshot.readerSettings.dialogFontWeight == null ? '' : String(snapshot.readerSettings.dialogFontWeight);
+            speakerEl.style.color = nameTheme.nameColor || '';
         } else {
             speakerEl.style.display = 'none';
             speakerEl.style.fontWeight = '';
@@ -1727,10 +1977,17 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         }
     }
     const controls = root.querySelector('.igs-controls');
+    // 漫画模式的输入框样式写在对话框里，悬浮时一律放回去。
+    const floatInput = snapshot.mode !== 'embedded' && !comicActive && snapshot.readerSettings.inputPlacement === 'float';
+    if (root.setAttribute) root.setAttribute('data-igs-input', floatInput ? 'float' : 'dialog');
+    if (controls && dialog) {
+        if (floatInput && controls.parentNode !== root) root.appendChild(controls);
+        else if (!floatInput && controls.parentNode !== dialog) dialog.insertBefore(controls, dialog.querySelector('#igs-dialog-bar'));
+    }
     if (controls) {
-        // 内嵌模式使用酒馆默认输入框；其它模式的 IGS 输入区只在最后一页显示。
+        // 内嵌模式使用酒馆默认输入框；回读旧楼不提供输入区，其它模式仅在最新楼末页显示。
         const comicSent = isComicModeActive(snapshot.readerSettings) && current.comicInputSent && current.comicInputSent === comicContentKey(snapshot);
-        controls.style.display = snapshot.mode === 'embedded' ? 'none' : (isLastPage ? '' : 'none');
+        controls.style.display = snapshot.mode === 'embedded' || Number(current.turnOffset) > 0 ? 'none' : (isLastPage ? '' : 'none');
         if (comicSent) controls.setAttribute('data-igs-comic-sent', '1');
         else controls.removeAttribute('data-igs-comic-sent');
     }
@@ -1780,7 +2037,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     }
     if (clickLayer && !(clickLayer.dataset && clickLayer.dataset.igsBound)) {
         if (clickLayer.dataset) clickLayer.dataset.igsBound = '1';
-        const blankTap = () => {
+        const blankTap = (clientX) => {
             if (root && root.getAttribute && root.getAttribute('data-igs-cg-only') === '1') return;
             if (current.hidden) {
                 current.controller.toggleHidden();
@@ -1798,19 +2055,26 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction('next');
                 return;
             }
-            // 单击对话框以外的画面（左右都算）推进到下一页；打字机没放完时 next 会先放完。
-            if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction('next');
+            // 单击对话框以外的画面推进到下一页；打字机没放完时 next 会先放完。
+            // 全屏直播的对话框只是一条字幕、整个屏幕就是画面：点左半屏回上一页，右半屏仍是下一页。
+            if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction(isLiveFullLeftTap(root, clientX) ? 'prev' : 'next');
         };
-        clickLayer.addEventListener('click', () => {
+        clickLayer.addEventListener('click', (event) => {
+            const tapX = Number(event && event.clientX);
             if (current.dragSuppressClick || (current.runtime && current.runtime.dragSuppressClick)) {
                 current.dragSuppressClick = false;
                 if (current.runtime) current.runtime.dragSuppressClick = false;
                 return;
             }
+            if (isImageRetryTap(bg, Number(event && event.clientX), Number(event && event.clientY))
+                && typeof ctx.handleReaderAction === 'function') {
+                ctx.handleReaderAction('retry-failed-cg');
+                return;
+            }
             const live = current.snapshot || snapshot;
             const tripleOn = current.lastPointerType === 'touch' && live && live.readerSettings && live.readerSettings.dblclickCgOnly === true;
             if (!tripleOn) {
-                blankTap();
+                blankTap(tapX);
                 return;
             }
             // 手机三击隐藏：开关打开时单击稍等一下排除连击；关掉时单击立即生效。
@@ -1824,7 +2088,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             current.blankTapTimer = setTimeout(() => {
                 const taps = current.blankTapCount;
                 current.blankTapCount = 0;
-                for (let i = 0; i < taps; i++) blankTap();
+                for (let i = 0; i < taps; i++) blankTap(tapX);
             }, 320);
         });
     }
@@ -1843,6 +2107,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 event.target.closest('.igs-controls')
                 || event.target.closest('#igs-dialog-bar')
                 || event.target.closest('#igs-gen-strip')
+                || event.target.closest('#igs-missed-hint')
                 || event.target.closest('#igs-ctrl-bar')
                 || event.target.closest('#igs-settings')
             )) {

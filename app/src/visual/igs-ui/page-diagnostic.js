@@ -1,5 +1,7 @@
 // 「复制本页诊断」：只摘当前页的决策结果（标签、命中哪一路、为什么回退），
 // 不带台词正文、聊天内容、演出参数文本和图片本体，外链只留域名，方便用户直接贴出来求助。
+import { PROMPT_ENTRY_LABELS, PROMPT_POSITION_LABELS } from '../../scene/prompt-entries.js';
+import { describePromptTrigger } from '../../scene/prompt-triggers.js';
 
 const SOURCE_LABELS = Object.freeze({
     user: '用户配置', 'user-outfit': '衣柜', library: '生成图库', temp: '临时图', placeholder: '占位图',
@@ -39,7 +41,8 @@ function spriteLine(c) {
     if (c.chatPage || c.htmlCardPage) return '本页是聊天 / 卡片页，不显示立绘';
     if (c.cgActive) return '挂着 CG，立绘让位';
     if (!m) return c.speaker ? `说话人「${c.speaker}」未进入立绘匹配（场景素材关闭或旁白 / 系统角色）` : '无说话人';
-    const want = `角色「${m.character}」表情「${m.mood || '无'}」服装「${m.outfit || '无'}」`;
+    const why = m.outfitOffset == null ? '' : `（来源 ${m.outfitSource || '无'}${m.outfitReason ? `/${m.outfitReason}` : ''} @${m.outfitOffset}）`;
+    const want = `角色「${m.character}」表情「${m.mood || '无'}」服装「${m.outfit || '无'}」${why}`;
     if (c.spriteImage) return `${want} → ${label(m.source)}，槽位「${m.slot || '默认'}」${m.quality ? `，匹配度 ${m.quality}` : ''}`;
     if (c.sceneNsfw) return `${want} → NSFW 场景隐藏立绘`;
     return `${want} → 未命中（${label(m.source)}${m.quality ? `，匹配度 ${m.quality}` : ''}）`;
@@ -52,7 +55,27 @@ function backgroundLine(c) {
     return `${place} → ${label(m.source)}${m.quality ? `，匹配度 ${m.quality}` : ''}${c.backgroundTimed ? '，按时段' : ''}，${summarizeImageRef(c.backgroundImage)}`;
 }
 
-export function buildPageDiagnostic(snapshot, { version = '', worldview = '' } = {}) {
+// 直播手机为什么出 / 不出：开关、本页是否识别到直播、NSFW 收起、回忆梦境或卡片页收起。
+function liveLine(c, rs) {
+    const live = rs.liveFx && typeof rs.liveFx === 'object' ? rs.liveFx : {};
+    if (live.enabled !== true) return '没生效：直播间开关关着，或世界观不是现代又没开「随身带着现代手机」';
+    const fx = c.fx || {};
+    if (!fx.live) return '本页没有识别到直播（没写 live 标签，前文也没有开播词）';
+    if (c.sceneNsfw === true && live.muteOnNsfw !== false) return '识别到了，但场景是 NSFW，被「NSFW场景收起」藏起';
+    if (c.chatPage || c.htmlCardPage || fx.flashback === true || fx.dream === true) return '识别到了，本页是聊天/卡片/回忆/梦境，暂时收起';
+    if (rs.feedFx && rs.feedFx.enabled === true && (fx.storm || fx.feed)) return '识别到了，让位给社区/舆论风暴手机';
+    return '显示中';
+}
+
+// 最近一次注入的按需块：每块展开/收起、原因（命中词、上楼标签…）、字数，以及写了自己位置的块的注入位置与深度。
+function promptLines(report) {
+    const blocks = report && report.blocks ? Object.entries(report.blocks) : [];
+    if (!blocks.length) return [];
+    const total = blocks.reduce((sum, [, item]) => sum + (item.active ? item.chars || 0 : 0), 0);
+    return [`提示词按需块（共展开 ${total} 字）`, ...blocks.map(([key, item]) => `  ${PROMPT_ENTRY_LABELS[key] || key} ${item.reason === 'off' ? '' : item.active ? '展开' : '收起'} ${describePromptTrigger(item)}${item.active && item.chars ? ` · ${item.chars} 字` : ''}${item.position ? ` · ${PROMPT_POSITION_LABELS[item.position] || item.position}${item.position === 'depth' ? ` @D${item.depth}` : ''}` : ''}`.replace(/ {2,}/g, ' ').replace(/^ /, '  '))];
+}
+
+export function buildPageDiagnostic(snapshot, { version = '', worldview = '', promptReport = null } = {}) {
     if (!snapshot || !snapshot.content) return '';
     const c = snapshot.content;
     const rs = snapshot.readerSettings || {};
@@ -73,5 +96,7 @@ export function buildPageDiagnostic(snapshot, { version = '', worldview = '' } =
         `演出 ${summarizeFx(c.fx).join('、') || '无'}`,
     ];
     if (notes.length) lines.push(`提示 ${notes.join('、')}`);
+    lines.push(`直播 ${liveLine(c, rs)}`);
+    lines.push(...promptLines(promptReport));
     return lines.join('\n');
 }

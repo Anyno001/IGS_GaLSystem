@@ -1,13 +1,16 @@
 import { COMIC_GAP_LEVELS, COMIC_LINE_LEVELS, normalizeComicModeSettings } from './comic-settings.js';
 import { resolveComicTone } from './text-tone.js';
 import { applyColumnBreaks, planVerticalColumns, prefersHorizontal, readPlainText, sliceRichText, splitBubbleChunks } from './comic-typeset.js';
-import { bodyPath, fitSuperellipse, hashSeed, makeRand, tailPath, thoughtTrail } from './comic-shapes.js';
+import { bodyPath, fitSuperellipse, hashSeed, linkPath, makeRand, tailPath, thoughtTrail } from './comic-shapes.js';
 import { arrangeChain, placeComicGroup, resolveHeadBox, resolveTail } from './comic-layout.js';
 import { resolveChatTheme } from './chat-themes.js';
 import { normalizeDialogSkin } from './classic-dialog-skin.js';
 import { pickFxAccent } from './fx-symbols.js';
 import { peekSpriteHead, probeSpriteHead } from './fx-anchor.js';
 import { prefersReducedMotion } from './reduced-motion.js';
+import { isLiveHostCovered } from './stage-pause.js';
+import { preloadDialogFonts } from './dialog-theme-typography.js';
+import { loadCustomFonts, registerCustomFonts } from '../../media/custom-fonts.js';
 
 // 漫画演出模式运行时：把本页台词排成竖排对话泡，贴在说话人旁、尾巴指向嘴边；黑白模式给整个画面叠网点、加画格。
 // #igs-text 保持原样（隐藏），打字机、文字特效的源头不变；泡里的文字是它的排版副本。
@@ -19,8 +22,13 @@ const SHAPE_OF = Object.freeze({
     thought: 'thought', shout: 'shout', fear: 'fear', cute: 'cute',
 });
 // 尖刺、云朵、花边会伸出泡体：摆位按外接尺寸算。
-const SHAPE_REACH = Object.freeze({ shout: 1.4, thought: 1.14, cute: 1.05 });
-const SHAPE_EXP = Object.freeze({ oval: 2.5, thought: 2.2, shout: 2.2, cute: 2.4, fear: 2.4 });
+const SHAPE_REACH = Object.freeze({ shout: 1.4, thought: 1.06, cute: 1.05 });
+// 指数越大越方：管的是左右两条长边，对白的两侧偏直一点，心里话更方。
+const SHAPE_EXP = Object.freeze({ oval: 4, thought: 3.8, shout: 2.2, cute: 2.6, fear: 2.8 });
+// 可以用细线相连的泡形；爆炸框、心里话仍然咬合。
+// 上下两头的指数：小于 2 收成圆圆的尖头，不写就和两侧一样。
+const SHAPE_TIP = Object.freeze({ oval: 1.7, fear: 1.8 });
+const LINKED_SHAPES = new Set(['oval', 'cute', 'fear', 'box']);
 const FONT_SCALE = Object.freeze({ shout: 1.12, whisper: 0.86, narration: 0.9, system: 0.9, thought: 0.94 });
 const SPEECH_LIKE = new Set(['speech', 'whisper', 'dark', 'phone', 'calm', 'thought', 'shout', 'fear', 'cute']);
 
@@ -62,7 +70,7 @@ function applyPalette(root, readerSettings, comic, theme, state) {
     const palette = comic.palette;
     const skin = normalizeDialogSkin(readerSettings && readerSettings.dialogSkin);
     const ink = comic.inkMode === 'custom' ? comic.inkColor : '';
-    const key = `${palette}:${skin}:${ink}`;
+    const key = `${palette}:${skin}:${ink}:${comic.font}`;
     if (state.paletteKey === key) return;
     state.paletteKey = key;
     const style = root.style;
@@ -71,6 +79,13 @@ function applyPalette(root, readerSettings, comic, theme, state) {
     if (palette === 'color') applyColorPalette(style, skin, theme);
     // 自选描边色只换泡的墨线，字色仍跟随配色。
     if (ink) style.setProperty('--igs-comic-ink', ink);
+    if (comic.font) {
+        style.setProperty('--igs-comic-family', comic.font);
+        // 选了上传字体才读字体表注册；网络字体照对话框的做法预载。
+        const doc = root.ownerDocument;
+        if (comic.font.includes('IGSUserFont-')) registerCustomFonts(doc, loadCustomFonts((doc && doc.defaultView) || globalThis));
+        preloadDialogFonts(doc, [comic.font]);
+    }
 }
 
 function applyColorPalette(style, skin, theme) {
@@ -102,8 +117,7 @@ function ensureLayer(motion, doc, id, after) {
 // 网点层挂在立绘之后（漫画符号之下），画格挂在对话层之前：泡可以压过画格（破格）。
 function syncPageLayers(motion, doc, palette, frame) {
     const sprite = motion.querySelector ? motion.querySelector('#igs-sprite') : null;
-    if (palette === 'mono') ensureLayer(motion, doc, 'igs-comic-screen', sprite);
-    else removeNode(motion.querySelector && motion.querySelector('#igs-comic-screen'));
+    ensureLayer(motion, doc, 'igs-comic-screen', sprite);
     if (frame) {
         const dialogLayer = motion.querySelector ? motion.querySelector('#igs-dialog-layer') : null;
         const el = ensureLayer(motion, doc, 'igs-comic-frame', null);
@@ -154,7 +168,7 @@ function bubbleShape(shape, metric, font) {
     const { w, h, lengths, horizontal } = metric;
     if (shape === 'box' || shape === 'narration') {
         const pad = font * (shape === 'narration' ? 0.7 : 0.8);
-        return { a: w / 2 + pad, b: h / 2 + pad, n: 2, dx: 0, dy: 0 };
+        return { a: w / 2 + pad, b: h / 2 + pad, n: 2, tip: 2, dx: 0, dy: 0 };
     }
     const pad = font * 0.92;
     const pts = [];
@@ -170,26 +184,27 @@ function bubbleShape(shape, metric, font) {
     } else {
         pts.push([-w / 2, -h / 2], [w / 2, -h / 2], [-w / 2, h / 2], [w / 2, h / 2]);
     }
-    const n = SHAPE_EXP[shape] || 2.5;
-    const aspect = Math.min(2.1, Math.max(0.62, (h + pad * 2) / (w + pad * 2)));
+    const n = SHAPE_EXP[shape] || 3.1;
+    const tip = SHAPE_TIP[shape] || n;
+    const aspect = Math.min(3.2, Math.max(0.62, (h + pad * 2) / (w + pad * 2)));
     // 泡心不一定在文字外框中心：列长参差时把泡心挪向字多的一侧，让四周留白均匀（面积最小）。
     let best = null;
     for (let i = -3; i <= 3; i += 1) {
         for (let j = -3; j <= 3; j += 1) {
             const dx = i * w * 0.04;
             const dy = j * h * 0.04;
-            const fit = fitSuperellipse(pts, dx, dy, aspect, n);
+            const fit = fitSuperellipse(pts, dx, dy, aspect, n, tip);
             const area = (fit.a + pad) * (fit.b + pad);
             if (!best || area < best.area - 0.5) best = { area, fit, dx, dy };
         }
     }
-    return { a: Math.max(font * 1.5, best.fit.a + pad), b: Math.max(font * 1.5, best.fit.b + pad), n, dx: best.dx, dy: best.dy };
+    return { a: Math.max(font * 1.5, best.fit.a + pad), b: Math.max(font * 1.5, best.fit.b + pad), n, tip, dx: best.dx, dy: best.dy };
 }
 
 function maxColumnLength(shape) {
     if (shape === 'narration') return 13;
     if (shape === 'box') return 12;
-    return 10;
+    return 12;
 }
 
 // 本页的说话人头部：立绘就是说话人时才锚定；探测未完成先用手动标定或默认头位，探测完成后重排一次。
@@ -311,7 +326,9 @@ function layoutPage(root, snapshot, opts, { relayout = false }) {
     const plain = textEl ? readPlainText(textEl) : '';
     const pageKey = String(opts.renderKey || '');
     const sceneKey = String(content.sceneLocation || '');
-    if (!(stageW > 0) || !(stageH > 0) || !plain.trim() || !pageKey) {
+    // 手机形态直播盖住舞台、说话的正是主播：立绘收起了，泡不再压在手机画面上。
+    const hostCovered = isLiveHostCovered(root, content.spriteCharacter || content.speaker);
+    if (!(stageW > 0) || !(stageH > 0) || !plain.trim() || !pageKey || hostCovered) {
         demoteToGhost(state, false);
         removeNode(state.ghost);
         state.ghost = null;
@@ -387,7 +404,9 @@ function layoutPage(root, snapshot, opts, { relayout = false }) {
     const line = Math.max(1, font * 0.12 * (COMIC_LINE_LEVELS[comic.line] || 1));
     const sizes = shapes.map((s) => ({ ax: s.a * reach + line, by: s.b * reach + line }));
 
-    const margin = 14;
+    // 离画面边留白：画格边框（窄屏 4+3px、宽屏 7+3px）之外再空一截，泡的墨线和弹出放大都不压边。
+    const frameGut = comic.frame ? (stageW <= 640 ? 7 : 10) : 0;
+    const margin = frameGut + Math.min(22, Math.max(12, Math.min(stageW, stageH) * 0.03));
     const avoid = [];
     const toolbar = root.querySelector('#igs-ctrl-bar');
     const hud = root.querySelector('#igs-status-hud');
@@ -423,7 +442,9 @@ function layoutPage(root, snapshot, opts, { relayout = false }) {
     const kind = shape === 'narration' ? 'narration' : (tone === 'system' ? 'system' : (anchored ? (tone === 'thought' ? 'thought' : 'speech') : 'offscreen'));
     const offSide = hashSeed(content.speaker || '') % 2 ? 'left' : 'right';
     const maxChainW = (stageW - margin * 2) * 0.92;
-    const chains = sizes.length > 1 ? [arrangeChain(sizes, maxChainW, 'auto'), arrangeChain(sizes, maxChainW, 'column')] : [arrangeChain(sizes, maxChainW)];
+    // 细连线不是每处都有：按页随机（同一页每次重排结果一样），其余的接缝照旧咬合。
+    const links = sizes.map((_, i) => i > 0 && LINKED_SHAPES.has(shape) && hashSeed(`${pageKey}:link:${i}`) % 2 === 0);
+    const chains = sizes.length > 1 ? [arrangeChain(sizes, maxChainW, 'auto', links), arrangeChain(sizes, maxChainW, 'column', links)] : [arrangeChain(sizes, maxChainW)];
     const placed = placeComicGroup({ stageW, stageH, safe, head, kind, chains, avoid, offSide, gap: COMIC_GAP_LEVELS[comic.gap] });
     // 没有立绘的心里话（多半是主角）：云朵不拖尾巴。
     const tail = !comic.tail || (kind === 'offscreen' && tone === 'thought') ? null : resolveTail({ kind, head, centers: placed.centers, sizes, stageW, offSide });
@@ -434,22 +455,30 @@ function layoutPage(root, snapshot, opts, { relayout = false }) {
     svg.style.setProperty('--igs-comic-line', `${line}px`);
     const reduced = prefersReducedMotion(doc.defaultView);
     let delay = 0;
+    // 三层各画各的：先全部阴影、再全部墨线、最后全部纸色。后填的纸色盖掉泡与泡相叠处的墨线，整串只留外轮廓。
+    const layers = (comic.palette === 'color' ? ['shade', 'ink', 'paper'] : ['ink', 'paper']).map((name) => {
+        const layer = svgEl(doc, 'g', { class: `igs-comic-l-${name}` });
+        svg.appendChild(layer);
+        return { name, layer };
+    });
+    const bodies = shapes.map((s, i) => ({ cx: placed.centers[i][0], cy: placed.centers[i][1], a: s.a, b: s.b, n: s.n, tip: s.tip }));
     items.forEach((item, i) => {
         const [cx, cy] = placed.centers[i];
         const s = shapes[i];
-        const body = { cx, cy, a: s.a, b: s.b, n: s.n };
+        const body = bodies[i];
         const parts = [bodyPath(shape, body, rand)];
+        if (links[i]) parts.push(linkPath(bodies[i - 1], body, font * 0.34));
         if (tail && tail.index === i) {
             if (tone === 'thought') parts.push(...thoughtTrail(body, tail.tip));
             else parts.push(tailPath(tone === 'shout' ? 'shout' : (tone === 'phone' ? 'phone' : 'speech'), body, tail.tip, rand));
         }
-        const g = svgEl(doc, 'g', { class: 'igs-comic-b' });
-        g.style.transformOrigin = `${Math.round(cx)}px ${Math.round(cy)}px`;
-        g.style.setProperty('--igs-comic-delay', `${delay}ms`);
-        if (comic.palette === 'color') for (const d of parts) g.appendChild(svgEl(doc, 'path', { class: 'igs-comic-shade', d }));
-        for (const d of parts) g.appendChild(svgEl(doc, 'path', { class: 'igs-comic-ink', d }));
-        for (const d of parts) g.appendChild(svgEl(doc, 'path', { class: 'igs-comic-paper', d }));
-        svg.appendChild(g);
+        for (const { name, layer } of layers) {
+            const g = svgEl(doc, 'g', { class: 'igs-comic-b' });
+            g.style.transformOrigin = `${Math.round(cx)}px ${Math.round(cy)}px`;
+            g.style.setProperty('--igs-comic-delay', `${delay}ms`);
+            for (const d of parts) g.appendChild(svgEl(doc, 'path', { class: `igs-comic-${name}`, d }));
+            layer.appendChild(g);
+        }
         const m = metrics[i];
         item.bubble.style.left = `${Math.round(cx - s.dx - m.w / 2)}px`;
         item.bubble.style.top = `${Math.round(cy - s.dy - m.h / 2)}px`;
