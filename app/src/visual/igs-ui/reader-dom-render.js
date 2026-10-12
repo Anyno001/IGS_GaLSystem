@@ -884,8 +884,8 @@ function applyDialogFontMetrics(textEl, fontStack) {
 }
 
 const STATUS_HUD_PLACEHOLDER = '<svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="9" r="3.4"/><path d="M5.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/></svg>';
-// 折叠态加号与左列手机入口同规格：32 视框、1.6 描边、圆头、铺满 38px 方块，笔画长 16 与手机外框比例相当，中心落在 (16,16)。
-const STATUS_HUD_TOGGLE_ICON = '<svg viewBox="0 0 32 32" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path class="igs-hud-icon-expand" d="M16 8v16M8 16h16"/></svg>';
+// 折叠态加号保持原来的 18px 小号（随 --igs-hud-scale）；外框 38px，加号在框内正中不再下移，左列入口按外框中线对齐。
+const STATUS_HUD_TOGGLE_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path class="igs-hud-icon-expand" d="M12 5v14M5 12h14"/></svg>';
 const STATUS_HUD_LOCATION_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12Z"/><circle cx="12" cy="9" r="2.3"/></svg>';
 
 const STATUS_HUD_COLOR_VARS = Object.freeze({
