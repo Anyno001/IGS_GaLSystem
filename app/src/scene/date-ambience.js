@@ -1,6 +1,7 @@
 // 约会地点氛围层：按 [igs-scene] 的地点词判断咖啡厅 / 水族馆 / 电影院 / 海边 / 夜景，返回常驻氛围层的 kind，供 fx-daily 渲染。
 // 只认约会场所，判不出返回 null，交给 place-ambience 之外的兜底；水下（海底、海中）归 place-ambience，这里不碰。
 import { GAME_AMBIENCE_WORDS } from './game-console.js';
+import { isOpenAirPlace } from './place-ambience.js';
 const CINEMA_WORDS = Object.freeze(['电影院', '影院', '影厅', '放映厅', '电影厅', '影城', '戏院', 'cinema']);
 const AQUARIUM_WORDS = Object.freeze(['水族馆', '海洋馆', '水母馆', '海洋世界', '海洋公园', '海洋乐园', 'aquarium']);
 const BEACH_WORDS = Object.freeze(['海边', '沙滩', '海滩', '海岸', '海滨', 'beach']);
@@ -51,6 +52,8 @@ export function resolveDateAmbience(location, { worldview = '' } = {}) {
     if (includesAny(raw, AQUARIUM_WORDS)) return { kind: 'aquarium', variant: '' };
     if (includesAny(raw, BEACH_WORDS)) return { kind: 'beach', variant: '' };
     if (includesAny(raw, NIGHTVIEW_WORDS)) return { kind: 'nightview', variant: '' };
+    // 余下都是室内场所：人在门外、伞下、露天座位时不挂（窗格光影、暗场、屏幕光都在屋里）。
+    if (isOpenAirPlace(raw)) return null;
     if (includesAny(raw, GAME_AMBIENCE_WORDS)) return { kind: 'console', variant: '' };
     if (includesAny(raw, CAFE_WORDS)) return { kind: 'cafe', variant: '' };
     return null;

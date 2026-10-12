@@ -176,16 +176,18 @@ const ORIGINAL_READER_STYLE_TEXT = `
 #igs-overlay.igs-mode-embedded #igs-status-hud{top:14px;left:12px;--igs-hud-edge-x:12px;width:calc(320px * var(--igs-hud-scale,1));}
 #igs-overlay #igs-status-hud[data-igs-hud-pos]{z-index:6;--igs-hud-px:var(--igs-hud-x,0);--igs-hud-py:var(--igs-hud-y,0);top:calc(14px + (100% - 28px) * var(--igs-hud-py) / 100);left:calc(var(--igs-hud-edge-x,14px) + (100% - var(--igs-hud-edge-x,14px) * 2) * var(--igs-hud-px) / 100);transform:translate(calc(var(--igs-hud-px) * -1%),calc(var(--igs-hud-py) * -1%));}
 #igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-no-metrics{width:max-content;}
-#igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-collapsed{width:calc(36px * var(--igs-hud-scale,1));height:calc(36px * var(--igs-hud-scale,1));padding:0;}
+/* 折叠态与左列入口同为固定 38px：--igs-hud-scale 只挂在状态栏上，入口坞拿不到它，跟着缩放会让两者中心错开。 */
+#igs-overlay #igs-status-hud.igs-hud-collapsed,#igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-collapsed{width:38px;height:38px;padding:0;}
 @media ${STATUS_HUD_PHONE_MEDIA}{#igs-overlay #igs-status-hud[data-igs-hud-pos]{--igs-hud-px:var(--igs-hud-mx,0);--igs-hud-py:var(--igs-hud-my,0);}}
 #igs-status-hud.igs-hud-suppressed{opacity:0;}
 #igs-status-hud .igs-hud-toggle{position:absolute;inset:0;width:100%;height:100%;align-self:center;padding:0;pointer-events:auto;border:0;background:transparent;border-radius:0;box-shadow:none;color:rgba(255,255,255,.48);cursor:pointer;}
 #igs-status-hud .igs-hud-toggle:hover{background:transparent;border-color:transparent;color:rgba(255,255,255,.9);}
-#igs-status-hud .igs-hud-toggle svg{display:none;width:calc(18px * var(--igs-hud-scale,1));height:calc(18px * var(--igs-hud-scale,1));transform:translateY(4.5px);}
+#igs-status-hud .igs-hud-toggle svg{display:none;width:100%;height:100%;}
 
 #igs-status-hud.igs-hud-collapsed .igs-hud-identity,#igs-status-hud.igs-hud-collapsed .igs-hud-metrics,#igs-status-hud.igs-hud-collapsed .igs-hud-overflow{display:none;}
-#igs-status-hud.igs-hud-collapsed .igs-hud-toggle{width:calc(36px * var(--igs-hud-scale,1));height:calc(36px * var(--igs-hud-scale,1));border:0;background:transparent;border-radius:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;}
-#igs-status-hud.igs-hud-collapsed .igs-hud-toggle svg{display:block;}
+#igs-status-hud.igs-hud-collapsed .igs-hud-toggle{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border:0;background:transparent;border-radius:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;color:#f4f1ec;opacity:.55;filter:drop-shadow(0 2px 4px rgba(0,0,0,.5));transition:opacity .2s ease;}
+#igs-status-hud.igs-hud-collapsed .igs-hud-toggle:hover,#igs-status-hud.igs-hud-collapsed .igs-hud-toggle:focus-visible{color:#f4f1ec;opacity:1;}
+#igs-status-hud.igs-hud-collapsed .igs-hud-toggle svg{display:block;flex:none;}
 .igs-hud-identity{display:flex;flex-direction:column;align-items:center;gap:calc(4px * var(--igs-hud-scale,1));}
 .igs-hud-avatar{width:calc(46px * var(--igs-hud-scale,1));height:calc(46px * var(--igs-hud-scale,1));object-fit:cover;display:block;background:transparent;border:0;}
 .igs-hud-avatar-empty{display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.42);}

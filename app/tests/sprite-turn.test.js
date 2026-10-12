@@ -142,3 +142,24 @@ test('gate: head anchor stays mirrored for a flipped sprite', () => {
     assert.equal(spriteGeometry(base, null).head.x, 0.3);
     assert.ok(Math.abs(spriteGeometry({ ...base, flip: true }, null).head.x - 0.7) < 1e-9);
 });
+
+test('gate: several turn tags on one page resolve to the last one instead of cancelling out', () => {
+    const fx = fxOf('[igs-fx:stage|回眸|A]\n[igs-fx:stage|背影|A]\n[igs-fx:stage|甩头离开|A]\n一', '一');
+    assert.equal(fx.turns.A, 'storm');
+    const pose = resolveSpeakerPose(snap(fx, ON), 'A');
+    assert.equal(pose.flip, true);
+    assert.equal(pose.turn, 'storm');
+    const back = fxOf('[igs-fx:stage|回眸|A]\n[igs-fx:stage|背影|A]\n一', '一');
+    assert.equal(back.turns.A, 'back');
+    assert.equal(resolveSpeakerPose(snap(back, ON), 'A').back, true);
+});
+
+test('gate: glance without a prior back turn still plays a look-back in place', () => {
+    const a = el();
+    const anims = playSpriteTurn(a, { from: false, to: false, variant: 'glance' });
+    assert.ok(anims);
+    assert.deepEqual(a.anims[0].frames.map((f) => f.rotate), ['y 0deg', 'y 40deg', 'y 40deg', 'y 0deg']);
+    assert.equal(playSpriteTurn(el(), { from: false, to: false, variant: 'glance', reduced: true }), null);
+    assert.equal(playSpriteTurn(el(), { from: true, to: true, variant: 'back' }), null);
+});
+

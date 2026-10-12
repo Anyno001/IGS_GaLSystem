@@ -285,9 +285,11 @@ test('gate:notify:bell-waits-for-the-top-banner-to-retract', () => {
     cancelDanmaku(root);
 });
 
-test('gate:notify:mobile-panel-close-does-not-overlap-reader-exit', () => {
-    assert.match(NOTIFY_CENTER_STYLE_TEXT, /@media \(max-width:640px\)\{\.igs-nc-close\{order:-1;\}\}/);
+test('gate:notify:mobile-panel-actions-stay-centred-and-close-keeps-reader', () => {
+    assert.match(NOTIFY_CENTER_STYLE_TEXT, /@media \(max-width:640px\)\{\.igs-nc-bar\{flex-wrap:wrap;justify-content:center;\}\.igs-nc-title\{flex:0 0 100%;text-align:center;\}\}/);
+    assert.doesNotMatch(NOTIFY_CENTER_STYLE_TEXT, /\.igs-nc-close\{order:-1;/);
     assert.match(NOTIFY_CENTER_STYLE_TEXT, /\.igs-nc-bar\{display:flex;/);
+    assert.match(NOTIFY_CENTER_STYLE_TEXT, /\.igs-nc-title\{flex:1;/, 'desktop title keeps its original layout');
     const { root, motion } = makeRoot();
     const c = clock();
     applyDanmakuToDom(root, snapshot({ fx: { instants: [{ kind: 'notify', sender: 'a', text: 'b' }] } }, ON), opts(c));
@@ -295,6 +297,8 @@ test('gate:notify:mobile-panel-close-does-not-overlap-reader-exit', () => {
     click(entry);
     const bar = motion.querySelector('.igs-nc-bar');
     assert.deepEqual(bar.children.map((node) => node.className), ['igs-nc-title', 'igs-nc-clear', 'igs-nc-close']);
+    assert.equal(bar.querySelector('.igs-nc-clear').textContent, '全部清除');
+    assert.equal(bar.querySelector('.igs-nc-close').getAttribute('aria-label'), '关闭');
     click(bar.querySelector('.igs-nc-close'));
     assert.ok(!motion.querySelector('.igs-nc-panel'), 'panel closes');
     assert.ok(root.isConnected, 'reader stays mounted');

@@ -94,7 +94,7 @@ export function writeLegacyIgsSettings(storageLike, nextState = {}) {
     }
 }
 
-// 读路径的入参是刚 JSON.parse 出来的新对象，写路径的入参由调用方交出所有权（bootstrap 已拷好）。
+// 不深拷：读路径的入参是刚 JSON.parse 出来的新对象，写路径的入参由调用方交出所有权（bootstrap 已拷好）。
 export function normalizeLegacyIgsSettings(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
     return raw;
@@ -172,6 +172,15 @@ function isStorageLike(value) {
     return !!value && typeof value.getItem === 'function';
 }
 
+function cloneData(value) {
+    if (value == null) return value;
+    if (Array.isArray(value)) return value.map(cloneData);
+    if (typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneData(item)]));
+    }
+    return value;
+}
+
 function firstDefined(...values) {
     for (const value of values) {
         if (value !== undefined && value !== null) return value;
@@ -195,3 +204,4 @@ function slimBridgeForStorage(bridge) {
         },
     };
 }
+

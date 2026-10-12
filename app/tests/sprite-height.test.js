@@ -314,3 +314,4 @@ test('gate:sprite-height:cast zoom writes the layout that is already on screen',
     assert.equal(spriteHeightLayoutKey({}, 'pc', '丙', 'smile', '校服'), 'pc::丙|校服');
     assert.equal(spriteHeightLayoutKey(layouts, 'pc', ''), '');
 });
+

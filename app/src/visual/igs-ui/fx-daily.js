@@ -788,9 +788,9 @@ const AMBIENCE_HTML = Object.freeze({
 const AMBIENCE_FADE_MS = 900;
 
 // 换地点时自动入水 / 出水：上一个正文页在岸上、这一页到了水下就播一次入水，反过来播出水。
-// 跟「车窗光影、浴室水汽」同一个开关；刚打开阅读器的第一页、聊天/卡片页、NSFW 页、本页已有入水标签时都不播。
+// 跟水下光影同一个开关（地点光影）；刚打开阅读器的第一页、聊天/卡片页、NSFW 页、本页已有入水标签时都不播。
 function syncWaterCrossing(state, env, settings, content, played) {
-    if (!settings.ambience || pageKindOf(content) !== 'text') return '';
+    if (!settings.placeLight || pageKindOf(content) !== 'text') return '';
     const under = Boolean(env.place && env.place.kind === 'underwater');
     const was = state.underwater;
     state.underwater = under;
@@ -803,9 +803,16 @@ function syncWaterCrossing(state, env, settings, content, played) {
     return under ? 'dive' : 'surface';
 }
 
+// 三个开关各管各的：载具归「车窗光影」、浴室归「浴室水汽」、其余地点（室内窗光、水下、星空等）归「地点光影」。
+function ambienceSwitchOn(settings, kind) {
+    if (VEHICLE_KINDS.includes(kind)) return settings.vehicleLight === true;
+    if (kind === 'bath') return settings.bathSteam === true;
+    return settings.placeLight === true;
+}
+
 // 聊天页、卡片页不挂；NSFW 页只留浴室水汽、水下与太空这类环境本身（车里的光带会扫过 CG）。
 function resolveAmbience(settings, content, place) {
-    if (!settings.ambience || !place || pageKindOf(content) !== 'text') return null;
+    if (!place || !ambienceSwitchOn(settings, place.kind) || pageKindOf(content) !== 'text') return null;
     if (content.sceneNsfw === true && !STILL_PLACE_KINDS.includes(place.kind) && !DATE_STILL_KINDS.includes(place.kind) && !CAMPUS_STILL_KINDS.includes(place.kind) && !FX_PACK_STILL_KINDS.includes(place.kind)) return null;
     const time = resolveWeatherFxTime(content.sceneTime);
     return { ...place, night: time === 'night' || time === 'midnight' || time === 'dusk' };

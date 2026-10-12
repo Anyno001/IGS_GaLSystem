@@ -35,5 +35,8 @@ export function placeEntryDock(front, top) {
     front.style.setProperty('--igs-dock-top', value);
 }
 
-export const ENTRY_DOCK_CSS = `.${DOCK_CLASS}{position:absolute;z-index:1;left:var(--igs-entry-left,14px);top:var(--igs-dock-top,14px);display:flex;flex-direction:column;align-items:flex-start;gap:8px;pointer-events:none;}
+// 左上原位：坞宽固定 38px（与状态栏折叠按钮同宽），入口按中线居中，小/大档入口也与折叠按钮同一条竖线。
+// 全屏直播挪到名次卡上方时按右缘对齐计算 left，坞改回随内容宽、左对齐。
+export const ENTRY_DOCK_CSS = `.${DOCK_CLASS}{position:absolute;z-index:1;left:var(--igs-entry-left,14px);top:var(--igs-dock-top,14px);width:38px;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none;}
+[data-entry-full]>.${DOCK_CLASS}{width:auto;align-items:flex-start;}
 .${DOCK_CLASS}>*{position:relative;flex:none;}`;

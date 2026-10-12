@@ -37,7 +37,7 @@ import { resolveSpriteBaseScale } from './sprite-height.js';
 import { applyStageShakeEffect } from './stage-shake-runtime.js';
 import { playCameraImpactSfx } from './camera-impact.js';
 import { normalizeFxSoundSettings } from './fx-settings.js';
-import { normalizeStageCastSettings } from './stage-direction-settings.js';
+import { normalizeSpriteMotionSettings, normalizeStageCastSettings } from './stage-direction-settings.js';
 import { applyFxToDom, repositionFxSymbols } from './fx-runtime.js';
 import { applyDanmakuToDom } from './danmaku-runtime.js';
 import { applyItemMentionMarkup, itemMentionsOf, renderItemFx, showItemMention } from './fx-item-render.js';
@@ -51,7 +51,7 @@ import { applyWeatherFx, resolveWeatherFxTime } from './weather-fx-runtime.js';
 import { applySceneGrade } from './scene-grade.js';
 import { applyStageDirection, cancelCgReveal, decodeSpriteImage, revealCgImage } from './stage-direction-runtime.js';
 import { applyCastToDom, castRomanceAttr, castSlotKey, clearCastDom, isCastAlignEnabled, isCastCollapsed, isCastRomanceDuoEnabled, isStageCastEnabled, layoutCastSlots, resolveCastCapacity, resolveCastRomanceMode, resolveCastRomanceTarget, isCastLeanEnabled, markCalledCast, playCastBeats, resolveCastPosePlan, resolveCastReactPage, applySpeakerFlip, castStageEntrances, castKeyOfSnapshot, resolveSpeakerPose } from './stage-cast-render.js';
-import { BACK_HINT_DEFAULT, cancelSpriteTurn, playSpriteTurn } from './sprite-turn.js';
+import { BACK_HINT_DEFAULT, SPRITE_BACK_SCALE, cancelSpriteTurn, playSpriteTurn } from './sprite-turn.js';
 import { applySavedCastSlot } from './cast-slot-edit.js';
 import { spriteIdentity } from '../../scene/character-outfits.js';
 import { planCastLayouts, playSpeakerCastMotion, playSpeakerMove, resolveCastHandoff } from './stage-cast-motion.js';
@@ -449,7 +449,8 @@ export function buildFallbackSettingsOverlay(doc, snapshot, ctx = {}) {
     close.type = 'button';
     close.setAttribute('data-action', 'close');
     close.setAttribute('aria-label', '关闭');
-    close.textContent = '×';
+    // × 用关于视框中心对称的 SVG，不用文本字符：字形按基线排版，在 34px 方块里会偏上偏左。
+    close.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
     head.appendChild(close);
 
     const main = doc.createElement('div');
@@ -883,7 +884,8 @@ function applyDialogFontMetrics(textEl, fontStack) {
 }
 
 const STATUS_HUD_PLACEHOLDER = '<svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="9" r="3.4"/><path d="M5.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/></svg>';
-const STATUS_HUD_TOGGLE_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path class="igs-hud-icon-expand" d="M12 5v14M5 12h14"/></svg>';
+// 折叠态加号与左列手机入口同规格：32 视框、1.6 描边、圆头、铺满 38px 方块，笔画长 16 与手机外框比例相当，中心落在 (16,16)。
+const STATUS_HUD_TOGGLE_ICON = '<svg viewBox="0 0 32 32" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path class="igs-hud-icon-expand" d="M16 8v16M8 16h16"/></svg>';
 const STATUS_HUD_LOCATION_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12Z"/><circle cx="12" cy="9" r="2.3"/></svg>';
 
 const STATUS_HUD_COLOR_VARS = Object.freeze({
@@ -899,6 +901,14 @@ const STATUS_HUD_COLOR_VARS = Object.freeze({
 });
 
 const STATUS_HUD_RADIUS = Object.freeze({ square: 0, soft: 6, small: 10, medium: 16, large: 24, circle: '50%' });
+
+// 说话人立绘按角色记住的上次朝向 { page, flip }：只在同一楼内有效，换楼清空（姿态标签按楼解析，跨楼不延续）。
+function spriteFacingOf(current, messageId) {
+    const id = String(messageId == null ? '' : messageId);
+    if (!current.spriteFacing || current.spriteFacing.id !== id) current.spriteFacing = { id, map: new Map() };
+    return current.spriteFacing.map;
+}
+
 
 function findStatusHudHost(root) {
     if (!root) return null;
@@ -1253,9 +1263,18 @@ function cancelSpriteExit(current, element) {
     if (element) element.style.opacity = '';
 }
 
-// 旁白写了这个人离场：立绘朝画外淡出，动效关闭或低画质直接消失。
-function playSpriteExit(current, element, { reduced = false, lowQuality = false } = {}) {
-    if (reduced || lowQuality || !element || typeof element.animate !== 'function') return false;
+// 立绘动效开关：slide 为登场 / 退场的侧滑（spriteMotion.enabled 且 enterExit）；
+// move 为换位平移，属于「走位」，登场 / 退场与转身与走位都关掉时不播。
+export function resolveSpriteSlideGates(readerSettings) {
+    const reader = readerSettings || {};
+    const motion = normalizeSpriteMotionSettings(reader.spriteMotion);
+    const slide = motion.enabled && motion.enterExit;
+    return { slide, move: slide || normalizeStageCastSettings(reader.stageCast).castStage };
+}
+
+// 旁白写了这个人离场：立绘朝画外淡出；登场 / 退场关闭、减少动效或低画质时直接消失。
+function playSpriteExit(current, element, { reduced = false, lowQuality = false, enabled = true } = {}) {
+    if (!enabled || reduced || lowQuality || !element || typeof element.animate !== 'function') return false;
     const x = parseFloat(String(element.style.backgroundPosition || '').split(/\s+/)[0]);
     const shift = Number.isFinite(x) && x < 50 ? '-9%' : '9%';
     const token = {};
@@ -1265,6 +1284,8 @@ function playSpriteExit(current, element, { reduced = false, lowQuality = false 
         element.style.display = 'none';
         writeBackgroundImage(element, '');
         element.style.opacity = '';
+        // fill:'forwards' 会把透明度 0 一直留在 #igs-sprite 上；不取消，之后每个说话人的立绘都看不见。
+        try { token.anim.cancel(); } catch (error) { /* 已取消 */ }
     };
     token.anim = element.animate([{ opacity: 1, translate: '0 0' }, { opacity: 0, translate: shift + ' 0' }], { duration: 320, easing: 'ease-in', fill: 'forwards' });
     current.spriteExit = token;
@@ -1547,11 +1568,16 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 : resolveSpeakerPose(snapshot, spriteKey);
             if (castPlan && castPlan.speaker) Object.assign(layout, { posX: castPlan.speaker.posX, posY: castPlan.speaker.posY, scale: castPlan.speaker.scale });
             else if (speakerSlotX != null) layout.posX = speakerSlotX;
+            // 背影：已换成登记的「背影」图时不再镜像、不压暗；没有这张图时镜像 + 压暗 + 略缩小。
+            const backArt = speakerPose.back === true && snapshot.content.spriteBackArt === true;
+            const visualFlip = backArt ? false : speakerPose.flip;
+            const backFallback = speakerPose.back === true && !backArt;
+            if (backFallback) layout.scale = Math.round(Number(layout.scale) * SPRITE_BACK_SCALE * 100) / 100;
             stageSprite = { url: spriteAssetUrl, key: spriteKey, posX: Number(layout.posX) };
-            fxSprite = { url: spriteAssetUrl, posX: Number(layout.posX), posY: Number(layout.posY), scale: Number(layout.scale), head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, spriteKey, spriteMood, spriteOutfit), multi: Boolean(castPlan && castPlan.members.length), flip: speakerPose.flip };
+            fxSprite = { url: spriteAssetUrl, posX: Number(layout.posX), posY: Number(layout.posY), scale: Number(layout.scale), head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, spriteKey, spriteMood, spriteOutfit), multi: Boolean(castPlan && castPlan.members.length), flip: visualFlip };
             const probed = peekSpriteHead(spriteAssetUrl);
             speakerBack = speakerPose.back ? speakerPose.backText || BACK_HINT_DEFAULT : null;
-            spritePose = { layout, flip: fxSprite.flip, back: speakerPose.back, turn: speakerPose.turn, widthPct: spriteWidthPercent(stageW, stageH, { ...layout, naturalW: probed && probed.naturalW, naturalH: probed && probed.naturalH }), spriteKey, spriteMood, spriteOutfit };
+            spritePose = { layout, flip: fxSprite.flip, back: backFallback, turn: backArt ? '' : speakerPose.turn, widthPct: spriteWidthPercent(stageW, stageH, { ...layout, naturalW: probed && probed.naturalW, naturalH: probed && probed.naturalH }), spriteKey, spriteMood, spriteOutfit };
         }
         revealSpriteImage(spriteEl, spriteAssetUrl, () => {
             writeBackgroundImage(spriteEl, spriteAssetUrl);
@@ -1573,16 +1599,24 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             applySpeakerFlip(spriteEl, spritePose.flip, spritePose.layout.posX, spritePose.widthPct);
             if (spritePose.back) spriteEl.setAttribute('data-igs-sprite-back', '1');
             else spriteEl.removeAttribute('data-igs-sprite-back');
+            // 转身判定按角色记住上次朝向（同一楼内），中间隔了旁白页 / 别人说话也能接上；同一页重绘不重播。
             const turnPage = `${snapshot.messageId}:${snapshot.content.currentIndex}`;
-            const prevTurn = current.spriteTurn;
-            if (!prevTurn || prevTurn.page !== turnPage) cancelSpriteTurn(spriteEl);
-            if (prevTurn && prevTurn.page !== turnPage && prevTurn.key === spritePose.spriteKey && prevTurn.flip !== spritePose.flip) {
+            const facing = spriteFacingOf(current, snapshot.messageId);
+            const memo = facing.get(spritePose.spriteKey);
+            const freshPage = !memo || memo.page !== turnPage;
+            if (!current.spriteTurn || current.spriteTurn.page !== turnPage) cancelSpriteTurn(spriteEl);
+            const fromFlip = memo ? memo.flip : false;
+            const shouldTurn = freshPage && (fromFlip !== spritePose.flip || spritePose.turn === 'glance');
+            if (shouldTurn) {
                 playSpriteTurn(spriteEl, {
-                    from: prevTurn.flip, to: spritePose.flip, prop: 'rotate', variant: spritePose.turn, posX: spritePose.layout.posX,
+                    from: fromFlip, to: spritePose.flip, prop: 'rotate', variant: spritePose.turn, posX: spritePose.layout.posX,
                     reduced: prefersReducedMotion(), lowQuality: root.getAttribute('data-igs-quality') === 'low', stage: stageMotion,
                     sound: normalizeFxSoundSettings(snapshot.readerSettings && snapshot.readerSettings.fxSound),
                 });
             }
+            igsDebug('[DEBUG-sprite] pose', { speaker: spritePose.spriteKey, from: fromFlip, to: spritePose.flip, turn: spritePose.turn, backFallback: spritePose.back, backArt: snapshot.content.spriteBackArt === true, played: shouldTurn });
+            // 甩头离开那一页之后视为回台正面：记成正面，免得回来时多播一次转回。
+            facing.set(spritePose.spriteKey, { page: turnPage, flip: spritePose.turn === 'storm' ? false : spritePose.flip });
             current.spriteTurn = { page: turnPage, key: spritePose.spriteKey, flip: spritePose.flip };
             igsDebug('[DEBUG-sprite] apply-layout', { mode: snapshot.mode, speaker: spritePose.spriteKey, mood: spritePose.spriteMood, outfit: spritePose.spriteOutfit, index: snapshot.content.currentIndex, layout: { ...spritePose.layout } });
         });
@@ -1597,7 +1631,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         cancelSpriteTurn(spriteEl);
         spriteEl.removeAttribute('data-igs-sprite-back');
         clearSpriteOutfitSwap(spriteEl);
-        const fading = exiting && playSpriteExit(current, spriteEl, { reduced: prefersReducedMotion(), lowQuality: root.getAttribute('data-igs-quality') === 'low' });
+        const fading = exiting && playSpriteExit(current, spriteEl, { reduced: prefersReducedMotion(), lowQuality: root.getAttribute('data-igs-quality') === 'low', enabled: resolveSpriteSlideGates(snapshot.readerSettings).slide });
         if (!fading) {
             applySpeakerFlip(spriteEl, false);
             spriteEl.classList.remove('igs-sprite-narration');
@@ -1610,6 +1644,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         }
     }
     const castReduced = prefersReducedMotion();
+    const slideGates = resolveSpriteSlideGates(snapshot.readerSettings);
     // 陪衬朝向说话人：减少动效、暧昧退场或开关关闭时不倾；旁白页（无说话人槽位）保持上一页朝向。
     const castLean = !castReduced && castRomanceMode !== 'recede' && isCastLeanEnabled(snapshot)
         ? { speakerX: speakerSlotX, keep: speakerSlotX == null }
@@ -1631,7 +1666,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         // 贴底探测未就绪时，新上台的陪衬等下方重排完成再滑入（applyCastToDom 内有超时兜底）。
         let releaseCastAlign = () => {};
         const castAlignReady = castPlan.pending.length ? new Promise((resolve) => { releaseCastAlign = resolve; }) : null;
-        applyCastToDom(root, markCalledCast(castPlan.members, castReact.called), { reduced: castReduced, handoff, focus: castFocus, lean: castLean, entrances: castStageEntrances(snapshot), ready: castAlignReady, spriteEnhance, turn: castTurnKinds, lowQuality: root.getAttribute('data-igs-quality') === 'low', turnStage: stageMotion, turnSound: normalizeFxSoundSettings(snapshot.readerSettings && snapshot.readerSettings.fxSound) });
+        applyCastToDom(root, markCalledCast(castPlan.members, castReact.called), { reduced: castReduced, slide: slideGates.slide, move: slideGates.move, handoff, focus: castFocus, lean: castLean, entrances: castStageEntrances(snapshot), ready: castAlignReady, spriteEnhance, turn: castTurnKinds, lowQuality: root.getAttribute('data-igs-quality') === 'low', turnStage: stageMotion, turnSound: normalizeFxSoundSettings(snapshot.readerSettings && snapshot.readerSettings.fxSound) });
         const castReactKey = `${snapshot.messageId}:${snapshot.content.currentIndex}`;
         if (current.castReactKey !== castReactKey) {
             current.castReactKey = castReactKey;
@@ -1689,7 +1724,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             ? { messageId: snapshot.messageId, speaker: stageSprite.key, speakerX: stageSprite.posX, posY: fxSprite ? fxSprite.posY : null }
             : null;
         current.castStage = null;
-        if (castEnabled) applyCastToDom(root, [], { reduced: castReduced });
+        if (castEnabled) applyCastToDom(root, [], { reduced: castReduced, slide: slideGates.slide, move: slideGates.move });
         else clearCastDom(root);
     }
     const castRomanceMark = !castEditing && castPlan && castPlan.members.length ? castRomanceAttr(snapshot.mode, castRomanceMode) : '';
@@ -1889,11 +1924,13 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         // 有人说话但没有立绘（系统角色、只配头像）：舞台调度按换说话人处理，不播旧立绘退场。
         noSpriteSpeaker: !stageSprite && (Boolean(snapshot.content.speaker) || snapshot.content.textType === 'system'),
     });
-    if (castCollapseMove) playSpeakerMove(spriteEl, castCollapseMove.fromX, castCollapseMove.toX, castCollapseMove.posY);
+    if (castCollapseMove && slideGates.move) playSpeakerMove(spriteEl, castCollapseMove.fromX, castCollapseMove.toX, castCollapseMove.posY);
     if (castSpeakerMotion) {
         playSpeakerCastMotion(spriteEl, castSpeakerMotion.prevStage, castSpeakerMotion.speaker, castSpeakerMotion.handoff, {
             // 同场景内直接切回（旁白 / 系统页后回到说话人）也不播同屏上台淡入。
             skipEnter: stageDirection.directSprite === true || stageDirection.played.some((kind) => kind.startsWith('sprite:') && kind.includes('enter')),
+            slide: slideGates.slide,
+            move: slideGates.move,
         });
     }
     // 亲密演出与 NSFW 仅露脸剪影：复用 fxSprite（布局 + 手动头部标定），编辑立绘时 fxSprite 为 null、不逼近不剪影。

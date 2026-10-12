@@ -210,6 +210,19 @@ function entryTop(root, motion, stageH) {
     return Math.max(ENTRY_TOP, (rect.bottom - m.top) * k + ENTRY_GAP);
 }
 
+// 入口坞左边距：状态栏压住左上原位时，让 38px 坞的中线对准状态栏的中线（嵌入模式状态栏左边距是 12 而不是 14）；
+// 状态栏不在左上、隐藏或量不到时回默认 ENTRY_LEFT。
+function entryLeft(root, motion, stageH) {
+    const hud = root.querySelector('#igs-status-hud');
+    if (!hud || hud.hasAttribute('hidden') || !hud.classList || !hud.classList.contains('igs-hud-collapsed') || typeof hud.getBoundingClientRect !== 'function' || typeof motion.getBoundingClientRect !== 'function') return ENTRY_LEFT;
+    const rect = hud.getBoundingClientRect();
+    const m = motion.getBoundingClientRect();
+    if (!(rect.width > 0) || !(m.height > 0)) return ENTRY_LEFT;
+    const k = stageH / m.height;
+    if ((rect.left - m.left) * k >= ENTRY_LEFT + ENTRY_SIZE || (rect.top - m.top) * k >= ENTRY_TOP + ENTRY_SIZE) return ENTRY_LEFT;
+    return Math.max(0, Math.round((rect.left - m.left) * k + (rect.width * k - ENTRY_SIZE) / 2));
+}
+
 // 内心弹幕的落点：有头部标定时围着头，否则围着立绘上半身；没有立绘就在舞台中上部。
 function innerAnchor(geo, sprite) {
     const floor = Math.min(geo.dialogTop, geo.stageH) - 24;
@@ -581,13 +594,14 @@ export function applyDanmakuToDom(root, snapshot, options = {}) {
             const stage = measureStage(layers.motion);
             if (!stage) return;
             let top = entryShown || reviewShown || notifyShown ? entryTop(root, layers.motion, stage.stageH) : 0;
+            const left = entryShown || reviewShown || notifyShown ? entryLeft(root, layers.motion, stage.stageH) : ENTRY_LEFT;
             state.liveStage = stage;
             placeLiveFullName(root, stage);
             const liveFit = phone ? fitLivePhone(host, stage) : null;
             if (phone) fitLiveControls(front, liveFit);
             if (phone) fitFaceFor(host, stage, options.sprite, ctx.doc, refit);
             // 入口浮钮避开直播手机：手机左侧放得下就留在外面，放不下就收进手机内、标题行下方。
-            const place = entryPlacement(stage, liveFit, top, liveFit && liveFit.layout === 'full' ? liveCardRect(host, layers.motion, stage) : null, liveFit && liveFit.layout === 'full' ? entrySizeOf(front, layers.motion, stage) : 0);
+            const place = entryPlacement(stage, liveFit, top, liveFit && liveFit.layout === 'full' ? liveCardRect(host, layers.motion, stage) : null, liveFit && liveFit.layout === 'full' ? entrySizeOf(front, layers.motion, stage) : 0, left);
             front.style.setProperty('--igs-entry-left', `${place.left}px`);
             if (place.full) front.setAttribute('data-entry-full', '1');
             else front.removeAttribute('data-entry-full');
@@ -626,8 +640,8 @@ function fitFaceFor(host, stage, sprite, doc, refit) {
 // 观众 / 社区 / 通知入口的落点：手机形态直播的手机在场时避开它的 rect。
 // 全屏直播：入口挪到右侧人气榜名次卡正上方，右边缘与名次卡对齐、间距 ENTRY_GAP；多个入口往上叠（step 为每格高度）。
 // card = 名次卡在舞台里的 { right, top }，size = 入口边长；量不到名次卡时按右内边距 16 与默认卡高估算。
-export function entryPlacement(stage, fit, top, card, size) {
-    const base = { left: ENTRY_LEFT, top };
+export function entryPlacement(stage, fit, top, card, size, left = ENTRY_LEFT) {
+    const base = { left, top };
     if (stage && fit && fit.layout === 'full') {
         const box = size > 0 ? size : ENTRY_SIZE;
         const stageW = Number(stage.stageW) || 0;

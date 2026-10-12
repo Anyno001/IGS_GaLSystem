@@ -747,10 +747,11 @@ test('gate:igs-ui:reader-source-keeps-original-selectors', () => {
     assert.match(source.styleText, /#igs-status-hud\.igs-hud-bg-dialog\{[^}]*background:color-mix\(in srgb,var\(--igs-dialog-bg[^}]*50%,transparent\)[^}]*border-radius:calc\(6px \* var\(--igs-hud-scale,1\)\)/);
     assert.doesNotMatch(source.styleText, /#igs-status-hud\.igs-hud-bg-dialog\{[^}]*backdrop-filter/);
     assert.match(source.styleText, /#igs-status-hud \.igs-hud-toggle\{position:absolute;inset:0;width:100%;height:100%;[^}]*pointer-events:auto[^}]*border:0;background:transparent;border-radius:0/);
-    assert.match(source.styleText, /#igs-status-hud \.igs-hud-toggle svg\{display:none;width:calc\(18px \* var\(--igs-hud-scale,1\)\);height:calc\(18px \* var\(--igs-hud-scale,1\)\);transform:translateY\(4\.5px\);\}/);
+    assert.match(source.styleText, /#igs-status-hud \.igs-hud-toggle svg\{display:none;width:100%;height:100%;\}/);
     assert.match(source.styleText, /#igs-status-hud\.igs-hud-collapsed \.igs-hud-identity,#igs-status-hud\.igs-hud-collapsed \.igs-hud-metrics,#igs-status-hud\.igs-hud-collapsed \.igs-hud-overflow\{display:none;\}/);
-    assert.match(source.styleText, /#igs-status-hud\.igs-hud-collapsed \.igs-hud-toggle\{[^}]*width:calc\(36px \* var\(--igs-hud-scale,1\)\);height:calc\(36px \* var\(--igs-hud-scale,1\)\);border:0;background:transparent;border-radius:0/);
-    assert.match(source.styleText, /#igs-status-hud\.igs-hud-collapsed \.igs-hud-toggle svg\{display:block;\}/);
+    assert.match(source.styleText, /#igs-status-hud\.igs-hud-collapsed \.igs-hud-toggle\{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border:0;background:transparent;border-radius:0[^}]*color:#f4f1ec;opacity:\.55;filter:drop-shadow\(0 2px 4px rgba\(0,0,0,\.5\)\)/);
+    assert.match(source.styleText, /#igs-status-hud\.igs-hud-collapsed \.igs-hud-toggle:hover,#igs-status-hud\.igs-hud-collapsed \.igs-hud-toggle:focus-visible\{color:#f4f1ec;opacity:1;\}/);
+    assert.match(source.styleText, /#igs-status-hud\.igs-hud-collapsed \.igs-hud-toggle svg\{display:block;flex:none;\}/);
     assert.doesNotMatch(source.styleText, /#igs-status-hud\.igs-hud-collapsed \.igs-hud-toggle\{[^}]*var\(--igs-toolbar-bg/);
     assert.match(source.styleText, /#igs-overlay\.igs-toolbar-top #igs-status-hud\{top:14px;\}/);
     assert.doesNotMatch(source.styleText, /transition:all/);
@@ -782,7 +783,7 @@ test('gate:igs-ui:reader-source-keeps-original-selectors', () => {
     assert.doesNotMatch(readerHostText, /emptyBackgroundColorField|optionBubbleFontSizeField|readerSettings\.emptyBackgroundColor/);
     assert.match(rendererText, /const dockTop = !embeddedMode && readerSettings\.toolbarDock !== 'float'/);
     assert.match(rendererText, /statusHud\.classList\.toggle\('igs-hud-collapsed', persistedCollapsed \|\| toolbarExpanded\)/);
-    assert.match(rendererText, /class="igs-hud-icon-expand" d="M12 5v14M5 12h14"/);
+    assert.match(rendererText, /class="igs-hud-icon-expand" d="M16 8v16M8 16h16"/);
     assert.doesNotMatch(rendererText, /igs-hud-icon-collapse/);
     assert.match(rendererText, /`calc\(\$\{radius\}px \* var\(--igs-hud-scale,1\)\)`/);
     assert.match(rendererText, /hud && hud\.barColor === 'grayscale'/);

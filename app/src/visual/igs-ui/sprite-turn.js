@@ -23,11 +23,14 @@ export function playSpriteTurnSfx(sound) {
 }
 
 export const SPRITE_TURN_STYLE_TEXT = `
-#igs-overlay #igs-sprite[data-igs-sprite-back]:not(.igs-sprite-editing){--igs-sprite-dim:brightness(.74) saturate(.9);}
+#igs-overlay #igs-sprite[data-igs-sprite-back]:not(.igs-sprite-editing){--igs-sprite-dim:brightness(.6) saturate(.75);}
 #igs-overlay #igs-speaker[data-igs-back-hint]::after{content:attr(data-igs-back-hint);margin-left:.7em;font-size:.8em;font-weight:400;opacity:.8;letter-spacing:.04em;}
 `.trim();
 
 export const BACK_HINT_DEFAULT = '背对着你';
+// 背影：角色登记了这个精确表情槽位就直接用这张图；没有时退回镜像 + 压暗（上方样式）+ 按此比例缩小，做出背身剪影感。
+export const SPRITE_BACK_MOOD = '背影';
+export const SPRITE_BACK_SCALE = 0.94;
 
 export function cancelSpriteTurn(el) {
     const list = el && el._igsTurnAnims;
@@ -49,8 +52,11 @@ function frames(prop, from, to) {
 
 // el 的终态已写好；这里只播过程。prop 为 'rotate'（说话人）或 'scale'（陪衬）。
 // variant：'glance' 回眸（镜头轻推）、'storm' 甩头离开（转身后朝画外退场，停在透明）。
+// 回眸前面没有背对（朝向不变）时也播：侧转约 40° 再转回，表现「回头看一眼」。
 export function playSpriteTurn(el, { from = false, to = false, prop = 'rotate', variant = '', posX = 50, reduced = false, lowQuality = false, stage = null, sound = null } = {}) {
-    if (!el || typeof el.animate !== 'function' || from === to) return null;
+    if (!el || typeof el.animate !== 'function') return null;
+    const glanceInPlace = from === to && variant === 'glance';
+    if (from === to && !glanceInPlace) return null;
     cancelSpriteTurn(el);
     if (reduced || lowQuality) return null;
     const anims = [];
@@ -67,7 +73,13 @@ export function playSpriteTurn(el, { from = false, to = false, prop = 'rotate', 
                 { duration: SPRITE_TURN_MS },
             ));
         }
-        anims.push(el.animate(frames(prop, from, to), { duration: SPRITE_TURN_MS, easing: 'ease-in-out' }));
+        if (glanceInPlace) {
+            const base = prop === 'scale' ? (to ? '-1 1' : '1 1') : `y ${to ? 180 : 0}deg`;
+            const mid = prop === 'scale' ? (to ? '-0.6 1' : '0.6 1') : `y ${to ? 140 : 40}deg`;
+            anims.push(el.animate([{ [prop]: base }, { [prop]: mid, offset: 0.4 }, { [prop]: mid, offset: 0.6 }, { [prop]: base }], { duration: SPRITE_TURN_MS * 2, easing: 'ease-in-out' }));
+        } else {
+            anims.push(el.animate(frames(prop, from, to), { duration: SPRITE_TURN_MS, easing: 'ease-in-out' }));
+        }
         anims.push(el.animate(
             [{ filter: 'brightness(1)' }, { filter: 'brightness(.8)', offset: 0.5 }, { filter: 'brightness(1)' }],
             { duration: SPRITE_TURN_MS, easing: 'ease-in-out', composite: 'add' },

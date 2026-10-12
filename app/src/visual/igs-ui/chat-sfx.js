@@ -152,7 +152,7 @@ export function playChatSfx(kind, { volume = 0.6, preset, audioScheduler, delay 
     if (typeof audioScheduler === 'function') {
         try { return audioScheduler({ kind, volume, preset: normalizeChatSfxPreset(preset), partials }) || null; } catch { return null; }
     }
-    return playSynthPartials(partials, { volume, delay });
+    return playSynthPartials(partials, { volume, delay, retryOnUnlock: true });
 }
 
 export function createSynthPartial(wave, from, to, start, duration, gain, extra) {
@@ -169,12 +169,25 @@ function noiseBuffer(context) {
     return buffer;
 }
 
-export function playSynthPartials(partials, { volume = 0.6, delay = 0 } = {}) {
+export function playSynthPartials(partials, { volume = 0.6, delay = 0, retryOnUnlock = false } = {}) {
     if (!Array.isArray(partials) || !partials.length || !(volume > 0)) return null;
     const output = busInput('sfx');
     if (!output) return null;
     const nodes = [];
+    let releaseDuck = null;
+    let cancelled = false;
+    let scheduled = false;
+    let retry = null;
+    const clearRetry = () => {
+        if (!retry) return;
+        retry.doc.removeEventListener('pointerdown', retry.handler, true);
+        retry = null;
+    };
     const stop = () => {
+        cancelled = true;
+        clearRetry();
+        releaseDuck?.();
+        releaseDuck = null;
         for (const node of nodes) {
             try { node.stop?.(); } catch { /* already stopped */ }
             try { node.disconnect(); } catch { /* already disconnected */ }
@@ -183,8 +196,9 @@ export function playSynthPartials(partials, { volume = 0.6, delay = 0 } = {}) {
     };
     try {
         const context = output.context;
-        resumeAudioBus().then(() => {
-            if (context.state !== 'running') return;
+        const schedule = () => {
+            if (cancelled || scheduled || context.state !== 'running') return;
+            scheduled = true;
             const base = context.currentTime + 0.01 + delay;
             for (const q of partials) {
                 const at = base + q.start;
@@ -222,8 +236,31 @@ export function playSynthPartials(partials, { volume = 0.6, delay = 0 } = {}) {
                 osc.stop(at + q.duration + 0.02);
             }
             const end = Math.max(...partials.map((q) => q.start + q.duration));
-            duckSceneAudio({ durationMs: (delay + end) * 1000 + 150 });
-        }).catch(stop);
+            releaseDuck = duckSceneAudio({ durationMs: (delay + end) * 1000 + 150 });
+        };
+        // 聊天首页常在没有音频许可时自动冒泡；总线恢复后也要补播这一次，不能把它静默丢掉。
+        const armUnlock = () => {
+            if (cancelled || scheduled || retry || !retryOnUnlock || context.state === 'running') return;
+            const doc = globalThis.document;
+            if (!doc || typeof doc.addEventListener !== 'function') return;
+            const handler = () => {
+                clearRetry();
+                resume().catch(stop);
+            };
+            retry = { doc, handler };
+            doc.addEventListener('pointerdown', handler, true);
+        };
+        const resume = () => {
+            const pending = resumeAudioBus({ retry: !retryOnUnlock });
+            // iOS/WebView 中 resume() 可能直到下一次手势才兑现：不能等 Promise 结算后才监听手势。
+            armUnlock();
+            return pending.then(() => {
+                if (cancelled) return;
+                if (context.state === 'running') { clearRetry(); schedule(); return; }
+                armUnlock();
+            });
+        };
+        resume().catch(stop);
         return { stop };
     } catch {
         stop();

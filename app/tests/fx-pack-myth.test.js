@@ -166,7 +166,7 @@ test('gate: myth charm state registers and sources avoid canvas and mask-image u
         const src = readFileSync(new URL(`../src/visual/igs-ui/${file}`, import.meta.url), 'utf8');
         assert.doesNotMatch(src, /canvas/i, file);
         assert.doesNotMatch(src, /mask-image\s*:\s*url/i, file);
-        assert.ok(!/\r(?!\n)/.test(src), `${file} has no stray CR`);
+        assert.ok(!src.includes('\r'), `${file} uses LF`);
     }
 });
 

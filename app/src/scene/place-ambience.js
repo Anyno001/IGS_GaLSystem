@@ -58,6 +58,13 @@ function rawOf(value) {
     return String(value == null ? '' : value).trim().toLowerCase();
 }
 
+// 明说在露天 / 门外 / 伞下：「咖啡店外的太阳伞下」不在店里，室内的窗格光影、光斑都不该挂。
+const OPEN_AIR_RE = /露天|户外|室外|屋外|店外|馆外|厅外|门外|门口|门前|伞下|阳伞|外摆|露台|街边|路边|草坪|野餐/;
+
+export function isOpenAirPlace(location) {
+    return OPEN_AIR_RE.test(rawOf(location));
+}
+
 function includesAny(text, words) {
     return words.some((word) => text.includes(word));
 }

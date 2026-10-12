@@ -31,8 +31,12 @@ const GENERAL_DEFAULT_KINDS = new Set(FX_PACKS_ACTIVE.filter((pack) => pack.defa
 
 export function normalizeDailyFxSettings(value) {
     const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-    // ambience：车窗光影、浴室水汽这类按地点常驻的氛围层，不写提示词，默认跟着日常演出一起开。
-    const out = { enabled: src.enabled === true, petals: src.petals !== false, photoAlbum: src.photoAlbum !== false, ambience: src.ambience !== false };
+    // 按地点常驻的氛围层，不写提示词，默认跟着日常演出一起开；分三个开关：车窗光影（载具）、浴室水汽、其他地点光影（室内窗光、水下、星空等）。
+    // 旧存档只有一个 ambience：三个新开关没存过时都沿用它；ambience 本身留作「三个里有一个开着」。
+    const legacy = src.ambience !== false;
+    const own = (key) => (typeof src[key] === 'boolean' ? src[key] : legacy);
+    const out = { enabled: src.enabled === true, petals: src.petals !== false, photoAlbum: src.photoAlbum !== false, vehicleLight: own('vehicleLight'), bathSteam: own('bathSteam'), placeLight: own('placeLight') };
+    out.ambience = out.vehicleLight || out.bathSteam || out.placeLight;
     for (const kind of DAILY_FX_KINDS) out[kind] = DAILY_FX_OPT_IN.has(kind) && !GENERAL_DEFAULT_KINDS.has(kind) ? src[kind] === true : src[kind] !== false;
     // 包的默认总开关（dailyFx.pack<Id>，题材包默认关、defaultOn 通用包默认开）；总开关关着时各 kind 由 fx-era 的 applyFxEra 链拨成关，勾选原样留在存档里。
     for (const pack of FX_PACKS_ACTIVE) if (!pack.packSwitch) out[packSwitchKey(pack.id)] = pack.defaultOn === true ? src[packSwitchKey(pack.id)] !== false : src[packSwitchKey(pack.id)] === true;

@@ -67,7 +67,7 @@ test('gate:status-hud-position:reader-css-moves-custom-positions-below-toolbar',
     assert.ok(css.includes(`@media ${STATUS_HUD_PHONE_MEDIA}{#igs-overlay #igs-status-hud[data-igs-hud-pos]{--igs-hud-px:var(--igs-hud-mx,0);--igs-hud-py:var(--igs-hud-my,0);}}`));
     assert.match(css, /#igs-overlay\.igs-mode-embedded #igs-status-hud\{[^}]*--igs-hud-edge-x:12px;/);
     const shrink = css.indexOf('#igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-no-metrics{width:max-content;}');
-    const collapsed = css.indexOf('#igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-collapsed{width:calc(36px * var(--igs-hud-scale,1));height:calc(36px * var(--igs-hud-scale,1));padding:0;}');
+    const collapsed = css.indexOf('#igs-overlay #igs-status-hud.igs-hud-collapsed,#igs-overlay #igs-status-hud[data-igs-hud-pos].igs-hud-collapsed{width:38px;height:38px;padding:0;}');
     assert.ok(shrink > 0 && collapsed > shrink, '没有 HUD 条时按内容收窄；折叠时收成按钮大小，贴在所选的角上');
 });
 

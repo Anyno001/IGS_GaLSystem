@@ -669,6 +669,11 @@ test('gate:danmaku:live-list-limits-and-entry-placement-avoid-phone', async () =
     assert.deepEqual(entryPlacement({ stageW: 1280, stageH: 720 }, { layout: 'full', floor: 100 }, 20, { right: 1264, top: 500 }, 38), { left: 1226, top: 454, step: 46, full: true });
     assert.deepEqual(entryPlacement({ stageW: 1280, stageH: 720 }, { layout: 'full', floor: 100 }, 20, null, 30), { left: 1234, top: 434, step: 38, full: true });
     assert.deepEqual(entryPlacement({ stageW: 1280 }, null, 14), { left: 14, top: 14 });
+    // 左上原位可传入按状态栏中线算出的 left（嵌入模式状态栏左边距 12）。
+    assert.deepEqual(entryPlacement({ stageW: 1280 }, null, 60, null, 0, 12), { left: 12, top: 60 });
+    const { ENTRY_DOCK_CSS } = await import('../src/visual/igs-ui/entry-dock.js');
+    assert.match(ENTRY_DOCK_CSS, /\.igs-entry-dock\{[^}]*width:38px;[^}]*align-items:center;/, '坞宽与折叠按钮同为 38px，入口按中线居中');
+    assert.match(ENTRY_DOCK_CSS, /\[data-entry-full\]>\.igs-entry-dock\{width:auto;align-items:flex-start;\}/);
 });
 
 test('gate:danmaku:live-full-click-turns-page-and-entry-docks-into-phone-top-bar', async () => {

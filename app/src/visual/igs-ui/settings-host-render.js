@@ -47,7 +47,7 @@ import { CLASSIC_DIALOG_THEME_DEFAULTS, DIALOG_SKIN_GRADIENT_VEIL, DIALOG_SKIN_W
 import { dialogSkinLabel, getDialogSkinChoices } from './dialog-skin-catalog.js';
 import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_HOUSES, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { VOICE_BARK_FREQUENCIES, normalizeVoiceBarkSettings } from './voice-bark.js';
-import { TTS_BILINGUAL_MODES, TTS_PROVIDERS, TTS_RATES, TTS_TRANSPORTS, normalizeTtsSettings, systemVoiceOptions, ttsApiVoiceList } from './tts.js';
+import { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_PROVIDERS, TTS_RATES, TTS_TRANSPORTS, normalizeTtsSettings, systemVoiceOptions, ttsApiVoiceList } from './tts.js';
 import { normalizeBilingualSettings } from './bilingual-text.js';
 import { HORROR_DREAD_CAP_LABELS, HORROR_DREAD_LEVELS, normalizeHorrorDreadCap } from './horror-dread.js';
 import { DIALOG_SKIN_HORROR_GORE, DIALOG_SKIN_HORROR_PSYCH } from './dialog-theme-horror.js';
@@ -1039,16 +1039,17 @@ function renderTtsControls(tts, { bilingual = false } = {}) {
         const api = tts.api;
         parts.push(
             field(`${base}.api.transport`, '传输方式', selectInput(`${base}.api.transport`, api.transport, TTS_TRANSPORTS)),
-            field(`${base}.api.endpoint`, '接口地址', textInput(`${base}.api.endpoint`, api.endpoint, 'https://api.openai.com/v1 或 http://127.0.0.1:9880/v1')),
+            field(`${base}.api.format`, '接口格式', selectInput(`${base}.api.format`, api.format, TTS_API_FORMATS)),
+            field(`${base}.api.endpoint`, '接口地址', textInput(`${base}.api.endpoint`, api.endpoint, 'https://api.openai.com/v1、https://api.fish.audio 或 http://127.0.0.1:9880/v1')),
             field(`${base}.api.apiKey`, 'API Key', secretInput(`${base}.api.apiKey`, api.apiKey, '本地服务可留空')),
-            field(`${base}.api.model`, '模型', textInput(`${base}.api.model`, api.model, '如tts-1、FunAudioLLM/CosyVoice2-0.5B')),
+            field(`${base}.api.model`, '模型', textInput(`${base}.api.model`, api.model, '如tts-1、FunAudioLLM/CosyVoice2-0.5B、s1')),
         );
-        for (const [key, label] of roles) parts.push(field(`${base}.api.${key}`, `${label}声音`, textInput(`${base}.api.${key}`, api[key], key === 'narrator' ? '留空用女声' : '接口里的声音名')));
+        for (const [key, label] of roles) parts.push(field(`${base}.api.${key}`, `${label}声音`, textInput(`${base}.api.${key}`, api[key], key === 'narrator' ? '留空用女声' : '接口里的声音名（Fish Audio 填声音模型 ID）')));
         parts.push(
             field(`${base}.api.voices`, '可选声音', textInput(`${base}.api.voices`, api.voices, '逗号分隔，给角色单独指定时用')),
             checkbox(`${base}.api.prefetch`, api.prefetch, '提前生成下一页（停留1.5秒后才生成）'),
             '<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-clear-cache">清除朗读缓存</button>',
-            '<div class="igs-source-filter-note">兼容OpenAI语音接口；直连被拦时改用经酒馆转发。</div>',
+            '<div class="igs-source-filter-note">支持OpenAI兼容语音接口与Fish Audio。直连被拦时改用「酒馆 CORS 代理」（需在酒馆 config.yaml 打开 enableCorsProxy）；Fish Audio 不允许浏览器直连，必须用代理。</div>',
         );
     }
     parts.push(field(`${base}.lexicon`, '读音替换', textareaInput(`${base}.lexicon`, tts.lexicon, '每行一条：原词=读法\n例：雫=shizuku\n例：Λ=兰姆达')));

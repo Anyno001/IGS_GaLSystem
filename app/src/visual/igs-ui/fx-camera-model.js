@@ -1,4 +1,5 @@
 import { resolveWeatherFxScene } from './weather-fx-runtime.js';
+import { isOpenAirPlace } from '../../scene/place-ambience.js';
 
 const text = (value) => String(value == null ? '' : value).trim();
 const pick = (table, value, fallback = '') => {
@@ -192,6 +193,7 @@ export const CAMERA_AMBIENCE_HTML = Object.freeze({
 
 export function resolveCameraAmbience(location) {
     const place = text(location);
-    if (!place) return null;
+    // 「咖啡店外的太阳伞下」含「店」会被判成室内：明说在门外、伞下、露天时不挂窗格光影。
+    if (!place || isOpenAirPlace(place)) return null;
     return resolveWeatherFxScene(place) === 'indoor' ? { kind: 'cmroom', variant: '' } : null;
 }

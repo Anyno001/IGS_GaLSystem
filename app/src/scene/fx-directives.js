@@ -346,10 +346,11 @@ function applyStageDirective(result, d, current) {
         return;
     }
     // 变体：回眸 / 甩头离开 / 转身面对 / 背影。turns 只收标签所在页，供转身动画选动作；姿态本身仍累积。
+    // 同一页同一角色写了多条时以最后一条为准，和姿态累积保持一致（否则 turns 留第一条、姿态留最后一条，两者对不上会整页无动作）。
     if (action === 'glance' || action === 'storm' || action === 'face' || action === 'back') {
         const prev = result.poses[a] || { flip: false, front: false };
         const { face, back, backText, storm, ...plain } = prev;
-        if (current && (!result.turns || !result.turns[a])) result.turns = { ...result.turns, [a]: action };
+        if (current) result.turns = { ...result.turns, [a]: action };
         if (action === 'glance') result.poses[a] = { ...plain, flip: false };
         else if (action === 'storm') {
             result.poses[a] = { ...plain, flip: true, storm: true };
@@ -360,7 +361,7 @@ function applyStageDirective(result, d, current) {
             const { face: of, back: ob, backText: ot, storm: os, ...otherPlain } = other;
             result.poses[a] = { ...plain, face: b };
             result.poses[b] = { ...otherPlain, face: a };
-            if (current && !result.turns[b]) result.turns[b] = action;
+            if (current) result.turns[b] = action;
         }
         return;
     }

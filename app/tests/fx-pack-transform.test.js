@@ -239,7 +239,7 @@ test('gate:fx-pack-transform sources have no canvas and no mask-image:url, and l
         const text = readFileSync(new URL(`../src/visual/igs-ui/${file}`, import.meta.url), 'utf8');
         assert.ok(!/canvas/i.test(text), `${file} canvas`);
         assert.ok(!/mask-image/i.test(text), `${file} mask-image`);
-        assert.ok(!/\r(?!\n)/.test(text), `${file} stray CR`);
+        assert.ok(!/\r/.test(text), `${file} CRLF`);
     }
     assert.ok(TRANSFORM_STYLE_TEXT.includes('data-igs-quality="low"'));
     assert.ok(TRANSFORM_STYLE_TEXT.includes('.igs-xf.is-reduced'));

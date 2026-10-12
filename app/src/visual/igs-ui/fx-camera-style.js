@@ -159,8 +159,9 @@ ${O} .igs-cm-sprite-hush{position:absolute;inset:0;}
 `;
 
 const AMBIENCE_CSS = `
-${O} .igs-dfx-amb.is-cmroom .igs-cm-win{left:6%;top:6%;width:34%;height:44%;display:grid;grid-template:1fr 1fr/1fr 1fr;gap:10px;transform:translateX(-4%);animation:igs-cm-win 90s linear both;}
-${O} .igs-dfx-amb.is-cmroom .igs-cm-win b{background:rgba(255,240,204,.18);}
+/* 窗光打在墙上：四格窗格只做柔光斑，不能出现硬边方框（不用 filter:blur，手机上太贵）。 */
+${O} .igs-dfx-amb.is-cmroom .igs-cm-win{left:6%;top:6%;width:34%;height:44%;display:grid;grid-template:1fr 1fr/1fr 1fr;gap:10px;transform:translateX(-4%);opacity:.8;animation:igs-cm-win 90s linear both;}
+${O} .igs-dfx-amb.is-cmroom .igs-cm-win b{background:radial-gradient(ellipse at 50% 50%,rgba(255,240,204,.15),rgba(255,240,204,.06) 55%,transparent 78%);}
 ${O} .igs-dfx-amb.is-cmroom .igs-cm-shadow{left:0;right:0;bottom:0;height:30%;background:linear-gradient(0deg,rgba(24,18,30,.22),transparent);transform-origin:50% 100%;animation:igs-cm-shadow 90s linear both;}
 ${O} .igs-dfx-amb.is-cmroom .igs-cm-beam,${O} .igs-dfx-amb.is-cmroom .igs-cm-curtain{display:none;}
 @keyframes igs-cm-win{from{transform:translateX(-4%)}to{transform:translateX(26%)}}

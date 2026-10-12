@@ -248,8 +248,9 @@ function getStyleProp(el, name) {
 }
 
 // 滑入 / 滑出：透明度单独播；位移用 composite:'add' 叠在 CSS 呼吸上，不把呼吸的 transform 盖掉。
-function playSlide(el, posX, reduced, entering, duration, fill, done) {
-    const side = reduced ? 0 : castSideOf(posX);
+// noSlide（登场 / 退场关闭）时只淡入淡出，不侧移。
+function playSlide(el, posX, reduced, entering, duration, fill, done, noSlide = false) {
+    const side = reduced || noSlide ? 0 : castSideOf(posX);
     const opacity = entering ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 1 }, { opacity: 0 }];
     const anim = play(el, opacity, duration, fill, done);
     if (side && anim) {
@@ -285,6 +286,9 @@ export function applyCastToDom(root, members = [], motion = {}) {
     if (!layer) return { count: 0 };
     const doc = layer.ownerDocument;
     const reduced = motion.reduced === true;
+    // 登场 / 退场关闭：上下台只淡入淡出；走位关闭：换槽位直接到位，不平移。
+    const noSlide = motion.slide === false;
+    const noMove = motion.move === false;
     const focus = String(motion.focus || '');
     const handoff = motion.handoff || {};
     const lean = motion.lean || null;
@@ -359,7 +363,7 @@ export function applyCastToDom(root, members = [], motion = {}) {
             stopAnim(el);
             el._igsCastAnim = demotedIn
                 ? play(el, [{ filter: CAST_LIT_FRAME }, { filter: CAST_DIM_FRAME }], CAST_HANDOFF_MS, 'backwards')
-                : playEntrance(el, m.posX, reduced, entrances[m.character] || '');
+                : playEntrance(el, m.posX, reduced, entrances[m.character] || '', noSlide);
         };
         if (wait) {
             const pending = { url: m.url };
@@ -372,7 +376,7 @@ export function applyCastToDom(root, members = [], motion = {}) {
         } else if (!pendingSame) {
             show();
         }
-        if (!entering && Number(fromX) !== Number(m.posX) && !reduced) {
+        if (!entering && Number(fromX) !== Number(m.posX) && !reduced && !noMove) {
             stopAnim(el);
             el._igsCastAnim = play(el, [{ backgroundPosition: `${fromX}% ${m.posY}%` }, { backgroundPosition: `${m.posX}% ${m.posY}%` }], CAST_MOVE_MS, 'backwards');
         }
@@ -389,7 +393,7 @@ export function applyCastToDom(root, members = [], motion = {}) {
         el.setAttribute('data-igs-cast-leaving', '1');
         el._igsCastAnim = playSlide(el, el._igsCastX, reduced, false, FADE_MS, 'forwards', () => {
             if (el.hasAttribute('data-igs-cast-leaving') && el.parentNode) el.parentNode.removeChild(el);
-        });
+        }, noSlide);
     }
     layer.style.display = Array.from(layer.children || []).length ? '' : 'none';
     return { count: members.length };
@@ -440,7 +444,7 @@ export const CAST_REACT_ALL = '全员';
 
 // 陪衬反应规划（纯函数）：reacts 为 fx.reacts（[{ target, emotion }]），members 为在台陪衬（[{ character }]）。
 // symbols / actions 为已规范化的漫画符号词表（mangaFx.symbols）与动作词表（spriteActions），只读词表不看各自总开关。
-// 情绪词命中符号与动作时两者都播；都不中只小跳；目标写「全员」时作用于全部陪衬，不在台上的目标丢弃。
+// 情绪词命中符号与动作时两者都播；没写情绪词只小跳；写了但都不中不再小跳（交给换表情）；目标写「全员」时作用于全部陪衬，不在台上的目标丢弃。
 // 说话人情绪命中 surprise 符号词表时，所有尚无动作的陪衬再小跳一次。同一角色的符号与动作各只取第一条。
 export function planCastReacts({ reacts = [], members = [], keyOf = (name) => name, symbols = {}, actions = {}, speakerEmotion = '' } = {}) {
     const onStage = (Array.isArray(members) ? members : []).map((m) => String((m && m.character) || '')).filter(Boolean);
@@ -458,7 +462,7 @@ export function planCastReacts({ reacts = [], members = [], keyOf = (name) => na
         const key = raw === CAST_REACT_ALL ? '' : String(keyOf(raw) || raw);
         const targets = raw === CAST_REACT_ALL ? onStage : onStage.filter((c) => c === key);
         const symbol = symbolOf(emotion);
-        const action = actionOf(emotion) || (symbol ? '' : 'hop');
+        const action = actionOf(emotion) || (symbol || emotion ? '' : 'hop');
         for (const character of targets) {
             if (symbol && !hasMark.has(character)) {
                 hasMark.add(character);
@@ -516,8 +520,8 @@ export const CAST_ENTRANCE_SLOW_MS = 900;
 export const CAST_ENTRANCE_PEEK_MS = 1100;
 const CAST_PEEK_PCT = 20;
 
-function playEntrance(el, posX, reduced, kind) {
-    if (reduced || !kind) return playSlide(el, posX, reduced, true, reduced ? FADE_MS : FADE_MS + 120, 'backwards');
+function playEntrance(el, posX, reduced, kind, noSlide = false) {
+    if (reduced || !kind) return playSlide(el, posX, reduced, true, reduced ? FADE_MS : FADE_MS + 120, 'backwards', undefined, noSlide);
     if (kind === 'slow') return playSlide(el, posX, false, true, CAST_ENTRANCE_SLOW_MS, 'backwards');
     if (kind === 'peek') {
         const side = castSideOf(posX) || -1;

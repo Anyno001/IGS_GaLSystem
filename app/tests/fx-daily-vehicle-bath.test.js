@@ -280,3 +280,14 @@ test('gate:fx-daily-underwater-space changing place into or out of the water pla
     assert.deepEqual(page(6, { sceneLocation: '海滩' }, { dailyFx: { enabled: true, ambience: false } }).result.played, [], 'follows the ambience switch');
     assert.match(DAILY_FX_STYLE_TEXT, /\.igs-dfx-surface-veil\{/);
 });
+
+test('gate:fx-daily-vehicle-bath ambience: car window, bath steam and place light switch independently', () => {
+    const only = (patch) => ({ readerSettings: { dailyFx: { enabled: true, ...patch } } });
+    assert.equal(render({ sceneLocation: '车里' }, only({ vehicleLight: false })).result.ambience, '');
+    assert.equal(render({ sceneLocation: '浴室' }, only({ vehicleLight: false })).result.ambience, 'bath');
+    assert.equal(render({ sceneLocation: '浴室' }, only({ bathSteam: false })).result.ambience, '');
+    assert.equal(render({ sceneLocation: '车里' }, only({ bathSteam: false })).result.ambience, 'car');
+    assert.equal(render({ sceneLocation: '海底' }, only({ placeLight: false })).result.ambience, '');
+    const legacy = normalizeDailyFxSettings({ ambience: false, bathSteam: true });
+    assert.deepEqual([legacy.vehicleLight, legacy.bathSteam, legacy.placeLight, legacy.ambience], [false, true, false, true]);
+});

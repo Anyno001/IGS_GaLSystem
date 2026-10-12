@@ -7,7 +7,7 @@ import path from 'node:path';
 // 闭包一用就抛 ReferenceError；CG 库缩略图回调曾因此一张都不换（异常又被界面回调吞掉）。
 test('gate:reader-host:no-const-or-let-after-the-factory-returns', () => {
     const file = path.resolve(import.meta.dirname, '../src/visual/igs-ui/reader-host.js');
-    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
     const start = lines.findIndex((line) => line.startsWith('export function createIgsReaderHost('));
     assert.ok(start >= 0, 'factory not found');
     const end = lines.findIndex((line, i) => i > start && line === '}');

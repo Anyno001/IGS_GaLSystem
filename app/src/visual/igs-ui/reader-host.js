@@ -54,6 +54,8 @@ import { parseHtmlCardMarker } from '../../scene/html-cards.js';
 import { resolveBackgroundAsset, resolveSpriteAsset, resolveNudeSpriteAsset, isGeneratedAssetUrl, bindGeneratedBackground, bindGeneratedSprite, isNonSpriteSpeaker } from '../../scene/asset-match.js';
 import { STAGE_CAST_MAX_SEATS, STAGE_CAST_SCAN_LIMIT, pickCastMembers, resolveCastOffset, resolveStageCast } from '../../scene/stage-cast.js';
 import { normalizeStageCastSettings } from './stage-direction-settings.js';
+import { SPRITE_BACK_MOOD } from './sprite-turn.js';
+import { createReactMoodLookup, isReactMoodHit } from '../../scene/react-mood.js';
 import { resolveRomanceRivalTarget } from './romance-settings.js';
 import { clearCastDom } from './stage-cast-render.js';
 import { resolveCharacterDna } from '../../scene/character-dna.js';
@@ -3281,6 +3283,8 @@ export function createIgsReaderHost(options = {}) {
         let resolvedSpeaker = scene.speaker || '';
         let spriteCharacter = '';
         let spriteOutfit = '';
+        // 本页说话人立绘已换成登记的「背影」图：渲染层不再镜像、不再压暗缩小。
+        let spriteBackArt = false;
         let nsfwCgPortrait = '';
         let castSprites = [];
         let spriteLeft = false;
@@ -3686,7 +3690,21 @@ export function createIgsReaderHost(options = {}) {
                 };
                 const wantedOutfit = spriteChar ? outfitFor(spriteChar) : '';
                 const outfitWhy = { outfitSource: (outfitTrace && outfitTrace.source) || '', outfitReason: (outfitTrace && outfitTrace.reason) || '', outfitOffset };
-                const spriteHit = spriteChar ? resolveSpriteAsset(spriteChar, spriteMood, assetMatchCtx, wantedOutfit) : { url: '', source: '' };
+                let spriteHit = spriteChar ? resolveSpriteAsset(spriteChar, spriteMood, assetMatchCtx, wantedOutfit) : { url: '', source: '' };
+                // 陪衬反应换表情（stageCast.enabled && castReact）：react 写的情绪保持到这个人下次开口；
+                // 只在真有这张表情图时换，落到默认 / 平和兜底就维持原表情。
+                const castForReact = normalizeStageCastSettings(readerSettings.stageCast);
+                const reactMoodOf = castForReact.enabled && castForReact.castReact
+                    ? createReactMoodLookup({ reacts: fxDirectives, speech: outfitDirectives, offset: outfitOffset >= 0 ? outfitOffset : fxOffset, keyOf: (name) => resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, name) || name })
+                    : () => '';
+                const speakerReactMood = spriteChar ? reactMoodOf(spriteChar) : '';
+                if (speakerReactMood) {
+                    const reactHit = resolveSpriteAsset(spriteChar, speakerReactMood, assetMatchCtx, wantedOutfit);
+                    if (isReactMoodHit(reactHit)) {
+                        spriteHit = reactHit;
+                        spriteMood = speakerReactMood;
+                    }
+                }
                 if (spriteChar) spriteMatch = { character: spriteChar, mood: spriteMood || '', outfit: wantedOutfit || '', source: spriteHit.source, quality: spriteHit.quality || '', slot: spriteHit.slot || '', ...outfitWhy };
                 if (spriteChar) noteUnlistedMood(spriteHit, spriteMood, sceneAssets);
                 spriteImage = spriteChar ? resolveGenerated(spriteHit.url) || null : null;
@@ -3697,6 +3715,20 @@ export function createIgsReaderHost(options = {}) {
                     // 默认), not the raw mood word, so every mood that maps to the same
                     // sprite image shares one position across pages.
                     spriteMood = spriteHit.slot || spriteMood;
+                    // 背影：本页该角色处于背对姿态（castStage 开）且登记了名为「背影」的表情立绘时换成这张图；
+                    // 只认精确槽位，不走情绪组 / 默认兜底；站位仍按原表情槽位取，前后不跳位。没有这张图时渲染层退回镜像 + 压暗 + 缩小。
+                    if (normalizeStageCastSettings(readerSettings.stageCast).castStage && pageFx && pageFx.poses) {
+                        const backKey = resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, spriteCharacter) || spriteCharacter;
+                        const backPose = Object.entries(pageFx.poses).find(([name]) => (resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, name) || name) === backKey);
+                        if (backPose && backPose[1] && backPose[1].back === true) {
+                            const backHit = resolveSpriteAsset(spriteChar, SPRITE_BACK_MOOD, assetMatchCtx, wantedOutfit);
+                            const backUrl = backHit.slot === SPRITE_BACK_MOOD && backHit.quality === 'exact' ? resolveGenerated(backHit.url) : '';
+                            if (backUrl) {
+                                spriteImage = backUrl;
+                                spriteBackArt = true;
+                            }
+                        }
+                    }
                 }
                 if (!chatPage && normalizeStageCastSettings(readerSettings.stageCast).enabled) {
                     const castKeyOf = (name) => resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, name) || name;
@@ -3731,7 +3763,13 @@ export function createIgsReaderHost(options = {}) {
                         pin: castPin,
                         seats: STAGE_CAST_MAX_SEATS - (spriteImage ? 1 : 0),
                         resolve: (m) => {
-                            const hit = resolveSpriteAsset(m.character, m.mood, assetMatchCtx, outfitFor(m.character));
+                            const memberOutfit = outfitFor(m.character);
+                            let hit = resolveSpriteAsset(m.character, m.mood, assetMatchCtx, memberOutfit);
+                            const memberReact = reactMoodOf(m.character);
+                            if (memberReact) {
+                                const reactHit = resolveSpriteAsset(m.character, memberReact, assetMatchCtx, memberOutfit);
+                                if (isReactMoodHit(reactHit)) hit = reactHit;
+                            }
                             const image = resolveGenerated(hit.url);
                             return image ? { character: hit.character || m.character, mood: hit.slot || m.mood, outfit: hit.outfit || '', image } : null;
                         },
@@ -3806,6 +3844,7 @@ export function createIgsReaderHost(options = {}) {
                 spriteMood,
                 spriteOutfit,
                 spriteLeft,
+                spriteBackArt,
                 statusEmotion: bubbleMood,
                 textType,
                 text: currentText,

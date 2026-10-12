@@ -49,7 +49,8 @@ ${THEMED.map(([value, palette]) => `${themeSelector(value)}::before{opacity:${pa
 .igs-settings-theme-option.is-active{outline-color:var(--igs-settings-accent)}
 .igs-settings-close,.igs-settings-action{border:0;background:var(--igs-settings-field);color:var(--igs-settings-ink-2);border-radius:var(--igs-settings-radius-control);height:34px;padding:0 12px;font:inherit;font-size:12px;letter-spacing:.04em;cursor:pointer;transition:background-color .14s ease,color .14s ease}
 .igs-settings-close{background:var(--igs-settings-close-bg,var(--igs-settings-field))}
-.igs-settings-close{width:34px;padding:0;font-size:18px;letter-spacing:0}
+.igs-settings-close{display:inline-flex;align-items:center;justify-content:center;width:34px;padding:0;font-size:18px;line-height:1;letter-spacing:0}
+.igs-settings-close svg{display:block;width:16px;height:16px;flex:none;pointer-events:none}
 .igs-settings-close:hover,.igs-settings-close:focus-visible,.igs-settings-action:hover,.igs-settings-action:focus-visible{background:var(--igs-settings-accent);color:var(--igs-settings-on-accent);outline:none}
 .igs-settings-danger{color:var(--igs-settings-danger);background:transparent}
 .igs-settings-danger:hover,.igs-settings-danger:focus-visible{background:var(--igs-settings-danger);color:var(--igs-settings-on-accent)}

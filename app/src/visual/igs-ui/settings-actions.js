@@ -2430,7 +2430,10 @@ export async function handleSettingsAction(action, ctx) {
         const charName = decodeSeg(normalizedAction.slice('tts-preview:'.length));
         const assets = settingsState.draft.bridge.sceneAssets || {};
         const voice = charName ? resolveTtsVoice({ textType: 'dialogue', speaker: charName }, reader.tts, assets, listSystemVoices()) : null;
-        return previewTts(reader.tts, voice ? { role: voice.role, voice: voice.voice } : {});
+        const result = await previewTts(reader.tts, voice ? { role: voice.role, voice: voice.voice } : {});
+        // 试听失败的原因不走阅读器的报错通道，这里在设置页提示出来，免得点了像没反应。
+        if (result && result.ok === false && result.error) showGeneratedNotice(options.global || globalThis, `试听失败：${result.error}`);
+        return result;
     }
     if (normalizedAction.startsWith('voice-bark-preview:')) {
         const charName = decodeSeg(normalizedAction.slice('voice-bark-preview:'.length));
