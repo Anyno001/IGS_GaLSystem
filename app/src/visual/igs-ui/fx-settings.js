@@ -10,6 +10,7 @@ import { normalizeAmbientSoundSettings, normalizeBgmSettings } from './scene-aud
 import { normalizeTextFxSettings } from './text-fx.js';
 import { normalizeBilingualSettings } from './bilingual-text.js';
 import { normalizeClickWaitMarkSettings } from './click-wait-mark.js';
+import { normalizeWaitStageSettings } from './wait-stage.js';
 import { normalizeDailyFxSettings } from './fx-daily-model.js';
 import { FX_PACK_SETTING_GROUPS } from '../../scene/fx-packs.js';
 import { normalizeBattleFxSettings } from './fx-battle-model.js';
@@ -212,6 +213,7 @@ export const FX_SETTINGS_NORMALIZERS = Object.freeze({
     textFx: normalizeTextFxSettings,
     bilingual: normalizeBilingualSettings,
     clickWaitMark: normalizeClickWaitMarkSettings,
+    waitStage: normalizeWaitStageSettings,
     dailyFx: normalizeDailyFxSettings,
     // 题材包自带开关的设置组（如 aboFx），登记见 scene/fx-packs.js。
     ...FX_PACK_SETTING_GROUPS,

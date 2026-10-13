@@ -94,7 +94,7 @@ const BGM_TONE_SHAPES = Object.freeze({
 const BGM_CORS_HOSTS = Object.freeze(['cdn.jsdelivr.net', 'fastly.jsdelivr.net', 'gcore.jsdelivr.net', 'testingcf.jsdelivr.net']);
 const corsBlocked = new Set();
 
-// 默认曲目包约 60 首，再给用户自己的曲目留余量。
+// 默认曲目包目前 80 首；留足自行添加曲目和后续扩充的余量。
 const MAX_TRACKS = 200;
 const MAX_KEYWORDS = 20;
 const MAX_KEYWORD_LENGTH = 20;

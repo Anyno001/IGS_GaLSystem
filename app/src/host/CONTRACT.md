@@ -16,9 +16,11 @@
 - 隔离宿主 DOM 选择器变化，避免其它模块直接依赖 `#send_textarea`、`#send_but` 等选择器。
 - 提供 `setInputText(text)` 只填入酒馆默认输入框，以及 `typeAndSend(text)` 填入并发送；内嵌阅读器不得维护第二套发送框。
 - 地图独用 `fillEmptyInputText(text)`：必须读取酒馆真实草稿，只有确知为空才纯文本填入并触发输入事件；非空、不可读取或失败均返回诊断，不改变原 `setInputText` / `typeAndSend` 调用语义。
-- `chat-stream-observer.js` 只在楼层内嵌阅读器打开时观察阅读器实际挂载文档的 `#chat`，不得观察整个 document 或按固定间隔轮询。`onActivity` 按 `activityThrottleMs`（默认 150ms）首尾节流：首批变更立即回调，窗口内其余合并为窗口末一次；稳定 / 空闲判定仍按每批变更重置，`stop` / `cancelPending` 清掉节流定时器。
+- `chat-stream-observer.js` 在五种阅读器模式打开时观察阅读器实际挂载文档的 `#chat`，不得观察整个 document 或按固定间隔扫描正文。`onActivity` 按 `activityThrottleMs`（默认 150ms）首尾节流：首批变更立即回调，窗口内其余合并为窗口末一次；稳定 / 空闲判定仍按每批变更重置，`stop` / `cancelPending` 清掉节流定时器。
 - 酒馆 `GENERATION_STARTED / GENERATION_ENDED / GENERATION_STOPPED` 是流式起止主信号；DOM 静默窗口仅作兼容兜底。
-- `GENERATION_STARTED` 的 `dryRun === true` 与 `type === 'quiet'`（非 `quietToLoud`）是插件后台请求/提示词组装，不得武装载入态；生成期间 `#chat` 静默 10s 先做一次稳定收尾，不只依赖 120s 硬超时。
+- `GENERATION_STARTED` 的 `dryRun === true` 与 `type === 'quiet'`（非 `quietToLoud`）是插件后台请求/提示词组装，不得武装载入态；quiet 的结束和 IGS 自身后台生成的结束也不能完成前台等待。
+- 静默和 120s 无活动超时不代表完成：后者仅调用 `onTimeout` 提醒，不解除观察；每批外部活动重置时限。完成需要结束事件，或宿主停止按钮已收起且有生成/回复活动证据、静默满 10s。停止按钮仍显示时不收尾，按钮不可读取不能推断已结束。
+- `onStable({ reason, revision })` 只在完成信号和稳定窗口后调用；`reason` 区分 ended、stopped、failed（失败事件仅在宿主暴露该 eventType 时订阅）。每批写入、生成起止和取消更新 revision，异步读完后用 `isCurrentRevision` 丢弃过期结果；停止后再发 ended 不覆盖 stopped。
 - 流式 mutation 只同步载入状态与最新 AI 楼层挂载，不在 token 回调中解析正文或扫描图片；生成结束后一次性换源。
 - 标签语法注入（`prompt-injector.js`，由 `core/bootstrap.js` 的 `syncSceneAssetsInjection` 驱动）：`bridge.sceneAssets.promptPlacement` 默认 `system`，主规则以 `IN_PROMPT` 写入 `igs-scene-assets-format-rule`（相对静态、可命中前缀缓存），本轮提醒与按需展开的块、交互摘要以 `IN_CHAT` depth 0 写入 `igs-scene-assets-depth0`；`depth0` 为旧行为，两段合并成一条 `IN_CHAT` depth 0。`bridge.sceneAssets.promptEntries.<块>.position/depth` 写了位置的条目不走上述两段，按位置与深度（system 为 IN_PROMPT，depth0 / depth 为 IN_CHAT，深度即 @D）分段，位置与深度相同的合并为一段，key 为 `igs-scene-assets-entry-system|depth0|d<N>`。`clear()` 清掉以上全部 key。酒馆助手回退只有聊天内位置，始终合并。`bridge.sceneAssets.promptRuleEnabled === false` 时主规则不含【场景与台词】块（用户改由酒馆预设提供），其余已开启的语法块照常注入，都没有时两个 key 都清掉。
 - `bridge.sceneAssets.promptAdaptive` 默认开：`GENERATION_STARTED` 时按本轮上下文（`prompt-context.js`：最近 12 层 AI 正文、输入框或最近一条用户消息、角色卡名与群聊成员）重算，`impersonate` / `quiet` 生成期间清空，`GENERATION_ENDED` / `GENERATION_STOPPED` 与换聊天时恢复；预算上限约 1500 token，按「场景 > 文字演出 > 演出 > 物品 > 聊天 > 日常 > 战斗 > 亲密」填入，超出的块降级为索引行。关闭时按旧版全量拼接（未自定义的场景规则用 V3 长版原文），与改版前逐字一致，代写与静默生成也不清空。

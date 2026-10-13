@@ -1,7 +1,7 @@
 import { resolveMoodGroup, fuzzyResolveMoodGroup, moodFallbackChain } from './mood-groups.js';
 import { resolveSceneTimeAsset } from './scene-time.js';
 import { sceneTimeBucket } from './time-bucket.js';
-import { IGS_DIRECTIVE_START_RE, matchOutfitDirectiveAt } from './directive-tags.js';
+import { IGS_DIRECTIVE_START_RE, matchOutfitDirectiveAt, splitIgsDirectiveLines } from './directive-tags.js';
 
 // 指令可独占整行，也可紧跟在正文之后（同一行内混排），因此不做行首锚定。
 const SCENE_RE = /\[igs-scene:([^|\]]+)\|([^|\]]+)\|([^|\]]+)(?:\|([^\]]*))?\]/;
@@ -47,15 +47,12 @@ export function extractSceneDirectives(text, options = {}) {
 
     const directives = [];
     const illustrationMarkers = [];
-    const lines = source.split('\n');
+    const lines = splitIgsDirectiveLines(source);
     let segmentCount = 0;
     // 待结算的正文本：只有遇到 [igs-scene] 或行尾时才确定它属于哪一段。
     let pending = '';
-    // 行首偏移：用于按「字符位置」定位指令，弥补按行计数的段索引与文本管线分段之间的错位。
-    let lineOffset = 0;
-
     for (let i = 0; i < lines.length; i++) {
-        const rawLine = lines[i];
+        const { text: rawLine, offset: lineOffset, lineIndex } = lines[i];
         const trimmed = rawLine.trim();
         const indent = rawLine.length - rawLine.trimStart().length;
         if (!trimmed) continue;
@@ -78,24 +75,24 @@ export function extractSceneDirectives(text, options = {}) {
                     weather: m[3].trim(),
                     nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw',
                     segmentIndex: segmentCount,
-                    lineIndex: i,
+                    lineIndex,
                     offset: cursor,
                 });
             } else if ((m = matchOutfitDirectiveAt(rest, outfitResolver))) {
                 if (pending.trim()) { segmentCount += 1; pending = ''; }
                 const textKey = m.type === 'thought' ? 'thought' : 'dialogue';
-                directives.push({ type: m.type, character: m.character, mood: m.mood, outfit: m.outfit, ...(m.unknownOutfit ? { unknownOutfit: m.unknownOutfit } : {}), [textKey]: m.text, segmentIndex: segmentCount, lineIndex: i, offset: cursor });
+                directives.push({ type: m.type, character: m.character, mood: m.mood, outfit: m.outfit, ...(m.unknownOutfit ? { unknownOutfit: m.unknownOutfit } : {}), [textKey]: m.text, segmentIndex: segmentCount, lineIndex, offset: cursor });
                 rest = rest.slice(m.raw.length);
                 cursor += m.raw.length;
                 continue;
             } else if ((m = rest.match(CHAR_AT_RE))) {
                 if (pending.trim()) { segmentCount += 1; pending = ''; }
-                directives.push({ type: 'char', character: m[1].trim(), mood: String(m[2] || '').trim(), dialogue: m[3].trim(), segmentIndex: segmentCount, lineIndex: i, offset: cursor });
+                directives.push({ type: 'char', character: m[1].trim(), mood: String(m[2] || '').trim(), dialogue: m[3].trim(), segmentIndex: segmentCount, lineIndex, offset: cursor });
             } else if ((m = rest.match(THOUGHT_AT_RE))) {
                 if (pending.trim()) { segmentCount += 1; pending = ''; }
-                directives.push({ type: 'thought', character: m[1].trim(), mood: String(m[2] || '').trim(), thought: m[3].trim(),segmentIndex: segmentCount, lineIndex: i, offset: cursor });
+                directives.push({ type: 'thought', character: m[1].trim(), mood: String(m[2] || '').trim(), thought: m[3].trim(),segmentIndex: segmentCount, lineIndex, offset: cursor });
             } else if ((m = rest.match(IMG_AT_RE))) {
-                illustrationMarkers.push({ slot: Number(m[1] || m[2]), lineIndex: i, offset: cursor });
+                illustrationMarkers.push({ slot: Number(m[1] || m[2]), lineIndex, offset: cursor });
             } else if ((m = rest.match(FX_AT_RE))) {
                 // igs-fx 由 fx-directives 单独解析，这里只跳过、不计入正文。
             } else {
@@ -112,7 +109,6 @@ export function extractSceneDirectives(text, options = {}) {
             cursor += m[0].length;
         }
         pending += rest;
-        lineOffset += rawLine.length + 1;
     }
 
     return { directives, illustrationMarkers, strippedText: source };

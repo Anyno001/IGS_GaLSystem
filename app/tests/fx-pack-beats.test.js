@@ -148,6 +148,27 @@ test('gate:fx-pack-beats panel carries type chip, rows and the world skin', () =
     assert.match(panel.innerHTML, /igs-panel-row is-bad/);
 });
 
+test('gate:fx-pack-beats evidence animates as a small item popup without inventory or era-specific treatment', () => {
+    for (const ancient of [false, true]) {
+        const env = envOf({ ancient, reduced: false });
+        const built = BEATS_BUILDERS.evidence(SAMPLES.evidence, env);
+        const stack = built.node.querySelector('.igs-fx-item-stack');
+        const card = stack && stack.querySelector('.igs-fx-item-card');
+        assert.ok(card, '证据须以带进场动画的物品小弹窗展示');
+        assert.equal(built.node.querySelector('.igs-fx-item-showcase'), null, '不使用中央大演出');
+        assert.equal(card.getAttribute('data-igs-item-action'), 'present');
+        assert.equal(card.querySelector('.igs-fx-item-action').textContent, '出示证据');
+        assert.equal(card.querySelector('.igs-fx-item-name').textContent, SAMPLES.evidence.name);
+        assert.equal(card.querySelector('.igs-fx-item-desc').textContent, SAMPLES.evidence.desc);
+        assert.equal(card.querySelector('.igs-fx-item-icon').getAttribute('data-igs-item-placeholder'), '1');
+        assert.equal(card.querySelector('.igs-fx-item-seal'), null);
+        assert.equal(stack.getAttribute('data-igs-era'), null);
+        assert.doesNotMatch(String(built.node.className), /is-ancient/);
+        assert.equal(built.sounds[0], 'bt-slap');
+        assert.ok(built.life > 0);
+    }
+});
+
 test('gate:fx-pack-beats link draws between head anchors, falls back for absent ends and caps at three', () => {
     const env = envOf();
     const built = BEATS_BUILDERS.link(SAMPLES.link, env);

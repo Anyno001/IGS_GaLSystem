@@ -1,7 +1,8 @@
+import { createItemImageService } from './helpers/media-fixtures.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryGeneratedAssetStore } from '../src/media/generated-asset-store.js';
-import { createItemImageService, itemAssetKeyOf } from '../src/generated-images/illustration/item-image-service.js';
+import { itemAssetKeyOf } from '../src/generated-images/illustration/item-image-service.js';
 
 const TEXT = '[igs-fx:item|获得|黄铜钥匙|旧钥匙]\n她把钥匙递过来。';
 const TABLES = { ok: true, data: { a: { uid: 'sheet_a', name: '物品表', content: [['物品名称', '描述'], ['信', '一封信'], ['黄铜钥匙', ''], ['药水', ''], ['地图', '']] } } };

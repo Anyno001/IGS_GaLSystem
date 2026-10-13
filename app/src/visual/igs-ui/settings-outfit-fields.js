@@ -312,6 +312,7 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
     const menu = active
         ? renderRowMenu([
             menuItem(`ui-toggle-open:${encSeg(metaKey)}`, isOpen(metaKey) ? '收起服装设置' : '服装设置（衣柜、别名…）'),
+            menuItem(`scene-promote-outfit:${c}:${o}`, '设为原装'),
             menuItem(`scene-rename-outfit:${c}:${o}`, '重命名这套'),
             menuItem(`scene-remove-outfit:${c}:${o}`, '删除这套', ' is-danger'),
         ], `「${active}」的操作`)
@@ -355,6 +356,55 @@ export function renderWardrobe(wardrobe, { resolveUrl, scopeTag, scopeMenu, focu
         ? `<div class="igs-btn-mgr-list igs-wardrobe-list is-tall">${rows}</div>`
         : '<div class="igs-scene-empty">暂无衣柜提示词，可点击右上角「+」添加</div>';
     return `<div class="igs-wardrobe-group">${lead ? `<div class="igs-asset-folder-bar">${lead}</div>` : ''}${body}</div>`;
+}
+
+function field(attrs, charName, value, placeholder) {
+    return `<input class="igs-scene-url-input igs-mig-field" ${attrs} data-mig-char="${esc(charName)}" value="${esc(value || '')}" placeholder="${esc(placeholder)}">`;
+}
+
+export function renderMigrationRow({ character, name, words, note, stat = '', warned = false }) {
+    const c = encSeg(character);
+    const pick = (key) => `data-mig-field="${key}" data-mig-char="${esc(character)}"`;
+    return `<div class="igs-mig-row" data-mig-row="${esc(character)}">`
+        + `<div class="igs-mig-head"><span class="igs-mig-name">${esc(character)}</span><span class="igs-mig-stat${warned ? ' is-warn' : ''}">${esc(stat)}</span></div>`
+        + `<div class="igs-mig-fields">`
+        + `<label class="igs-mig-label"><span>服装名</span>${field(pick('name'), character, name, '如 睡衣')}</label>`
+        + `<label class="igs-mig-label"><span>别名</span>${field(pick('words'), character, (Array.isArray(words) ? words : []).join('、'), '正文里怎么写，如 睡衣、家居服')}</label>`
+        + `<label class="igs-mig-label"><span>说明</span>${field(pick('note'), character, note, '什么情形穿这套（可留空）')}</label>`
+        + `</div>`
+        + `<div class="igs-mig-foot"><span class="igs-mig-hint">提示词会从原装默认立绘上取，取不到就留空</span>`
+        + `<button type="button" class="igs-review-link" data-action="scene-migrate-outfit-skip:${c}">不迁移</button></div>`
+        + `</div>`;
+}
+
+// 原装迁移清单：点功能键先出这块，逐行确认服装名、别名、说明，再一次性搬。
+export function renderMigrateOutfitPanel(rows, { skipped = [], busy = false } = {}) {
+    const list = Array.isArray(rows) ? rows : [];
+    const drop = Array.isArray(skipped) ? skipped : [];
+    if (!list.length) {
+        const why = drop.length
+            ? `<div class="igs-mig-list">${drop.map((item) => `<div class="igs-mig-skip">${esc(item.character)}：${esc(item.reason)}</div>`).join('')}</div>`
+            : '<div class="igs-scene-empty">没有可迁移的原装立绘</div>';
+        return `<section class="igs-review-card is-empty" data-migrate-outfit-panel="1"><div class="igs-review-card-head"><span class="igs-review-card-title">原装迁移</span>`
+            + `<button type="button" class="igs-review-link" data-action="scene-migrate-outfit-cancel">关闭</button></div>${why}</section>`;
+    }
+    const body = `<div class="igs-mig-list">${list.map(renderMigrationRow).join('')}</div>`
+        + (drop.length ? `<div class="igs-mig-skip-head">已跳过</div><div class="igs-mig-list">${drop.map((item) => `<div class="igs-mig-skip">${esc(item.character)}：${esc(item.reason)}</div>`).join('')}</div>` : '');
+    return renderReviewCard({
+        key: 'migrate-outfit',
+        title: '原装迁移',
+        count: list.length,
+        hint: '把原装立绘整体搬成一套差分服装，并建好同名衣柜条目。原装的「默认」立绘搬进「平和」那个槽（这套衣服缺图时本来就兜底到它）。迁移后原装清空、不再保留。',
+        clearAction: 'scene-migrate-outfit-cancel',
+        headerAction: `<button type="button" class="igs-review-link is-primary" data-action="scene-migrate-outfit-apply"${busy ? ' disabled' : ''}>${busy ? '迁移中…' : `迁移 ${list.length} 个`}</button>`,
+        body,
+    });
+}
+
+// 清单仍显示在角色立绘区顶部；入口只存在于各角色行菜单。
+export function renderMigrateEntry(rows) {
+    if (Array.isArray(rows)) return renderMigrateOutfitPanel(rows);
+    return '';
 }
 
 // 待确认页的一块：标题、数量、一句说明、清空，下面是条目。三块（服装词 / 情绪词 / 刚生成的图）长得一样。
@@ -595,4 +645,21 @@ button.igs-scope-seg:hover,button.igs-scope-seg:focus-visible{color:var(--igs-se
 @media (max-width:420px){.igs-gen-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .igs-review-select{width:auto;max-width:8em;height:28px;padding:0 6px;font-size:12px}
 .igs-scene-subtab-count{margin-left:4px;padding:0 5px;border-radius:8px;background:var(--igs-settings-accent);color:#fff;font-size:10px;line-height:16px}
+.igs-mig-entry{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 2px}
+.igs-mig-entry-note{font-size:12px;color:var(--igs-settings-ink-3)}
+.igs-mig-list{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.igs-mig-row{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border:1px solid var(--igs-settings-line);border-radius:var(--igs-settings-radius-control)}
+.igs-mig-head{display:flex;align-items:baseline;gap:8px;min-width:0}
+.igs-mig-name{font-size:13px;font-weight:600;color:var(--igs-settings-ink)}
+.igs-mig-stat{margin-left:auto;font-size:12px;color:var(--igs-settings-ink-3);white-space:nowrap}
+.igs-mig-stat.is-warn{color:var(--igs-settings-accent)}
+.igs-mig-fields{display:flex;flex-direction:column;gap:6px}
+.igs-mig-label{display:flex;align-items:center;gap:8px;min-width:0}
+.igs-mig-label>span{flex:0 0 48px;font-size:12px;color:var(--igs-settings-ink-3)}
+.igs-mig-field{flex:1;min-width:0}
+.igs-mig-foot{display:flex;align-items:center;gap:8px}
+.igs-mig-hint{flex:1;min-width:0;font-size:12px;line-height:1.4;color:var(--igs-settings-ink-3)}
+.igs-mig-skip-head{margin-top:10px;font-size:12px;color:var(--igs-settings-ink-3)}
+.igs-mig-skip{padding:4px 0;font-size:12px;line-height:1.4;color:var(--igs-settings-ink-3)}
+@media (max-width:420px){.igs-mig-label{flex-direction:column;align-items:stretch;gap:2px}.igs-mig-label>span{flex:none}.igs-mig-stat{margin-left:0}}
 `.trim();

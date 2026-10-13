@@ -136,6 +136,7 @@ export const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.gradientVeil.heightPercent',
     'readerSettings.gradientVeil.opacity',
     'readerSettings.gradientVeil.speakerStyle',
+    'readerSettings.xianxiaSpeaker',
     'readerSettings.classicDialogWidthPercent',
     'readerSettings.skinDialogScale',
     'readerSettings.magicHouse',
@@ -270,6 +271,8 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
     perf: Object.freeze({
         label: '演出',
         requiredPaths: frozen([
+            'bridge.sentencePaging',
+            'bridge.dialogueSentencePaging',
             'readerSettings.cgHoldPages',
             'readerSettings.cinemaBars',
             'readerSettings.typewriter.enabled',

@@ -1,3 +1,4 @@
+import { requireMediaCache } from './media-cache-owner.js';
 // CG 库服务。三层数据各管各的：
 // 1. 目录（igs-cg-index entries）：每张楼层 CG / 照片一条轻记录，打开 CG 库只读这里。
 // 2. 缩略图（igs-cg-index thumbs）：网格只放缩略图，第一次看到某张时由原图生成后留下。
@@ -68,8 +69,8 @@ export function cgEntryFromSlot(key, rec, mark) {
         photoId: '',
         updatedAt: String((rec && rec.updatedAt) || ''),
         ready: Boolean(rec && rec.status === 'done' && rec.dataUrl),
-        hidden: Boolean(mark && mark.hidden),
-        favorite: Boolean(mark && mark.favorite),
+        hidden: Boolean((mark || rec)?.hidden),
+        favorite: Boolean((mark || rec)?.favorite),
     };
 }
 
@@ -151,6 +152,8 @@ export function withCgIndexSync(store, indexStore) {
 
 export function createCgLibrary(deps = {}) {
     const { illustrationStore, photoStore, marksStore, indexStore, clearIllustration } = deps;
+    const mediaCache = requireMediaCache(deps.mediaCache || deps.indexStore?.mediaCache, 'cg-library', deps.indexStore?.mediaCache);
+    const thumbKey = entry => `thumb:cg:${entry.key}:${String(entry.updatedAt || '')}`;
     const timeouts = { ...CG_LIBRARY_TIMEOUTS, ...(deps.timeouts || {}) };
     const now = typeof deps.now === 'function' ? deps.now : () => new Date().toISOString();
     const makeId = typeof deps.makeId === 'function' ? deps.makeId : () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -289,25 +292,31 @@ export function createCgLibrary(deps = {}) {
     async function readThumbs(entries) {
         const list = (entries || []).filter(Boolean);
         if (!indexStore || !list.length) return new Map();
+        const stamps = new Map(list.map(entry => [entry.key, mediaCache.token(thumbKey(entry))]));
         const got = await settle(step(indexStore.getThumbs(list.map((e) => e.key)), timeouts.index, 'index-timeout'), 'index-error');
         const out = new Map();
         if (!got.ok || !got.value) return out;
         for (const e of list) {
             const t = got.value.get(e.key);
-            if (t && DISPLAY_URL_RE.test(t.dataUrl) && t.stamp === String(e.updatedAt || '')) out.set(e.key, t.dataUrl);
+            if (t && mediaCache.token(thumbKey(e)) === stamps.get(e.key) && DISPLAY_URL_RE.test(t.dataUrl) && t.stamp === String(e.updatedAt || '')) out.set(e.key, mediaCache.remember(thumbKey(e), t.dataUrl));
         }
         return out;
     }
 
     async function makeThumb(entry) {
-        const full = await readFull(entry);
-        if (!full.ok) return full;
-        if (!makeThumbnail) return { ok: true, dataUrl: full.dataUrl };
-        const small = await settle(step(Promise.resolve().then(() => makeThumbnail(full.dataUrl)), timeouts.thumb, 'thumb-timeout'), 'thumb-failed');
-        if (!small.ok) return { ok: false, reason: small.reason };
-        if (!DISPLAY_URL_RE.test(String(small.value || ''))) return { ok: false, reason: 'thumb-failed' };
-        if (indexStore) Promise.resolve().then(() => indexStore.putThumb(entry.key, small.value, entry.updatedAt)).catch(() => {});
-        return { ok: true, dataUrl: small.value };
+        const key = thumbKey(entry), generation = mediaCache.token(key);
+        try {
+            const dataUrl = await mediaCache.load(key, async () => {
+                const full = await readFull(entry);
+                if (!full.ok) throw Object.assign(new Error(full.reason), { code: full.reason });
+                if (!makeThumbnail) return full.dataUrl;
+                const small = await step(Promise.resolve().then(() => makeThumbnail(full.dataUrl)), timeouts.thumb, 'thumb-timeout');
+                if (!DISPLAY_URL_RE.test(String(small || ''))) throw new Error('thumb-failed');
+                return small;
+            });
+            if (!dataUrl || mediaCache.token(key) !== generation) return { ok: false, reason: 'cache-cleared' };
+            return { ok: true, dataUrl: mediaCache.peek(key) || dataUrl };
+        } catch (error) { return { ok: false, reason: reasonOf(error, 'thumb-failed') }; }
     }
 
     async function setFlag(entry, field, value) {
@@ -315,13 +324,21 @@ export function createCgLibrary(deps = {}) {
         try {
             if (entry.kind === 'photo') {
                 if (!photoStore) return { ok: false, reason: 'store-unavailable' };
-                const [raw] = await step(photoStore.getMany([entry.photoId]), timeouts.write, 'write-timeout');
-                if (!raw) return { ok: false, reason: 'missing' };
-                const result = await step(photoStore.put({ ...raw, [field]: value }), timeouts.write, 'write-timeout');
+                let result;
+                if (photoStore.patchMetadata) result = await step(photoStore.patchMetadata(entry.photoId, { [field]: value }), timeouts.write, 'write-timeout');
+                else {
+                    const [raw] = await step(photoStore.getMany([entry.photoId]), timeouts.write, 'write-timeout');
+                    if (!raw) return { ok: false, reason: 'missing' };
+                    result = await step(photoStore.put({ ...raw, [field]: value }), timeouts.write, 'write-timeout');
+                }
                 if (!result || !result.ok) return result || { ok: false, reason: 'write-timeout' };
             } else {
                 if (!marksStore) return { ok: false, reason: 'store-unavailable' };
                 const current = (await step(marksStore.get(entry.key), timeouts.write, 'write-timeout')) || { key: entry.key, hidden: false, favorite: false };
+                if (illustrationStore?.patchSlotMetadata) {
+                    const updated = await illustrationStore.patchSlotMetadata(entry.key, { [field]: value });
+                    if (!updated?.ok) return updated;
+                }
                 const result = await step(marksStore.put({ ...current, [field]: value, key: entry.key, updatedAt: now() }), timeouts.write, 'write-timeout');
                 if (!result || !result.ok) return result || { ok: false, reason: 'write-timeout' };
             }
@@ -388,6 +405,7 @@ export function createCgLibrary(deps = {}) {
         syncIndex,
         readThumbs,
         makeThumb,
+        mediaCache,
         readFull,
         setHidden: (entry, hidden) => setFlag(entry, 'hidden', hidden === true),
         setFavorite: (entry, favorite) => setFlag(entry, 'favorite', favorite === true),

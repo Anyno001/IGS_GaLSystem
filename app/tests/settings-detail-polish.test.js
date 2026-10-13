@@ -89,6 +89,47 @@ test('gate:settings-polish:asset-review-buttons-are-grouped-and-aligned', async 
     assert.ok(ASSET_REVIEW_STYLE_TEXT.includes('.igs-asset-review-actions button:focus-visible{'));
 });
 
+test('gate:assets:review-rename-draft-survives-refresh-and-commit-uses-edited-name', async () => {
+    const { renderAssetReviewPanel } = await import('../src/visual/igs-ui/asset-review-panel.js');
+    const doc = { createElement(tag) {
+        return {
+            tagName: tag.toUpperCase(), ownerDocument: doc, children: [], attrs: {}, listeners: {}, value: '',
+            setAttribute(key, value) { this.attrs[key] = String(value); },
+            getAttribute(key) { return this.attrs[key] || null; },
+            removeAttribute(key) { delete this.attrs[key]; },
+            addEventListener(type, handler) { this.listeners[type] = handler; },
+            appendChild(child) { this.children.push(child); return child; },
+            append(...children) { this.children.push(...children); },
+            removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
+            get firstChild() { return this.children[0] || null; },
+            querySelectorAll(tag) {
+                const out = [];
+                const visit = (node) => {
+                    for (const child of node.children) {
+                        if (child.tagName === tag.toUpperCase()) out.push(child);
+                        visit(child);
+                    }
+                };
+                visit(this);
+                return out;
+            },
+        };
+    } };
+    const container = doc.createElement('div');
+    const record = { key: 'chat:floor:sprite', type: 'sprite', name: '原名', previewUrl: '' };
+    const saved = [];
+    const render = (items) => renderAssetReviewPanel(container, items, { onResolve: (_, status, name) => saved.push([status, name]) });
+    render([record]);
+    container.querySelectorAll('input')[0].value = '新名字';
+    render([record]);
+    assert.equal(container.querySelectorAll('input')[0].value, '新名字');
+    container.querySelectorAll('button')[0].listeners.click({ stopPropagation() {} });
+    assert.deepEqual(saved, [['library', '新名字']]);
+    render([]);
+    assert.equal(container.querySelectorAll('input').length, 0);
+    assert.ok(Object.hasOwn(container.attrs, 'hidden'), 'empty review is hidden');
+});
+
 test('gate:settings-polish:toast-follows-dialog-skin', async () => {
     const { getDialogSkinStyleText } = await import('../src/visual/igs-ui/dialog-skin-style.js');
     const base = { base: 'https://cdn.example/dist/skins/' };

@@ -35,6 +35,7 @@ import { GRADIENT_VEIL_STYLE_TEXT } from '../src/visual/igs-ui/gradient-veil-dia
 import { getDialogSkinStyleText, listDialogSkinAssetUrls, watchDialogSkinAssets } from '../src/visual/igs-ui/dialog-skin-style.js';
 import { getSettingsShellTemplate } from '../src/visual/igs-ui/settings-shell.js';
 import { findTruncatedFontTables } from '../scripts/font-slices.js';
+import { checkBundleStartup } from '../scripts/bundle-startup-check.js';
 import { getSettingsStyleText } from '../src/visual/igs-ui/settings-style.js';
 import { DIALOG_FONT_OPTIONS } from '../src/visual/igs-ui/reader-host-constants.js';
 import {
@@ -165,15 +166,11 @@ test('gate:loader-json:matches loader source and references public bundle', () =
     });
     assert.match(loaderJson.content, /QR_BUTTON_NAME = 'Gal模拟'/);
     assert.match(loaderJson.content, /getButtonEvent\(QR_BUTTON_NAME\)/);
-    // 发布产物只留最新一个，锁定到当前版本的 tag，不追 main（避开 CDN 缓存），与自动更新版同一份源码。
-    const pinnedRef = `v${readJson('package.json').version}`;
-    const releaseFiles = fs.readdirSync(path.join(projectRoot, 'loader')).filter((name) => / v\d+\.\d+\.\d+\.json$/.test(name));
-    assert.deepEqual(releaseFiles, [`沉浸式Galgame系统 ${pinnedRef}.json`]);
-    const pinnedJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'loader', releaseFiles[0]), 'utf8'));
-    assert.equal(pinnedJson.name, `沉浸式Galgame系统 ${pinnedRef}`);
-    assert.match(pinnedJson.content, new RegExp(`IGS_LOADER_REF=["']${pinnedRef.replace(/\./g, '\\.')}["']`));
-    assert.ok(pinnedJson.content.endsWith(loaderJson.content));
-    assert.deepEqual(pinnedJson.button, loaderJson.button);
+    // 当前自动更新导入件追踪发布仓库 main；保留的历史导入件不参与当前版本一致性检查。
+    const releaseRef = `v${readJson('package.json').version}`;
+    const releasePath = path.join(projectRoot, 'loader', `酒馆助手脚本-沉浸式Galgame系统（自动更新） ${releaseRef}.json`);
+    const releaseJson = JSON.parse(fs.readFileSync(releasePath, 'utf8'));
+    assert.deepEqual(releaseJson, loaderJson);
 });
 
 test('gate:dist-bundle:is-self-contained-for-loader-cache-bust', () => {
@@ -188,6 +185,13 @@ test('gate:dist-bundle:is-self-contained-for-loader-cache-bust', () => {
     assert.match(bundle, /message-scope-not-found/);
     assert.equal(manifest.name, 'Immersive Galgame System');
     assert.equal(manifest.version, pkgVersion);
+});
+
+test('gate:dist-bundle:boots-minified-and-debug-in-fresh-processes', () => {
+    const version = readJson('package.json').version;
+    for (const file of ['igs.bundle.js', 'igs.bundle.debug.js']) {
+        checkBundleStartup(path.join(appRoot, 'dist', file), version);
+    }
 });
 
 test('gate:dist-bundle:loads-as-esm-entry', async () => {
@@ -240,7 +244,7 @@ test('gate:loader-json:repeated enable rescans magic wand without alerting', () 
     assert.equal(root.__IGS_AUTO_UPDATE_LOADER__.reused, true);
 });
 
-test('gate:loader-json:adds-temporary-magic-wand-entry-before-remote-bundle-loads', () => {
+test('gate:loader-json:adds-temporary-magic-wand-entry-before-remote-bundle-loads', async () => {
     const loaderJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'loader', 'igs-loader.json'), 'utf8'));
     const documentLike = createLoaderDocumentLike({ magicMenu: true });
     const alerts = [];
@@ -266,6 +270,18 @@ test('gate:loader-json:adds-temporary-magic-wand-entry-before-remote-bundle-load
         fetch: root.fetch,
     });
     vm.runInContext(loaderJson.content, context);
+    // v0.36.43（b57030b）把启动流程改成异步（reconcileExistingRuntime 需要 await 旧运行时关闭），
+    // 临时魔法棒入口改为在随后的微任务里写入，所以这里等一拍再断言。
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const entry = documentLike.magicMenu.querySelector('[data-igs-loader-entry="1"]');
+    assert.ok(entry);
+    assert.equal(entry.getAttribute('data-igs-magic-entry'), '1');
+    assert.equal(entry.getAttribute('data-igs-version'), 'loader');
+    assert.match(entry.innerHTML, /沉浸式Galgame系统/);
+    assert.deepEqual(alerts, []);
+});
 
 
 function createQrLoaderHarness(options = {}) {
@@ -410,14 +426,6 @@ test('gate:loader-qr:missing-or-throwing-qr-api-fails-open', () => {
     assert.equal(throwing.subscriptions.length, 0);
     assert.equal(throwing.alerts.length, 0);
     assert.equal(throwing.warnings.length >= 1, true);
-});
-
-    const entry = documentLike.magicMenu.querySelector('[data-igs-loader-entry="1"]');
-    assert.ok(entry);
-    assert.equal(entry.getAttribute('data-igs-magic-entry'), '1');
-    assert.equal(entry.getAttribute('data-igs-version'), 'loader');
-    assert.match(entry.innerHTML, /沉浸式Galgame系统/);
-    assert.deepEqual(alerts, []);
 });
 
 test('gate:loader-json:loads-main-commit-by-default-with-main-fallback', async () => {

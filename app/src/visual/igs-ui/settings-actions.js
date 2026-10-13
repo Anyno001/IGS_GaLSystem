@@ -1,3 +1,5 @@
+import { prepareImageImport } from '../../media/image-import-transaction.js';
+import { writeCheckedStorage } from '../../storage/checked-storage-write.js';
 import { openSettingsPage } from './settings-pages.js';
 import { DEFAULT_VIRTUAL_REGEX } from '../../scene/message-source.js';
 import { pendingExpressionCaptions } from './settings-outfit-fields.js';
@@ -16,7 +18,6 @@ import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneA
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
-import { createIndexedDbAssetThumbStore } from '../../media/asset-thumb-store.js';
 import { buildPageDiagnostic } from './page-diagnostic.js';
 import { fxPromptsCopyText } from './fx-settings-fields.js';
 import { isPromptEntryKey, normalizePromptEntry } from '../../scene/prompt-entries.js';
@@ -64,14 +65,14 @@ import { isBuiltinNudeOutfit, normalizeCharacterOutfits, normalizeWardrobe, rena
 
 import { migrateSpriteKeys } from './sprite-key-migration.js';
 import { NAI_OFFICIAL_MODELS } from '../../generated-images/request-builders/nai-v4-builder.js';
-import { ASSET_FOLDER_KINDS, addAssetFolder, forgetAssetItem, loadAssetFoldersFor as loadAssetFolders, mergeAssetFolderScope, moveAssetToFolder, removeAssetFolder, renameAssetFolder, renameAssetItem, saveAssetFolders, setAssetView, toggleAssetFolder } from './asset-folders.js';
+import { ASSET_FOLDERS_STORAGE_KEY, ASSET_FOLDER_KINDS, addAssetFolder, forgetAssetItem, loadAssetFoldersFor as loadAssetFolders, mergeAssetFolderScope, moveAssetToFolder, removeAssetFolder, renameAssetFolder, renameAssetItem, saveAssetFolders, setAssetView, toggleAssetFolder } from './asset-folders.js';
 import { mergeDefaultBackgrounds } from '../../backgrounds/merge-default-backgrounds.js';
 
 // 能按「本卡 / 全局」筛选和整批迁移的素材，值是确认框里的叫法。
 const SCOPED_COLLECTION_KINDS = Object.freeze({ scenes: '场景', characters: '角色', wardrobe: '衣柜提示词' });
 import { isLayeredPreset, isLegacyPresetData, isValidPresetName, layeredPresetFromRoot, legacyPackConflicts, legacyPackSummary, legacyPresetToPack, loadLegacyPresets, mergeLegacyLibrary, presetCardLayers, presetFromAssets, readPresetLibrary, removeNamedPreset, renameNamedPreset, replaceLibraryWithPack, replacePresetLibrary, storeLegacyPresets, writeNamedPreset } from '../../scene/legacy-preset.js';
 import { avatarHoldersOfPreset, avatarHoldersOfRoot, moveInlineAvatars, storeAvatarImage } from './avatar-images.js';
-import { describeLocalStorageUsage } from '../../storage/storage-usage.js';
+import { describeLocalStorageUsage, describeMediaUsage } from '../../storage/storage-usage.js';
 
 // 草稿深拷贝后顶层 imageApi 与 bridge.imageApi 不再是同一对象，面板只改后者；生图读取优先顶层，这里对齐为面板当前值。
 function cloneImageDraft(draft) {
@@ -374,12 +375,20 @@ function applyOutfitExpression(sceneAssets, name, outfitName, item) {
     sceneAssets.generated = library;
 }
 
-function persistGeneratedLibrary(persistSettingsDraft) {
+function persistGeneratedLibrary(persistSettingsDraft, options = {}) {
     try {
-        return persistSettingsDraft();
+        return persistSettingsDraft(options);
     } catch (error) {
         return { ok: false, reason: 'generated-asset-persist-failed' };
     }
+}
+
+async function rollbackImportedDraft(settingsState, before, persistSettingsDraft, prepared, storage, folders) {
+    settingsState.draft = before;
+    const restored = persistGeneratedLibrary(persistSettingsDraft);
+    const folderResult = folders !== undefined ? writeCheckedStorage(storage, ASSET_FOLDERS_STORAGE_KEY, folders) : { ok: true };
+    const compensation = prepared ? await prepared.rollback() : { ok: true };
+    return { ok: false, reason: 'save-failed', rollbackFailed: !restored || restored.ok === false || !folderResult.ok || !compensation.ok };
 }
 
 function restoreGeneratedLibrary(sceneAssets, previousLibrary, persistSettingsDraft) {
@@ -928,7 +937,8 @@ export async function handleSettingsAction(action, ctx) {
     }
 
     if (normalizedAction === 'copy-page-diagnostic') {
-        const text = buildPageDiagnostic(state.activeReader && state.activeReader.snapshot, { version: options.version, worldview: resolveWorldview(draftEffectiveAssets(settingsState)), promptReport: getLastPromptReport() });
+        const mediaStats = await Promise.resolve(options.media?.stats?.()).catch(() => null);
+        const text = buildPageDiagnostic(state.activeReader && state.activeReader.snapshot, { version: options.version, worldview: resolveWorldview(draftEffectiveAssets(settingsState)), promptReport: getLastPromptReport(), mediaStats });
         if (!text) {
             if (typeof dialogs.view === 'function') await dialogs.view('请先打开阅读器并翻到出现问题的页面，再从工具栏的「设置」进入并复制。');
             return rerenderSettings();
@@ -1064,13 +1074,32 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    if (normalizedAction === 'gen-records-retry' || normalizedAction.startsWith('gen-temp-page:')) {
+        const service = options.generatedAssets;
+        try {
+            settingsState.asyncState.genRecordsError = '';
+            if (normalizedAction === 'gen-records-retry') {
+                const results = await Promise.allSettled([service?.retryMetadata?.(), options.itemImages?.retryMetadata?.()]);
+                if (results.some(result => result.status === 'rejected' || result.value?.ok === false)) throw new Error('asset-record-read-failed');
+            } else if (service?.changeTempPage) {
+                await service.changeTempPage(normalizedAction.slice('gen-temp-page:'.length));
+            }
+        } catch (error) { settingsState.asyncState.genRecordsError = error.message || '素材记录读取失败'; }
+        return rerenderSettings();
+    }
+
     if (normalizedAction.startsWith('gen-temp-accept:')) {
         const key = decodeSeg(normalizedAction.slice('gen-temp-accept:'.length));
         const service = options.generatedAssets;
-        if (!service || typeof service.getRecord !== 'function' || typeof service.setStatus !== 'function') {
+        if (!service || typeof service.readRecord !== 'function' || typeof service.setStatus !== 'function') {
             return { ok: false, reason: 'generated-assets-unavailable' };
         }
-        const record = service.getRecord(key);
+        let record;
+        try { record = await service.readRecord(key); }
+        catch (error) {
+            settingsState.asyncState.genRecordsError = error.message || '素材记录读取失败';
+            return rerenderSettings();
+        }
         if (!record || !record.imageId) return rerenderSettings();
         const globalObj = options.global || globalThis;
         const suggestedName = String(record.name || '').trim();
@@ -1106,11 +1135,11 @@ export async function handleSettingsAction(action, ctx) {
             if (!bound.ok) return rerenderSettings();
             sceneAssets.characters = bound.characters;
             sceneAssets.characterAliases = bound.characterAliases;
-            const persisted = persistGeneratedLibrary(persistSettingsDraft);
+            const persisted = persistGeneratedLibrary(persistSettingsDraft, { spriteAssetChanged: true });
             if (operationFailed(persisted)) {
                 sceneAssets.characters = previousCharacters;
                 sceneAssets.characterAliases = previousAliases;
-                const rolled = persistGeneratedLibrary(persistSettingsDraft);
+                const rolled = persistGeneratedLibrary(persistSettingsDraft, { spriteAssetChanged: true });
                 if (operationFailed(rolled)) {
                     return generatedOperationFailure(dialogs, globalObj, '角色立绘入库失败，且无法恢复原设置。', 'generated-asset-accept-rollback-failed');
                 }
@@ -1133,7 +1162,7 @@ export async function handleSettingsAction(action, ctx) {
             } else if (previousCharacters) {
                 sceneAssets.characters = previousCharacters;
                 sceneAssets.characterAliases = previousAliases;
-                const rolled = persistGeneratedLibrary(persistSettingsDraft);
+                const rolled = persistGeneratedLibrary(persistSettingsDraft, { spriteAssetChanged: true });
                 if (operationFailed(rolled)) {
                     return generatedOperationFailure(dialogs, options.global || globalThis, '角色立绘入库失败，且无法恢复原设置。', 'generated-asset-accept-rollback-failed');
                 }
@@ -1208,7 +1237,7 @@ export async function handleSettingsAction(action, ctx) {
         delete library.characters[name];
         delete library.characterAliases[name];
         sceneAssets.generated = library;
-        const persisted = persistGeneratedLibrary(persistSettingsDraft);
+        const persisted = persistGeneratedLibrary(persistSettingsDraft, { spriteAssetChanged: true });
         if (operationFailed(persisted)) return persisted;
         const boundMessage = `已把这张图设为「${adopted.name}」的默认立绘。`;
         if (globalObj.toastr && typeof globalObj.toastr.success === 'function') globalObj.toastr.success(boundMessage, 'IGS');
@@ -1426,7 +1455,7 @@ export async function handleSettingsAction(action, ctx) {
         if (String(spriteNote || '').trim()) spriteNotes[name] = String(spriteNote).trim();
         else delete spriteNotes[name];
         ensureCharacterAliases(settingsState, editTarget);
-        const persisted = persistGeneratedLibrary(persistSettingsDraft);
+        const persisted = persistGeneratedLibrary(persistSettingsDraft, { spriteAssetChanged: true });
         if (operationFailed(persisted)) {
             progress.end();
             return persisted;
@@ -1484,7 +1513,7 @@ export async function handleSettingsAction(action, ctx) {
         all[name] = mine;
         liveAssets.characterOutfits = all;
         ensureCharacterAliases(settingsState, editTarget);
-        const persisted = persistGeneratedLibrary(persistSettingsDraft);
+        const persisted = persistGeneratedLibrary(persistSettingsDraft, { spriteAssetChanged: true });
         if (operationFailed(persisted)) {
             progress.end();
             restoreBusy();
@@ -1700,13 +1729,13 @@ export async function handleSettingsAction(action, ctx) {
             if (outfitMode) applyOutfitExpression(liveAssets, name, outfitName, item);
             else applyCharacterExpression(liveAssets, name, item);
         }
-        const persisted = persistGeneratedLibrary(persistSettingsDraft);
+        const painted = (result.items || []).filter((item) => item.ok && item.imageId).length;
+        const persisted = persistGeneratedLibrary(persistSettingsDraft, { spriteAssetChanged: painted > 0 });
         if (operationFailed(persisted)) {
             progress.end();
             restoreBusy();
             return persisted;
         }
-        const painted = (result.items || []).filter((item) => item.ok).length;
         const failedItems = (result.items || []).filter((item) => !item.ok && item.error !== '已停止' && item.error !== '已跳过');
         const firstError = errorText(failedItems[0] && failedItems[0].error, '未返回原因');
         const rendered = await rerenderSettings();
@@ -2599,18 +2628,22 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
-    // 「清除素材缓存」：清掉三条本地缓存——图片按路径留的 dataUrl、设置页缩略图、内存里的解码图。
-    // 酒馆上的原图不动，下次查看重新下载 / 重新缩图；遇到「图不更新」「占空间」时一键重置。
+    if (normalizedAction === 'image-cache-status' || normalizedAction === 'image-files-retry-delete') {
+        if (!options.media) return { ok: false, reason: 'media-unavailable' };
+        try {
+            if (normalizedAction === 'image-files-retry-delete') await options.media.retryDeletes();
+            settingsState.asyncState.imageCacheStatus = describeMediaUsage(await options.media.stats());
+        } catch (error) { settingsState.asyncState.imageCacheStatus = `读取或回收失败：${error.message}`; }
+        return rerenderSettings();
+    }
+
+    // 一个清理入口覆盖原图、派生缩略图、对象 URL 与在途加载。
     if (normalizedAction === 'image-cache-clear' || normalizedAction === 'purge-asset-cache') {
         const hostGlobal = options.global || globalThis;
-        await localImageCacheFor(hostGlobal).clear();
-        if (normalizedAction === 'purge-asset-cache') {
-            try {
-                const thumbs = createIndexedDbAssetThumbStore(hostGlobal);
-                if (thumbs && typeof thumbs.clear === 'function') await thumbs.clear();
-            } catch (error) { /* 缩略图库打不开也不影响其余缓存清空 */ }
-        }
+        await (options.media ? options.media.clearCache() : localImageCacheFor(hostGlobal).clear());
+        options.generatedAssets?.clearCache?.(); options.illustrations?.clearCache?.(); options.itemImages?.clearCache?.();
         resetCgView(settingsState.asyncState);
+        settingsState.asyncState.imageCacheStatus = options.media ? describeMediaUsage(await options.media.stats()) : '';
         settingsState.asyncState.imageCgStatus = normalizedAction === 'purge-asset-cache'
             ? '已清除素材缓存，图片与缩略图会在查看时重新读取。'
             : '已清空本地图片缓存。';
@@ -4217,12 +4250,18 @@ async function importAllSettings(settingsState, options, dialogs, ctx, persistSe
         return rerenderSettings();
     }
     if (!await dialogs.confirm(`用「${file.fileName}」覆盖当前的全局配置？场景、角色、衣柜和各角色卡的资料保持不动。API Key保留本机现有的。`, { okLabel: '导入' })) return rerenderSettings();
+    const before = cloneData(settingsState.draft);
     const normalized = ctx.normalizeImportedSettings({ bridge: parsed.bridge, readerSettings: parsed.readerSettings });
     settingsState.draft.bridge = normalized.bridge;
     settingsState.draft.readerSettings = normalized.readerSettings;
-    const persisted = persistSettingsDraft();
-    if (persisted.ok === false) return persisted;
+    const persisted = persistGeneratedLibrary(persistSettingsDraft);
+    if (!persisted || persisted.ok === false) return rollbackImportedDraft(settingsState, before, persistSettingsDraft);
     const rescued = await rescueLegacyAssets(file, options);
+    if (rescued.ok === false) {
+        settingsState.draft = before;
+        const restored = persistGeneratedLibrary(persistSettingsDraft);
+        return { ...rescued, rollbackFailed: rescued.rollbackFailed || restored?.ok === false };
+    }
     if (rescued.count) {
         pageAlert(dialogs, globalObj, `该配置包含旧版素材（${rescued.count}套），已另行保存。可在「角色」「场景」页顶部的素材预设中套用到本卡或全局。`);
     }
@@ -4244,15 +4283,17 @@ async function rescueLegacyAssets(file, options) {
             presets[`${file.fileName || '导入的配置'}里的素材`] = { ...oldAssets, spriteLayouts: reader.spriteLayouts || {}, spriteHeads: reader.spriteHeads || {} };
         }
     }
-    const service = options.generatedAssets;
-    for (const image of (archive && archive.images) || []) {
-        if (!service || typeof service.writeStoredImage !== 'function') break;
-        try { await service.writeStoredImage(image); } catch (error) { /* 图写不进本机时，预设里只缺这一张 */ }
+    const prepared = await prepareImageImport(archive?.images || [], presets, options.generatedAssets, { remapMissing: Boolean(archive) });
+    if (!prepared.ok) return prepared;
+    const previous = loadLegacyPresets(globalObj.localStorage);
+    const stored = storeLegacyPresets(globalObj.localStorage, prepared.value);
+    if (stored.ok === false) {
+        const compensation = await prepared.rollback();
+        return { ...stored, rollbackFailed: stored.rollbackFailed || !compensation.ok };
     }
-    const seen = new Map();
-    for (const preset of Object.values(presets)) await moveInlineAvatars(avatarHoldersOfPreset(preset), service, seen);
-    const stored = storeLegacyPresets(globalObj.localStorage, presets);
-    return { count: stored.ok === false ? 0 : stored.count };
+    const released = unreferencedGeneratedImageIds(collectGeneratedImageIds(previous), {}, globalObj.localStorage);
+    if (released.length) await options.generatedAssets?.deleteImages?.(released);
+    return { ok: true, count: stored.count };
 }
 
 // 旧版素材预设（浏览器里留着的，或导出的 json）→ 按名字合并进当前角色卡或全局。已有的其他条目不动。
@@ -4329,11 +4370,17 @@ async function handlePresetAction(action, settingsState, options, dialogs, persi
         const name = await askName('导入预设，名字：', (archive && archive.name) || String(file.fileName || '').replace(/\.(?:json|zip)$/i, '') || '导入的预设');
         if (!name) return rerenderSettings();
         if (presets[name] && !await dialogs.confirm(`已存在预设「${name}」，是否用文件中的内容覆盖？`, { okLabel: '覆盖' })) return rerenderSettings();
-        const lost = archive ? await writePackImages(archive.images, options) : 0;
-        await moveInlineAvatars(avatarHoldersOfPreset(data), options.generatedAssets);
-        const written = writeNamedPreset(storage, name, data);
-        if (written.ok === false) return failed(written);
-        if (lost) alertFn(`预设已导入，有${lost}张图片未能保存到本机。`);
+        const prepared = await prepareImageImport(archive?.images || [], data, options.generatedAssets, { remapMissing: Boolean(archive) });
+        if (!prepared.ok) { alertFn('图片保存失败，未导入预设。'); return prepared; }
+        let written;
+        try { written = writeNamedPreset(storage, name, prepared.value); }
+        catch (error) { written = { ok: false, reason: 'preset-save-failed', error: error.message }; }
+        if (written.ok === false) {
+            const compensation = await prepared.rollback();
+            return failed({ ...written, rollbackFailed: written.rollbackFailed || !compensation.ok });
+        }
+        const released = releasedGeneratedImageIds(collectGeneratedImageIds(presets[name]), root, storage);
+        if (released.length) await options.generatedAssets?.deleteImages?.(released);
         return rerenderSettings();
     }
 
@@ -4383,8 +4430,11 @@ async function handlePresetAction(action, settingsState, options, dialogs, persi
 
     if (command === 'preset-delete') {
         if (!await dialogs.confirm(`删除预设「${name}」？素材本身不受影响，但之后将无法再套用该预设。`, { okLabel: '删除' })) return rerenderSettings();
+        const previousIds = collectGeneratedImageIds(preset);
         const written = removeNamedPreset(storage, name);
         if (written.ok === false) return failed(written);
+        const released = unreferencedGeneratedImageIds(previousIds, root, storage);
+        if (released.length) await options.generatedAssets?.deleteImages?.(released);
         return rerenderSettings();
     }
 
@@ -4442,9 +4492,9 @@ async function handlePresetAction(action, settingsState, options, dialogs, persi
     return rerenderSettings();
 }
 
-async function importLegacyPreset(settingsState, options, dialogs, persistSettingsDraft, rerenderSettings, data, label) {
+async function importLegacyPreset(settingsState, options, dialogs, persistSettingsDraft, rerenderSettings, data, label, images = []) {
     const globalObj = options.global || globalThis;
-    const pack = legacyPresetToPack(data);
+    let pack = legacyPresetToPack(data);
     const summary = legacyPackSummary(pack);
     const root = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
     const asyncState = settingsState.asyncState || {};
@@ -4471,8 +4521,11 @@ async function importLegacyPreset(settingsState, options, dialogs, persistSettin
         + (conflicts.length ? `\n${where}中已有的${conflicts.length}个同名条目将替换为预设中的版本：${shown}。` : '')
         + '\n其他已有素材保持不变。';
     if (!await dialogs.confirm(message, { okLabel: '导入' })) return rerenderSettings();
+    const before = cloneData(settingsState.draft);
+    const prepared = await prepareImageImport(images, data, options.generatedAssets, { remapMissing: images.length > 0 });
+    if (!prepared.ok) { pageAlert(dialogs, globalObj, '图片保存失败，未导入预设。'); return prepared; }
+    pack = legacyPresetToPack(prepared.value);
     mergeLegacyLibrary(target, pack);
-    mergeAssetFolderScope(globalObj.localStorage, label, dest);
     if (pack.worldview) applyWorldview(target, pack.worldview);
     root.characterHouses = { ...(root.characterHouses || {}), ...cloneData(pack.characterHouses) };
     root.characterVoices = { ...(root.characterVoices || {}), ...normalizeCharacterVoices(pack.characterVoices) };
@@ -4483,8 +4536,15 @@ async function importLegacyPreset(settingsState, options, dialogs, persistSettin
     const reader = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
     reader.spriteLayouts = { ...(reader.spriteLayouts || {}), ...cloneData(pack.spriteLayouts) };
     reader.spriteHeads = { ...(reader.spriteHeads || {}), ...normalizeSpriteHeads(pack.spriteHeads) };
-    const persisted = persistSettingsDraft();
-    if (persisted.ok === false) return persisted;
+    const persisted = persistGeneratedLibrary(persistSettingsDraft);
+    if (!persisted || persisted.ok === false) {
+        const rolledBack = await rollbackImportedDraft(settingsState, before, persistSettingsDraft, prepared);
+        return { ...persisted, ...rolledBack };
+    }
+    const folders = globalObj.localStorage.getItem(ASSET_FOLDERS_STORAGE_KEY);
+    if (!mergeAssetFolderScope(globalObj.localStorage, label, dest, { strict: true })) return rollbackImportedDraft(settingsState, before, persistSettingsDraft, prepared, globalObj.localStorage, folders);
+    const released = releasedGeneratedImageIds(collectGeneratedImageIds(before.bridge?.sceneAssets), root, globalObj.localStorage);
+    if (released.length) await options.generatedAssets?.deleteImages?.(released);
     pageAlert(dialogs, globalObj, `已把「${label}」导入${where}。`);
     return rerenderSettings();
 }
@@ -4539,12 +4599,11 @@ async function importCharacterCardPack(settingsState, options, dialogs, persistS
         pageAlert(dialogs, globalObj, '该文件既不是角色卡素材包，也不是旧版素材预设。');
         return rerenderSettings();
     }
-    const pack = parseCharacterCardPack(file.bytes);
+    let pack = parseCharacterCardPack(file.bytes);
     const presetArchive = pack ? null : parsePresetArchive(file.bytes);
     if (presetArchive && isLegacyPresetData(presetArchive.preset)) {
-        await writePackImages(presetArchive.images, options);
         const label = presetArchive.name || String(file.fileName || '').replace(/\.zip$/i, '') || '导入的预设';
-        return importLegacyPreset(settingsState, options, dialogs, persistSettingsDraft, rerenderSettings, presetArchive.preset, label);
+        return importLegacyPreset(settingsState, options, dialogs, persistSettingsDraft, rerenderSettings, presetArchive.preset, label, presetArchive.images);
     }
     if (!pack) {
         pageAlert(dialogs, globalObj, '该压缩包不是角色卡素材包。');
@@ -4559,7 +4618,10 @@ async function importCharacterCardPack(settingsState, options, dialogs, persistS
         const confirmed = await dialogs.confirm(`导入将覆盖角色卡「${pack.characterName}」中现有的场景、角色和衣柜${extra}。是否继续？`);
         if (!confirmed) return rerenderSettings();
     }
-    const failed = await writePackImages(pack.images, options);
+    const before = cloneData(settingsState.draft);
+    const prepared = await prepareImageImport(pack.images, pack, options.generatedAssets, { remapMissing: true });
+    if (!prepared.ok) { pageAlert(dialogs, globalObj, '图片保存失败，未导入素材包。'); return prepared; }
+    pack = prepared.value;
     ensureCardLibrary(root, key);
     root.cards[key] = cardLibrarySnapshot(pack.library);
     if (pack.worldview) applyWorldview(root.cards[key], pack.worldview);
@@ -4575,10 +4637,14 @@ async function importCharacterCardPack(settingsState, options, dialogs, persistS
         ...(settingsState.draft.readerSettings.spriteHeads || {}),
         ...(pack.spriteHeads || {}),
     };
-    const persisted = persistSettingsDraft();
-    if (persisted.ok === false) return persisted;
-    const extra = failed ? `有${failed}张图片未能保存到本机。` : '';
-    pageAlert(dialogs, globalObj, `已导入角色卡「${pack.characterName}」的素材，打开同名角色卡即可使用。${extra}`);
+    const persisted = persistGeneratedLibrary(persistSettingsDraft);
+    if (!persisted || persisted.ok === false) {
+        const rolledBack = await rollbackImportedDraft(settingsState, before, persistSettingsDraft, prepared);
+        return { ...persisted, ...rolledBack };
+    }
+    const released = releasedGeneratedImageIds(collectGeneratedImageIds(before.bridge?.sceneAssets), root, globalObj.localStorage);
+    if (released.length) await options.generatedAssets?.deleteImages?.(released);
+    pageAlert(dialogs, globalObj, `已导入角色卡「${pack.characterName}」的素材，打开同名角色卡即可使用。`);
     return rerenderSettings();
 }
 
@@ -4597,21 +4663,6 @@ async function readPackImages(ids, options) {
         else missing += 1;
     }
     return { images, missing };
-}
-
-// 包里的图写回本机，返回没写进去的张数。
-async function writePackImages(images, options) {
-    const service = options.generatedAssets;
-    let failed = 0;
-    for (const image of Array.isArray(images) ? images : []) {
-        try {
-            const written = service && typeof service.writeStoredImage === 'function' ? await service.writeStoredImage(image) : null;
-            if (!written || written.ok === false) failed += 1;
-        } catch (error) {
-            failed += 1;
-        }
-    }
-    return failed;
 }
 
 async function readAssetDataUrl(url, globalObj, service) {

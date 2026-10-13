@@ -122,7 +122,7 @@ function vitalsHtml(item) {
 function portraitOf(who, env, region = 'face') {
     const el = spriteElOf(env, who);
     const url = urlOfBackground(el && el.style && el.style.backgroundImage);
-    const crop = url ? resolveRegionCrop({ url }, region, 1) : null;
+    const crop = url ? resolveRegionCrop({ url }, region, 1, env.root.ownerDocument) : null;
     return crop ? cloneSpriteLayer(env.root, who, { speaker: env.speaker, crop }) : null;
 }
 
@@ -257,7 +257,7 @@ export const COC_BUILDERS = {
     magnify(item, env) {
         const el = spriteElOf(env, item.who);
         const url = urlOfBackground(el && el.style && el.style.backgroundImage);
-        const crop = url ? resolveRegionCrop({ url }, item.region, 1) : null;
+        const crop = url ? resolveRegionCrop({ url }, item.region, 1, env.root.ownerDocument) : null;
         const clone = crop ? cloneSpriteLayer(env.root, item.who, { speaker: env.speaker, crop }) : null;
         const sprite = readStageBackground(env.root).sprite;
         const left = spritePosX(sprite) > 50 ? 27 : 73;

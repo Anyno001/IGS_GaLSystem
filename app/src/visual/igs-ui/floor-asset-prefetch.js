@@ -31,6 +31,7 @@ export function collectFloorAssetUrls({
     inheritedScene = null,
     assetMatchCtx = null,
     imageSlots = [],
+    onSpriteUrl = null,
     systemRole = null,
     readClues = null,
 } = {}) {
@@ -75,9 +76,15 @@ export function collectFloorAssetUrls({
         const name = String(directive.character || '').trim();
         if (!name || isNonSpriteSpeaker(name) || isSystemRole(name, systemRole)) continue;
         const outfit = outfitFor(name, Number(directive.offset));
-        pushUrl(urls, seen, resolveSpriteAsset(name, directive.mood || '', ctx, outfit).url);
+        const spriteUrl = resolveSpriteAsset(name, directive.mood || '', ctx, outfit).url;
+        if (spriteUrl && onSpriteUrl) onSpriteUrl(spriteUrl);
+        pushUrl(urls, seen, spriteUrl);
         const place = sceneBefore(directives, Number(directive.offset), inheritedScene);
-        if (place.nsfw) pushUrl(urls, seen, resolveNudeSpriteAsset(name, directive.mood || '', ctx).url);
+        if (place.nsfw) {
+            const nudeUrl = resolveNudeSpriteAsset(name, directive.mood || '', ctx).url;
+            if (nudeUrl && onSpriteUrl) onSpriteUrl(nudeUrl);
+            pushUrl(urls, seen, nudeUrl);
+        }
     }
     return urls;
 }

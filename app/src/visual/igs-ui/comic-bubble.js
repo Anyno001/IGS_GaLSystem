@@ -213,7 +213,7 @@ function headFor(motion, opts, content) {
     const sprite = opts.sprite;
     if (!sprite || !sprite.url) return { head: null, pending: false };
     if (!content.speaker || (content.spriteCharacter && content.spriteCharacter !== content.speaker)) return { head: null, pending: false };
-    const probed = peekSpriteHead(sprite.url);
+    const probed = peekSpriteHead(sprite.url, motion.ownerDocument);
     const manual = sprite.head || null;
     const naturalW = probed ? probed.naturalW : 1;
     const naturalH = probed ? probed.naturalH : manual && manual.aspect;
@@ -455,7 +455,7 @@ function layoutPage(root, snapshot, opts, { relayout = false }) {
     // 同屏其他角色的脸不能被泡挡住。
     for (const member of Array.isArray(opts.cast) ? opts.cast : []) {
         if (!member || member.character === content.speaker) continue;
-        const probed = peekSpriteHead(member.url);
+        const probed = peekSpriteHead(member.url, motion.ownerDocument);
         const box = probed ? resolveHeadBox(stageW, stageH, { ...member, naturalW: probed.naturalW, naturalH: probed.naturalH, head: member.head || probed.head }) : null;
         if (box) avoid.push({ x: box.cx - box.w * 0.6, y: box.top - box.h * 0.05, w: box.w * 1.2, h: box.h * 1.15, weight: 6 });
     }

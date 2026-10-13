@@ -5,6 +5,7 @@ import { normalizeCharacterOutfits, normalizeWardrobe } from './character-outfit
 import { normalizeCharacterDnaMap } from './character-dna.js';
 import { normalizeGeneratedLibrary } from './asset-match.js';
 import { resolveWorldview } from './worldview.js';
+import { writeCheckedStorage } from '../storage/checked-storage-write.js';
 
 export const LEGACY_PRESET_KEY = 'igs:scene-presets:v1';
 
@@ -133,7 +134,8 @@ export function storeLegacyPresets(storage, presets) {
         const parsed = raw ? JSON.parse(raw) : null;
         const current = parsed && isPlain(parsed.presets) ? parsed.presets : {};
         const active = parsed && typeof parsed.active === 'string' ? parsed.active : '';
-        storage.setItem(LEGACY_PRESET_KEY, JSON.stringify({ version: 1, presets: { ...current, ...incoming }, active }));
+        const written = writeCheckedStorage(storage, LEGACY_PRESET_KEY, JSON.stringify({ version: 1, presets: { ...current, ...incoming }, active }));
+        if (!written.ok) return written;
         return { ok: true, count: Object.keys(incoming).length };
     } catch (error) {
         return { ok: false, reason: 'store-write-failed', saveError: error };
@@ -155,8 +157,7 @@ function writePresetStore(storage, update) {
     try {
         const store = readPresetStore(storage);
         const presets = update({ ...store.presets });
-        storage.setItem(LEGACY_PRESET_KEY, JSON.stringify({ version: 1, presets, active: store.active }));
-        return { ok: true };
+        return writeCheckedStorage(storage, LEGACY_PRESET_KEY, JSON.stringify({ version: 1, presets, active: store.active }));
     } catch (error) {
         return { ok: false, reason: 'store-write-failed', saveError: error };
     }

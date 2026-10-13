@@ -1,9 +1,10 @@
+import { createMemoryCgIndexStore, createCgLibrary } from './helpers/media-fixtures.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryIllustrationStore } from '../src/media/illustration-store.js';
 import { createMemoryCgGalleryStore } from '../src/media/cg-gallery-store.js';
-import { createMemoryCgIndexStore } from '../src/media/cg-index-store.js';
-import { createCgLibrary } from '../src/media/cg-library.js';
+
+
 import { createCgGalleryPanel } from '../src/visual/igs-ui/cg-gallery-panel.js';
 
 function fakeDoc() {

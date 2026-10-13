@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { contentHash, findTruncatedFontTables, fontSliceName, JSDELIVR_FILE_LIMIT_BYTES, readSliceManifest, renderSliceFontFaces, SPLIT_FONT_MIN_BYTES } from './font-slices.js';
 import { externalizeSkinAssets, verifySkinAssets } from './skin-assets.js';
+import { checkBundleStartup } from './bundle-startup-check.js';
 
 const appRoot = path.resolve(import.meta.dirname, '..');
 const srcRoot = path.join(appRoot, 'src');
@@ -228,6 +229,10 @@ if (/^\s*import\s/m.test(builtBundle) || builtBundle.includes("from '../src/inde
     throw new Error('Build output must be self-contained and must not import app/src modules at runtime.');
 }
 
+for (const name of ['igs.bundle.js', 'igs.bundle.debug.js']) {
+    checkBundleStartup(path.join(distRoot, name), packageJson.version);
+}
+console.log('gate:bundle-startup ok (minified/debug, auto/manual)');
 console.log('gate:build ok');
 
 function buildModuleGraph(rootFile) {

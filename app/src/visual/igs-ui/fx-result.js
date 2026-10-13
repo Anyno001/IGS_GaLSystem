@@ -86,7 +86,7 @@ function avatarNode(root, doc, who, speaker) {
     wrap.setAttribute('aria-hidden', 'true');
     const sprite = !name ? null : (name === speaker ? root.querySelector('#igs-sprite') : castSpriteOf(root, name));
     if (sprite) {
-        const crop = resolveRegionCrop({ url: sprite.style ? urlOfImage(sprite.style.backgroundImage) : '' }, 'face', 1);
+        const crop = resolveRegionCrop({ url: sprite.style ? urlOfImage(sprite.style.backgroundImage) : '' }, 'face', 1, sprite.ownerDocument);
         const face = cloneSpriteLayer(root, name, { speaker, crop });
         if (face) {
             wrap.appendChild(face);

@@ -186,7 +186,7 @@ export const CAMERA_BUILDERS = {
         const cellNodes = typeof node.querySelectorAll === 'function' ? Array.from(node.querySelectorAll('.igs-cm-cell')) : [];
         cellNodes.forEach((cell, i) => {
             if (i % 2 === 0 && i > 1) return;
-            const crop = resolveRegionCrop(env.sprite || {}, CELL_REGIONS[i], CELL_RATIO[n]);
+            const crop = resolveRegionCrop(env.sprite || {}, CELL_REGIONS[i], CELL_RATIO[n], env.root.ownerDocument);
             const clone = cloneSpriteLayer(env.root, '', { speaker: env.speaker, crop });
             if (clone) cell.appendChild(clone);
         });
@@ -211,7 +211,7 @@ export const CAMERA_BUILDERS = {
             && Array.from(env.root.querySelectorAll('.igs-cast-sprite')).some((el) => el.getAttribute('data-igs-cast-char') === who);
         const host = castHit && typeof node.querySelector === 'function' ? node.querySelector('.igs-cm-sprite-hush') : null;
         if (host) {
-            const crop = resolveRegionCrop(env.sprite || {}, 'face', 1.2);
+            const crop = resolveRegionCrop(env.sprite || {}, 'face', 1.2, env.root.ownerDocument);
             const clone = cloneSpriteLayer(env.root, who, { speaker: env.speaker, crop });
             if (clone) {
                 const box = make(env.doc, '');

@@ -99,6 +99,12 @@ export function isLiveFullLeftTap(root, clientX) {
     return Boolean(rect && rect.width > 0 && clientX < rect.left + rect.width / 2);
 }
 
+export function isBackgroundLeftTap(root, clientX) {
+    if (!root || !Number.isFinite(clientX)) return false;
+    const rect = typeof root.getBoundingClientRect === 'function' ? root.getBoundingClientRect() : null;
+    return Boolean(rect && rect.width > 0 && clientX >= rect.left && clientX < rect.left + rect.width / 2);
+}
+
 export function createReaderButton(doc, id, title, html) {
     const button = doc.createElement('button');
     button.id = `igs-btn-${id}`;
@@ -701,6 +707,49 @@ function watchSliceScale(dialog, win) {
         sliceScaleWatchers.set(dialog, observer);
     }
     update();
+}
+
+// Each page starts at its configured height. Only a measured text overflow may expand the
+// frame; the next render resets it, and the stage boundary remains the hard safety limit.
+export function growDialogForOverflow(root, dialog, textEl, { comic = false } = {}) {
+    if (!dialog || !textEl || !dialog.style || !textEl.style) return false;
+    textEl.style.overflowY = '';
+    if (comic || !root || typeof dialog.getBoundingClientRect !== 'function'
+        || typeof root.getBoundingClientRect !== 'function') return false;
+    const textHeight = Number(textEl.clientHeight);
+    const overflow = Number(textEl.scrollHeight) - textHeight;
+    if (!(textHeight > 0 && overflow > 1)) return false;
+    const frame = dialog.getBoundingClientRect();
+    const stage = root.getBoundingClientRect();
+    if (!(frame.height > 0 && stage.height > 0)) return false;
+    const bottomGap = Math.max(0, stage.bottom - frame.bottom);
+    const limit = Math.floor(stage.height - bottomGap - 16);
+    const target = Math.min(limit, Math.ceil(frame.height + overflow + 2));
+    if (!(target > frame.height + 1)) return false;
+    dialog.style.maxHeight = `${target}px`;
+    dialog.style.height = `${target}px`;
+    // Keep auto overflow: a fitting page shows no scrollbar; late font reflow must not clip text.
+    return true;
+}
+
+const fontDialogRechecks = new WeakMap();
+
+// Font loading can change line wrapping after this page's synchronous measurement.
+// Recheck the same page once when its fonts settle; never redraw or poll the reader.
+export function recheckDialogAfterFonts(root, dialog, textEl, key, { comic = false } = {}) {
+    if (!dialog || !textEl || comic) return;
+    const fonts = textEl.ownerDocument && textEl.ownerDocument.fonts;
+    if (fonts?.status !== 'loading' || typeof fonts.ready?.then !== 'function') return;
+    const previous = fontDialogRechecks.get(dialog);
+    if (previous?.key === key && previous?.ready === fonts.ready) return;
+    const job = { key, ready: fonts.ready };
+    fontDialogRechecks.set(dialog, job);
+    fonts.ready.then(() => {
+        if (fontDialogRechecks.get(dialog) !== job || root?.isConnected === false) return;
+        if (root?.querySelector?.('#igs-dialog') !== dialog || root?.querySelector?.('#igs-text') !== textEl) return;
+        if (textEl.dataset?.igsTextRenderKey !== key) return;
+        growDialogForOverflow(root, dialog, textEl);
+    }).catch(() => { /* Font failure keeps the existing scroll fallback. */ });
 }
 
 function clearFrozenDialogHeight(current) {
@@ -1312,6 +1361,26 @@ function revealSpriteImage(element, url, paint) {
     return true;
 }
 
+// 静态台词只在本页立绘未就绪时短暂等图；不读像素、不复制 DOM、不触发重绘。
+export function syncSpriteTextWait(current, text, { page, pending = false, schedule = setTimeout, cancel = clearTimeout } = {}) {
+    const wait = current.spriteTextWait;
+    if (wait && (!pending || wait.page !== page || wait.text !== text)) wait.release();
+    if (current.spriteTextWaitKey !== page) current.spriteTextWaitKey = '';
+    if (!pending || !text || current.spriteTextWait || current.spriteTextWaitKey) return;
+    const visibility = text.style.visibility;
+    const job = { page, text, timer: null, release: null };
+    job.release = () => {
+        cancel(job.timer);
+        if (current.spriteTextWait !== job) return;
+        current.spriteTextWait = null;
+        text.style.visibility = visibility;
+    };
+    current.spriteTextWait = job;
+    current.spriteTextWaitKey = page;
+    text.style.visibility = 'hidden';
+    job.timer = schedule(job.release, 160);
+}
+
 const ROOT_TOGGLED_CLASSES = new Set(['igs-default-reader-chrome', 'igs-gradient-veil-active', 'igs-scene-nsfw']);
 
 export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
@@ -1461,6 +1530,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const spriteAssetUrl = hideSpriteNsfw || snapshot.content.htmlCardPage === true
         ? null
         : resolveAssetUrl(snapshot.content.spriteImage);
+    const spritePage = `${snapshot.messageId}:${snapshot.content.currentIndex}`;
+    let spriteDecodePending = false;
     const castEnabled = isStageCastEnabled(snapshot);
     const castOn = castEnabled && !hideSpriteNsfw && !isCastCollapsed(snapshot, { spriteEditMode: Boolean(current.spriteEditMode) });
     // 恋爱演出同屏：暧昧档陪衬整层退到背景（recede），修罗场钉住并提亮恋爱对象（rival）。
@@ -1529,7 +1600,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 ...heightMeta(m.character, m.mood, m.outfit, layout),
             }, m.character, m.outfit, m.slotIndex);
         }).filter((m) => m.url),
-        peek: peekSpriteHead,
+        peek: url => peekSpriteHead(url, root.ownerDocument),
     } : null;
     // 站位姿态（castStage）只作用于多人布局：收成单人或槽位编辑时 castPlanInput 为空，姿态自然暂停。
     const castPlan = castPlanInput ? resolveCastPosePlan(snapshot, planCastLayouts(castPlanInput), castSpeakerKey) : null;
@@ -1575,11 +1646,11 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             if (backFallback) layout.scale = Math.round(Number(layout.scale) * SPRITE_BACK_SCALE * 100) / 100;
             stageSprite = { url: spriteAssetUrl, key: spriteKey, posX: Number(layout.posX) };
             fxSprite = { url: spriteAssetUrl, posX: Number(layout.posX), posY: Number(layout.posY), scale: Number(layout.scale), head: resolveSpriteHead(snapshot.readerSettings.spriteHeads, spriteKey, spriteMood, spriteOutfit), multi: Boolean(castPlan && castPlan.members.length), flip: visualFlip };
-            const probed = peekSpriteHead(spriteAssetUrl);
+            const probed = peekSpriteHead(spriteAssetUrl, root.ownerDocument);
             speakerBack = speakerPose.back ? speakerPose.backText || BACK_HINT_DEFAULT : null;
             spritePose = { layout, flip: fxSprite.flip, back: backFallback, turn: backArt ? '' : speakerPose.turn, widthPct: spriteWidthPercent(stageW, stageH, { ...layout, naturalW: probed && probed.naturalW, naturalH: probed && probed.naturalH }), spriteKey, spriteMood, spriteOutfit };
         }
-        revealSpriteImage(spriteEl, spriteAssetUrl, () => {
+        spriteDecodePending = revealSpriteImage(spriteEl, spriteAssetUrl, () => {
             writeBackgroundImage(spriteEl, spriteAssetUrl);
             spriteEl.style.display = 'block';
             spriteEl.style.position = 'absolute';
@@ -1593,6 +1664,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             spriteEl.style.left = 'auto';
             spriteEl.style.filter = '';
             spriteEl.style.setProperty('-webkit-filter', '');
+            const wait = current.spriteTextWait;
+            if (wait && wait.page === spritePage) wait.release();
             if (!spritePose) return;
             spriteEl.style.backgroundSize = spriteBackgroundSize(spritePose.layout.scale);
             spriteEl.style.backgroundPosition = `${spritePose.layout.posX}% ${spritePose.layout.posY}%`;
@@ -2092,9 +2165,9 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction('next');
                 return;
             }
-            // 单击对话框以外的画面推进到下一页；打字机没放完时 next 会先放完。
-            // 全屏直播的对话框只是一条字幕、整个屏幕就是画面：点左半屏回上一页，右半屏仍是下一页。
-            if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction(isLiveFullLeftTap(root, clientX) ? 'prev' : 'next');
+            // 背景空白区左半回上一页、右半进下一页；直播全屏沿用原有左半回退。
+            if (typeof ctx.handleReaderAction === 'function') ctx.handleReaderAction(
+                isLiveFullLeftTap(root, clientX) || isBackgroundLeftTap(root, clientX) ? 'prev' : 'next');
         };
         clickLayer.addEventListener('click', (event) => {
             const tapX = Number(event && event.clientX);
@@ -2181,6 +2254,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     }
     applyToolbarState(root, current);
     applyReaderSettingsToDom(root, snapshot, current, { dialog, textEl, toolbar });
+    growDialogForOverflow(root, dialog, textEl, { comic: comicActive });
+    recheckDialogAfterFonts(root, dialog, textEl, typewriterRenderKey, { comic: comicActive });
     applyReaderModeRuntime(root, snapshot, current, {
         isActiveReader: (reader) => (typeof ctx.isActiveReader === 'function' ? ctx.isActiveReader(reader) : true),
         requestClose: () => { if (typeof ctx.closeReader === 'function') ctx.closeReader(); },
@@ -2211,7 +2286,15 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             underwater: isUnderwaterScene(snapshot.content, snapshot.readerSettings),
         });
         armTextFx(textEl, typewriter && typewriter.animated ? typewriter.revealDelay : null);
-    }
+        // 冷缓存尚无 URL 或本页立绘还在解码时，静态台词最多等一小段时间；
+        // 立绘先画好则立即放开。朗读/打字机已有自己的节奏，不额外隐藏台词。
+        // 每页只等一次，不因图片事件重渲染反复藏字。
+        const needsWait = Boolean(!comicActive && spriteEl && (snapshot.content.pendingSpriteRef || (spriteDecodePending && spriteAssetUrl))
+            && !snapshot.content.cgActive && typewriterSettings.enabled !== true && !typewriter.animated
+            && (typewriterTextType === 'dialogue' || typewriterTextType === 'thought')
+            && !normalizeTtsSettings(snapshot.readerSettings.tts).enabled);
+        syncSpriteTextWait(current, textEl, { page: spritePage, pending: needsWait });
+    } else syncSpriteTextWait(current, textEl, { page: spritePage });
     if (textEl && typewriterRenderKey) {
         // 台词朗读与角色语气音二选一，朗读优先。去重只看消息与句序号，换主题、调字号等重绘不重播。
         const content = snapshot.content;

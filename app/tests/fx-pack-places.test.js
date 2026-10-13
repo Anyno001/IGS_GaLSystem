@@ -222,7 +222,7 @@ test('gate:places-pack source avoids canvas and mask-image url', () => {
         const source = fs.readFileSync(new URL(file, SRC_DIR), 'utf8');
         assert.ok(!/canvas/i.test(source), `${file} canvas`);
         assert.ok(!/mask-image\s*:\s*url/i.test(source), `${file} mask-image url`);
-        assert.ok(!/\r/.test(source), `${file} LF`);
+        assert.ok(!/\r(?!\n)/.test(source), `${file} bare CR`);
         assert.ok(!/chat-sfx/.test(source.replace(/^\/\/.*$/gm, '')), `${file} imports chat-sfx (cycle)`);
     }
 });

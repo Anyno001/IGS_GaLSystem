@@ -1,3 +1,7 @@
+import { mapImageRepositoryFor } from '../../media/tavern-map-images.js';
+import { isImagePath } from '../../media/image-identity.js';
+import { localImageCacheFor } from '../../media/tavern-image-cache.js';
+import { createMediaLeaseScope } from '../../media/media-lease-scope.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { getMapChildren, hasInvalidBasemap, locateMapScene, mapAncestors, readMapModel, resolveMapBasemap, sanitizeMapBasemapUrl } from '../../data/shujuku/map-model.js';
@@ -28,41 +32,6 @@ const OWN_TIME_ART = /map-demo-(?:clean|day)/i;
 // 「17:40」等钟点也归入五档时段，内置分时段底图才能跟着切换。
 const timeBucket = time => resolveWeatherFxTime(time) || time;
 const CLOSE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
-const MAP_IMAGE_DIR = 'igs-map';
-const MAP_DATA_RE = /^data:image\/(png|jpeg|jpg|webp);base64,/i;
-
-// 把上传的底图 data URL 存进酒馆 user/images/igs-map，返回可直接当 img.src 的路径；没连上酒馆或失败返回 ''。
-// 底图本体进文件夹后，localStorage 的 igs-map-custom 键只剩这个短路径，才能跟着 igs-settings.json 换设备同步。
-async function uploadMapBasemapImage(globalObject, dataUrl) {
-    const m = MAP_DATA_RE.exec(String(dataUrl || ''));
-    if (!m) return '';
-    const ctx = getSillyTavernContext(globalObject);
-    const headers = ctx && typeof ctx.getRequestHeaders === 'function' ? ctx.getRequestHeaders() : null;
-    if (!headers || typeof globalObject.fetch !== 'function') return '';
-    const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
-    const name = `map-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-    try {
-        const res = await globalObject.fetch('/api/images/upload', {
-            method: 'POST', headers,
-            body: JSON.stringify({ image: dataUrl.slice(m[0].length), ch_name: MAP_IMAGE_DIR, filename: name, format: ext }),
-        });
-        if (!res || !res.ok) return '';
-        const path = String(((await res.json().catch(() => null)) || {}).path || '').replace(/\\/g, '/');
-        return /^\/?user\/images\/igs-/i.test(path) ? (path.startsWith('/') ? path : `/${path}`) : '';
-    } catch (_) {
-        return '';
-    }
-}
-
-// 换图或清除时顺手删掉旧的上传文件，避免 8MB 大图在文件夹里越积越多；删不掉只留孤儿文件，不影响使用。
-function deleteMapBasemapImage(globalObject, path) {
-    if (!/^\/?user\/images\/igs-/i.test(String(path || ''))) return;
-    const ctx = getSillyTavernContext(globalObject);
-    const headers = ctx && typeof ctx.getRequestHeaders === 'function' ? ctx.getRequestHeaders() : null;
-    if (!headers || typeof globalObject.fetch !== 'function') return;
-    try { globalObject.fetch('/api/images/delete', { method: 'POST', headers, body: JSON.stringify({ path: String(path).replace(/^\//, '') }) }).catch(() => {}); } catch (_) { /* 删不掉就留着 */ }
-}
-
 export function createMapPanelController(doc, global, fillDraft, options = {}) {
     let root = null;
     let client = null;
@@ -105,8 +74,18 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     const customKey = () => `${CUSTOM_BASEMAP_KEY}${getChatId() || 'default'}:${activeUid || '-'}:${parentId || '-'}`;
     const readCustom = () => { try { return sanitizeMapBasemapUrl(storage()?.getItem(customKey()) || ''); } catch (_) { return ''; } };
     // 写入后读回校验：上传的大图可能超 localStorage 配额，setItem 静默失败时要能察觉。
-    const writeCustom = url => { try { const s = storage(); if (!s) return false; s.setItem(customKey(), String(url)); return s.getItem(customKey()) === String(url); } catch (_) { return false; } };
-    const clearCustom = () => { const old = readCustom(); try { storage()?.removeItem(customKey()); } catch (_) { /* 隐私模式忽略 */ } deleteMapBasemapImage(global || globalThis, old); };
+    const mapImages = mapImageRepositoryFor(global || globalThis);
+    const mediaCache = options.mediaCache || localImageCacheFor(global || globalThis);
+    const ownedLoading = new Map();
+    const ownedLeases = createMediaLeaseScope(mediaCache);
+    let disposed = false, cacheGeneration = 0, customIntent = 0;
+    const writeCustom = (url, key = customKey()) => mapImages.set(key, url);
+    const clearCustom = () => { customIntent += 1; return mapImages.remove(customKey()); };
+    const offClear = mediaCache.onClear(() => {
+        cacheGeneration += 1; ownedLoading.clear(); basemapToken += 1; basemapUrl = ''; basemapState = 'none'; pendingKey = '';
+        queueMicrotask(() => { if (!disposed && root) render(); });
+    });
+    void mapImages.restore().then(() => { if (root) render(); }).catch(() => {});
     const saltKey = () => GEN_SALT_KEY + (getChatId() || 'default');
     const readSalt = () => { try { return Number(storage()?.getItem(saltKey())) || 0; } catch (_) { return 0; } };
     const readPalette = () => { try { return storage()?.getItem(GEN_PALETTE_KEY) === 'classic' ? 'classic' : 'bright'; } catch (_) { return 'bright'; } };
@@ -182,11 +161,13 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     }
 
     function close() {
+        customIntent += 1; cacheGeneration += 1; ownedLeases.releaseAll(); ownedLoading.clear();
         if (!root) return { ok: true, reason: 'not-open' };
         basemapToken++;
         basemapUrl = '';
         basemapState = 'none';
         pendingKey = '';
+        generator?.releaseActive?.();
         if (weatherLayer) cancelWeatherFx(weatherLayer);
         weatherLayer = null;
         unwatchLayout?.();
@@ -207,7 +188,7 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
         return { ok: true };
     }
 
-    function onClick(event) {
+    async function onClick(event) {
         event.stopPropagation?.();
         if (event.target === root) { close(); return; }
         const control = event.target?.closest?.('[data-map-act]');
@@ -254,7 +235,10 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
         }
         if (action === 'custom-upload') return uploadCustomBasemap();
         if (action === 'custom-url') return promptCustomBasemap();
-        if (action === 'custom-clear') { clearCustom(); camera = null; message = '已清除自定义底图'; render(); return; }
+        if (action === 'custom-clear') {
+            try { await clearCustom(); message = '已清除自定义底图'; } catch { message = '清除失败，请重试'; }
+            camera = null; render(); return;
+        }
         if (action === 'basemap-style' && MAP_BUILTIN_BASEMAPS.some(style => style.id === id)) writeStored(BASEMAP_SOURCE_KEY, `builtin:${id}`);
         if (action === 'gen-palette' && (id === 'bright' || id === 'classic')) writeStored(GEN_PALETTE_KEY, id);
         render();
@@ -389,6 +373,7 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
 
     function render() {
         if (!root) return;
+        ownedLeases.begin();
         renderCount++;
         const table = activeTable();
         const parent = table?.locations.find(loc => loc.id === parentId);
@@ -423,6 +408,16 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
                 : builtin
                     ? { status: 'ok', url: builtin.url, reason: '', ownTimeArt: builtin.ownTimeArt }
                     : baseResolution.status === 'ok' ? { ...baseResolution, url: resolveMapTimeBasemap(baseResolution.url, timeBucket(sceneTime)) } : baseResolution;
+        if (resolution.status === 'ok' && isImagePath(resolution.url)) {
+            const path = resolution.url, ready = mediaCache.peek(path);
+            ownedLeases.use(path);
+            if (!ready && !ownedLoading.has(path)) {
+                const stamp = cacheGeneration; ownedLoading.set(path, stamp);
+                void mapImages.resolveUrl(path).then(value => { if (value && root && stamp === cacheGeneration && !disposed) render(); }).catch(() => {}).finally(() => { if (ownedLoading.get(path) === stamp) ownedLoading.delete(path); });
+            }
+            resolution.url = ready; resolution.status = ready ? 'ok' : 'none';
+        }
+        ownedLeases.end();
         const invalidBasemap = table ? hasInvalidBasemap(table, parentId) : false;
         const basemapNotice = resolution.status === 'conflict' ? resolution.reason
             : generated?.status === 'failed' ? '地图生成失败，已使用内置地图'
@@ -571,7 +566,7 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     }
 
     function ensureGenerator() {
-        generator ||= createMapBasemapGenerator({ doc });
+        generator ||= createMapBasemapGenerator({ doc, mediaCache });
         return generator;
     }
 
@@ -601,8 +596,9 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     // 上传本地图片作本层底图：优先传进酒馆 user/images 存路径（换设备、清缓存后还在），
     // 没连上酒馆时退回存浏览器 data URL（仅本机、可能超配额）。
     async function uploadCustomBasemap() {
+        const key = customKey(), intent = ++customIntent;
         const picked = await pickBasemapImage();
-        if (!root) return;
+        if (!root || key !== customKey() || intent !== customIntent || disposed) return;
         if (!picked) return;
         if (!picked.ok) {
             message = picked.reason === 'too-large' ? '图片过大，请压到 8MB 以内'
@@ -611,23 +607,16 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
             return;
         }
         if (!sanitizeMapBasemapUrl(picked.dataUrl)) { message = '图片过大或格式不受支持'; render(); return; }
-        const previous = readCustom();
-        const path = await uploadMapBasemapImage(global || globalThis, picked.dataUrl);
-        if (!root) return;
-        if (path && writeCustom(path)) {
-            if (previous !== path) deleteMapBasemapImage(global || globalThis, previous);
-            message = '已设为自定义底图';
-        } else if (writeCustom(picked.dataUrl)) {
-            message = path ? '已设为自定义底图' : '已存到本浏览器（未连酒馆，换设备不保留）';
-        } else {
-            message = '图片太大，浏览器存不下，请改用网址';
-        }
+        const saved = await writeCustom(picked.dataUrl, key);
+        if (!root || key !== customKey() || intent !== customIntent || disposed) return;
+        message = saved.ok ? (/^data:/i.test(saved.url) ? '已存到本浏览器（未连酒馆，换设备不保留）' : '已设为自定义底图') : '图片保存失败，原底图已保留';
         camera = null;
         render();
     }
 
     // 填图片网址作本层底图：只接受 http(s)。
-    function promptCustomBasemap() {
+    async function promptCustomBasemap() {
+        const key = customKey(), intent = ++customIntent;
         const view = doc?.defaultView || (global || globalThis);
         if (typeof view?.prompt !== 'function') { message = '当前环境不支持输入网址，请改用上传图片'; render(); return; }
         const current = readCustom();
@@ -635,13 +624,9 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
         if (raw === null) return;
         const url = sanitizeMapBasemapUrl(String(raw).trim());
         if (!url || !/^https?:\/\//i.test(url)) { message = '网址无效，需以 http:// 或 https:// 开头'; render(); return; }
-        const previous = readCustom();
-        if (writeCustom(url)) {
-            if (previous !== url) deleteMapBasemapImage(global || globalThis, previous);
-            message = '已设为自定义底图';
-        } else {
-            message = '保存失败';
-        }
+        const saved = await writeCustom(url, key);
+        if (!root || key !== customKey() || intent !== customIntent || disposed) return;
+        message = saved.ok ? '已设为自定义底图' : '保存失败';
         camera = null;
         render();
     }
@@ -678,6 +663,7 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     }
 
     function dispose() {
+        disposed = true; offClear();
         close();
         generator?.dispose();
         generator = null;

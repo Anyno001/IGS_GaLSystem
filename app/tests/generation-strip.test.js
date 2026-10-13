@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createGenerationStrip } from '../src/visual/igs-ui/generation-strip.js';
+import { createGenerationStrip, GENERATION_STRIP_STYLE_TEXT } from '../src/visual/igs-ui/generation-strip.js';
 import { trackImageActivity } from '../src/generated-images/generation-activity.js';
 
 function fakeTimers() {
@@ -115,4 +115,24 @@ test('生成细线：忙完时结果小字不跟着闪一下就熄', () => {
     t.advance(1300);
     assert.equal(strip.getState().phase, 'done');
     assert.equal(strip.getState().tip, '第 2 楼已生成 1 项素材，待确认');
+});
+
+test('gate:generation-strip:already-generated-skip-has-green-line-and-expires', () => {
+    const t = fakeTimers();
+    const strip = createGenerationStrip({ timers: t, now: t.now });
+    strip.notice('skipped', '本楼素材已生成，无需重复生图');
+    assert.equal(strip.getState().phase, 'skipped');
+    assert.match(GENERATION_STRIP_STYLE_TEXT, /data-state="skipped"[^\n]*#53c781/);
+    assert.equal(strip.getState().tip, '本楼素材已生成，无需重复生图');
+    t.advance(6500);
+    assert.equal(strip.getState().phase, 'idle');
+    strip.floor(5, false);
+    strip.notice('skipped', '本楼插图都已生成');
+    strip.floor(5, true);
+    assert.equal(strip.getState().phase, 'skipped');
+    strip.notice('error', '另一张生成失败');
+    assert.equal(strip.getState().phase, 'failed');
+    assert.match(GENERATION_STRIP_STYLE_TEXT, /data-state="failed"[^\n]*#e07070/);
+    strip.notice('success', '重试成功');
+    assert.notEqual(strip.getState().phase, 'skipped');
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { withTavernIllustrationFiles, CG_RECORDS_FILE } from '../src/media/tavern-image-files.js';
+import { withTavernIllustrationFiles, CG_RECORDS_FILE } from '../src/media/tavern-illustrations.js';
 import { createMemoryIllustrationStore } from '../src/media/illustration-store.js';
 
 // 假酒馆：user/files 下的 JSON 与 user/images/igs-cg 的文件名列表，记录上传。

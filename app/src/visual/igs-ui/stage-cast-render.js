@@ -339,7 +339,7 @@ export function applyCastToDom(root, members = [], motion = {}) {
         // 背对（第四批）：整张立绘水平翻转，用空闲的独立属性 scale；原点移到图的中心，镜像不整体平移。
         const flipped = m.flip === true;
         const host = el.parentNode;
-        const probed = peekSpriteHead(m.url);
+        const probed = peekSpriteHead(m.url, el.ownerDocument);
         // 图还没换上时先藏起来再读尺寸。空着的全屏层带滤镜，这一读会把黑帧画出来。
         if (el.style.backgroundImage !== image) el.style.visibility = 'hidden';
         const widthPct = spriteWidthPercent(host && host.clientWidth, host && host.clientHeight, { posX: m.posX, posY: m.posY, scale: m.scale, naturalW: probed && probed.naturalW, naturalH: probed && probed.naturalH });

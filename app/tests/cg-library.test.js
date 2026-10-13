@@ -1,10 +1,11 @@
+import { createMemoryCgIndexStore, createCgLibrary } from './helpers/media-fixtures.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryIllustrationStore } from '../src/media/illustration-store.js';
 import { createMemoryCgGalleryStore } from '../src/media/cg-gallery-store.js';
-import { createMemoryCgIndexStore } from '../src/media/cg-index-store.js';
+
 import { createMemoryPhotoAlbumStore } from '../src/media/photo-album.js';
-import { createCgLibrary, filterCgEntries, withCgIndexSync, cgPageSlice, parseCgSlotKey } from '../src/media/cg-library.js';
+import { filterCgEntries, withCgIndexSync, cgPageSlice, parseCgSlotKey } from '../src/media/cg-library.js';
 
 const PNG = (n) => `data:image/png;base64,${n}`;
 const at = (minute) => new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString();

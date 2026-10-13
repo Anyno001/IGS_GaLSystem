@@ -1,5 +1,7 @@
 // 素材页文件夹：只是界面归类（与折叠状态同类），按全局或当前角色卡分别存本地；不写入素材或导入导出数据。
-const STORAGE_KEY = 'igs-asset-folders-v1';
+import { writeCheckedStorage } from '../../storage/checked-storage-write.js';
+export const ASSET_FOLDERS_STORAGE_KEY = 'igs-asset-folders-v1';
+const STORAGE_KEY = ASSET_FOLDERS_STORAGE_KEY;
 export const ASSET_FOLDER_KINDS = Object.freeze(['scenes', 'characters']);
 const VIEWS = ['list', 'grid'];
 const cleanName = (v) => String(v == null ? '' : v).trim().slice(0, 40);
@@ -52,8 +54,7 @@ export function saveAssetFolders(storage, scope, state) {
         let scopes;
         try { scopes = readScopes(storage); } catch { scopes = Object.create(null); }
         scopes[String(scope || '')] = normalizeAssetFolders(state);
-        storage.setItem(STORAGE_KEY, JSON.stringify({ scopes }));
-        return true;
+        return writeCheckedStorage(storage, STORAGE_KEY, JSON.stringify({ scopes })).ok;
     } catch (error) {
         console.warn('[IGS] 素材文件夹保存失败', error);
         return false;
@@ -72,12 +73,12 @@ export function loadAssetFoldersFor(storage, scope = '') {
 }
 
 // 旧版按预设名字存文件夹。找回预设时把那份分类并进目标（全局或角色卡），目标里已有的分配不改。
-export function mergeAssetFolderScope(storage, fromScope, toScope) {
+export function mergeAssetFolderScope(storage, fromScope, toScope, { strict = false } = {}) {
     try {
         const scopes = readScopes(storage);
         const from = String(fromScope || '');
         const to = String(toScope || '');
-        if (!own(scopes, from) || from === to) return false;
+        if (!own(scopes, from) || from === to) return strict;
         const source = normalizeAssetFolders(scopes[from]);
         const target = normalizeAssetFolders(own(scopes, to) ? scopes[to] : scopes['']);
         for (const kind of ASSET_FOLDER_KINDS) {

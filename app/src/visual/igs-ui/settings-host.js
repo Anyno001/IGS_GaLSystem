@@ -3,6 +3,7 @@ import { updateCharCounts } from './prompt-entries-fields.js';
 import { draftAssetLibrary, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { placeRowMenu } from './settings-outfit-fields.js';
+import { splitMigrationWords } from '../../scene/outfit-migration.js';
 import { cgReasonText } from '../../media/cg-library.js';
 import { setStagePauseReason } from './stage-pause.js';
 import { scheduleFontGuard } from './font-guard.js';
@@ -42,7 +43,7 @@ export function createSettingsHost(deps) {
     const {
         flushDeferredImageRefresh, normalizeUnifiedSettings, onboarding, openCgGallery, options, pageModal,
         playReaderUiSfx, rerenderActiveReader, resolveBridgeConfigSnapshot, scheduleMoodAutoClassify, sourceCache,
-        state, takeReaderStaleBehindSettings,
+        state, takeReaderStaleBehindSettings, invalidateFloorAssetPlan,
     } = deps;
     const settingsDialogs = createSettingsDialogs({
         getContainer: () => (state.activeSettings && state.activeSettings.dom ? state.activeSettings.dom.root : null),
@@ -171,7 +172,8 @@ export function createSettingsHost(deps) {
         onboarding.onSettingsClosed();
         syncSettingsStagePause();
         scheduleMoodAutoClassify();
-        if (takeReaderStaleBehindSettings() && state.activeReader) rerenderActiveReader();
+        // persistSettingsDraft 已用最新配置同步重绘；消费延迟到图标记即可，避免关页重复构建快照。
+        takeReaderStaleBehindSettings();
         playReaderUiSfx('close');
         return { ok: true };
     }
@@ -216,6 +218,7 @@ export function createSettingsHost(deps) {
             for (const key of open) asyncState.advancedOpen[key] = true;
         }
         state.activeSettings.asyncState.wardrobeFocus = '';
+        delete state.activeSettings.asyncState.migrateRows;
         rememberSettingsPage(state.activeSettings);
         return rerenderSettings();
     }
@@ -402,7 +405,9 @@ export function createSettingsHost(deps) {
             const current = state.activeReader.payload;
             const filterChanged = JSON.stringify(current.sourceFilter) !== JSON.stringify(snapshot.bridge.sourceFilter);
             const formatChanged = JSON.stringify(current.virtualRegex) !== JSON.stringify(snapshot.bridge.virtualRegex);
-            if (filterChanged || formatChanged) {
+            const pagingChanged = snapshot.bridge.sentencePaging !== state.activeReader.snapshot?.readerSettings?._sentencePaging
+                || snapshot.bridge.dialogueSentencePaging !== state.activeReader.snapshot?.readerSettings?._dialogueSentencePaging;
+            if (filterChanged || formatChanged || pagingChanged) {
                 current.sourceFilter = cloneData(snapshot.bridge.sourceFilter);
                 current.virtualRegex = cloneData(snapshot.bridge.virtualRegex);
                 // These values were produced with the old rules; the reader must reparse its message.
@@ -413,6 +418,7 @@ export function createSettingsHost(deps) {
                 sourceCache.invalidate();
             }
         }
+        if (optionsForPersist.spriteAssetChanged === true) invalidateFloorAssetPlan?.();
         rerenderActiveReader({
             syncModeFromSettings: optionsForPersist.syncActiveModeFromSettings === true,
         });
@@ -701,6 +707,19 @@ export function createSettingsHost(deps) {
                 const entry = Object.hasOwn(dnaMap, dnaChar) && dnaMap[dnaChar] && typeof dnaMap[dnaChar] === 'object' ? dnaMap[dnaChar] : (dnaMap[dnaChar] = {});
                 entry[dnaField] = target.value;
                 state.activeSettings.snapshot.draft = state.activeSettings.draft;
+                return;
+            }
+            // 原装迁移清单：服装名 / 别名 / 说明只改草稿，不重绘（保焦点），点「迁移」时才落盘。
+            const migChar = target.getAttribute('data-mig-char');
+            const migField = target.getAttribute('data-mig-field');
+            if (migChar && migField) {
+                const rows = state.activeSettings.asyncState.migrateRows;
+                const row = Array.isArray(rows) ? rows.find((item) => item.character === migChar) : null;
+                if (row) {
+                    if (migField === 'words') row.words = splitMigrationWords(target.value);
+                    else if (migField === 'name' || migField === 'note') row[migField] = String(target.value || '');
+                    state.activeSettings.snapshot.draft = state.activeSettings.draft;
+                }
                 return;
             }
             const sceneBg = target.getAttribute('data-scene-bg');

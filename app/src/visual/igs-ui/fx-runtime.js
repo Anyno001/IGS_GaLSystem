@@ -486,7 +486,7 @@ export function repositionFxSymbols(root, { speaker = null, cast = [] } = {}) {
         const sprite = who ? byChar.get(who) : speaker;
         const kind = el.getAttribute('data-igs-fx-place') || el.getAttribute('data-kind');
         if (!sprite || !sprite.url || !kind) continue;
-        placeSymbol(el, kind, layers.motion, sprite, peekSpriteHead(sprite.url));
+        placeSymbol(el, kind, layers.motion, sprite, peekSpriteHead(sprite.url, root.ownerDocument));
     }
 }
 
@@ -526,7 +526,7 @@ function playSymbol(effect, ctx, life, target) {
     if (effect.castTarget && effect.castTarget.character) el.setAttribute('data-igs-fx-cast', effect.castTarget.character);
     const source = effect.castTarget || options.sprite;
     const sprite = source && source.url ? source : null;
-    const cached = sprite ? peekSpriteHead(sprite.url) : null;
+    const cached = sprite ? peekSpriteHead(sprite.url, doc) : null;
     if (!sprite || cached || (sprite.head && sprite.head.aspect)) {
         showSymbol(el, effect, ctx, life, sprite, cached);
         return;
@@ -711,7 +711,7 @@ function playEffect(effect, ctx) {
         const sprite = options.sprite && options.sprite.url ? options.sprite : null;
         const speaker = snapshot.content && snapshot.content.speaker;
         if (!sprite || (effect.name && !sameCharacter(snapshot, effect.name, speaker))) return;
-        const probed = peekSpriteHead(sprite.url);
+        const probed = peekSpriteHead(sprite.url, doc);
         const head = sprite.head || (probed && probed.head) || FALLBACK_HEAD;
         const aspect = probed && probed.naturalW > 0 ? probed.naturalH / probed.naturalW : (sprite.head && sprite.head.aspect);
         const crop = resolveCutinCrop(head, aspect);

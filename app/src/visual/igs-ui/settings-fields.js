@@ -538,6 +538,7 @@ export function renderCharacterAssetList(characters, options = {}) {
             + renderRowMenu([
                 menuItem(`scene-toggle-dna:${encSeg(charName)}`, dnaOpen ? '收起角色设定' : `角色设定${characterDnaFilled(dna) ? '' : '（外貌未填）'}`),
                 folderSelect(charName, { menu: true }),
+                String((moods || {}).默认 || '').trim() ? menuItem(`scene-migrate-outfit:${encSeg(charName)}`, '原装迁成差分服装') : '',
                 menuItem(`scene-rename-char:${encSeg(charName)}`, '重命名'),
                 options && typeof options.scopeMenu === 'function' ? options.scopeMenu('characters', charName) : '',
                 menuItem(`scene-remove-char:${encSeg(charName)}`, '删除角色', ' is-danger'),
@@ -873,12 +874,12 @@ function generatedLeftovers(library, characters, scenes) {
 }
 
 // 「待确认」页签上的数字：刚生成的临时图 + 还没入库的生成素材。
-export function countGeneratedWaiting({ library = {}, temp = [], characters = {}, scenes = {} } = {}) {
+export function countGeneratedWaiting({ library = {}, temp = [], tempPage, characters = {}, scenes = {} } = {}) {
     const left = generatedLeftovers(library, characters, scenes);
-    return (Array.isArray(temp) ? temp.length : 0) + left.sprites.length + left.backgrounds.length;
+    return (tempPage?.total ?? (Array.isArray(temp) ? temp.length : 0)) + left.sprites.length + left.backgrounds.length;
 }
 
-export function renderGeneratedAssetPane({ library = {}, temp = [], resolveUrl, characters = {}, scenes = {} } = {}) {
+export function renderGeneratedAssetPane({ library = {}, temp = [], tempPage, readError = '', resolveUrl, characters = {}, scenes = {} } = {}) {
     // 修复抠图只给刚生成的立绘，背景不提供入口。
     const resolve = (url) => {
         const raw = String(url || '').trim();
@@ -928,13 +929,20 @@ export function renderGeneratedAssetPane({ library = {}, temp = [], resolveUrl, 
             extra: [matteItem(item.imageId, item.type), key ? menuItem(`gen-temp-discard:${encSeg(key)}`, '丢弃', ' is-danger') : ''],
         });
     }).join('');
-    const count = (Array.isArray(temp) ? temp.length : 0) + leftoverRows.length;
+    const count = (tempPage?.total ?? (Array.isArray(temp) ? temp.length : 0)) + leftoverRows.length;
+    const error = readError || tempPage?.error;
+    const controls = tempPage ? `<div class="igs-gen-tile-actions">`
+        + `<button type="button" class="igs-review-link" data-action="gen-temp-page:previous"${tempPage.hasPrevious ? '' : ' disabled'}>上一页</button>`
+        + `<span>${tempPage.loading ? '正在读取素材…' : `临时素材共 ${tempPage.total || 0} 项，每页 24 项`}</span>`
+        + `<button type="button" class="igs-review-link" data-action="gen-temp-page:next"${tempPage.hasNext ? '' : ' disabled'}>下一页</button>`
+        + `<button type="button" class="igs-review-link" data-action="gen-records-retry">重新读取</button></div>`
+        + (error ? '<p role="alert">素材或物品记录读取失败，请点“重新读取”。本机数据保留，失败不会当作缺图重新生成。</p>' : '') : '';
     return renderReviewCard({
         key: 'generated',
         title: '刚生成的图',
         count,
         hint: '存好后移到角色或场景里，这里不再保留。',
-        body: count ? `<div class="igs-gen-grid">${tempRows}${leftoverRows.join('')}</div>` : '',
+        body: controls + (tempRows || leftoverRows.length ? `<div class="igs-gen-grid">${tempRows}${leftoverRows.join('')}</div>` : ''),
         empty: '暂无刚生成的素材',
     });
 }

@@ -32,7 +32,7 @@ function headSpot(env) {
         const sprite = env.sprite;
         if (!sprite || !sprite.head || !sprite.url) return null;
         const geo = measureStage(env.root.querySelector('#igs-stage-motion'));
-        const probed = peekSpriteHead(sprite.url);
+        const probed = peekSpriteHead(sprite.url, env.root.ownerDocument);
         if (!geo || !probed) return null;
         const rect = spriteDrawRect(geo.stageW, geo.stageH, { posX: sprite.posX, posY: sprite.posY, scale: sprite.scale, naturalW: probed.naturalW, naturalH: probed.naturalH });
         if (!rect) return null;

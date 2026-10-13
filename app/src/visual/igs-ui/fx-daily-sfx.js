@@ -36,6 +36,13 @@ const pluck = (freq, start, ring, gain) => [
     p('sine', freq * 3.02, freq * 3.02, start, ring * 0.3, gain * 0.18, { attack: 0.002 }),
     p('sine', freq * 4.05, freq * 4.05, start, ring * 0.15, gain * 0.08, { attack: 0.001 }),
 ];
+// 古琴专用拨弦：泛音更短更弱（温润），可选向下短滑音（bend 为起始高出的音分，滑回本音）。
+const guqinPluck = (freq, start, ring, gain, bend = 0) => [
+    p('sine', bend ? freq * 2 ** (bend / 1200) : freq, freq, start, ring, gain, bend ? { attack: 0.003, sweep: 1 } : { attack: 0.003 }),
+    p('sine', freq * 2.01, freq * 2.01, start, ring * 0.35, gain * 0.3, { attack: 0.002 }),
+    p('sine', freq * 3.02, freq * 3.02, start, ring * 0.2, gain * 0.14, { attack: 0.002 }),
+    p('sine', freq * 4.05, freq * 4.05, start, ring * 0.1, gain * 0.06, { attack: 0.001 }),
+];
 const pluckClick = (start, gain, freq = 2400) => n(start, 0.03, gain, { freq, q: 1.2, attack: 0.001 });
 
 const WESTMINSTER = [329.63, 261.63, 293.66, 196.0, 196.0, 293.66, 329.63, 261.63];
@@ -729,8 +736,11 @@ const DEFS = {
     },
     // 古琴：几根弦依次拨响，泛音略带非谐，余韵悠长。
     guqin: {
-        partials: [146.83, 196, 220, 293.66].flatMap((freq, i) => pluck(freq, [0, 0.32, 0.62, 1.0][i], 1.5, 0.2)),
-        noise: [0, 0.32, 0.62, 1.0].map((start) => pluckClick(start, 0.08, 1500)),
+        partials: [146.83, 196, 220, 293.66].flatMap((freq, i) => guqinPluck(freq, [0, 0.46, 0.88, 1.55][i], 1.5, [0.2, 0.17, 0.15, 0.12][i], [12, 0, 10, 0][i])),
+        noise: [
+            ...[0, 0.46, 0.88, 1.55].map((start) => pluckClick(start, 0.08, 1500)),
+            ...[0, 0.46, 0.88, 1.55].map((start) => n(start, 0.05, 0.04, { filter: 'highpass', freq: 3600, q: 0.7, attack: 0.002 })),
+        ],
     },
     // 做饭：热油下锅的「滋啦」、锅铲磕锅沿一下，成品出锅时清脆一声「叮」。
     cook: {

@@ -59,6 +59,7 @@ function extraSwitches(reader, extras) {
             ['漫画演出模式', on('comicMode')],
             ['双语台词', on('bilingual')],
             extras.sentencePaging ? ['旁白按句号分页', extras.sentencePagingOn === true] : null,
+            extras.dialogueSentencePaging ? ['对白／心理话也按句分页', extras.dialogueSentencePagingOn === true] : null,
         ],
         stage: [
             ['多角色同屏', on('stageCast')],
@@ -127,7 +128,7 @@ function buildPerformanceBodies(src, extras, isOpen) {
         more,
         fx,
         bodies: {
-            text: [host('playback-speed', extras.playbackSpeed), host('typewriter', extras.typewriter, '逐字显示'), stage.clickWaitMark, stage.textFx, stage.bilingual, host('sentence-paging', extras.sentencePaging)],
+            text: [host('playback-speed', extras.playbackSpeed), host('typewriter', extras.typewriter, '逐字显示'), stage.waitStage, stage.clickWaitMark, stage.textFx, stage.bilingual, host('sentence-paging', extras.sentencePaging), host('dialogue-sentence-paging', extras.dialogueSentencePaging)],
             stage: [
                 section('镜头与环境', [stage.transition, stage.cgEntrance, stage.tint, stage.camera, host('weather', extras.weatherFx, '雨雪雾粒子'), fx.crowd, host('stage-shake', extras.stageShake, '冲击时晃屏'), renderPackFields(src, more, { ids: ['camera'] }), renderPackFields(src, more, { ids: ['places'] }), host('cinema-bars', extras.cinemaBars, '只盖背景，CG时收起'), fx.comic, renderPanelSkinField(src, more)]),
                 section('立绘', [stage.motion, stage.actions, stage.turn, stage.cast, renderPackFields(src, more, { ids: ['transform'] }), host('narration-filter', extras.narrationFilter)]),

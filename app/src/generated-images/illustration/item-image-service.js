@@ -59,11 +59,12 @@ export function createItemImageService(deps) {
     const report = deps.report || (() => {});
     const newId = deps.newId || (() => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`);
     const emit = (detail) => { if (events && typeof events.emit === 'function') events.emit(ITEM_IMAGE_UPDATED_EVENT, detail); };
-    const cache = createItemRecordCache({ store, type: ITEM_ASSET_TYPE, emit });
+    const cache = createItemRecordCache({ store, type: ITEM_ASSET_TYPE, emit, mediaCache: deps.mediaCache,
+        onError: () => report('error', '物品记录读取失败，本次补图暂停；可在素材 → 待确认中重新读取。') });
     const floorLocks = new Map();
     const inflight = new Map();
     let queue = Promise.resolve();
-    let offRendered = null;
+    let offRendered = null, retryTarget = null;
 
     const readSettings = () => {
         const raw = getSettings ? getSettings() || {} : {};
@@ -108,10 +109,12 @@ export function createItemImageService(deps) {
 
 
     // 生成单件；重画失败时保留原图，不覆盖已可用的记录。
-    async function generateItem(chatId, plan, s, floor) {
+    async function generateItem(chatId, plan, s, floor, force = false) {
         const need = plan.need;
         const key = itemAssetKeyOf(chatId, need.name);
-        const previous = recordFor(chatId, need.name);
+        if (chatId !== chatOf()) return { ok: false, error: '聊天已切换', reason: 'stale-chat' };
+        const previous = await cache.read(chatId, key);
+        if (!force && previous && SETTLED_STATUSES.has(previous.status)) return { ok: true, record: previous, reason: 'already-present' };
         const base = { key, chatId, type: ITEM_ASSET_TYPE, name: need.name, description: need.description || '', tags: plan.tags || '',
             floorKey: floor ? floorKeyOf(floor) : '', messageId: floor ? floor.messageId : null, swipeId: floor ? floor.swipeId : null, createdAt: now() };
         let error = plan.error || '';
@@ -139,21 +142,29 @@ export function createItemImageService(deps) {
             if (previous && previous.status === 'ready') return { ok: false, error, record: previous };
             record = { ...base, imageId: '', status: 'failed', error };
         }
-        if (record.status === 'ready' && previous && previous.imageId) await cache.dropImage(previous.imageId);
-        await store.putAsset(record);
+        try { await store.putAsset(record); }
+        catch (error) {
+            if (record.status === 'ready' && record.imageId) await cache.dropImage(record.imageId);
+            throw error;
+        }
+        if (record.status === 'ready' && previous && previous.imageId && previous.imageId !== record.imageId) await cache.dropImage(previous.imageId);
         cache.set(record);
         emit({ chatId, key, name: need.name, reason: record.status === 'ready' ? 'generated' : 'failed' });
         return { ok: record.status === 'ready', error, record };
     }
 
-    function missingNeeds(chatId, candidates, limit) {
-        return candidates.filter((item) => {
-            const record = recordFor(chatId, item.name);
-            return !record || !SETTLED_STATUSES.has(record.status);
-        }).slice(0, limit);
+    async function missingNeeds(chatId, candidates, limit) {
+        const needs = [];
+        for (const item of candidates) {
+            if (chatId !== chatOf()) throw Object.assign(new Error('media-metadata-stale'), { code: 'media-metadata-stale' });
+            const record = await cache.read(chatId, itemAssetKeyOf(chatId, item.name));
+            if (!record || !SETTLED_STATUSES.has(record.status)) needs.push(item);
+            if (needs.length >= limit) break;
+        }
+        return needs;
     }
 
-    async function runBatch(chatId, needs, text, s, floor) {
+    async function runBatch(chatId, needs, text, s, floor, force = false) {
         const backend = nai && typeof nai.describe === 'function' ? nai.describe() : { ready: { ok: true } };
         if (!backend.ready || !backend.ready.ok) {
             const error = (backend.ready && backend.ready.error) || '生图后端未就绪';
@@ -163,7 +174,7 @@ export function createItemImageService(deps) {
         const plans = await planItems(needs, text, s, backend);
         const results = [];
         for (const plan of plans) {
-            results.push(await enqueue(itemAssetKeyOf(chatId, plan.need.name), () => generateItem(chatId, plan, s, floor)));
+            results.push(await enqueue(itemAssetKeyOf(chatId, plan.need.name), () => generateItem(chatId, plan, s, floor, force)));
         }
         const count = results.filter((r) => r.ok).length;
         const failedCount = results.length - count;
@@ -186,10 +197,12 @@ export function createItemImageService(deps) {
         const job = (async () => {
             await cache.ensure(floor.chatId);
             const candidates = mergeItemCandidates(collectTagItems(floor.text), readCatalog());
-            const needs = missingNeeds(floor.chatId, candidates, s.items.maxPerFloor);
+            const needs = await missingNeeds(floor.chatId, candidates, s.items.maxPerFloor);
             if (!needs.length) return { ok: true, reason: 'nothing-missing', count: 0 };
             return runBatch(floor.chatId, needs, itemContextOf(floor.text, needs), s, floor);
-        })().catch((error) => {
+        })().then(result => { if (result.ok && retryTarget?.chatId === floor.chatId && retryTarget?.messageId === Number(messageId)) retryTarget = null; return result; }).catch((error) => {
+            if (error.code === 'media-metadata-stale') return { ok: false, reason: 'stale-chat' };
+            retryTarget = { chatId: floor.chatId, messageId: Number(messageId) };
             report('error', `物品图处理异常：${(error && error.message) || error}`);
             return { ok: false, reason: 'error', error: '物品图生成失败' };
         }).finally(() => floorLocks.delete(lockKey));
@@ -205,7 +218,7 @@ export function createItemImageService(deps) {
         if (!chatId) return { ok: false, reason: 'no-chat' };
         await cache.ensure(chatId);
         const cap = Math.max(1, Math.min(Math.trunc(Number(limit)) || MANUAL_LIMIT, MANUAL_LIMIT));
-        const needs = missingNeeds(chatId, readCatalog(), cap);
+        const needs = await missingNeeds(chatId, readCatalog(), cap);
         if (!needs.length) return { ok: true, reason: 'nothing-missing', count: 0 };
         return runBatch(chatId, needs, '', s, null);
     }
@@ -217,25 +230,25 @@ export function createItemImageService(deps) {
         const label = String(name || '').trim();
         if (!chatId || !normalizeItemName(label)) return { ok: false, reason: 'invalid-item' };
         await cache.ensure(chatId);
-        const previous = recordFor(chatId, label);
+        const previous = await cache.read(chatId, itemAssetKeyOf(chatId, label));
         const fromTable = readCatalog().find((item) => item.key === normalizeItemName(label));
         const need = {
             name: previous ? previous.name : label,
             description: (previous && previous.description) || (fromTable && fromTable.description) || '',
         };
-        return runBatch(chatId, [need], '', s, null);
+        return runBatch(chatId, [need], '', s, null, true);
     }
 
     async function discard(name) {
         const chatId = chatOf();
         if (!chatId) return { ok: false, reason: 'no-chat' };
         await cache.ensure(chatId);
-        const record = recordFor(chatId, name);
+        const record = await cache.read(chatId, itemAssetKeyOf(chatId, name));
         if (!record) return { ok: false, reason: 'not-found' };
-        await cache.dropImage(record.imageId);
         const next = { ...record, imageId: '', status: 'discarded', updatedAt: now() };
         await store.putAsset(next);
         cache.set(next);
+        await cache.dropImage(record.imageId);
         emit({ chatId, key: record.key, name: record.name, reason: 'discarded' });
         return { ok: true, record: next };
     }
@@ -243,19 +256,28 @@ export function createItemImageService(deps) {
     // 同步取图（演出与背包格位用）：只读本地缓存，未命中时异步补载并发事件。
     function imageUrlFor(name, chatId = chatOf()) {
         if (!chatId || !normalizeItemName(name)) return '';
-        void cache.ensure(chatId);
+        cache.ensure(chatId);
         const record = recordFor(chatId, name);
         return record && record.status === 'ready' ? cache.imageUrl(record.imageId) : '';
     }
 
     return {
         processMessage, fillMissing, regenerate, discard, imageUrlFor,
-        listItems: () => cache.list(chatOf()).filter((record) => record.status === 'ready'),
+        listItems: (options = {}) => cache.page(chatOf(), { ...options, statuses: ['ready'] }),
+        metadataStatus: cache.status,
+        async retryMetadata() {
+            cache.clear();
+            if (!chatOf()) return { ok: true };
+            await cache.page(chatOf(), { limit: 1 });
+            return retryTarget?.chatId === chatOf() ? processMessage(retryTarget.messageId) : { ok: true };
+        },
         start() {
             if (offRendered) return;
             offRendered = messageHost.on('CHARACTER_MESSAGE_RENDERED', (messageId) => { void processMessage(Number(messageId)); });
         },
+        clearCache() { cache.clear(); },
         stop() {
+            cache.clear();
             if (offRendered) { offRendered(); offRendered = null; }
         },
     };

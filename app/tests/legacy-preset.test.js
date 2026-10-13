@@ -406,12 +406,14 @@ test('preset: 导出把引用的生成图一起打进压缩包，清了本机再
         storage.removeItem(LEGACY_PRESET_KEY);
         picked = { name: 'HP.zip', bytes: new Uint8Array(await downloaded.arrayBuffer()) };
         await handleSettingsAction('preset-import', ctx);
-        assert.equal(images.get('alley').dataUrl, JPG);
-        assert.equal(images.get('nezha').originalDataUrl, PNG, '原图也带回来');
-        assert.equal(images.get('nezha').revision, 2);
         const back = loadLegacyPresets(storage).HP;
-        assert.equal(back.scenes.对角巷.url, 'igs-gen:alley');
-        assert.equal(back.scopeCards['card:小雪'].library.characters.哪吒.默认, 'igs-gen:nezha');
+        const alleyId = back.scenes.对角巷.url.slice(8);
+        const nezhaId = back.scopeCards['card:小雪'].library.characters.哪吒.默认.slice(8);
+        assert.notEqual(alleyId, 'alley', '导入分配新身份，避免覆盖其他预设的共享图片');
+        assert.equal(back.scenes.对角巷.times.上午.url, back.scenes.对角巷.url);
+        assert.equal(images.get(alleyId).dataUrl, JPG);
+        assert.equal(images.get(nezhaId).originalDataUrl, PNG, '原图也带回来');
+        assert.equal(images.get(nezhaId).revision, 2);
     } finally {
         globalThis.FileReader = RealFileReader;
     }

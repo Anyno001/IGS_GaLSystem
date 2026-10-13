@@ -1,5 +1,7 @@
+import { requireMediaCache } from '../../media/media-cache-owner.js';
 import { floorHasEventCg } from '../../scene/event-cg.js';
 import { numberParagraphs, formatNumberedParagraphs, insertMarkers, insertMarkersAtAnchors, findAnchorInsertIndex, appendedTail, reattachTail, transplantMarkers } from './marker-placer.js';
+import { normalizeImageMarkerLayout } from '../../scene/image-marker-layout.js';
 import { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } from './floor-body-length.js';
 import { buildPlannerUserPrompt, formatTodayOutfitBlock } from './planner-prompt.js';
 import { summarizeFloorOutfits } from './floor-outfit-reference.js';
@@ -94,7 +96,6 @@ export function readCgViewport(globalObject, mode) {
     return windowViewport(globalObject, portrait);
 }
 
-const CACHE_LIMIT = 40;
 // 只有这些状态算「本楼已处理完」；failed / stale / 中途刷新残留的 planning 在下次渲染时重试，
 // 否则改好 Key 或地址之后，之前失败过的楼层永远不会再发请求。
 const SETTLED_STATUSES = new Set(['done']);
@@ -173,9 +174,11 @@ export function createAutoIllustrationService(deps) {
     const minBodyChars = Number.isFinite(Number(deps.minBodyChars)) ? Number(deps.minBodyChars) : MIN_AUTO_IMAGE_BODY_CHARS;
     const sourceFilter = typeof deps.getSourceFilter === 'function' ? deps.getSourceFilter : () => undefined;
     const locks = new Map();
-    const cache = new Map();
-    const hydrated = new Set();
+    const cache = requireMediaCache(deps.mediaCache, 'auto-illustrations');
+    const states = cache.auxiliary.createMap('cg-states');
+    const resourceKey = key => `cg:${key}`;
     let offRendered = null;
+    let stopped = false;
     let regexesEnsured = false;
     const settings = () => normalizeAutoIllustrationSettings(getSettings ? getSettings() : null);
     const cgSize = (s) => cgSizeForMode(
@@ -188,13 +191,32 @@ export function createAutoIllustrationService(deps) {
         return value && typeof value === 'object' ? value : {};
     };
 
-    function remember(key, value) {
-        cache.delete(key);
-        cache.set(key, value);
-        while (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value);
+    function remember(key, value, { metadataOnly = false } = {}) {
+        if (stopped) return;
+        states.set(key, { status: value.status, hasImage: Boolean(value.dataUrl) });
+        if (metadataOnly) return;
+        if (value.dataUrl) cache.forget(resourceKey(key));
+        if (/^(data:image\/|blob:|https?:)/i.test(String(value.dataUrl || ''))) cache.remember(resourceKey(key), value.dataUrl);
+        else if (value.dataUrl && cache.peek(value.dataUrl)) cache.remember(resourceKey(key), cache.peek(value.dataUrl));
+    }
+
+    async function prepareSlots(key, requests) {
+        const previous = new Map((await store.getSlots(key, { deferImages: true })).map(record => [Number(record.slot), record]));
+        for (const request of requests) {
+            const old = previous.get(Number(request.slot));
+            await store.putSlot(key, { ...old, ...request, status: old?.dataUrl ? 'done' : 'pending', generationStatus: 'pending', updatedAt: old?.dataUrl ? old.updatedAt : now() });
+        }
+        return previous;
+    }
+
+    function paintedRecord(request, result, previous, fallback) {
+        if (result?.ok && result.dataUrl) return { ...request, status: 'done', generationStatus: 'done', dataUrl: result.dataUrl, updatedAt: now() };
+        const old = previous.get(Number(request.slot));
+        return { ...old, ...request, status: old?.dataUrl ? 'done' : 'failed', generationStatus: 'failed', error: result?.error || fallback, updatedAt: old?.dataUrl ? old.updatedAt : now() };
     }
 
     function emit(floor, slot) {
+        if (stopped) return;
         if (events && typeof events.emit === 'function') {
             events.emit(ILLUSTRATION_UPDATED_EVENT, { chatId: floor.chatId, messageId: floor.messageId, swipeId: floor.swipeId, slot });
         }
@@ -331,10 +353,7 @@ export function createAutoIllustrationService(deps) {
 
     async function paintDbgenCaptions(messageId, floor, key, s, base, slots) {
         const requests = slots.map(({ status, error, dataUrl, floorKey, key: slotKey, updatedAt, ...request }) => request);
-        for (const request of requests) {
-            await store.putSlot(key, { ...request, status: 'pending', updatedAt: now() });
-            remember(`${key}|${request.slot}`, { status: 'pending', dataUrl: '' });
-        }
+        const previous = await prepareSlots(key, requests);
         let succeeded = 0;
         let firstFailure = null;
         const errors = [];
@@ -357,10 +376,8 @@ export function createAutoIllustrationService(deps) {
                 if (result && result.failure && !firstFailure) firstFailure = result.failure;
                 report('error', `第 ${messageId} 楼第 ${request.slot} 张插图生成失败：${(result && result.error) || '出图失败'}`);
             }
-            const record = result && result.ok
-                ? { ...request, status: 'done', dataUrl: result.dataUrl }
-                : { ...request, status: 'failed', error: (result && result.error) || '出图失败' };
-            await store.putSlot(key, { ...record, updatedAt: now() });
+            const record = paintedRecord(request, result, previous, '出图失败');
+            await store.putSlot(key, record);
             remember(`${key}|${request.slot}`, { status: record.status, dataUrl: record.dataUrl || '' });
             emit(floor, request.slot);
         }
@@ -423,7 +440,7 @@ export function createAutoIllustrationService(deps) {
         }
         // 标记还在但记录丢了（换设备、清缓存）时先去掉旧标记再规划，避免重复插入；写回时仍按原文校验。
         const expected = floor;
-        if (/(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/i.test(floor.text)) floor = { ...floor, text: stripIllustrationMarkers(floor.text) };
+        if (/(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/i.test(floor.text)) floor = { ...floor, text: stripIllustrationMarkers(normalizeImageMarkerLayout(floor.text)) };
         const numbered = numberParagraphs(floor.text);
         // 本楼没写场景标签 = 场景延续：继承最近一个带场景标签的楼的 NSFW，不让 NSFW 掉进过场概率。
         if (!numbered.scenes.length) numbered.isNsfw = inheritedNsfw(messageId);
@@ -538,10 +555,7 @@ export function createAutoIllustrationService(deps) {
             return { ok: false, reason: 'backend-unavailable', error: backend.ready.error };
         }
         const requests = slots.map(({ status, error, dataUrl, floorKey, key: slotKey, updatedAt, ...request }) => request);
-        for (const request of requests) {
-            await store.putSlot(key, { ...request, status: 'pending', updatedAt: now() });
-            remember(`${key}|${request.slot}`, { status: 'pending', dataUrl: '' });
-        }
+        const previous = await prepareSlots(key, requests);
         let succeeded = 0;
         let firstFailure = null;
         const errors = [];
@@ -559,10 +573,8 @@ export function createAutoIllustrationService(deps) {
                 if (result && result.failure && !firstFailure) firstFailure = result.failure;
                 report('error', `第 ${messageId} 楼第 ${request.slot} 张插图生成失败：${(result && result.error) || 'NAI 生成失败'}`);
             }
-            const record = result && result.ok
-                ? { ...request, status: 'done', dataUrl: result.dataUrl }
-                : { ...request, status: 'failed', error: result && result.error || 'NAI 生成失败' };
-            await store.putSlot(key, { ...record, updatedAt: now() });
+            const record = paintedRecord(request, result, previous, 'NAI 生成失败');
+            await store.putSlot(key, record);
             remember(`${key}|${request.slot}`, { status: record.status, dataUrl: record.dataUrl || '' });
             emit(floor, request.slot);
         }
@@ -616,19 +628,23 @@ export function createAutoIllustrationService(deps) {
         };
         if (!floor.chatId) return '';
         const key = floorKeyOf(floor);
-        const hit = cache.get(`${key}|${slot}`);
-        if (hit) return hit.status === 'done' ? hit.dataUrl : '';
-        if (!hydrated.has(key)) {
-            hydrated.add(key);
-            store.getSlots(key).then((list) => {
-                let found = false;
-                for (const item of list) {
-                    remember(`${key}|${item.slot}`, { status: item.status, dataUrl: item.dataUrl || '' });
-                    if (item.status === 'done') found = true;
-                }
-                if (found) emit(floor, slot);
-            }).catch(() => { hydrated.delete(key); });
-        }
+        const slotKey = `${key}|${slot}`, resource = resourceKey(slotKey);
+        const hit = cache.peek(resource);
+        if (hit) return hit;
+        const known = states.get(slotKey);
+        if (known && !known.hasImage) return '';
+        if (stopped) return '';
+        const stamp = cache.token(resource), generation = states.epoch();
+        void cache.load(resource, async () => {
+            let record = typeof store.getSlotRecord === 'function' ? await store.getSlotRecord(slotKey)
+                : (await store.getSlots(key, { deferImages: true })).find(item => Number(item.slot) === Number(slot));
+            if (stopped || states.epoch() !== generation || cache.token(resource) !== stamp) return '';
+            if (record && store.hydrateSlot && !/^(data:image\/|blob:|https?:)/i.test(String(record.dataUrl || ''))) record = await store.hydrateSlot(record);
+            if (stopped || states.epoch() !== generation || cache.token(resource) !== stamp) return '';
+            if (record) remember(slotKey, record, { metadataOnly: true });
+            else remember(slotKey, { status: 'missing', dataUrl: '' }, { metadataOnly: true });
+            return record?.dataUrl || '';
+        }, { persist: false, timeoutMs: 45000 }).then(value => { if (value && !stopped && states.epoch() === generation && cache.token(resource) === stamp) emit(floor, slot); }).catch(() => {});
         return '';
     }
 
@@ -664,7 +680,7 @@ export function createAutoIllustrationService(deps) {
     async function dropSlots(floor, key, slots) {
         for (const item of slots) {
             await store.deleteSlot(key, item.slot);
-            cache.delete(`${key}|${item.slot}`);
+            cache.forget(resourceKey(`${key}|${item.slot}`)); states.delete(`${key}|${item.slot}`);
             emit(floor, item.slot);
         }
     }
@@ -686,7 +702,7 @@ export function createAutoIllustrationService(deps) {
             } catch (error) {
                 return { ok: false, reason: 'delete-failed', error };
             }
-            cache.delete(`${key}|${identity.slot}`);
+            cache.forget(resourceKey(`${key}|${identity.slot}`)); states.delete(`${key}|${identity.slot}`);
             const live = messageHost && typeof messageHost.readFloor === 'function' ? messageHost.readFloor(floor.messageId) : null;
             if (!live || !/(?:\[igs-img:|<IMG>)/i.test(live.text)) {
                 await store.putFloor(key, { kind: 'none', status: 'done', updatedAt: now() });
@@ -752,13 +768,31 @@ export function createAutoIllustrationService(deps) {
         const key = floorKeyOf(floor);
         if (locks.has(key)) return locks.get(key);
         const job = (async () => {
+            const oldSlots = await store.getSlots(key, { deferImages: true });
+            const oldFloor = await store.getFloor(key);
             const removed = await removeMarkers(floor, null);
-            if (!removed.ok) return { ...removed, error: '无法删掉本楼的 CG 挂载点' };
-            const slots = await store.getSlots(key);
-            await dropSlots(floor, key, slots);
-            if (!slots.length) emit(floor, 1);
+            if (!removed.ok) return { ...removed, error: '无法改写本楼的 CG 挂载点' };
             const latest = withAnyFloor(messageHost.readFloor(messageId), true) || { ...floor, text: stripIllustrationMarkers(floor.text) };
-            return run(Number(messageId), latest, key, s, true);
+            let result;
+            try { result = await run(Number(messageId), latest, key, s, true); }
+            catch (error) { result = { ok: false, reason: 'generation-failed', error: error.message }; }
+            if (!result.ok && !result.count) {
+                const before = new Set(oldSlots.map(record => Number(record.slot)));
+                const current = await store.getSlots(key, { deferImages: true });
+                await dropSlots(floor, key, current.filter(record => !before.has(Number(record.slot))));
+                for (const record of oldSlots) await store.putSlot(key, record);
+                if (oldFloor) await store.putFloor(key, oldFloor);
+                const live = messageHost.readFloor(messageId);
+                if (live && live.chatId === floor.chatId && live.swipeId === floor.swipeId) {
+                    const restoredText = transplantMarkers(floor.text, stripIllustrationMarkers(live.text)).text;
+                    await messageHost.writeFloor(messageId, restoredText, live, { requireLatest: false });
+                }
+            } else if (result.ok) {
+                const live = messageHost.readFloor(messageId);
+                const keep = new Set(Array.from(String(live?.text || '').matchAll(MARKER_RE), match => Number(match[1] || match[2])));
+                await dropSlots(floor, key, oldSlots.filter(record => !keep.has(Number(record.slot))));
+            }
+            return result;
         })().finally(() => { if (locks.get(key) === job) locks.delete(key); });
         locks.set(key, job);
         return job;
@@ -767,13 +801,17 @@ export function createAutoIllustrationService(deps) {
     return {
         processMessage, getIllustrationUrl, clearIllustration, clearFloorIllustrations, rerollSlot, rerollFloor,
         start() {
+            stopped = false;
             if (offRendered) return;
             messageHost.attachPromptStrip();
             offRendered = messageHost.on('CHARACTER_MESSAGE_RENDERED', (messageId) => {
                 void processMessage(Number(messageId));
             });
         },
+        clearCache() { states.clear(); },
         stop() {
+            stopped = true;
+            states.clear();
             if (offRendered) { offRendered(); offRendered = null; }
             messageHost.destroy();
         },

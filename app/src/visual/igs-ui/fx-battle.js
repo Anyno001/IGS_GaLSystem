@@ -235,7 +235,7 @@ function placeImpact(node, event, motion, sprite) {
         impact.style.left = `${point.x}px`;
         impact.style.top = `${point.y}px`;
     };
-    const probed = peekSpriteHead(sprite.url);
+    const probed = peekSpriteHead(sprite.url, motion.ownerDocument);
     const manual = sprite.head && Number(sprite.head.w) > 0;
     if (probed || manual || !motion || !motion.ownerDocument) {
         apply(probed);
@@ -579,15 +579,15 @@ export const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-result.is-ancient[data-igs-battle-result="lose"] .igs-fx-battle-ribbon-text{background:#2b1d12;box-shadow:inset 0 0 0 2px #2b1d12,inset 0 0 0 3.5px rgba(246,236,212,.6);}
 .igs-fx-battle-result.is-ancient[data-igs-battle-result="escape"] .igs-fx-battle-ribbon-title{color:rgba(43,29,18,.72);text-shadow:0 0 1px rgba(43,29,18,.6),6px 0 8px rgba(43,29,18,.2);}
 .igs-fx-battle-result.is-ancient[data-igs-battle-result="escape"] .igs-fx-battle-ribbon-text{background:#4f5d63;box-shadow:inset 0 0 0 2px #4f5d63,inset 0 0 0 3.5px rgba(246,236,212,.6);}
-/* 仙侠水墨皮肤（在水墨基础上追加）：剑气换青白细长、闪光冷白、暴击 / 击倒偏紫白雷劫；朱砂印与竖排招式名保留。每个节点（plate / vignette / encounter / hit / result）都要带 is-xianxia。 */
-.igs-fx-battle-vignette.is-ancient.is-xianxia{background:radial-gradient(ellipse at center,transparent 52%,rgba(31,37,35,.36) 100%);}
-.igs-fx-battle-plate.is-ancient.is-xianxia{border-color:rgba(31,37,35,.7);background:#f4f1ea;color:#1f2523;}
-.igs-fx-battle-plate.is-ancient.is-xianxia .igs-fx-battle-plate-mark{background:#b23a2a;color:#f4f1ea;}
-.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-wipe{background:radial-gradient(ellipse at 28% 40%,rgba(95,127,134,.16),transparent 55%),radial-gradient(ellipse at 76% 70%,rgba(95,127,134,.12),transparent 55%),rgba(244,241,234,.86);}
-.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-vs,.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-vs-foe{color:#1f2523;}
-.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-vs-cap{color:#b23a2a;}
-.igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-skill,.igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-skill-name{color:#1f2523;}
-.igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-skill-who{color:#b23a2a;}
+/* 仙侠水墨皮肤（焦墨底）：剑气换青白细长、闪光冷白、暴击 / 击倒偏紫白雷劫；朱砂印与竖排招式名保留。每个节点（plate / vignette / encounter / hit / result）都要带 is-xianxia。 */
+.igs-fx-battle-vignette.is-ancient.is-xianxia{background:radial-gradient(ellipse at center,transparent 52%,rgba(9,12,17,.52) 100%);}
+.igs-fx-battle-plate.is-ancient.is-xianxia{border-color:rgba(150,182,190,.45);background:rgba(18,22,27,.94);color:#f3ecdd;}
+.igs-fx-battle-plate.is-ancient.is-xianxia .igs-fx-battle-plate-mark{background:#b23a2a;color:#f3ecdd;}
+.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-wipe{background:radial-gradient(ellipse at 28% 40%,rgba(150,182,190,.12),transparent 55%),radial-gradient(ellipse at 76% 70%,rgba(150,182,190,.09),transparent 55%),rgba(14,18,23,.92);}
+.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-vs,.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-vs-foe{color:#f3ecdd;}
+.igs-fx-battle-encounter.is-ancient.is-xianxia .igs-fx-battle-vs-cap{color:#e0574a;}
+.igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-skill,.igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-skill-name{color:#f3ecdd;}
+.igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-skill-who{color:#e0574a;}
 .igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-slash{height:12px;margin-top:-6px;filter:drop-shadow(0 0 6px rgba(190,236,244,.9));}
 .igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-slash::before{background:linear-gradient(90deg,rgba(95,127,134,0),rgba(150,200,210,.8) 24%,#dff2f4 62%,rgba(190,230,238,.7) 90%,rgba(95,127,134,0));-webkit-mask:none;mask:none;clip-path:polygon(0 52%,30% 30%,70% 0,100% 50%,70% 100%,30% 70%);}
 .igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-slash::after{left:6%;right:4%;top:40%;height:20%;background:linear-gradient(90deg,transparent,#fff 28%,#fff 76%,transparent);box-shadow:0 0 12px 3px rgba(190,236,244,.85);}
@@ -598,9 +598,9 @@ export const BATTLE_FX_STYLE_TEXT = `
 .igs-fx-battle-hit.is-ancient.is-xianxia[data-igs-battle-result="crit"] .igs-fx-battle-flash,.igs-fx-battle-hit.is-ancient.is-xianxia[data-igs-battle-result="ko"] .igs-fx-battle-flash{background:radial-gradient(circle at 50% 40%,rgba(246,240,255,.95),rgba(176,150,240,.5) 50%,rgba(31,37,35,.4) 100%);}
 .igs-fx-battle-hit.is-ancient.is-xianxia[data-igs-battle-result="crit"] .igs-fx-battle-hurt,.igs-fx-battle-hit.is-ancient.is-xianxia[data-igs-battle-result="ko"] .igs-fx-battle-hurt{box-shadow:inset 0 0 12vmin 3vmin rgba(120,96,208,.62);}
 .igs-fx-battle-hit.is-ancient.is-xianxia .igs-fx-battle-spark{background:radial-gradient(circle,#f4fcff,#a8dcea 45%,transparent 70%);}
-.igs-fx-battle-result.is-ancient.is-xianxia .igs-fx-battle-result-veil{background:rgba(31,37,35,.34);}
-.igs-fx-battle-result.is-ancient.is-xianxia .igs-fx-battle-ribbon-title{color:#1f2523;}
-.igs-fx-battle-result.is-ancient.is-xianxia .igs-fx-battle-ribbon-text{background:#b23a2a;}
+.igs-fx-battle-result.is-ancient.is-xianxia .igs-fx-battle-result-veil{background:rgba(9,12,17,.5);}
+.igs-fx-battle-result.is-ancient.is-xianxia .igs-fx-battle-ribbon-title{color:#f7f1e4;}
+.igs-fx-battle-result.is-ancient.is-xianxia .igs-fx-battle-ribbon-text{background:#b23a2a;box-shadow:inset 0 0 0 1px rgba(243,236,221,.55);}
 #igs-stage-motion[data-igs-fx-battle-motion="snappy"] .igs-fx-battle-vs,#igs-stage-motion[data-igs-fx-battle-motion="snappy"] .igs-fx-battle-skill,#igs-stage-motion[data-igs-fx-battle-motion="snappy"] .igs-fx-battle-pop,#igs-stage-motion[data-igs-fx-battle-motion="snappy"] .igs-fx-battle-ribbon,#igs-stage-motion[data-igs-fx-battle-motion="snappy"] .igs-fx-battle-plate{animation-timing-function:steps(4,end);}
 #igs-stage-motion[data-igs-fx-battle-motion="snappy"] .igs-fx-battle-wipe{animation-timing-function:steps(6,end);}
 #igs-stage-motion[data-igs-fx-battle-motion="snappy"][data-igs-fx-battle-shake]{animation-timing-function:steps(3,end);}

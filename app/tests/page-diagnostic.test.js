@@ -37,6 +37,17 @@ test('gate:page-diagnostic:reports-cg-and-chat-page-reasons', () => {
     assert.equal(buildPageDiagnostic(null), '');
 });
 
+test('gate:page-diagnostic:distinguishes-pending-cg-and-matched-sprite-from-active-cg-and-miss', () => {
+    const text = buildPageDiagnostic(snapshot({
+        cgActive: false, cgWaiting: true, illustrationSlot: 19,
+        pendingSpriteRef: 'igs-gen:private-id',
+        spriteMatch: { character: '林小雨', mood: '害羞', source: 'user', slot: '平和' },
+    }));
+    assert.match(text, /CG 有标记（槽位 19）但图片未就绪，保留场景与立绘/);
+    assert.match(text, /立绘 .*用户配置，槽位「平和」，原图读取中/);
+    assert.doesNotMatch(text, /CG 显示中|挂着 CG|→ 未命中|private-id/);
+});
+
 test('gate:page-diagnostic:image-refs-never-carry-image-bodies-or-query-strings', () => {
     assert.equal(summarizeImageRef('data:image/png;base64,' + 'A'.repeat(4096)), '内嵌图(3KB)');
     assert.equal(summarizeImageRef('/user/images/igs-cg/abc.png'), 'user/images/igs-cg/abc.png');

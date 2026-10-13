@@ -18,3 +18,5 @@
 - 提供 `bootstrapIGS(options)`。
 - 提供 `destroyIGS()`。
 - 触发 `igs:ready`、`igs:destroy`、`igs:error` 事件。
+
+v0.36.43：保持 `IGS.destroy()` / `destroyIGS()` 的同步结果契约，调用即停用并解绑公共 API；新增 `IGS.shutdown()`，返回幂等 Promise，等待各清理步骤、媒体日志/回收和缓存连接关闭，成功为 `{ok:true}`，失败为 `{ok:false,reason,error}`。单个清理步骤失败不能跳过后续关闭步骤。重载必须等待 `shutdown()` 成功，不能在旧媒体所有者收尾期间启动新实例。

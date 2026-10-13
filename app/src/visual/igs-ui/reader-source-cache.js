@@ -12,6 +12,7 @@ export function buildReaderSourceSignature(input = {}) {
         hashText(input.virtualRegex),
         input.sceneAssetsEnabled ? '1' : '0',
         input.sentencePaging ? '1' : '0',
+        input.dialogueSentencePaging ? '1' : '0',
     ].join('|');
 }
 

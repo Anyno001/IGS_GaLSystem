@@ -1,14 +1,6 @@
-export const TEXT_FX_KINDS = Object.freeze({
-    抖: 'shake',
-    波: 'wave',
-    大: 'big',
-    小: 'small',
-    淡: 'whisper',
-    强: 'strong',
-    吼: 'roar',
-    渐大: 'grow',
-    渐小: 'fade',
-});
+import { TEXT_FX_KINDS, TEXT_FX_MARKUP_SOURCE } from '../../scene/text-fx-markup.js';
+
+export { TEXT_FX_KINDS };
 
 const TEXT_FX_MAX_GRAPHEMES = 40;
 const PER_CHAR_KINDS = new Set(['shake', 'wave', 'grow', 'fade']);
@@ -17,7 +9,7 @@ const COUNTED_KINDS = new Set(['grow', 'fade']);
 // 弹出类在打字机揭开该段时才播放，见 armTextFx。
 const POP_SELECTOR = '.igs-tfx-big,.igs-tfx-roar';
 // 半角/全角冒号都接受：模型在中文语境里常顺手写成「：」。
-const MARKUP_RE = new RegExp(`\\{(${Object.keys(TEXT_FX_KINDS).join('|')})[:：]([^{}\\n\\r]+)\\}`, 'g');
+const MARKUP_RE = new RegExp(TEXT_FX_MARKUP_SOURCE, 'g');
 const TAG_SPLIT_RE = /(<[^>]*>)/;
 const ENTITY_SPLIT_RE = /(&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);)/i;
 

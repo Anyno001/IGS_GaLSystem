@@ -72,6 +72,9 @@ export function createIgsCompatApi(app) {
             if (!message) {
                 return { ok: false, reason: 'message-not-found', messageId: normalizedId, mode: readerMode };
             }
+            if (typeof resolved.options.canReplace === 'function' && !resolved.options.canReplace()) {
+                return { ok: false, reason: 'reply-stale' };
+            }
             const readerPayload = await buildReaderPayload(app, message, normalizedId, readerMode);
             const refreshed = await app.refresh({
                 message,
@@ -90,6 +93,9 @@ export function createIgsCompatApi(app) {
             const payload = resolved.options.skipImageCollection === true
                 ? basePayload
                 : await enrichReaderPayload(app, basePayload);
+            if (typeof resolved.options.canReplace === 'function' && !resolved.options.canReplace()) {
+                return { ok: false, reason: 'reply-stale' };
+            }
             if (resolved.options.replaceActive === true
                 && app.igsUi && typeof app.igsUi.replaceReader === 'function') {
                 const reader = app.igsUi.replaceReader({
@@ -379,6 +385,7 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
         virtualRegex: bridge.virtualRegex,
         sceneAssets: bridge.sceneAssets,
         sentencePaging: bridge.sentencePaging,
+        dialogueSentencePaging: bridge.dialogueSentencePaging,
     });
     // 跨楼层场景追溯只在场景素材模式启用时发生；本楼没有任何场景指令时
     // （AI 漏发 [igs-scene:]，正文照常输出）才向前最多追溯 3 个 AI 楼层。

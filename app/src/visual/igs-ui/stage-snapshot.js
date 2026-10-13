@@ -106,9 +106,9 @@ export const REGION_RATIO = 0.34;
 
 // 纯函数：sprite 为 { head:{x,top,w}, aspect(原图高宽比) }，或带 url 时读已探测的头位缓存。
 // 返回 { size, x, y }：background-size 占取景框宽度的 %、background-position 的 %，让指定区域落在取景框中心。
-export function resolveRegionCrop(sprite, region = 'face', ratio = REGION_RATIO) {
+export function resolveRegionCrop(sprite, region = 'face', ratio = REGION_RATIO, doc) {
     const spec = REGION_SPECS[region] || REGION_SPECS.face;
-    const probed = sprite && sprite.url ? peekSpriteHead(sprite.url) : null;
+    const probed = sprite && sprite.url ? peekSpriteHead(sprite.url, doc) : null;
     const head = (sprite && sprite.head && Number(sprite.head.w) > 0 ? sprite.head : null) || (probed && probed.head) || FALLBACK_HEAD;
     const rawAspect = sprite && Number(sprite.aspect) > 0 ? Number(sprite.aspect) : (probed && probed.naturalW > 0 ? probed.naturalH / probed.naturalW : 0);
     const a = rawAspect > 0 ? rawAspect : 1.6;
@@ -168,7 +168,7 @@ export function resolveHeadAnchor(env, who) {
     if (!layer) return fallback;
     const motion = env.root.querySelector('#igs-stage-motion');
     const geo = motion ? measureStage(motion) : null;
-    const probed = peekSpriteHead(urlOfBackground(layer.image));
+    const probed = peekSpriteHead(urlOfBackground(layer.image), env.root.ownerDocument);
     if (!geo || !probed || !(probed.naturalW > 0)) return fallback;
     const scale = parseFloat(String(layer.size || '').split(/\s+/)[1]);
     const pos = String(layer.position || '').split(/\s+/).map(parseFloat);

@@ -62,6 +62,8 @@ const BACKUP_TEMPLATE = `
     <div class="igs-source-filter-title">本地缓存</div>
     <div class="igs-source-filter-grid">{{imageCacheCountField}}</div>
     <div class="igs-settings-row"><button class="igs-settings-action" data-action="purge-asset-cache" type="button" title="清空浏览器里缓存的图片和设置页缩略图，酒馆上的原图不动">清素材缓存</button></div>
+    <div class="igs-settings-row"><button class="igs-settings-action" data-action="image-cache-status" type="button">查看占用</button><button class="igs-settings-action" data-action="image-files-retry-delete" type="button">重试待删除文件</button></div>
+    <div class="igs-source-filter-note">{{imageCacheStatus}}</div>
   </div>
 </div>
 `.trim();

@@ -42,7 +42,7 @@ function spriteView(env, who) {
     const el = spriteElOf(env, who);
     if (!el || !el.style || el.style.display === 'none' || !el.style.backgroundImage) return null;
     const url = urlOfBackground(el.style.backgroundImage);
-    const probed = peekSpriteHead(url);
+    const probed = peekSpriteHead(url, el.ownerDocument);
     const target = targetOf(env, who);
     const head = (target && target.head && Number(target.head.w) > 0 ? target.head : null) || (probed && probed.head) || FALLBACK_HEAD;
     const aspect = probed && probed.naturalW > 0 ? probed.naturalH / probed.naturalW : 1.6;
@@ -56,7 +56,7 @@ function anchorOf(env, who, view) {
     const target = targetOf(env, who);
     const motion = env.root.querySelector('#igs-stage-motion');
     const geo = motion ? measureStage(motion) : null;
-    const probed = view && view.url ? peekSpriteHead(view.url) : null;
+    const probed = view && view.url ? peekSpriteHead(view.url, env.root.ownerDocument) : null;
     if (target && geo && probed && probed.naturalW > 0) {
         const rect = spriteDrawRect(geo.stageW, geo.stageH, { naturalW: probed.naturalW, naturalH: probed.naturalH, scale: target.scale, posX: target.posX, posY: target.posY });
         if (rect) {
@@ -138,7 +138,7 @@ function buildMirror(item, env, content) {
     const pad = bronze ? [7, 7] : [5, 8];
     const boxRatio = ratio * (100 - pad[0] * 2) / (100 - pad[1] * 2);
     const truth = content === 'true-form';
-    const crop = bronze ? resolveRegionCrop(view.sprite, 'face', boxRatio) : fitCrop(view.aspect, boxRatio);
+    const crop = bronze ? resolveRegionCrop(view.sprite, 'face', boxRatio, env.root.ownerDocument) : fitCrop(view.aspect, boxRatio);
     const mirrored = !view.flip;
     const clone = cloneOf(env, item.who, {
         crop, flip: mirrored,
@@ -182,7 +182,7 @@ function buildReflect(item, env) {
     const ratio = water ? 0.66 : 0.72;
     const pad = water ? [8, 8] : [6, 5];
     const boxRatio = ratio * (100 - pad[0] * 2) / (100 - pad[1] * 2);
-    const crop = resolveRegionCrop(view.sprite, water ? 'waist' : 'face', boxRatio);
+    const crop = resolveRegionCrop(view.sprite, water ? 'waist' : 'face', boxRatio, env.root.ownerDocument);
     const clone = cloneOf(env, item.who, { crop, flip: !view.flip, filter: water ? `${GRADE} blur(1.2px) saturate(.85)` : `${GRADE} blur(.5px) saturate(.8) brightness(.9)` });
     if (!clone) return null;
     dim(clone, water ? 0.72 : 0.5);
@@ -263,7 +263,7 @@ function buildFrame(item, env) {
         memory: { w: 28, ratio: 0.9, pad: [7, 7], region: 'face', filter: 'sepia(.55) saturate(.8) brightness(1.05) blur(.4px)', sound: 'xfmemory' },
     }[style];
     const boxRatio = spec.ratio * (100 - spec.pad[0] * 2) / (100 - spec.pad[1] * 2);
-    const crop = spec.region === 'full' ? fitCrop(view.aspect, boxRatio) : resolveRegionCrop(view.sprite, spec.region, boxRatio);
+    const crop = spec.region === 'full' ? fitCrop(view.aspect, boxRatio) : resolveRegionCrop(view.sprite, spec.region, boxRatio, env.root.ownerDocument);
     const clone = cloneOf(env, item.who, { crop, filter: spec.filter });
     if (!clone) return null;
     if (style === 'holo') dim(clone, 0.88);
@@ -326,7 +326,7 @@ function buildZoom(item, env) {
     const pad = [3, 3];
     const boxRatio = ratio * (100 - pad[0] * 2) / (100 - pad[1] * 2);
     const region = ['hand', 'lip', 'eye', 'neck', 'face', 'waist'].includes(item.region) ? item.region : 'face';
-    const clone = cloneOf(env, item.who, { crop: resolveRegionCrop(view.sprite, region, boxRatio), filter: GRADE });
+    const clone = cloneOf(env, item.who, { crop: resolveRegionCrop(view.sprite, region, boxRatio, env.root.ownerDocument), filter: GRADE });
     if (!clone) return null;
     const label = { hand: '手', lip: '唇', eye: '眼', neck: '颈', face: '脸', waist: '腰' }[region];
     const node = shell(env, 'zoom', '');

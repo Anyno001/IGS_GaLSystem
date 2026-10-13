@@ -1,3 +1,4 @@
+import { createAssetGenerationService } from './helpers/media-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -13,7 +14,7 @@ import { buildNaiV4Request, supportsNaiTransparentBackground } from '../src/gene
 import { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } from '../src/generated-images/illustration/auto-illustration-settings.js';
 import { createAlphaMatte, hasTransparentBorder, matteSolidBackground, findOpaqueBounds } from '../src/media/alpha-matte.js';
 import { createMemoryGeneratedAssetStore } from '../src/media/generated-asset-store.js';
-import { createAssetGenerationService } from '../src/generated-images/illustration/asset-generation-service.js';
+
 
 const USER_ASSETS = {
     enabled: true,
@@ -349,6 +350,49 @@ test('gate:assets:service-generates-missing-assets-and-reviews', async () => {
     assert.equal(await store.getImage('img1'), null);
     assert.ok(emitted.includes('generated'));
 });
+
+test('gate:assets:review-library-status-invalidates-cached-page-and-hides-card', async () => {
+    const store = createMemoryGeneratedAssetStore();
+    const record = { key: 'review-1', chatId: 'chat-1', floorKey: 'chat-1|3|0', type: 'sprite', name: '旧名', imageId: 'img-1', status: 'review' };
+    await store.putAsset(record);
+    const service = createAssetGenerationService({
+        messageHost: fakeHost(FLOOR_TEXT), store, getSettings: () => ({}),
+        llm: {}, nai: {},
+    });
+    try {
+        await service.readRecord(record.key);
+        assert.equal(service.listReview(record.floorKey).length, 1);
+        const result = await service.setStatus(record.key, 'library');
+        assert.equal(result.ok, true);
+        assert.equal(service.listReview(record.floorKey).length, 0);
+        assert.equal((await store.getAsset(record.key)).status, 'library');
+        const page = await store.queryAssets({ chatId: record.chatId, floorKey: record.floorKey, statuses: ['review'] });
+        assert.equal(page.records.length, 0);
+    } finally { service.destroy?.(); }
+});
+test('gate:assets:lost-internal-image-slots-fall-back-to-calm-and-default-instead-of-vanishing', () => {
+    const isMissingImage = (url) => url === 'igs-gen:lost';
+    const sceneAssets = {
+        characters: { 雪乃: { 愤怒: 'igs-gen:lost', 默认: 'igs-gen:base' } },
+        characterOutfits: { 雪乃: { 校服: { words: [], moods: { 喜悦: 'igs-gen:lost', 平和: 'igs-gen:calm' } } } },
+    };
+    const ctx = { sceneAssets, isMissingImage };
+    // 原装：命中的槽图已丢，不能短路成缺图，要继续落到「默认」。
+    const original = resolveSpriteAsset('雪乃', '愤怒', ctx);
+    assert.equal(original.url, 'igs-gen:base');
+    assert.equal(original.slot, '默认');
+    // 兜底图照常显示；死链槽仍标记缺图，让补图链有机会重画「愤怒」。
+    assert.equal(original.needsGeneration, true);
+    // 服装：命中的槽图已丢，退回这套衣服的「平和」，不再闪回原装。
+    const outfit = resolveSpriteAsset('雪乃', '喜悦', ctx, '校服');
+    assert.equal(outfit.url, 'igs-gen:calm');
+    assert.equal(outfit.slot, '平和');
+    // 所有槽都丢了才报缺图。
+    const gone = resolveSpriteAsset('雪乃', '愤怒', { sceneAssets: { characters: { 雪乃: { 愤怒: 'igs-gen:lost' } } }, isMissingImage });
+    assert.equal(gone.needsGeneration, true);
+});
+
+
 
 test('gate:assets:service-disabled-makes-no-requests', async () => {
     let requested = false;
@@ -687,7 +731,7 @@ test('gate:image-backend:legacy-nai-key-merges-into-unified-settings', async () 
 });
 
 test('gate:assets:dbgen-source-skips-secondary-llm', async () => {
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const floor = { chatId: 'c', messageId: 3, swipeId: 0, isAi: true, isLatest: true, text: '[igs-scene:废弃工厂|夜晚|雨]\n雨声。' };
     let llmCalls = 0;
@@ -715,7 +759,7 @@ test('gate:assets:dbgen-source-skips-secondary-llm', async () => {
 });
 
 test('gate:assets:later-backgrounds-skip-recall-and-already-generated', async () => {
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const { addGeneratedAssetToLibrary } = await import('../src/scene/asset-match.js');
     const text = [
@@ -775,7 +819,7 @@ test('gate:assets:later-backgrounds-skip-recall-and-already-generated', async ()
 });
 
 test('gate:assets:dbgen-sprite-passes-frontend-templates', async () => {
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const floor = { chatId: 'c', messageId: 3, swipeId: 0, isAi: true, isLatest: true, text: '[igs-char:神秘少女|平静|你来了。]' };
     const caption = {
@@ -824,7 +868,7 @@ test('gate:assets:dbgen-sprite-passes-frontend-templates', async () => {
 });
 
 test('gate:assets:dbgen-sprite-white-background-when-transparent-off', async () => {
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const floor = { chatId: 'c', messageId: 3, swipeId: 0, isAi: true, isLatest: true, text: '[igs-char:神秘少女|平静|你来了。]' };
     const caption = {
@@ -865,7 +909,7 @@ test('gate:assets:dbgen-sprite-white-background-when-transparent-off', async () 
 });
 
 test('gate:assets:dbgen-sprites-write-once-then-paint-and-split-past-eight', async () => {
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const names = ['甲', '乙', '丙'];
     const floor = {
@@ -1037,7 +1081,7 @@ test('gate:alpha-matte:keeps-png-text-chunks-after-crop', async () => {
 });
 
 test('gate:generated-assets:get-image-data-url-for-download', async () => {
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const store = createMemoryGeneratedAssetStore();
     await store.putImage({ id: 'img-1', dataUrl: 'data:image/png;base64,AAAA', type: 'sprite', createdAt: 1 });
@@ -1454,7 +1498,7 @@ test('gate:assets:expression-set-splits-writes-by-nine', async () => {
             return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: text, negative: '' } };
         },
     };
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const service = createAssetGenerationService({
         messageHost: { getChatId: () => 'c1', getUserName: () => '', readPreviousAiTexts: () => [] },
         llm: null, nai, store: createMemoryGeneratedAssetStore(), getSettings: () => ({}), events: null, matte: async (dataUrl) => dataUrl,
@@ -1855,7 +1899,7 @@ test('gate:assets:stopped-expression-set-keeps-captions-and-resume-paints-withou
             return { ok: true, dataUrl: 'data:image/png;base64,AAA', prompt: { positive: 'x', negative: '' } };
         },
     };
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const service = createAssetGenerationService({
         messageHost: { getChatId: () => 'c1', getUserName: () => '', readPreviousAiTexts: () => [] },
         llm: null, nai, store: createMemoryGeneratedAssetStore(), getSettings: () => ({}), events: null, matte: async (dataUrl) => dataUrl,
@@ -1900,13 +1944,15 @@ test('gate:assets:resume-button-shows-only-when-captions-wait-for-paint', async 
     assert.ok(waiting.includes('继续生图（1）'));
 });
 
-test('gate:asset-gen:image-cache-keeps-on-screen-thumbs-beyond-limit', async () => {
+test('gate:asset-gen:visible-page-uses-the-shared-cache-count-budget', async () => {
+    const { createLocalImageCache } = await import('../src/media/tavern-image-cache.js');
     let t = 0;
     const service = createAssetGenerationService({
         messageHost: { getChatId: () => 'chat', readFloor: () => null, readPreviousAiTexts: () => [], on: () => () => {} },
         llm: {}, nai: {}, store: { getImage: async (id) => ({ dataUrl: `data:image/png;base64,${id}` }) },
         getSettings: () => ({ autoIllustration: {}, sceneAssets: {} }),
         clock: () => t,
+        mediaCache: createLocalImageCache({}, { maxCount: 80 }),
     });
     const refs = Array.from({ length: 80 }, (_, i) => `igs-gen:p${i}`);
     const missing = () => refs.filter((ref) => !service.resolveUrl(ref)).length;
@@ -1937,7 +1983,7 @@ test('gate:asset-gen:settings-thumbs-use-short-blob-urls-and-revoke-on-delete', 
     const thumb = service.resolveThumbUrl('igs-gen:t1');
     assert.equal(thumb, 'blob:t0');
     assert.equal(service.resolveThumbUrl('igs-gen:t1'), thumb, '重绘复用同一个短地址，浏览器不重载不闪');
-    assert.equal(service.resolveUrl('igs-gen:t1'), 'data:image/png;base64,QUJD', '舞台等其他用途仍拿 dataUrl');
+    assert.equal(service.resolveUrl('igs-gen:t1'), thumb, '舞台和设置页共用同一份 Blob 与对象 URL');
     assert.equal(service.resolveThumbUrl('https://example.com/a.png'), 'https://example.com/a.png');
     await service.deleteImages(['t1']);
     assert.deepEqual(revoked, ['blob:t0']);

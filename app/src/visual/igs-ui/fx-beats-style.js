@@ -60,12 +60,6 @@ export const BEATS_STYLE_TEXT = `
 @keyframes igs-bt-pop{0%{transform:scale(1)}45%{transform:scale(1.06)}100%{transform:scale(1)}}
 
 #igs-overlay .igs-bt-evidence{display:flex;align-items:center;justify-content:flex-start;padding:0 0 var(--igs-fx-safe) max(16px,4%);box-sizing:border-box;}
-#igs-overlay .igs-bt-ev-card{position:relative;width:min(280px,34%);min-width:200px;box-sizing:border-box;padding:14px 18px;background:rgba(14,10,6,.72);color:#f1ede2;border:1px solid rgba(232,200,138,.45);border-radius:2px;animation:igs-bt-ev-in 560ms cubic-bezier(.2,.9,.3,1) both;}
-#igs-overlay .igs-bt-ev-tag{display:block;margin-bottom:8px;color:#e8c88a;font-size:max(12px,.72em);letter-spacing:.4em;}
-#igs-overlay .igs-bt-ev-name{font-size:1.25em;font-weight:500;line-height:1.35;letter-spacing:.06em;font-family:"Huiwen Mincho","Source Han Serif CN","Noto Serif SC",serif;}
-#igs-overlay .igs-bt-ev-desc{margin-top:6px;font-size:max(12px,.88em);line-height:1.6;color:#d6d0c2;}
-#igs-overlay .igs-bt-ev-tape,#igs-overlay .igs-bt-ev-stamp{display:none;}
-@keyframes igs-bt-ev-in{from{opacity:0;transform:translateX(-14px)}to{opacity:1;transform:none}}
 
 #igs-overlay .igs-bt-link-redline .igs-link.is-line{filter:drop-shadow(0 0 3px #d23b3b88);}
 

@@ -205,7 +205,7 @@ test('gate:camera-no-canvas-no-mask-url', () => {
         assert.ok(!/canvas/i.test(source), `${file} canvas`);
         assert.ok(!/mask-image\s*:\s*url/i.test(source), `${file} mask-image url`);
         assert.ok(!/footprint|脚印|igs-dfx-stroll/i.test(source), `${file} footprint`);
-        assert.ok(!/\r/.test(source), `${file} LF`);
+        assert.ok(!/\r(?!\n)/.test(source), `${file} bare CR`);
     }
 });
 

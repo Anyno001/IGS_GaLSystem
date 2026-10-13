@@ -310,16 +310,13 @@ test('gate:simulation:resource cache preserves local resource entry', () => {
 
 test('gate:simulation:image-resource-cache-loads-on-demand-and-deduplicates-url', async () => {
     let fetchCount = 0;
+    const images = [];
     const revoked = [];
     const cache = createImageResourceCache({
-        async fetch(url, options) {
-            fetchCount += 1;
-            assert.equal(url, 'https://example.com/scene.png');
-            assert.deepEqual(options, { cache: 'force-cache', mode: 'cors' });
-            return { ok: true, async blob() { return { type: 'image/png' }; } };
-        },
+        Image: class { constructor() { images.push(this); } },
+        async fetch() { fetchCount += 1; throw new Error('external-display-must-use-browser-cache'); },
         URL: {
-            createObjectURL() { return 'blob:scene-cache'; },
+            createObjectURL() { assert.fail('external-display-must-not-copy-bytes'); },
             revokeObjectURL(url) { revoked.push(url); },
         },
     });
@@ -328,14 +325,16 @@ test('gate:simulation:image-resource-cache-loads-on-demand-and-deduplicates-url'
     assert.equal(cache.get('https://example.com/scene.png'), '');
     const first = cache.load('https://example.com/scene.png');
     const second = cache.load('https://example.com/scene.png');
-    assert.equal(first, second);
-    assert.equal(fetchCount, 1);
-    assert.equal(await first, 'blob:scene-cache');
-    assert.equal(await second, 'blob:scene-cache');
-    assert.equal(cache.get('https://example.com/scene.png'), 'blob:scene-cache');
+    assert.equal(images.length, 1);
+    assert.equal(images[0].src, 'https://example.com/scene.png');
+    images[0].onload();
+    assert.equal(fetchCount, 0);
+    assert.equal(await first, 'https://example.com/scene.png');
+    assert.equal(await second, 'https://example.com/scene.png');
+    assert.equal(cache.get('https://example.com/scene.png'), 'https://example.com/scene.png');
     assert.equal(cache.size(), 1);
     cache.clear();
-    assert.deepEqual(revoked, ['blob:scene-cache']);
+    assert.deepEqual(revoked, []);
     assert.equal(cache.size(), 0);
 });
 
@@ -760,18 +759,19 @@ test('gate:assets:reader-manual-generation-feedback', async () => {
             [{ ok: false, reason: 'plan-failed', error: '副 LLM 规划失败' }, /副 LLM 规划失败/, 'error'],
             [{ ok: true, reason: 'disabled' }, /开启自动背景或自动立绘/, 'warn'],
             [{ ok: true, reason: 'scene-assets-disabled' }, /开启场景素材/, 'warn'],
-            [{ ok: true, reason: 'nothing-missing' }, /没有未登记/, 'warn'],
+            [{ ok: true, reason: 'nothing-missing' }, /没有未登记/, 'skipped'],
         ]) {
             result = next;
             assert.equal(await opened.controller.invokeAction('generate-assets'), next);
             assert.match(host.getState().activeReader.generationTip, text);
             assert.equal(logs.at(-1).level, level);
+            if (level === 'skipped') assert.equal(document.getElementById('igs-gen-strip').getAttribute('data-state'), 'skipped');
         }
     } finally { host.destroy(); }
 });
 
 test('gate:assets:reader-manual-retries-settled-floor', async () => {
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const document = createFakeDocument();
     const raw = '[igs-scene:废弃工厂|夜晚|雨]\n雨声很大。';
@@ -816,6 +816,92 @@ test('gate:assets:reader-manual-retries-settled-floor', async () => {
         assert.equal((await store.getFloor('chat-1|39|0')).status, 'done');
         assert.equal(service.listReview('chat-1|39|0').length, 1);
         assert.match(host.getState().activeReader.generationTip, /已生成 1 项/);
+    } finally { host.destroy(); }
+});
+
+test('gate:assets:review-rename-accept-persists-status-and-hides-card-or-rolls-back-on-failure', async () => {
+    const raw = '[igs-scene:旧背景|夜晚|晴]\n此处审核新背景。';
+    for (const failStatus of [false, true]) {
+        const document = createFakeDocument();
+        const record = { key: 'review-39', chatId: 'chat-1', floorKey: 'chat-1|39|0', type: 'background', name: '旧背景', time: '夜晚', imageId: 'image-39', status: 'review' };
+        const floor = { chatId: 'chat-1', messageId: 39, swipeId: 0, isAi: true, isLatest: true, text: raw };
+        let settings = { bridge: { sceneAssets: { enabled: true, scenes: {}, characters: {} } }, readerSettings: {} };
+        const saves = [];
+        const service = {
+            listReview: (key) => key === record.floorKey && record.status === 'review' ? [record] : [],
+            resolveUrl: (url) => url,
+            async setStatus(key, next) {
+                assert.equal(key, record.key);
+                assert.equal(next, 'library');
+                if (failStatus) return { ok: false, reason: 'store-write-failed' };
+                record.status = next;
+                return { ok: true };
+            },
+        };
+        const host = createIgsReaderHost({
+            global: { document, localStorage: createMemoryStorage() },
+            getIllustrationSource: () => floor,
+            getUnifiedSettings: () => settings,
+            saveUnifiedSettings(next) { settings = next; saves.push(next.bridge.sceneAssets.scenes); return { ok: true }; },
+            generatedAssets: service,
+        });
+        try {
+            const opened = host.openReader({ messageId: 39, message: { id: 39, text: raw }, raw }, { mode: 'pc' });
+            assert.equal(opened.ok, true);
+            const panel = document.getElementById('igs-asset-review');
+            assert.ok(panel, '最后一页须挂载待确认素材卡片');
+            const input = panel.querySelector('input');
+            assert.ok(input);
+            input.value = '改名后的背景';
+            const button = panel.querySelector('[data-asset-review-act="library"]');
+            assert.ok(button);
+            button.click();
+            for (let n = 0; n < 50 && (failStatus
+                ? saves.length < 2 : record.status !== 'library' || !panel.hasAttribute('hidden')); n += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            assert.equal(saves.length, failStatus ? 2 : 1, '保存失败要补偿提交一次');
+            if (failStatus) {
+                assert.equal(record.status, 'review');
+                assert.deepEqual(settings.bridge.sceneAssets.scenes, {});
+                assert.ok(!panel.hasAttribute('hidden'), '失败仍可重试，不从待确认列表消失');
+            } else {
+                assert.equal(record.status, 'library');
+                assert.equal(settings.bridge.sceneAssets.scenes['改名后的背景'].times['夜晚'].url, 'igs-gen:image-39');
+                assert.equal(service.listReview(record.floorKey).length, 0);
+                assert.ok(panel.hasAttribute('hidden'), '状态缓存更新后卡片消失');
+            }
+        } finally { host.destroy(); }
+    }
+});
+
+test('gate:simulation:new-scene-without-image-temporarily-shows-inherited-scene-background', async () => {
+    const document = createFakeDocument();
+    // 场景名刻意不与已有场景共享子串，避免撞进 lookupSceneBackground 的模糊命中。
+    const raw = '[igs-scene:冰湖|白天|晴]\n她走进冰湖。';
+    const host = createIgsReaderHost({
+        global: { document, localStorage: createMemoryStorage() },
+        getUnifiedSettings: () => ({
+            bridge: { sceneAssets: { enabled: true, scenes: { 竹林: { url: 'https://example.com/old.png', times: {} } }, characters: {} } },
+            readerSettings: {},
+        }),
+    });
+    try {
+        const opened = host.openReader({
+            messageId: 41, message: { id: 41, text: raw }, raw,
+            inheritedSceneState: { scene: '竹林', time: '白天' },
+        }, { mode: 'pc' });
+        assert.equal(opened.ok, true);
+        const content = host.getState().activeReader.snapshot.content;
+        assert.equal(content.backgroundImage, 'https://example.com/old.png');
+        assert.equal(content.backgroundMatch && content.backgroundMatch.source, 'inherited');
+        // 同一场景名不算继承顶替：上一楼就是这个场景时，未生成就保持空白等待。
+        const again = host.openReader({
+            messageId: 42, message: { id: 42, text: raw }, raw,
+            inheritedSceneState: { scene: '冰湖', time: '白天' },
+        }, { mode: 'pc' });
+        assert.equal(again.ok, true);
+        assert.equal(host.getState().activeReader.snapshot.content.backgroundImage, '');
     } finally { host.destroy(); }
 });
 
@@ -975,10 +1061,12 @@ test('gate:illustration:failed-cg-point-can-reroll-and-does-not-borrow-another-i
         const content = host.getState().activeReader.snapshot.content;
         assert.equal(content.illustrationSlot, 1);
         assert.equal(content.illustrationActive, false);
-        assert.equal(content.cgActive, true);
-        assert.equal(content.backgroundImage, '');
-        assert.equal(document.getElementById('igs-stage-motion').getAttribute('data-igs-cg'), '1');
-        assert.equal(document.getElementById('igs-bg').style.backgroundImage, '');
+        assert.equal(content.cgActive, false);
+        assert.equal(content.cgWaiting, true);
+        assert.equal(content.backgroundImage, 'https://example.com/room.png');
+        assert.notEqual(content.backgroundImage, 'https://example.com/other.png');
+        assert.notEqual(document.getElementById('igs-stage-motion').getAttribute('data-igs-cg'), '1');
+        assert.match(document.getElementById('igs-bg').style.backgroundImage, /room\.png/);
         const reroll = document.getElementById('igs-btn-reroll-cg');
         const clear = document.getElementById('igs-btn-clear-cg');
         assert.equal(reroll.disabled, false);
@@ -1250,7 +1338,7 @@ test('gate:illustration:reader-activates-only-after-marker-and-keeps-veil-withou
     host.destroy();
 });
 
-test('gate:illustration:cg-page-keeps-cg-and-does-not-paint-scene-background', () => {
+test('gate:illustration:cg-page-keeps-scene-until-image-arrives-and-then-shows-cg', () => {
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
     const raw = '[igs-scene:Room|night|clear]\n[igs-img:1]\n这一页同时有背景和 CG。\n下一句。';
     let imageUrl = '';
@@ -1275,10 +1363,11 @@ test('gate:illustration:cg-page-keeps-cg-and-does-not-paint-scene-background', (
     assert.equal(opened.ok, true);
     const content = () => host.getState().activeReader.snapshot.content;
     const bg = document.getElementById('igs-bg');
-    assert.equal(content().backgroundImage, '');
-    assert.equal(content().cgActive, true);
-    assert.equal(bg.style.backgroundImage, '');
-    assert.equal(document.getElementById('igs-stage-motion').getAttribute('data-igs-cg'), '1');
+    assert.equal(content().backgroundImage, 'https://example.com/room.png');
+    assert.equal(content().cgActive, false);
+    assert.equal(content().cgWaiting, true);
+    assert.match(bg.style.backgroundImage, /room\.png/);
+    assert.notEqual(document.getElementById('igs-stage-motion').getAttribute('data-igs-cg'), '1');
 
     imageUrl = 'data:image/png;base64,CG';
     trigger({ chatId: 'chat-1', messageId: 52, swipeId: 0, slot: 1 });
@@ -1290,6 +1379,173 @@ test('gate:illustration:cg-page-keeps-cg-and-does-not-paint-scene-background', (
 });
 
 
+
+test('gate:illustration:unavailable-slot-19-keeps-both-speakers-through-page-75-and-switches-on-arrival', () => {
+    const document = createFakeDocument();
+    const lines = ['[igs-scene:东路宫道|晚上|晴天]'];
+    for (let i = 0; i < 75; i++) {
+        if (i === 72) lines.push('[igs-img:19]');
+        lines.push(`[igs-char:${i < 73 ? '小林' : '白墨'}|温和|这是第${i + 1}句台词。]`);
+    }
+    const raw = lines.join('\n');
+    let imageUrl = '', notify;
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({
+            bridge: { sceneAssets: { enabled: true, scenes: { 东路宫道: { url: 'data:image/png;base64,Qkc=' } }, characters: { 白墨: { 默认: 'data:image/png;base64,QkFJ' }, 小林: { 默认: 'data:image/png;base64,TElO' } } } },
+            readerSettings: { titleScreen: false, stageCast: { enabled: true } },
+        }),
+        getIllustrationSource: () => ({ chatId: 'fixture', messageId: 22, swipeId: 0, text: raw }),
+        getIllustrationUrl: ({ slot }) => slot === 19 ? imageUrl : '',
+        onIllustrationUpdated: handler => { notify = handler; return () => {}; },
+    });
+    try {
+        const opened = host.openReader({ messageId: 22, message: { id: 22, text: raw }, raw }, { mode: 'fullscreen' });
+        const content = () => host.getState().activeReader.snapshot.content;
+        assert.equal(content().segments.length, 75);
+        for (let i = 0; i < 75; i++) {
+            if (i) opened.controller.invokeAction('next');
+            assert.equal(content().spriteImage, i < 73 ? 'data:image/png;base64,TElO' : 'data:image/png;base64,QkFJ', `第 ${i + 1} 页`);
+            assert.equal(content().cgActive, false);
+            assert.equal(content().backgroundImage, 'data:image/png;base64,Qkc=');
+        }
+        assert.equal(content().illustrationSlot, 19);
+        assert.equal(content().imageAvailableCount, 0);
+        assert.ok(content().castSprites.some(member => member.character === '小林'));
+        imageUrl = 'data:image/png;base64,Q0c=';
+        notify({ chatId: 'fixture', messageId: 22, swipeId: 0, slot: 19 });
+        assert.equal(content().cgActive, true);
+        assert.equal(content().backgroundImage, imageUrl);
+        assert.equal(content().spriteImage, null);
+    } finally { host.destroy(); }
+});
+
+test('gate:simulation:legacy-native-marker-inside-dialogue-keeps-one-page-and-visible-speaker', () => {
+    const document = createFakeDocument();
+    const raw = '<content>\n[igs-char:白墨|温和|先把画挂起来，你觉得呢？\n<IMG>\n19\n</IMG>\n]\n</content>';
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({ bridge: { sceneAssets: { enabled: true, characters: { 白墨: { 默认: 'data:image/png;base64,QkFJ' } } } }, readerSettings: { titleScreen: false } }),
+        getIllustrationUrl: () => '',
+    });
+    try {
+        const opened = host.openReader({ messageId: 22, message: { id: 22, text: raw }, raw }, { mode: 'fullscreen' });
+        assert.equal(opened.ok, true);
+        const content = host.getState().activeReader.snapshot.content;
+        assert.deepEqual(content.segments, ['[白墨]：先把画挂起来，你觉得呢？']);
+        assert.equal(content.speaker, '白墨');
+        assert.equal(content.spriteImage, 'data:image/png;base64,QkFJ');
+        assert.equal(content.cgActive, false);
+        assert.equal(content.cgWaiting, true);
+        assert.equal(content.illustrationSlot, 19);
+        assert.equal(document.getElementById('igs-sprite').style.display, 'block');
+    } finally { host.destroy(); }
+});
+
+test('gate:simulation:legacy-cg-marker-after-closed-dialogue-hides-orphan-bracket-without-losing-slot', () => {
+    const document = createFakeDocument();
+    const raw = '<content>\n[igs-char:白墨|温和|先把画挂起来，你觉得呢？]\n[igs-img:19]\n]\n下一句。\n</content>';
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({ bridge: { sceneAssets: { enabled: true, characters: { 白墨: { 默认: 'data:image/png;base64,QkFJ' } } } }, readerSettings: { titleScreen: false } }),
+        getIllustrationUrl: () => '',
+    });
+    try {
+        const opened = host.openReader({ messageId: 22, message: { id: 22, text: raw }, raw }, { mode: 'fullscreen' });
+        assert.equal(opened.ok, true);
+        const content = () => host.getState().activeReader.snapshot.content;
+        assert.deepEqual(content().segments, ['[白墨]：先把画挂起来，你觉得呢？', '下一句。']);
+        assert.equal(content().illustrationSlot, 19);
+        assert.equal(content().cgWaiting, true);
+        opened.controller.invokeAction('next');
+        assert.equal(content().text, '下一句。');
+    } finally { host.destroy(); }
+});
+
+test('gate:simulation:closed-multiline-dialogue-and-legacy-cg-keep-one-page-in-fullscreen', () => {
+    for (const gap of ['\n\n', '\n\n\n\n']) {
+        const document = createFakeDocument();
+        const raw = `<content>\n[igs-char:甲|平和|完整台词。${gap}<IMG>19</IMG>${gap}]\n</content>`;
+        const host = createIgsReaderHost({
+            global: { document },
+            getUnifiedSettings: () => ({ bridge: { sceneAssets: { enabled: true, characters: { 甲: { 默认: 'data:image/png;base64,QQ==' } } } }, readerSettings: { titleScreen: false } }),
+            getIllustrationUrl: () => 'data:image/png;base64,Q0c=',
+        });
+        try {
+            const opened = host.openReader({ messageId: 22, message: { id: 22, text: raw }, raw }, { mode: 'fullscreen' });
+            assert.equal(opened.ok, true);
+            const content = host.getState().activeReader.snapshot.content;
+            assert.deepEqual(content.segments, ['[甲]：完整台词。']);
+            assert.equal(content.speaker, '甲');
+            assert.equal(content.textType, 'dialogue');
+            assert.equal(content.illustrationSlot, 19);
+            assert.equal(content.cgActive, true);
+            assert.equal(content.backgroundImage, 'data:image/png;base64,Q0c=');
+            const html = document.getElementById('igs-text').innerHTML;
+            assert.ok(html.includes('完整台词。'));
+            assert.doesNotMatch(html, /\]|<IMG>|igs-char:/);
+        } finally { host.destroy(); }
+    }
+});
+
+test('gate:simulation:multiline-speech-paging-preserves-speaker-thought-and-outfit', async () => {
+    const document = createFakeDocument();
+    const raw = '<content>\n[igs-char:甲|平和|便服|第一句。\n\n第二句。\n]\n[igs-thought:甲|谨慎|便服|先等。\n想清楚。\n]\n[igs-char:乙|平和|下一句。\n]\n</content>';
+    const outfitImage = 'data:image/png;base64,T1VURklU';
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({ bridge: { dialogueSentencePaging: true, sceneAssets: { enabled: true, characters: { 甲: { 默认: 'data:image/png;base64,QQ==' }, 乙: { 默认: 'data:image/png;base64,Qg==' } }, characterOutfits: { 甲: { 便服: { words: [], moods: { 平和: outfitImage } } } } } }, readerSettings: { titleScreen: false } }),
+    });
+    try {
+        const opened = host.openReader({ messageId: 22, message: { id: 22, text: raw }, raw }, { mode: 'fullscreen' });
+        assert.equal(opened.ok, true);
+        assert.equal(host.getState().activeReader.snapshot.content.segments.length, 5);
+        const pages = [];
+        for (let i = 0; i < 5; i++) {
+            const content = host.getState().activeReader.snapshot.content;
+            pages.push([content.textType, content.speaker]);
+            if (i < 4) assert.equal(content.spriteImage, outfitImage);
+            const html = document.getElementById('igs-text').innerHTML;
+            assert.doesNotMatch(html, /\]|igs-char:|igs-thought:|便服/);
+            if (i < 4) await opened.controller.invokeAction('next');
+        }
+        assert.deepEqual(pages, [['dialogue', '甲'], ['dialogue', '甲'], ['thought', '甲'], ['thought', '甲'], ['dialogue', '乙']]);
+    } finally { host.destroy(); }
+});
+
+test('gate:simulation:pending-current-sprite-survives-one-image-cache-and-floor-prefetch', async () => {
+    const { localImageCacheFor } = await import('../src/media/tavern-image-cache.js');
+    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const document = createFakeDocument(), global = { document };
+    const cache = localImageCacheFor(global);
+    await cache.setMaxCount(1);
+    let notify = () => {}, reads = 0;
+    const service = createAssetGenerationService({
+        mediaCache: cache, llm: {}, nai: {}, getSettings: () => ({}),
+        messageHost: { getChatId: () => 'fixture', on: () => () => {} },
+        store: { getImage: async id => { reads++; return { dataUrl: `data:image/png;base64,${id}` }; } },
+        events: { emit: (_event, detail) => notify(detail) },
+    });
+    const raw = '[igs-char:白墨|平和|第一句。]\n[igs-char:白墨|喜悦|第二句。]\n[igs-char:白墨|愤怒|第三句。]';
+    const host = createIgsReaderHost({
+        global, media: { cache }, generatedAssets: service,
+        onGeneratedAssetUpdated: handler => { notify = handler; return () => {}; },
+        getUnifiedSettings: () => ({ bridge: { sceneAssets: { enabled: true, characters: { 白墨: { 平和: 'igs-gen:calm', 喜悦: 'igs-gen:joy', 愤怒: 'igs-gen:angry' } } } }, readerSettings: { titleScreen: false } }),
+    });
+    try {
+        const opened = host.openReader({ messageId: 22, message: { id: 22, text: raw }, raw }, { mode: 'fullscreen' });
+        await new Promise(resolve => setTimeout(resolve, 300));
+        const content = () => host.getState().activeReader.snapshot.content;
+        assert.equal(content().spriteImage, 'data:image/png;base64,calm');
+        const steadyReads = reads;
+        await new Promise(resolve => setTimeout(resolve, 300));
+        assert.equal(reads, steadyReads, '预热图被淘汰后不得反复读图和整页重绘');
+        opened.controller.invokeAction('next');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        assert.equal(content().spriteImage, 'data:image/png;base64,joy');
+        assert.equal(document.getElementById('igs-sprite').style.display, 'block');
+    } finally { host.destroy(); service.stop(); await cache.destroy(); }
+});
 
 test('gate:simulation:nsfw-scene-keeps-sprite-when-hide-toggle-off', async () => {
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
@@ -1557,6 +1813,226 @@ test('gate:simulation:scene-and-character-aliases-reuse-original-assets-and-layo
     assert.equal(sprite.style.backgroundPosition, '14% 78%');
     assert.equal(sprite.style.backgroundSize, 'auto 126%');
     vn.destroy();
+});
+
+test('gate:simulation:settings-generated-sprite-refreshes-current-stage', async () => {
+    const document = createFakeDocument();
+    const raw = '[igs-char:玉子|平和|你好。]';
+    let revision = 0;
+    let imageUpdated = () => {};
+    const resolved = [];
+    let stored = {
+        bridge: { openMode: 'pc', sceneAssets: { enabled: true, scenes: {}, characters: { 玉子: { 默认: 'igs-gen:old' } } } },
+        readerSettings: { titleScreen: false },
+    };
+    const images = new Map([['igs-gen:old', 'data:image/png;base64,T0xE'], ['igs-gen:new', 'data:image/png;base64,TkVX']]);
+    const host = createIgsReaderHost({
+        global: { document, localStorage: createMemoryStorage() },
+        onGeneratedAssetUpdated: (handler) => { imageUpdated = handler; return () => {}; },
+        getUnifiedSettings: () => stored,
+        getSettingsRevision: () => revision,
+        saveUnifiedSettings(next) { stored = next; revision += 1; return { ok: true }; },
+        generatedAssets: {
+            resolveUrl: (ref) => { resolved.push(ref); return images.get(ref) || ''; },
+            getImagePrompt: async () => ({ caption: { v4_prompt: { caption: { base_caption: 'portrait', char_captions: [] } } }, edited: true }),
+            generateCharacterSprite: async () => ({ ok: true, imageId: 'new' }),
+        },
+    });
+    try {
+        host.openReader({ messageId: 7, message: { id: 7, text: raw }, raw }, { mode: 'pc' });
+        assert.equal(host.getState().activeReader.snapshot.content.spriteImage, images.get('igs-gen:old'));
+        const sprite = document.getElementById('igs-overlay').querySelector('#igs-sprite');
+        assert.match(sprite.style.backgroundImage, /T0xE/, '舞台起初使用旧立绘');
+        const settings = host.openSettings({ tab: 'scene' });
+        const generated = await settings.controller.invoke('char-generate-sprite:%E7%8E%89%E5%AD%90');
+        assert.notEqual(generated && generated.ok, false);
+        assert.equal(stored.bridge.sceneAssets.characters.玉子.默认, 'igs-gen:new');
+        resolved.length = 0;
+        imageUpdated({ reason: 'image-loaded', imageId: 'new' });
+        assert.ok(resolved.includes('igs-gen:new'), '图片到达后预热新立绘');
+        assert.ok(!resolved.includes('igs-gen:old'), '设置保存后不能继续预热旧立绘');
+        assert.equal(host.getState().activeReader.snapshot.content.spriteImage, images.get('igs-gen:new'));
+        assert.equal(settings.controller.close().ok, true);
+        assert.equal(host.getState().activeReader.snapshot.content.spriteImage, images.get('igs-gen:new'));
+        assert.match(sprite.style.backgroundImage, /TkVX/, '设置器关闭后舞台必须立即显示新立绘');
+    } finally { host.destroy(); }
+});
+
+test('gate:simulation:settings-generated-sprite-cold-image-arrival-refreshes-stage-once', async () => {
+    const document = createFakeDocument();
+    const raw = '[igs-char:玉子|平和|你好。]';
+    let revision = 0;
+    let stored = {
+        bridge: { openMode: 'pc', sceneAssets: { enabled: true, scenes: {}, characters: { 玉子: { 默认: 'igs-gen:old' } } } },
+        readerSettings: { titleScreen: false },
+    };
+    let notify = () => {};
+    const resolved = [];
+    const images = new Map([['igs-gen:old', 'data:image/png;base64,T0xE']]);
+    const host = createIgsReaderHost({
+        global: { document, localStorage: createMemoryStorage() },
+        getUnifiedSettings: () => stored,
+        getSettingsRevision: () => revision,
+        saveUnifiedSettings(next) { stored = next; revision += 1; return { ok: true }; },
+        onGeneratedAssetUpdated(handler) { notify = handler; return () => {}; },
+        generatedAssets: {
+            resolveUrl(ref) { resolved.push(ref); return images.get(ref) || ''; },
+            getImagePrompt: async () => ({ caption: { v4_prompt: { caption: { base_caption: 'portrait', char_captions: [] } } }, edited: true }),
+            generateCharacterSprite: async () => ({ ok: true, imageId: 'new' }),
+        },
+    });
+    try {
+        host.openReader({ messageId: 7, message: { id: 7, text: raw }, raw }, { mode: 'pc' });
+        const sprite = document.getElementById('igs-overlay').querySelector('#igs-sprite');
+        let background = sprite.style.backgroundImage;
+        let paints = 0;
+        Object.defineProperty(sprite.style, 'backgroundImage', {
+            configurable: true,
+            get: () => background,
+            set(value) { background = value; paints += 1; },
+        });
+        const settings = host.openSettings({ tab: 'scene' });
+        assert.notEqual((await settings.controller.invoke('char-generate-sprite:%E7%8E%89%E5%AD%90'))?.ok, false);
+        assert.equal(stored.bridge.sceneAssets.characters.玉子.默认, 'igs-gen:new');
+        assert.equal(host.getState().activeReader.snapshot.content.pendingSpriteRef, 'igs-gen:new');
+        resolved.length = 0;
+        images.set('igs-gen:new', 'data:image/png;base64,TkVX');
+        notify({ reason: 'image-loaded', imageId: 'new' });
+        assert.ok(resolved.includes('igs-gen:new'), '新引用必须进入预热清单');
+        assert.ok(!resolved.includes('igs-gen:old'), '不再预热已被替换的立绘');
+        paints = 0;
+        resolved.length = 0;
+        assert.equal(settings.controller.close().ok, true);
+        assert.equal(paints, 1, '设置保存已重绘舞台，不得再因过期标记重复绘制');
+        assert.equal(host.getState().activeReader.snapshot.content.spriteImage, images.get('igs-gen:new'));
+        assert.match(sprite.style.backgroundImage, /TkVX/, '关闭设置器后舞台显示已到达的新图');
+        assert.ok(resolved.filter((ref) => ref === 'igs-gen:new').length <= 3, '关闭设置器不得重复解析新立绘');
+        resolved.length = 0;
+        notify({ reason: 'image-loaded', imageId: 'new' });
+        assert.ok(!resolved.includes('igs-gen:old'), '相同修订号的重复通知不得重建旧清单');
+    } finally { host.destroy(); }
+});
+
+test('gate:simulation:settings-generated-sprite-late-image-after-close-updates-stage', async () => {
+    const document = createFakeDocument();
+    const raw = '[igs-char:玉子|平和|你好。]';
+    let revision = 0;
+    let settings = {
+        bridge: { openMode: 'pc', sceneAssets: { enabled: true, scenes: {}, characters: { 玉子: { 默认: 'igs-gen:old' } } } },
+        readerSettings: { titleScreen: false },
+    };
+    const images = new Map([['igs-gen:old', 'data:image/png;base64,T0xE']]);
+    let notify = () => {};
+    const host = createIgsReaderHost({
+        global: { document, localStorage: createMemoryStorage() },
+        getUnifiedSettings: () => settings,
+        getSettingsRevision: () => revision,
+        saveUnifiedSettings(next) { settings = next; revision += 1; return { ok: true }; },
+        onGeneratedAssetUpdated(handler) { notify = handler; return () => {}; },
+        generatedAssets: {
+            resolveUrl: (ref) => images.get(ref) || '',
+            getImagePrompt: async () => ({ caption: { v4_prompt: { caption: { base_caption: 'portrait', char_captions: [] } } }, edited: true }),
+            generateCharacterSprite: async () => ({ ok: true, imageId: 'new' }),
+        },
+    });
+    try {
+        host.openReader({ messageId: 7, message: { id: 7, text: raw }, raw }, { mode: 'pc' });
+        const sprite = document.getElementById('igs-overlay').querySelector('#igs-sprite');
+        const panel = host.openSettings({ tab: 'scene' });
+        assert.notEqual((await panel.controller.invoke('char-generate-sprite:%E7%8E%89%E5%AD%90'))?.ok, false);
+        assert.equal(panel.controller.close().ok, true);
+        assert.equal(host.getState().activeReader.snapshot.content.pendingSpriteRef, 'igs-gen:new');
+        images.set('igs-gen:new', 'data:image/png;base64,TkVX');
+        notify({ reason: 'image-loaded', imageId: 'new' });
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        assert.equal(host.getState().activeReader.snapshot.content.spriteImage, images.get('igs-gen:new'));
+        assert.match(sprite.style.backgroundImage, /TkVX/, '异步像素到达后无需翻页即可换图');
+    } finally { host.destroy(); }
+});
+
+test('gate:simulation:dialogue-thought-paging-saves-and-preserves-speaker-across-pages', async () => {
+    const document = createFakeDocument();
+    const storage = createMemoryStorage({ igs_bridge_config: JSON.stringify({
+        sceneAssets: { enabled: true, scenes: {}, characters: {} },
+    }) });
+    const raw = [
+        '<now_plot>', '<content>',
+        '*先别急。*',
+        '[igs-char:玉子|平和|你好呀。请坐。]',
+        '[igs-thought:玉子|平和|先别急。再等等。]',
+        '*先别急。*',
+        '旁白第一句。旁白第二句。',
+        '</content>', '</now_plot>',
+    ].join('\n');
+    const vn = bootstrapIGS({
+        global: { document, localStorage: storage }, autoAttachMagicWand: false,
+        hostAdapter: {
+            getCurrentMessage: async () => ({ id: 9, text: raw }),
+            typeAndSend: async () => ({ ok: true }),
+        },
+    });
+    try {
+        const opened = await vn.openLatestAvailable('pc');
+        const controller = opened.reader.controller;
+        assert.equal(vn.getState().igsUi.activeReader.snapshot.content.segments.length, 5);
+        const settings = (await controller.invokeAction('settings')).controller;
+        settings.setValue('bridge.dialogueSentencePaging', true);
+        assert.equal(settings.close().ok, true);
+        assert.equal(vn.getUnifiedSettings({ mode: 'pc' }).bridge.dialogueSentencePaging, true);
+        const first = vn.getState().igsUi.activeReader.snapshot.content;
+        assert.equal(first.segments.length, 7);
+        assert.ok(first.segments[3].includes('先别急。'));
+        assert.ok(first.segments[4].includes('再等等。'));
+        const pages = [];
+        for (let i = 0; i < first.segments.length; i += 1) {
+            const content = vn.getState().igsUi.activeReader.snapshot.content;
+            pages.push([content.textType, content.speaker, content.text]);
+            if (i < first.segments.length - 1) await controller.invokeAction('next');
+        }
+        assert.deepEqual(pages.map(([kind, speaker]) => [kind, speaker]), [
+            ['narration', ''],
+            ['dialogue', '玉子'], ['dialogue', '玉子'],
+            ['thought', '玉子'], ['thought', '玉子'],
+            ['narration', ''], ['narration', ''],
+        ]);
+        assert.ok(pages[1][2].includes('你好呀。') && pages[2][2].includes('请坐。'), '两句对白必须全部显示');
+        assert.ok(pages[3][2].includes('先别急。') && pages[4][2].includes('再等等。'), '两句心理话必须全部显示');
+        assert.ok(pages[6][2].includes('旁白第一句。旁白第二句。'), '对白分页关闭旁白开关时不能切错或丢句');
+    } finally { vn.destroy(); }
+});
+
+test('gate:simulation:text-fx-sentence-pages-render-without-leaking-markers', async () => {
+    const raw = '<content>\n[igs-char:李伯|谨慎|便服|{小:堂上已经认出来了。}这件事以后再说。]\n[igs-char:小雨|平和|好。]\n</content>';
+    for (const enabled of [true, false]) {
+        const document = createFakeDocument();
+        const storage = createMemoryStorage({
+            igs_bridge_config: JSON.stringify({ dialogueSentencePaging: true, sceneAssets: { enabled: true } }),
+            'igs-reader-settings-v9-default': JSON.stringify({ textFx: { enabled } }),
+        });
+        const vn = bootstrapIGS({
+            global: { document, localStorage: storage }, autoAttachMagicWand: false,
+            hostAdapter: { getCurrentMessage: async () => ({ id: 9, text: raw }), typeAndSend: async () => ({ ok: true }) },
+        });
+        try {
+            const opened = await vn.openLatestAvailable('pc');
+            const controller = opened.reader.controller;
+            const text = () => document.getElementById('igs-overlay').querySelector('#igs-text').innerHTML;
+            const content = () => vn.getState().igsUi.activeReader.snapshot.content;
+            assert.equal(content().segments.length, 3);
+            assert.equal(content().speaker, '李伯');
+            assert.equal(content().textType, 'dialogue');
+            assert.ok(text().includes('堂上已经认出来了。'));
+            assert.doesNotMatch(text(), /\{小[:：]|\}/);
+            assert.equal(text().includes('igs-tfx-small'), enabled);
+            await controller.invokeAction('next');
+            assert.equal(content().speaker, '李伯');
+            assert.ok(text().includes('这件事以后再说。'));
+            assert.doesNotMatch(text(), /\{小[:：]|\}|igs-tfx-small/);
+            await controller.invokeAction('next');
+            assert.equal(content().speaker, '小雨');
+            assert.ok(text().includes('好。'));
+        } finally { vn.destroy(); }
+    }
 });
 
 test('gate:simulation:mobile-sentence-paging-keeps-current-sprite-dimmed-until-next-dialogue', async () => {
@@ -2463,7 +2939,7 @@ test('gate:simulation:igs-ui-enter-sends-and-shift-enter-does-not', async () => 
     vn.destroy();
 });
 
-test('gate:simulation:igs-ui-background-click-pages-forward-dialog-click-still-pages', async () => {
+test('gate:simulation:igs-ui-background-left-half-pages-back-right-half-forward-dialog-still-pages', async () => {
     const document = createFakeDocument();
     const latestMessage = {
         id: 44,
@@ -2478,24 +2954,35 @@ test('gate:simulation:igs-ui-background-click-pages-forward-dialog-click-still-p
         },
     });
 
+    try {
     const opened = await vn.openLatestAvailable('pc');
     const overlay = document.getElementById('igs-overlay');
     const clickLayer = overlay.querySelector('#igs-click-layer');
     const dialog = overlay.querySelector('#igs-dialog');
+    overlay.getBoundingClientRect = () => ({ left: 100, width: 800 });
 
     assert.equal(opened.reader.snapshot.content.progress, '1 / 3');
-    // 单击对话框以外的画面推进到下一页。
-    clickLayer.click();
+    // 背景空白区左半回退，正中线及右半推进。
+    clickLayer.dispatchEvent({ type: 'click', target: clickLayer, clientX: 700 });
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 3');
+    clickLayer.dispatchEvent({ type: 'click', target: clickLayer, clientX: 280 });
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '1 / 3');
+    clickLayer.dispatchEvent({ type: 'click', target: clickLayer, clientX: 500 });
     assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 3');
 
     // 点对话框仍照常翻页（第一下可能先放完打字机）。
     dialog.style.left = '0px';
     dialog.style.width = '200px';
+    dialog.getBoundingClientRect = () => ({ left: 0, width: 200 });
     dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160 });
     if (vn.getState().igsUi.activeReader.snapshot.content.progress !== '3 / 3') dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 160 });
     assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '3 / 3');
-
+    dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 40 });
+    if (vn.getState().igsUi.activeReader.snapshot.content.progress !== '2 / 3') dialog.dispatchEvent({ type: 'click', target: dialog, clientX: 40 });
+    assert.equal(vn.getState().igsUi.activeReader.snapshot.content.progress, '2 / 3', '对话框左半边仍回上一页');
+    } finally {
     vn.destroy();
+    }
 });
 
 test('gate:simulation:right-click-hides-outside-the-dialog-only', async () => {
@@ -4896,6 +5383,11 @@ test('gate:simulation:igs-ui-fullscreen-shows-reply-wait-and-opens-the-new-floor
         hostAdapter: {
             getCurrentMessage: async () => currentMessage,
             getMessageById: async (id) => messages.get(Number(id)) || null,
+            listMessages: async () => [
+                { id: 78, raw: { mes: '[igs-char:艾莉|喜悦|快来。]' }, text: '[igs-char:艾莉|喜悦|快来。]' },
+                { id: 79, raw: { mes: '[igs-char:露娜|悲伤|等我。]' }, text: '[igs-char:露娜|悲伤|等我。]' },
+                currentMessage,
+            ],
             typeAndSend: async () => {
                 eventSource.emit('generation_started');
                 return { ok: true };
@@ -4913,6 +5405,16 @@ test('gate:simulation:igs-ui-fullscreen-shows-reply-wait-and-opens-the-new-floor
     assert.equal(overlay.classList.contains('igs-awaiting-reply'), true);
     assert.equal(overlay.querySelector('#igs-send-status-text').textContent, '正在生成…');
     assert.equal(overlay.querySelector('#igs-toast').textContent, '');
+    await new Promise((resolve) => setImmediate(resolve));
+    const waitRoot = overlay.querySelector('.igs-waitstage');
+    assert.ok(waitRoot);
+    const games = waitRoot.querySelector('.igs-ws-games');
+    assert.ok(games);
+    const labels = games.querySelectorAll('button').map((button) => button.textContent);
+    assert.ok(labels.includes('这句是谁说的'), '宿主对象形态的角色台词须进入游戏池');
+    const rps = games.querySelectorAll('button').find((button) => button.textContent === '猜拳');
+    rps.click();
+    assert.equal(waitRoot.getAttribute('data-igs-waitstage-game'), 'rps');
 
     const nextElement = createFakeMessageElement(document, { messageId: 81, textContent: '生成完成后的最终正文。' });
     chat.appendChild(nextElement);
@@ -4927,7 +5429,16 @@ test('gate:simulation:igs-ui-fullscreen-shows-reply-wait-and-opens-the-new-floor
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
 
+    assert.ok(overlay.querySelector('.igs-waitstage'), '回复到达后保留已开始的这一局');
+    assert.equal(waitRoot.getAttribute('data-igs-waitstage-game'), 'rps');
+    assert.equal(games.hidden, true, '当前局进行时不提供开启新游戏的菜单');
+    const hand = waitRoot.querySelector('.igs-ws-hands').querySelectorAll('button')[0];
+    hand.click();
+    hand.click();
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(overlay.classList.contains('igs-awaiting-reply'), false);
+    assert.ok(!overlay.querySelector('.igs-waitstage'), '本局结算后自动收起过场');
     assert.match(opened.reader.controller.getSnapshot().content.displayText, /生成完成后的最终正文/);
     vn.destroy();
 });
@@ -5103,6 +5614,234 @@ test('gate:simulation:igs-ui-comic-mode-keeps-reply-wait-after-hiding-input', as
     vn.destroy();
 });
 
+async function createReplyWaitHarness(mode = 'fullscreen') {
+    const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
+    const globalObject = document.defaultView;
+    const chat = document.createElement('div');
+    chat.id = 'chat';
+    document.body.appendChild(chat);
+    const messages = new Map();
+    let currentMessage;
+    let read = () => currentMessage;
+    let send = () => ({ ok: true });
+    const put = (id, text, fields = {}) => {
+        const element = createFakeMessageElement(document, { messageId: id, textContent: text });
+        chat.appendChild(element);
+        currentMessage = { id, text, visibleText: text, element, ...fields };
+        messages.set(id, currentMessage);
+        return currentMessage;
+    };
+    put(100, '当前楼正文。');
+    const listeners = new Map();
+    const eventSource = {
+        on(name, handler) { if (!listeners.has(name)) listeners.set(name, []); listeners.get(name).push(handler); },
+        off(name, handler) { listeners.set(name, (listeners.get(name) || []).filter((item) => item !== handler)); },
+        emit(name, ...args) { for (const handler of listeners.get(name) || []) handler(...args); },
+    };
+    const mutations = [];
+    globalObject.MutationObserver = class {
+        constructor(handler) { mutations.push(handler); }
+        observe() {}
+        disconnect() {}
+    };
+    let seq = 0;
+    const timers = new Map();
+    globalObject.setTimeout = (handler, delay) => { timers.set(++seq, { handler, delay }); return seq; };
+    globalObject.clearTimeout = (id) => timers.delete(id);
+    globalObject.SillyTavern = { getContext: () => ({ eventSource, event_types: {
+        GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended',
+        GENERATION_STOPPED: 'generation_stopped', GENERATION_FAILED: 'generation_failed',
+    } }) };
+    const vn = bootstrapIGS({ global: globalObject, autoAttachMagicWand: false, hostAdapter: {
+        getCurrentMessage: async () => read(),
+        getMessageById: async (id) => messages.get(Number(id)),
+        typeAndSend: async () => {
+            eventSource.emit('generation_started', 'normal', {}, false);
+            return send();
+        },
+    } });
+    const opened = await vn.openLatestAvailable(mode);
+    assert.equal(opened.ok, true);
+    const controller = opened.reader.controller;
+    const flush = async () => { await new Promise((resolve) => setImmediate(resolve)); await new Promise((resolve) => setImmediate(resolve)); };
+    const fire = async (delay) => {
+        const entry = [...timers].find(([, timer]) => timer.delay === delay);
+        assert.ok(entry, `missing ${delay}ms timer`);
+        timers.delete(entry[0]); entry[1].handler();
+        await flush();
+    };
+    return {
+        vn, document, controller, put, fire, flush, eventSource,
+        wait: () => document.querySelector('.igs-waitstage'),
+        mutate: () => mutations.forEach((handler) => handler([{ target: chat, addedNodes: [currentMessage.element], removedNodes: [] }])),
+        readWith: (fn) => { read = fn; },
+        sendWith: (fn) => { send = fn; },
+    };
+}
+
+test('gate:simulation:reply-wait-retains-partial-floor-through-silence-and-timeout', async () => {
+    const h = await createReplyWaitHarness();
+    try {
+        await h.controller.submit('继续');
+        const waiting = h.wait();
+        h.put(101, '只写出半句');
+        h.mutate();
+        await h.fire(10000);
+        assert.equal(h.wait(), waiting);
+        assert.match(h.controller.getSnapshot().content.displayText, /当前楼/);
+        await h.fire(120000);
+        assert.equal(h.wait(), waiting);
+        assert.match(waiting.querySelector('.igs-ws-state').textContent, /尚未确认回复写完/);
+        h.put(101, '完整的下一楼正文。');
+        h.eventSource.emit('generation_ended');
+        await h.fire(800);
+        assert.equal(h.wait(), null);
+        assert.match(h.controller.getSnapshot().content.displayText, /完整的下一楼正文/);
+    } finally { h.vn.destroy(); }
+});
+
+test('gate:simulation:reply-wait-classifies-empty-and-non-narrative-output-in-every-mode', async () => {
+    for (const mode of ['fullscreen', 'web', 'pc', 'mobile', 'embedded']) {
+        const h = await createReplyWaitHarness(mode);
+        try {
+            await h.controller.submit('继续');
+            h.put(101, mode === 'fullscreen' ? '' : '<thinking>只有思考</thinking><content> </content>');
+            h.mutate();
+            h.eventSource.emit('generation_ended');
+            await h.fire(800);
+            assert.equal(h.wait().getAttribute('data-igs-waitstage-error'), 'empty', mode);
+            assert.match(h.controller.getSnapshot().content.displayText, /当前楼/);
+            h.wait().querySelector('.igs-ws-actions').querySelector('button').click();
+            assert.equal(h.wait(), null);
+            assert.match(h.controller.getSnapshot().content.displayText, /当前楼/);
+        } finally { h.vn.destroy(); }
+    }
+});
+
+test('gate:simulation:reply-wait-shows-empty-when-the-request-ended-without-a-new-floor', async () => {
+    const h = await createReplyWaitHarness();
+    try {
+        await h.controller.submit('继续');
+        h.eventSource.emit('generation_ended');
+        await h.fire(800);
+        assert.equal(h.wait().getAttribute('data-igs-waitstage-error'), 'empty');
+    } finally { h.vn.destroy(); }
+});
+
+test('gate:simulation:reply-wait-reports-host-failure-or-stop-during-a-game', async () => {
+    for (const reason of ['failed', 'stopped']) {
+        const h = await createReplyWaitHarness();
+        try {
+            await h.controller.submit('继续');
+            await h.flush();
+            h.wait().querySelector('.igs-ws-games').querySelector('button').click();
+            h.put(101, '还没写完的正文');
+            h.mutate();
+            h.eventSource.emit(`generation_${reason}`);
+            h.eventSource.emit('generation_ended');
+            await h.fire(800);
+            assert.equal(h.wait().getAttribute('data-igs-waitstage-error'), reason);
+            assert.match(h.controller.getSnapshot().content.displayText, /当前楼/);
+        } finally { h.vn.destroy(); }
+    }
+});
+
+test('gate:simulation:reply-wait-keeps-the-layer-until-replacement-succeeds', async () => {
+    const h = await createReplyWaitHarness();
+    try {
+        await h.controller.submit('继续');
+        const waiting = h.wait();
+        const open = h.vn.openViewerFromMessage;
+        let resume;
+        h.vn.openViewerFromMessage = async (...args) => {
+            await new Promise((resolve) => { resume = resolve; });
+            return open(...args);
+        };
+        h.put(101, '完整的新楼。');
+        h.mutate();
+        h.eventSource.emit('generation_ended');
+        await h.fire(800);
+        assert.equal(h.wait(), waiting);
+        assert.match(h.controller.getSnapshot().content.displayText, /当前楼/);
+        resume();
+        await h.flush();
+        assert.equal(h.wait(), null);
+        assert.match(h.controller.getSnapshot().content.displayText, /完整的新楼/);
+    } finally { h.vn.destroy(); }
+});
+
+test('gate:simulation:reply-wait-read-and-render-errors-remain-visible', async () => {
+    for (const kind of ['read', 'render']) {
+        const h = await createReplyWaitHarness();
+        try {
+            await h.controller.submit('继续');
+            h.put(101, '完整的新楼。');
+            if (kind === 'read') h.readWith(() => { throw new Error('read failed'); });
+            else h.vn.openViewerFromMessage = async () => ({ ok: false, reason: 'render-failed' });
+            h.eventSource.emit('generation_ended');
+            await h.fire(800);
+            assert.equal(h.wait().getAttribute('data-igs-waitstage-error'), 'read');
+            assert.match(h.controller.getSnapshot().content.displayText, /当前楼/);
+        } finally { h.vn.destroy(); }
+    }
+});
+
+test('gate:simulation:reply-wait-send-exception-preserves-input-and-allows-retry', async () => {
+    const h = await createReplyWaitHarness();
+    try {
+        h.sendWith(() => { throw new Error('network failed'); });
+        assert.equal((await h.controller.submit('保留这句话')).ok, false);
+        assert.equal(h.wait().getAttribute('data-igs-waitstage-error'), 'send');
+        h.wait().querySelector('.igs-ws-actions').querySelector('button').click();
+        assert.equal(h.document.getElementById('igs-input').value, '保留这句话');
+        h.sendWith(() => ({ ok: true }));
+        assert.equal((await h.controller.submit('保留这句话')).ok, true);
+        assert.equal(h.wait().getAttribute('data-igs-waitstage-phase'), 'wait');
+    } finally { h.vn.destroy(); }
+});
+
+test('gate:simulation:reply-wait-late-write-discards-the-old-read-result', async () => {
+    const h = await createReplyWaitHarness();
+    try {
+        await h.controller.submit('继续');
+        const partial = h.put(101, '较早读到的半句');
+        let resolveRead;
+        h.readWith(() => new Promise((resolve) => { resolveRead = resolve; }));
+        h.eventSource.emit('generation_ended');
+        await h.fire(800);
+        const final = h.put(101, '最后完整写入的下一楼正文。');
+        h.mutate();
+        resolveRead(partial);
+        await h.flush();
+        assert.ok(h.wait());
+        assert.match(h.controller.getSnapshot().content.displayText, /当前楼/);
+        h.readWith(() => final);
+        await h.fire(800);
+        assert.equal(h.wait(), null);
+        assert.match(h.controller.getSnapshot().content.displayText, /最后完整写入/);
+    } finally { h.vn.destroy(); }
+});
+
+test('gate:simulation:reply-wait-close-during-async-replacement-does-not-reopen', async () => {
+    const h = await createReplyWaitHarness();
+    try {
+        await h.controller.submit('继续');
+        const open = h.vn.openViewerFromMessage;
+        let resume;
+        h.vn.openViewerFromMessage = async (...args) => {
+            await new Promise((resolve) => { resume = resolve; });
+            return open(...args);
+        };
+        h.put(101, '完整的新楼。');
+        h.eventSource.emit('generation_ended');
+        await h.fire(800);
+        h.controller.close();
+        resume();
+        await h.flush();
+        assert.equal(h.document.getElementById('igs-overlay'), null);
+    } finally { h.vn.destroy(); }
+});
+
 test('gate:simulation:igs-ui-fullscreen-send-keeps-the-current-page-until-the-new-floor', async () => {
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
     const globalObject = document.defaultView;
@@ -5201,6 +5940,7 @@ test('gate:simulation:igs-ui-fullscreen-send-keeps-the-current-page-until-the-ne
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(overlay.classList.contains('igs-awaiting-reply'), false);
+    assert.equal(overlay.querySelector('.igs-waitstage').getAttribute('data-igs-waitstage-error'), 'empty');
     assert.equal(opened.reader.controller.getSnapshot().content.currentIndex, 1);
     assert.match(opened.reader.controller.getSnapshot().content.displayText, /第二页/);
     vn.destroy();
@@ -7830,6 +8570,9 @@ function createFakeElement(tagName, ownerDocument) {
             child.parentElement = element;
             element.children.push(child);
             return child;
+        },
+        append(...children) {
+            for (const child of children) element.appendChild(child);
         },
         insertBefore(child, referenceNode) {
             if (!referenceNode) return element.appendChild(child);

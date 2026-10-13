@@ -287,7 +287,7 @@ export function applyCgPortrait(root, snapshot, ctx = {}) {
         if (!crop) return;
         showImage(box, url, crop);
     };
-    const known = peekSpriteHead(url);
+    const known = peekSpriteHead(url, dialog.ownerDocument);
     if (known) place(known);
     else probeSpriteHead(url, dialog.ownerDocument).then(place, () => place(null));
 }

@@ -20,6 +20,17 @@ const TYPE_LABEL = { sprite: '立绘', background: '背景' };
 export function renderAssetReviewPanel(container, items = [], handlers = {}) {
     if (!container || !container.ownerDocument) return;
     const doc = container.ownerDocument;
+    // 图片读回与设置保存会重绘审核框；只保留仍在待确认列表里的改名草稿。
+    const drafts = new Map();
+    const activeInput = doc.activeElement;
+    const activeKey = activeInput?.getAttribute?.('data-asset-review-key');
+    let focusTarget = null;
+    if (typeof container.querySelectorAll === 'function') {
+        for (const input of container.querySelectorAll('input')) {
+            const key = input.getAttribute('data-asset-review-key');
+            if (key) drafts.set(key, input.value);
+        }
+    }
     while (container.firstChild) container.removeChild(container.firstChild);
     const outfitAsks = Array.isArray(handlers.outfitAsks) ? handlers.outfitAsks : [];
     if (!items.length && !outfitAsks.length) {
@@ -28,7 +39,7 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
     }
     const title = doc.createElement('div');
     title.className = 'igs-asset-review-title';
-    title.textContent = items.length ? `本层生成了 ${items.length} 个新素材，是否入库？` : '正文出现了衣柜里没有的衣服';
+    title.textContent = items.length ? `本层待确认素材 ${items.length}${handlers.hasMore ? '+' : ''} 项，是否入库？` : '正文出现了衣柜里没有的衣服';
     container.appendChild(title);
     // 新衣服：下拉菜单选去向，确认后交给宿主；「稍后」留在素材页「待确认」里。
     for (const ask of outfitAsks) {
@@ -77,9 +88,11 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
         label.textContent = thumb.alt;
         const input = doc.createElement('input');
         input.type = 'text';
-        input.value = String(item.name || '');
+        input.setAttribute('data-asset-review-key', String(item.key || ''));
+        input.value = drafts.has(item.key) ? drafts.get(item.key) : String(item.name || '');
         input.setAttribute('aria-label', '素材名称');
         input.addEventListener('keydown', (event) => event.stopPropagation());
+        if (activeKey && activeKey === item.key) focusTarget = input;
         const actions = doc.createElement('div');
         actions.className = 'igs-asset-review-actions';
         // 立绘额外提供「入库并编辑 DNA」：先收入角色立绘，再把 tags 作为 DNA 候选交给设置页，由用户确认后才写入。
@@ -102,5 +115,16 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
         row.append(thumb, body);
         container.appendChild(row);
     }
+    if (handlers.hasMore) {
+        const more = doc.createElement('button');
+        more.type = 'button'; more.textContent = '到待确认页查看其余素材';
+        more.addEventListener('click', event => { event.stopPropagation(); handlers.onMore?.(); });
+        container.appendChild(more);
+    }
     container.removeAttribute('hidden');
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+        const start = activeInput.selectionStart, end = activeInput.selectionEnd;
+        focusTarget.focus();
+        if (Number.isInteger(start) && Number.isInteger(end)) focusTarget.setSelectionRange?.(start, end);
+    }
 }

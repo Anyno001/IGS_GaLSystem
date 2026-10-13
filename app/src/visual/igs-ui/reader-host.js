@@ -1,3 +1,5 @@
+import { createMediaLeaseScope } from '../../media/media-lease-scope.js';
+import { bindImageCacheDocument } from '../../media/tavern-image-cache.js';
 import { narrationKeepsSprite, narrationCastLeft, otherNamesOf } from '../../scene/narration-sprite.js';
 import {
     buildIgsTextPayload,
@@ -6,7 +8,7 @@ import {
     normalizeSourceFilter,
     normalizeVirtualRegex,
 } from '../../scene/message-source.js';
-import { canonicalName, noteFormGender, setActiveFormGenders } from './voice-bark.js';
+import { applyVoiceBark, canonicalName, noteFormGender, setActiveFormGenders } from './voice-bark.js';
 import { createSettingsHost } from './settings-host.js';
 import { normalizeBridgeConfig, normalizeReaderSettings } from './settings-host-normalize.js';
 import { extractSceneDirectives, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers } from '../../scene/scene-directives.js';
@@ -92,6 +94,7 @@ import {
 } from './reader-host-constants.js';
 import { eventToShortcut, findShortcutAction, resolveShortcuts } from './reader-shortcuts.js';
 import { isEmbeddedReaderMode } from '../../schemas/reader-mode.js';
+import { buildWaitStageModel, createWaitStageRuntime } from './wait-stage-runtime.js';
 import { onDlcSkinsChange } from './dlc-skin-registry.js';
 import { onDlcFxChange } from '../../scene/fx-registry.js';
 import {
@@ -152,7 +155,7 @@ import {
 import { buildReaderSourceSignature, createReaderSourceCache } from './reader-source-cache.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
 import { collectFloorAssetUrls } from './floor-asset-prefetch.js';
-import { createChatStreamObserver } from '../../host/chat-stream-observer.js';
+import { createChatStreamObserver, isUserFloorNode } from '../../host/chat-stream-observer.js';
 import { findAcuDice, formatCheckMessage, resolveDiceCommand } from '../../choices/dice-check.js';
 import { buildResultFxPlan, normalizeResultFxSettings, resultDetailOf } from './fx-result-model.js';
 import { cancelResultFx, playResultFx } from './fx-result.js';
@@ -286,7 +289,14 @@ function normalizeReaderSettingsCached(settings, legacyTheme) {
     return { ...value };
 }
 
+// 只在确有图本体读空时才交给素材匹配：平时不传，匹配不必逐槽检查、也不复制素材表。
+function missingImageProbe(generatedAssets) {
+    return generatedAssets && typeof generatedAssets.hasMissingImages === 'function' && generatedAssets.hasMissingImages()
+        ? generatedAssets.isMissingImage : undefined;
+}
+
 export function createIgsReaderHost(options = {}) {
+    bindImageCacheDocument(getRootDocument(options.global), options.media?.cache);
     let statusHudClient = null;
     let statusHudCallback = null;
     let statusHudTimer = 0;
@@ -371,6 +381,15 @@ export function createIgsReaderHost(options = {}) {
         parse: (input) => buildIgsTextPayload(input.liveMessage, input.parseOptions),
     });
     const imageResourceCache = createImageResourceCache(options.global || globalThis, { limit: 96 });
+    let mediaHostDisposed = false;
+    const offMediaClear = options.media?.cache?.onClear(() => {
+        state.activeReader?.assetLoadRequests?.clear();
+        queueMicrotask(() => {
+            if (mediaHostDisposed) return;
+            if (state.activeReader) rerenderActiveReader();
+            if (state.activeSettings && isAssetSettingsPage(state.activeSettings)) scheduleImageRefresh({ settings: true });
+        });
+    }) || (() => {});
     let moodAutoTimer = 0;
     let moodAutoRunning = false;
     let moodAutoAgain = false;
@@ -383,12 +402,24 @@ export function createIgsReaderHost(options = {}) {
         global: options.global || globalThis,
         getDocument: () => resolveEmbeddedDocument(state.activeReader),
         onActivity: () => handleChatStreamActivity(),
-        onStable: () => handleChatStreamStable(),
-        // 硬超时无条件收起等待。全屏在新楼写完之前会让 onStable 返回 false，继续等。
+        onStable: (settled) => handleChatStreamStable(settled),
+        isUserFloor: (messageId) => isUserFloorId(messageId),
         onTimeout: () => {
+            waitStage.showSlow();
+        },
+    });
+    // 等待过场：五种阅读器模式共用黑屏 + 一句台词（回放角色说过的话 + 通用兜底）。
+    // 回复写完后，未在游戏中就地换页；在游戏中等这一局结算再换页。
+    const waitStage = createWaitStageRuntime({
+        getDoc: () => resolveEmbeddedDocument(state.activeReader),
+        onVoice: (line) => playWaitStageVoice(line),
+        onExitReady: () => finishPendingWaitExit(),
+        onDismiss: () => {
+            streamObserver.cancelPending();
             exitEmbeddedLoading();
         },
     });
+    let pendingReplyMessage = null;
     // 物品图到达后重绘阅读器：演出占位与背包格位据此替换为生图。
     const offItemImageUpdatedRaw = typeof options.onItemImageUpdated === 'function'
         // 物品图可能一批连着到，和生图一样按窗口合并成一次重绘。
@@ -403,7 +434,7 @@ export function createIgsReaderHost(options = {}) {
     // 否则 N 张图触发 N 次整页重绘、每次又带上已到的全部 dataUrl，开销随张数平方增长。
     const IMAGE_REFRESH_BATCH_MS = 120;
     let imageRefreshTimer = 0;
-    let floorAssetPlan = { key: '', urls: [] };
+    let floorAssetPlan = { key: '', reader: null, urls: [] };
     let readerImageRefreshPending = false;
     let settingsImageRefreshPending = false;
     // 设置面板全屏盖住阅读器时不重绘后面的舞台，记一笔，关面板时补一次。
@@ -424,7 +455,8 @@ export function createIgsReaderHost(options = {}) {
             readerImageRefreshPending = false;
             settingsImageRefreshPending = false;
             if (doReader && state.activeReader) {
-                if (state.activeSettings) readerStaleBehindSettings = true;
+                if (waitStage.isOpen()) void refreshWaitStageModel(state.activeReader);
+                else if (state.activeSettings) readerStaleBehindSettings = true;
                 else rerenderActiveReader();
             }
             if (doSettings && state.activeSettings && isAssetSettingsPage(state.activeSettings)) {
@@ -437,12 +469,16 @@ export function createIgsReaderHost(options = {}) {
     const offGeneratedAssetUpdated = typeof options.onGeneratedAssetUpdated === 'function'
         ? options.onGeneratedAssetUpdated((detail) => {
             const settings = state.activeSettings;
-            const imageLoaded = Boolean(detail && detail.reason === 'image-loaded');
+            const imageLost = Boolean(detail && detail.reason === 'image-lost');
+            // 图本体读空跟读回一样走合并重绘；预热计划作废，重绘时按兜底图重算一次。
+            const imageLoaded = imageLost || Boolean(detail && detail.reason === 'image-loaded');
             if (state.activeReader) {
-                if (imageLoaded) warmActiveFloorImages();
+                if (imageLost) floorAssetPlan.key = '';
+                else if (imageLoaded) warmActiveFloorImages(null, detail.imageId);
                 if (settings) readerStaleBehindSettings = true;
-                else if (imageLoaded) scheduleImageRefresh({ reader: true });
-                else rerenderActiveReader();
+                if (imageLoaded) {
+                    if (waitStage.isOpen() || !settings) scheduleImageRefresh({ reader: true });
+                } else if (!settings) rerenderActiveReader();
             }
             if (!settings) return;
             if (imageLoaded) {
@@ -518,6 +554,7 @@ export function createIgsReaderHost(options = {}) {
         flushDeferredImageRefresh, normalizeUnifiedSettings, onboarding, openCgGallery, options, pageModal,
         playReaderUiSfx, rerenderActiveReader, resolveBridgeConfigSnapshot, scheduleMoodAutoClassify, sourceCache,
         state,
+        invalidateFloorAssetPlan() { floorAssetPlan.key = ''; },
         takeReaderStaleBehindSettings() {
             const stale = readerStaleBehindSettings;
             readerStaleBehindSettings = false;
@@ -851,11 +888,16 @@ export function createIgsReaderHost(options = {}) {
         });
     }
 
+    function readerPageAssetUrls(content) {
+        if (!content) return [];
+        return [content.backgroundImage, content.spriteImage, content.pendingSpriteRef, content.nsfwCgPortrait,
+            content.fx && content.fx.foeImage,
+            ...(Array.isArray(content.castSprites) ? content.castSprites.map(member => member && member.image) : []),
+            ...(Array.isArray(content.pendingCastRefs) ? content.pendingCastRefs : [])].filter(Boolean);
+    }
+
     function pageUsesAsset(content, source) {
-        if (!content || !source) return false;
-        if (content.backgroundImage === source || content.spriteImage === source || content.nsfwCgPortrait === source) return true;
-        if (content.fx && content.fx.foeImage === source) return true;
-        return Array.isArray(content.castSprites) && content.castSprites.some((member) => member && member.image === source);
+        return Boolean(source) && readerPageAssetUrls(content).includes(source);
     }
 
     function concreteReaderAssetUrl(url) {
@@ -874,7 +916,7 @@ export function createIgsReaderHost(options = {}) {
         return model;
     }
 
-    function warmActiveFloorImages(mountedSnapshot) {
+    function warmActiveFloorImages(mountedSnapshot, loadedImageId = '') {
         const current = state.activeReader;
         const payload = current && current.payload;
         const snapshot = mountedSnapshot || (current && current.snapshot);
@@ -884,11 +926,13 @@ export function createIgsReaderHost(options = {}) {
         const source = String(payload.raw || (typeof liveMessage === 'string' ? liveMessage : '') || '');
         const slots = snapshot.content && Array.isArray(snapshot.content.imageSlots) ? snapshot.content.imageSlots : [];
         const key = `${firstDefined(payload.messageId, payload.message && payload.message.id, '')}:${source.length}:${slots.map((slot) => (slot && slot.url) || '').join('|')}`;
-        if (floorAssetPlan.key !== key) {
+        const planChanged = floorAssetPlan.key !== key || floorAssetPlan.reader !== current;
+        if (planChanged) {
             const sceneAssets = readerSettings._sceneAssets || null;
             const generatedAssets = options.generatedAssets || null;
             floorAssetPlan = {
                 key,
+                reader: current,
                 urls: collectFloorAssetUrls({
                     source,
                     sceneAssets,
@@ -904,9 +948,18 @@ export function createIgsReaderHost(options = {}) {
                         tempBackground: generatedAssets ? generatedAssets.tempBackground : null,
                         tempSceneTime: generatedAssets ? generatedAssets.tempSceneTime : null,
                         tempSprite: generatedAssets ? generatedAssets.tempSprite : null,
+                        isMissingImage: missingImageProbe(generatedAssets),
                     },
                 }),
             };
+        }
+        // 每楼只完整预热一次；缓存放不下的后续页图片由出场页按需读，不能在每次重绘中反复补满。
+        const spriteRef = loadedImageId ? `igs-gen:${loadedImageId}` : '';
+        if (!planChanged) {
+            if (!spriteRef || !floorAssetPlan.urls.includes(spriteRef)) return;
+            const ready = concreteReaderAssetUrl(spriteRef);
+            if (ready) imageResourceCache.load(ready);
+            return;
         }
         for (const url of floorAssetPlan.urls) {
             const concrete = concreteReaderAssetUrl(url);
@@ -917,9 +970,12 @@ export function createIgsReaderHost(options = {}) {
     function resolveReaderAssetUrl(url, current) {
         const source = String(url || '').trim();
         if (!source) return '';
-        if (isGeneratedAssetUrl(source)) return concreteReaderAssetUrl(source);
+        const leases = current.assetLeases ||= options.media?.cache ? createMediaLeaseScope(options.media.cache) : null;
+        if (isGeneratedAssetUrl(source)) { leases?.use(`asset:${source.slice(8)}`); return concreteReaderAssetUrl(source); }
+        const ownedKey = options.media?.cache?.sourceId?.(source);
+        if (ownedKey) leases?.use(ownedKey);
         const ready = imageResourceCache.get(source);
-        if (ready) return ready;
+        if (ready) { const key = options.media?.cache?.sourceId?.(ready); if (key) leases?.use(key); return ready; }
         // data / blob 已经是本地像素。先原样画上，解码只为了预热缓存；
         // 等解码完再补地址会先把背景清成空的，播 CG 时整屏闪一下。
         const inline = /^(?:data:|blob:)/i.test(source);
@@ -957,6 +1013,7 @@ export function createIgsReaderHost(options = {}) {
         stopTts();
         clearReaderToast(current);
         cancelTypewriter(current.dom && current.dom.text, { finish: false });
+        current.spriteTextWait?.release();
         const stageMotion = current.dom && current.dom.overlay && current.dom.overlay.querySelector
             ? current.dom.overlay.querySelector('#igs-stage-motion')
             : null;
@@ -979,9 +1036,14 @@ export function createIgsReaderHost(options = {}) {
         if (closeOptions.keepFullscreen !== true) {
             exitDocumentFullscreen(getRootDocument(options.global));
         }
+        current.assetLeases?.releaseAll();
+        if (floorAssetPlan.reader === current) floorAssetPlan = { key: '', reader: null, urls: [] };
         current.imagePollToken += 1;
         streamObserver.stop();
         stopEmbeddedStoryWatch();
+        // 关阅读器时把等待过场一并收掉，别留下还在轮台词的一层和等着换页的旧楼。
+        waitStage.close();
+        pendingReplyMessage = null;
         sourceCache.invalidate();
         if (current.dom && typeof current.dom.dispose === 'function') {
             current.dom.dispose();
@@ -1020,6 +1082,7 @@ export function createIgsReaderHost(options = {}) {
         moodAutoTimer = 0;
         const closed = closeSettings();
         if (closed.ok === false) return closed;
+        mediaHostDisposed = true; offMediaClear();
         offIllustrationUpdated();
         offDlcSkins();
         offDlcFx();
@@ -1033,17 +1096,18 @@ export function createIgsReaderHost(options = {}) {
         closeReader();
         disarmEditReopen();
         streamObserver.stop();
-        imageResourceCache.clear();
+        imageResourceCache.destroy();
         return { ok: true };
     }
 
+    // 五种模式都跟宿主回复：发送后进等待过场，新回复写完原地换源。内嵌另有一套挂载路径。
     function tracksHostReply(mode) {
-        return isEmbeddedReaderMode(mode) || followsHostReply(mode);
+        return Boolean(mode);
     }
 
-    // 全屏与网页全屏：发送后在输入栏显示「正在生成」，新回复写完原地换源。
-    function followsHostReply(mode) {
-        return mode === 'fullscreen' || mode === 'web';
+    // 旧调用点按模式判定的写法保留：现在五种模式一律跟回复，统一由等待过场承接。
+    function followsHostReply() {
+        return true;
     }
 
     function handleChatStreamActivity() {
@@ -1096,7 +1160,14 @@ export function createIgsReaderHost(options = {}) {
         if (readHostBooleanAttribute(element, ['is_user', 'data-is-user'])) return null;
         if (readHostBooleanAttribute(element, ['is_system', 'data-is-system'])) return null;
         const messageId = readLiveMessageId(element);
-        return messageId != null ? { id: messageId, element } : null;
+        if (messageId == null || isUserFloorId(messageId)) return null;
+        return { id: messageId, element };
+    }
+
+    // 以聊天数据为准：插件改写用户楼时 DOM 的 is_user 可能丢失。
+    function isUserFloorId(messageId) {
+        if (typeof options.isUserFloor !== 'function') return false;
+        try { return options.isUserFloor(messageId) === true; } catch (error) { return false; }
     }
 
     function readHostBooleanAttribute(element, names) {
@@ -1142,79 +1213,199 @@ export function createIgsReaderHost(options = {}) {
 
     // 观察器只在“稳定”后调用一次：读取最新 AI 消息并原地换源。
     // 流式 token 期间不解析正文、不收集图片，避免酒馆卡顿与页面抖动。
-    async function handleChatStreamStable() {
+    async function handleChatStreamStable(settled) {
         const current = state.activeReader;
-        const embedded = Boolean(current && isEmbeddedReaderMode(current.mode));
         if (!current || !tracksHostReply(current.mode)) return true;
+        if (!streamObserver.hasGenerationSettled()) return false;
         if (Number(current.turnOffset) > 0 && !current.awaitingReply && current.streamPhase !== 'streaming') {
             noticeNewFloor();
             return true;
         }
         if (typeof options.getCurrentMessage !== 'function'
             || typeof options.openViewerFromMessage !== 'function') {
-            exitEmbeddedLoading();
+            showReplyFailure(current, 'read');
             return true;
         }
-        // 宿主挂起时该 await 可能无限 pending，超时兜底保证 loading 退出路径必然到达。
-        const message = await Promise.race([
-            options.getCurrentMessage(),
-            new Promise((resolve) => setTimeout(resolve, 5000)),
-        ]);
-        if (!message || message.id == null) {
-            if (followsHostReply(current.mode) && current.awaitingReply && !streamObserver.hasGenerationSettled()) return false;
-            exitEmbeddedLoading();
+        if (settled.reason === 'stopped' || settled.reason === 'failed') {
+            showReplyFailure(current, settled.reason);
             return true;
         }
-        // 全屏：用户还停在这一楼。正文比对稍有出入也不能重开，重开会把页码打回第一页并清掉等待提示。
-        // 生成没结束就继续等；结束了仍是这一楼，只收起提示，留在当前页。新楼写完再切过去。
-        if (followsHostReply(current.mode) && current.awaitingReply) {
-            const newFloor = Number(message.id) !== Number(current.contentMessageId);
-            if (!streamObserver.hasGenerationSettled() || !newFloor) {
-                if (!streamObserver.hasGenerationSettled()) return false;
-                exitEmbeddedLoading();
-                return true;
+        let message;
+        try {
+            message = await readReplyMessage();
+        } catch (error) {
+            if (state.activeReader === current && streamObserver.isCurrentRevision(settled.revision)) {
+                showReplyFailure(current, 'read');
             }
+            return false;
+        }
+        if (state.activeReader !== current || !streamObserver.isCurrentRevision(settled.revision)) return false;
+        if (!streamObserver.hasGenerationSettled()) return false;
+        if (!message || message.id == null || message.isUser || message.isSystem
+            || message.is_user || message.is_system || isUserFloorId(message.id)) {
+            showReplyFailure(current, 'empty');
+            return true;
         }
         const nextRaw = getMessagePrimaryText(message.raw || message);
         const nextVisible = String(message.visibleText || '');
-        const changed = message.id !== current.contentMessageId
-            || nextRaw !== current.streamBaselineRaw
-            || nextVisible !== current.streamBaselineVisible;
-        if (!changed) {
-            exitEmbeddedLoading();
+        const baselineId = current.replyBaselineMessageId ?? current.contentMessageId;
+        const changed = Number(message.id) !== Number(baselineId)
+            || nextRaw.trim() !== String(current.streamBaselineRaw || '').trim();
+        const parsed = buildIgsTextPayload(message, {
+            sourceFilter: current.payload.sourceFilter,
+            virtualRegex: current.payload.virtualRegex,
+            sceneAssets: current.snapshot.readerSettings._sceneAssets,
+            visibleText: nextVisible,
+        });
+        if (!changed || !(parsed.textSegments.length || parsed.htmlCards.length || parsed.chats.length)) {
+            showReplyFailure(current, 'empty');
             return true;
         }
+        // 回复已写完：当前游戏只结算这一局，之后由过场回调继续换楼。
+        if (!waitStage.replyArrived()) {
+            pendingReplyMessage = { reader: current, message, revision: settled.revision };
+            return true;
+        }
+        await applyReplyMessage(current, message, settled.revision);
+        return true;
+    }
+
+    // 换到新写的这一楼：内嵌要先把阅读器挂到新楼层里，其余模式就地换源。
+    async function applyReplyMessage(current, message, revision) {
+        const canReplace = () => state.activeReader === current && streamObserver.isCurrentRevision(revision);
+        if (!current || !canReplace()) return;
+        const embedded = isEmbeddedReaderMode(current.mode);
+        const previous = { turnOffset: current.turnOffset, mountMessageId: current.mountMessageId };
         current.turnOffset = 0;
         current.mountMessageId = message.id;
         if (embedded) syncEmbeddedReaderMount(current, message);
         try {
-            await options.openViewerFromMessage(message.id, current.mode, {
+            const result = await options.openViewerFromMessage(message.id, current.mode, {
                 replaceActive: true,
                 turnOffset: 0,
                 mountMessageId: message.id,
                 message,
+                canReplace,
             });
-        } catch (error) {
-            // 宿主异常不得打断阅读器；保持当前内容即可。
-        } finally {
+            if (!canReplace()) return;
+            if (result && result.ok === false) {
+                current.turnOffset = previous.turnOffset;
+                current.mountMessageId = previous.mountMessageId;
+                showReplyFailure(current, result.reason === 'no-readable-text' ? 'empty' : 'read');
+                return;
+            }
             exitEmbeddedLoading();
+        } catch (error) {
+            if (canReplace()) {
+                current.turnOffset = previous.turnOffset;
+                current.mountMessageId = previous.mountMessageId;
+                showReplyFailure(current, 'read');
+            }
         }
-        return true;
+    }
+
+    function finishPendingWaitExit() {
+        const pending = pendingReplyMessage;
+        pendingReplyMessage = null;
+        if (!pending || state.activeReader !== pending.reader) return;
+        void applyReplyMessage(pending.reader, pending.message, pending.revision);
+    }
+
+    async function readReplyMessage() {
+        const timers = options.global || globalThis;
+        let timeout;
+        try {
+            return await Promise.race([
+                Promise.resolve().then(() => options.getCurrentMessage()),
+                new Promise((_, reject) => {
+                    timeout = timers.setTimeout(() => reject(new Error('reply-read-timeout')), 5000);
+                }),
+            ]);
+        } finally {
+            timers.clearTimeout(timeout);
+        }
+    }
+
+    function showReplyFailure(current, kind) {
+        if (state.activeReader !== current) return;
+        pendingReplyMessage = null;
+        streamObserver.cancelPending();
+        current.streamPhase = 'error';
+        current.awaitingReply = false;
+        const overlay = current.dom && current.dom.overlay;
+        if (overlay && overlay.classList) overlay.classList.remove('igs-awaiting-reply');
+        mountWaitStage(current, { embedded: isEmbeddedReaderMode(current.mode) });
+        waitStage.showFailure(kind);
+    }
+
+    // 等待过场的台词池是从最近几楼的正文里现抽的，等树跑完再补一次即可。
+    async function refreshWaitStageModel(current) {
+        if (!current) return null;
+        const turns = await listTurnsSafe();
+        if (state.activeReader !== current || !waitStage.isOpen()) return null;
+        const all = turns.length ? turns.slice(-7) : (Array.isArray(current.payload && current.payload.turns) ? current.payload.turns.slice(-7) : []);
+        // 等待层的牌面不是当前正文页：外链直接可显示，生成图则由图库读回事件更新候选。
+        const resolveUrl = (url) => concreteReaderAssetUrl(url);
+        const model = buildWaitStageModel({
+            settings: current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.waitStage,
+            turns: all,
+            sceneAssets: current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings._sceneAssets,
+            resolveUrl,
+        });
+        waitStage.update(model);
+        return model;
+    }
+
+    // 语气音：回放角色自己的台词时配一声短音；通用兜底句不放。
+    function playWaitStageVoice(line) {
+        const current = state.activeReader;
+        if (!current || !line || !line.who) return;
+        const settings = current.snapshot && current.snapshot.readerSettings;
+        if (!settings) return;
+        const root = current.dom && (current.dom.overlay || (current.dom.embeddedMount && current.dom.embeddedMount.host));
+        if (!root) return;
+        try {
+            applyVoiceBark(root, {
+                key: `waitstage:${line.who}:${line.text}`,
+                textType: 'dialogue',
+                speaker: line.who,
+                mood: line.mood || '',
+                cast: [line.who],
+            }, settings.voiceBark, settings._sceneAssets);
+        } catch (error) {
+            // 语气音失败不影响过场。
+        }
+    }
+
+    // 关掉「等待过场」只收起台词与小游戏，三点等待反馈五种模式都留着（内嵌关了就是开天窗）。
+    function mountWaitStage(current, { embedded = false } = {}) {
+        const host = embedded
+            ? (current.dom && current.dom.embeddedMount && current.dom.embeddedMount.host)
+            : (current.dom && current.dom.overlay);
+        if (!host) return;
+        // 层已经在等就别重建：重建会把台词轮换打回第一句，也会抹掉玩家点开的小游戏。
+        if (waitStage.isOpen(host)) return;
+        const settings = (current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.waitStage) || null;
+        waitStage.open(host, { embedded, settings, model: null });
+        void refreshWaitStageModel(current);
     }
 
     function enterReplyWait(current) {
-        if (!current || !followsHostReply(current.mode)) return;
+        if (!current) return;
         if (current.streamPhase !== 'streaming') {
+            waitStage.close();
+            pendingReplyMessage = null;
             current.imagePollToken += 1;
             current.imagePolling = false;
             current.streamBaselineRaw = String(current.mountBaselineRaw || '');
-            current.streamBaselineVisible = String(current.mountBaselineVisible || '');
+            current.replyBaselineMessageId = current.contentMessageId;
             streamObserver.prepareForReply();
         }
         current.streamPhase = 'streaming';
         current.awaitingReply = true;
         const overlay = current.dom && current.dom.overlay;
         if (overlay && overlay.classList) overlay.classList.add('igs-awaiting-reply');
+        mountWaitStage(current);
     }
 
     function enterEmbeddedLoading() {
@@ -1222,32 +1413,27 @@ export function createIgsReaderHost(options = {}) {
         const mount = current && current.dom && current.dom.embeddedMount;
         if (!current || !isEmbeddedReaderMode(current.mode) || !mount || !mount.host) return;
         if (current.streamPhase !== 'streaming') {
+            waitStage.close();
+            pendingReplyMessage = null;
             current.imagePollToken += 1;
             current.imagePolling = false;
             current.streamBaselineRaw = String(current.mountBaselineRaw || '');
-            current.streamBaselineVisible = String(current.mountBaselineVisible || '');
+            current.replyBaselineMessageId = current.contentMessageId;
+            streamObserver.prepareForReply();
         }
         current.streamPhase = 'streaming';
         current.turnOffset = 0;
-        const host = mount.host;
-        host.setAttribute('data-igs-embedded-loading', '1');
+        mount.host.setAttribute('data-igs-embedded-loading', '1');
         if (current.dom.root && current.dom.root.style) current.dom.root.style.display = 'none';
-        let loading = host.querySelector && host.querySelector('.igs-embedded-loading');
-        if (!loading && host.ownerDocument && typeof host.ownerDocument.createElement === 'function') {
-            loading = host.ownerDocument.createElement('div');
-            loading.className = 'igs-embedded-loading';
-            loading.setAttribute('role', 'status');
-            loading.setAttribute('aria-live', 'polite');
-            loading.innerHTML = '<span class="igs-embedded-loading-dot"></span><span class="igs-embedded-loading-dot"></span><span class="igs-embedded-loading-dot"></span><span class="igs-embedded-loading-text">正在生成…</span>';
-            host.appendChild(loading);
-        }
+        mountWaitStage(current, { embedded: true });
     }
 
     function exitEmbeddedLoading() {
         const current = state.activeReader;
         if (!current) return;
+        pendingReplyMessage = null;
         current.streamBaselineRaw = '';
-        current.streamBaselineVisible = '';
+        current.replyBaselineMessageId = null;
         current.streamPhase = 'idle';
         current.awaitingReply = false;
         const waitingOverlay = current.dom && current.dom.overlay;
@@ -1260,15 +1446,17 @@ export function createIgsReaderHost(options = {}) {
         const mount = current.dom && current.dom.embeddedMount;
         const host = mount && mount.host;
         if (host && host.removeAttribute) host.removeAttribute('data-igs-embedded-loading');
-        const loading = host && host.querySelector ? host.querySelector('.igs-embedded-loading') : null;
-        if (loading && typeof loading.remove === 'function') loading.remove();
+        waitStage.close();
         if (current.dom && current.dom.root && current.dom.root.style) current.dom.root.style.display = '';
+        if (current.deferredReviewKey) syncAssetReviewAfterRender(current, current.snapshot);
     }
 
     function remountEmbeddedReader(current, message) {
         if (!current || !current.dom || !current.dom.root) return;
         const root = current.dom.root;
         const doc = resolveEmbeddedDocument(current);
+        // 换楼要换宿主节点，留在旧宿主里的层一并作废（同 syncReaderMountForMode）。
+        waitStage.close();
         teardownEmbeddedMount(current.dom.embeddedMount);
         current.dom.embeddedMount = mountEmbeddedRoot(doc, root, message, message && message.id);
         if (!current.dom.embeddedMount) {
@@ -1292,6 +1480,8 @@ export function createIgsReaderHost(options = {}) {
         if (current.dom.embeddedMount) {
             const wasStreaming = current.streamPhase === 'streaming';
             exitEmbeddedLoading();
+            // 宿主节点马上要被拆掉，先清理过场层与小游戏状态。
+            waitStage.close();
             (doc.documentElement || doc.body).appendChild(root);
             teardownEmbeddedMount(current.dom.embeddedMount);
             current.dom.embeddedMount = null;
@@ -1379,6 +1569,7 @@ export function createIgsReaderHost(options = {}) {
 
     async function submitReaderInput(text) {
         if (!state.activeReader) return { ok: false, reason: 'reader-not-open' };
+        if (state.activeReader.streamPhase === 'streaming') return { ok: false, reason: 'reply-pending' };
         // 停在旧楼时发送：剧情会接在最新楼后面，先确认，免得以为是在旧楼的语境里接着写。
         if (Number(state.activeReader.turnOffset) > 0) {
             const floorId = currentTurnMessageId(state.activeReader);
@@ -1386,30 +1577,52 @@ export function createIgsReaderHost(options = {}) {
             if (!confirmed) return { ok: false, sent: false, reason: 'old-floor-cancelled' };
             if (!state.activeReader) return { ok: false, reason: 'reader-not-open' };
         }
-        const embedded = isEmbeddedReaderMode(state.activeReader.mode);
-        const fullscreen = followsHostReply(state.activeReader.mode);
+        const current = state.activeReader;
+        const nextText = String(firstDefined(text, current.inputValue, '') || '');
+        if (!nextText.trim()) return { ok: false, sent: false, reason: 'empty-input' };
+        const embedded = isEmbeddedReaderMode(current.mode);
+        const fullscreen = followsHostReply(current.mode);
         if (embedded) enterEmbeddedLoading();
-        else if (fullscreen) enterReplyWait(state.activeReader);
-        const nextText = String(firstDefined(text, state.activeReader.inputValue, '') || '');
+        else if (fullscreen) enterReplyWait(current);
+        current.inputValue = nextText;
+        if (typeof options.getCurrentMessage === 'function') {
+            try {
+                const baseline = await readReplyMessage();
+                if (state.activeReader !== current) return { ok: false, sent: false, reason: 'reader-changed' };
+                if (baseline && baseline.id != null) {
+                    current.replyBaselineMessageId = baseline.id;
+                    current.streamBaselineRaw = getMessagePrimaryText(baseline.raw || baseline);
+                }
+            } catch (error) {
+                // 尚未发送时读取不到最新楼，保留打开阅读器时的基线。
+            }
+        }
+        if (state.activeReader !== current) return { ok: false, sent: false, reason: 'reader-changed' };
         const send = typeof options.typeAndSend === 'function'
             ? options.typeAndSend
             : async () => ({ ok: false, reason: 'missing-send-handler' });
-        const result = await send(nextText);
-        if ((embedded || fullscreen) && result.ok === false) exitEmbeddedLoading();
-        else if (embedded || fullscreen) streamObserver.noteActivity();
-        state.activeReader.inputValue = '';
+        let result;
+        try { result = await send(nextText) || { ok: true }; }
+        catch (error) { result = { ok: false, reason: 'send-failed' }; }
+        if (state.activeReader !== current) return { ok: result.ok !== false, sent: result.ok !== false, text: nextText, result };
+        if (result.ok === false) {
+            showReplyFailure(current, 'send');
+        } else {
+            if (current.streamPhase === 'streaming') streamObserver.noteActivity();
+            current.inputValue = '';
+        }
         // 漫画模式：发出去后输入框收起，新回复到了再出来。
-        const sentSnapshot = state.activeReader.snapshot;
-        if (result.ok !== false && sentSnapshot && isComicModeActive(sentSnapshot.readerSettings)) {
+        const sentSnapshot = current.snapshot;
+        if (result.ok !== false && current.streamPhase === 'streaming' && sentSnapshot && isComicModeActive(sentSnapshot.readerSettings)) {
             state.activeReader.comicInputSent = comicContentKey(sentSnapshot);
             const overlay = state.activeReader.dom && state.activeReader.dom.overlay;
             const controls = overlay && overlay.querySelector ? overlay.querySelector('.igs-controls') : null;
             if (controls && controls.setAttribute) controls.setAttribute('data-igs-comic-sent', '1');
         }
-        if (state.activeReader.dom && state.activeReader.dom.input) {
-            state.activeReader.dom.input.value = '';
+        if (current.dom && current.dom.input) {
+            current.dom.input.value = current.inputValue;
         }
-        if (!(fullscreen && result.ok !== false)) {
+        if (!(embedded || fullscreen)) {
             writeToast(result.ok === false ? (result.reason || '发送失败') : '已发送');
         }
         return {
@@ -2497,7 +2710,7 @@ export function createIgsReaderHost(options = {}) {
         if (!cg || !cg.skipMessage) return cg;
         const regen = await regenerateCurrentImage();
         if (regen && regen.reason === 'provider-not-enabled') {
-            imageNotice('warn', cg.skipMessage);
+            imageNotice(cg.reason === 'nothing-missing' ? 'skipped' : 'warn', cg.skipMessage);
             return cg;
         }
         return regen;
@@ -2618,7 +2831,7 @@ export function createIgsReaderHost(options = {}) {
         };
         const skip = (result, message) => {
             if (!deferSkip) {
-                feedback('warn', message);
+                feedback(result && result.reason === 'nothing-missing' ? 'skipped' : 'warn', message);
                 return result;
             }
             return { ...result, skipMessage: message };
@@ -2675,7 +2888,7 @@ export function createIgsReaderHost(options = {}) {
         // 没有可补全素材时交给重画当前图，这类跳过不必单独提示。
         const skip = (result, message) => {
             if (!deferSkip) {
-                feedback('warn', message);
+                feedback(result && result.reason === 'nothing-missing' ? 'skipped' : 'warn', message);
                 return result;
             }
             return { ...result, skipMessage: message };
@@ -2750,6 +2963,10 @@ export function createIgsReaderHost(options = {}) {
         }
         if (state.activeReader !== current) return result;
         if (result && result.ok !== false && result.imageState) {
+            // 重画已经落定：在跑的后台轮询可能还拿着旧一版（绑定数为 0）的收集结果，
+            // 让它作废，否则签名一变就整页重绘，把刚画好的图盖回去。
+            current.imagePollToken += 1;
+            current.imagePolling = false;
             current.payload.imageState = cloneData(result.imageState);
             rerenderActiveReader();
         }
@@ -2918,6 +3135,8 @@ export function createIgsReaderHost(options = {}) {
                 requiresMessageScope: Array.isArray(context.imageState && context.imageState.slots)
                     && context.imageState.slots.length > 0,
             });
+            // 收集期间可能已经重画过：这一份是旧结果，套用会把刚画好的图盖掉。
+            if (!state.activeReader || state.activeReader !== current || current.imagePollToken !== token) return;
             if (!result || result.ok === false) continue;
             const nextBoundCount = countBoundImageSlots(result);
             const nextSignature = String(result.signature || '');
@@ -3155,6 +3374,7 @@ export function createIgsReaderHost(options = {}) {
             visibleText: payload.visibleText,
             sceneAssets: readerSettings._sceneAssets,
             sentencePaging: readerSettings._sentencePaging,
+            dialogueSentencePaging: readerSettings._dialogueSentencePaging,
         };
         const sourceSignature = buildReaderSourceSignature({
             messageId: payload.messageId,
@@ -3164,6 +3384,7 @@ export function createIgsReaderHost(options = {}) {
             virtualRegex: payload.virtualRegex,
             sceneAssetsEnabled: Boolean(readerSettings._sceneAssets && readerSettings._sceneAssets.enabled),
             sentencePaging: Boolean(readerSettings._sentencePaging),
+            dialogueSentencePaging: Boolean(readerSettings._dialogueSentencePaging),
         });
         const cached = sourceCache.get(sourceSignature, { liveMessage, parseOptions });
         const extracted = cached.value || buildIgsTextPayload(liveMessage, parseOptions);
@@ -3271,6 +3492,7 @@ export function createIgsReaderHost(options = {}) {
             tempBackground: generatedAssets ? generatedAssets.tempBackground : null,
             tempSceneTime: generatedAssets ? generatedAssets.tempSceneTime : null,
             tempSprite: generatedAssets ? generatedAssets.tempSprite : null,
+            isMissingImage: missingImageProbe(generatedAssets),
         };
         const sceneDirectives = Array.isArray(extracted.sceneDirectives) ? extracted.sceneDirectives
             : Array.isArray(payload.sceneDirectives) ? payload.sceneDirectives : [];
@@ -3280,6 +3502,7 @@ export function createIgsReaderHost(options = {}) {
         let finalBackgroundTimed = false;
         const hideSpriteOnNsfw = !normalizeStatusHudSettings(readerSettings && readerSettings.statusHud).showSpriteOnNsfw;
         let spriteImage = null;
+        let pendingSpriteRef = '';
         let resolvedSpeaker = scene.speaker || '';
         let spriteCharacter = '';
         let spriteOutfit = '';
@@ -3287,6 +3510,7 @@ export function createIgsReaderHost(options = {}) {
         let spriteBackArt = false;
         let nsfwCgPortrait = '';
         let castSprites = [];
+        let pendingCastRefs = [];
         let spriteLeft = false;
         let speakerCastOrder = null;
         // 只给「复制本页诊断」用：记下立绘 / 背景这一页实际命中了哪一路。
@@ -3304,7 +3528,7 @@ export function createIgsReaderHost(options = {}) {
             : '';
         // 场景切换只看 [igs-scene] 标签：直接在原文里定位「当前页正文」，
         // 再取它前方最近的场景标签。不依赖段数、不做偏移累加。
-        const sceneSourceForOffset = String(payload.raw || text || '');
+        const sceneSourceForOffset = String(extracted.markerLayoutSource || payload.raw || text || '');
         // 说话页正文带「[名字]：」前缀，原文里找不到时先去掉前缀再找；仍找不到就借前面最近一页的位置。
         // 不按序号推断：说话指令常常没有序号，会一路读到本楼最后一个场景标签，说话页的背景就提前换掉。
         const locateSegment = (segment) => {
@@ -3445,7 +3669,7 @@ export function createIgsReaderHost(options = {}) {
             ? resolveEventCgForPage({ source: sceneSourceForOffset, segments, index: normalizedIndex, holdPages: readerSettings && readerSettings.cgHoldPages, eventCgs: sceneAssets.eventCgs })
             : null;
         const eventCgUrl = eventCg ? String(resolveGenerated(eventCg.url) || '') : '';
-        // 这一页挂了 CG。图还没从存储读回来时不要先铺场景背景，否则两张图先后写上同一层，对话框会跟着闪，最后往往只剩背景。
+        // 标记只定位 CG；没有可显示图片时保留正常舞台，读回后再切入 CG。
         const cgWaiting = Boolean(illustrationHit) && !illustrationUrl && !boundMarkerUrl;
         if (illustrationUrl) {
             finalBackgroundImage = illustrationUrl;
@@ -3455,10 +3679,6 @@ export function createIgsReaderHost(options = {}) {
             finalBackgroundImage = boundMarkerUrl;
             spriteImage = null;
             backgroundMatch = { source: 'bound-slot' };
-        } else if (cgWaiting) {
-            finalBackgroundImage = '';
-            spriteImage = null;
-            backgroundMatch = { source: 'cg' };
         } else if (eventCgUrl) {
             finalBackgroundImage = eventCgUrl;
             spriteImage = null;
@@ -3473,12 +3693,24 @@ export function createIgsReaderHost(options = {}) {
                 backgroundMatch = { source: bgHit.source, quality: bgHit.quality || '' };
                 finalBackgroundImage = resolveGenerated(bgHit.url);
                 finalBackgroundTimed = Boolean(finalBackgroundImage) && bgHit.timed === true;
+                // 本楼写了新场景但图还没生成：先暂用上一楼场景的背景顶替，免得整屏空白；
+                // 本楼场景图一生成就按上面的正常路径覆盖，不需要额外撤销。
+                if (!finalBackgroundImage && bgHit.needsGeneration && inheritedSceneState
+                    && inheritedSceneState.scene && inheritedSceneState.scene !== sceneStateForBg.scene) {
+                    const inheritedHit = resolveBackgroundAsset(inheritedSceneState, assetMatchCtx);
+                    const inheritedUrl = resolveGenerated(inheritedHit.url);
+                    if (inheritedUrl) {
+                        finalBackgroundImage = inheritedUrl;
+                        finalBackgroundTimed = false;
+                        backgroundMatch = { source: 'inherited', quality: inheritedHit.quality || '' };
+                    }
+                }
             } else {
                 finalBackgroundImage = '';
             }
             spriteImage = null;
         }
-        const cgActive = Boolean(illustrationUrl || boundMarkerUrl || cgWaiting || eventCgUrl);
+        const cgActive = Boolean(illustrationUrl || boundMarkerUrl || eventCgUrl);
         // Per-segment classification from the formatted segment text itself.
         // Order matters: thought (*...*) is checked before dialogue ([名字]：) because
         // a thought segment looks like *[名字]：...* and would otherwise match dialogue.
@@ -3526,6 +3758,29 @@ export function createIgsReaderHost(options = {}) {
                 }
                 return null;
             };
+            // 分页后的短心理话不足六字，不能靠全文子串匹配认领。仅从该
+            // 指令的可见起始页连续消费 *…* 页；一旦越过原文或遇到旁白就停止。
+            const findPagedThought = () => {
+                for (const d of charThoughtDirectives) {
+                    if (d.type !== 'thought') continue;
+                    const start = Number(d.segmentIndex);
+                    if (!Number.isInteger(start) || start < 0 || start > normalizedIndex) continue;
+                    const source = normalizeFingerprint(d.thought);
+                    if (!source) continue;
+                    let consumed = '';
+                    for (let i = start; i <= normalizedIndex; i++) {
+                        const page = String(segments[i] || '').match(/^\s*\*+\s*([\s\S]*?)\s*\*+\s*$/);
+                        const part = page ? normalizeFingerprint(page[1]) : '';
+                        if (!part || !source.startsWith(consumed + part)) {
+                            consumed = '';
+                            break;
+                        }
+                        consumed += part;
+                    }
+                    if (consumed) return d;
+                }
+                return null;
+            };
             const classifySegment = (segText) => {
                 // 没有任何 [igs-*:] 指令时禁止按文本外形猜测台词/心理话，统一按旁白兜底。
                 if (!hasIgsDirectives) return null;
@@ -3539,7 +3794,8 @@ export function createIgsReaderHost(options = {}) {
                     // 无角色名的 *…* 也可能是 AI 的斜体旁白：只有严格对上某条心里话指令才算心理活动。
                     const matched = sp
                         ? findDirectiveByText(sp, bodyText) || findDirectiveByText(sp, tMatch[2])
-                        : findDirectiveByText('', bodyText, { strict: true, type: 'thought' });
+                        : findDirectiveByText('', bodyText, { strict: true, type: 'thought' })
+                            || (seg === currentText ? findPagedThought() : null);
                     if (!sp && !matched) return null;
                     if (!sp) sp = matched.character || '';
                     return { textType: 'thought', speaker: sp, mood: matched ? (matched.mood || '') : '', body: seg };
@@ -3708,6 +3964,7 @@ export function createIgsReaderHost(options = {}) {
                 if (spriteChar) spriteMatch = { character: spriteChar, mood: spriteMood || '', outfit: wantedOutfit || '', source: spriteHit.source, quality: spriteHit.quality || '', slot: spriteHit.slot || '', ...outfitWhy };
                 if (spriteChar) noteUnlistedMood(spriteHit, spriteMood, sceneAssets);
                 spriteImage = spriteChar ? resolveGenerated(spriteHit.url) || null : null;
+                if (!spriteImage && spriteChar && isGeneratedAssetUrl(spriteHit.url)) pendingSpriteRef = spriteHit.url;
                 if (spriteImage) {
                     spriteCharacter = spriteHit.character || spriteChar;
                     spriteOutfit = spriteHit.outfit || '';
@@ -3771,6 +4028,7 @@ export function createIgsReaderHost(options = {}) {
                                 if (isReactMoodHit(reactHit)) hit = reactHit;
                             }
                             const image = resolveGenerated(hit.url);
+                            if (!image && isGeneratedAssetUrl(hit.url)) pendingCastRefs.push(hit.url);
                             return image ? { character: hit.character || m.character, mood: hit.slot || m.mood, outfit: hit.outfit || '', image } : null;
                         },
                     });
@@ -3792,6 +4050,7 @@ export function createIgsReaderHost(options = {}) {
             bubbleMood = '';
             if (hideChatSprite) spriteImage = null;
             castSprites = [];
+            pendingCastRefs = [];
             speakerCastOrder = null;
         }
         const statusSceneInfo = {
@@ -3862,9 +4121,11 @@ export function createIgsReaderHost(options = {}) {
                 backgroundImage: finalBackgroundImage,
                 backgroundTimed: finalBackgroundTimed,
                 spriteImage,
+                pendingSpriteRef,
                 spriteMatch,
                 backgroundMatch,
                 castSprites,
+                pendingCastRefs,
                 speakerCastOrder,
                 images: cloneData(displayImageState.images),
                 imageSlots: cloneData(displayImageState.slots),
@@ -3892,6 +4153,7 @@ export function createIgsReaderHost(options = {}) {
                 cgNsfw: Boolean(eventCgUrl && eventCg.nsfw),
                 illustrationActive: Boolean(illustrationUrl),
                 cgActive,
+                cgWaiting,
                 nsfwCgPortrait,
                 illustrationSlot: illustrationHit ? illustrationHit.slot : null,
                 illustrationUrl,
@@ -3987,6 +4249,7 @@ export function createIgsReaderHost(options = {}) {
             && payload.message.element.ownerDocument;
         const doc = messageDoc || rootDoc;
         if (!doc) return null;
+        bindImageCacheDocument(doc, options.media?.cache);
         ensureStyleTag(doc, 'igs-overlay-style', getOriginalReaderStyleText());
         const existing = doc.getElementById('igs-overlay');
         if (existing) existing.remove();
@@ -4121,6 +4384,7 @@ export function createIgsReaderHost(options = {}) {
             setTheme: (settingsTheme) => saveBridgePatch({ settingsTheme }),
         });
         const mapController = createMapPanelController(doc, options.global, fillRecordDraft, {
+            mediaCache: options.media?.cache,
             getChatId: () => {
                 const ctx = getSillyTavernContext(options.global || globalThis);
                 return ctx && (typeof ctx.getCurrentChatId === 'function' ? ctx.getCurrentChatId() : ctx.chatId) || '';
@@ -4246,6 +4510,8 @@ export function createIgsReaderHost(options = {}) {
                 const target = record && record.target;
                 // 挪出去的插件面板（状态栏、动画小部件）自己刷新不碰正文，不算外部改动，免得每次都重跑一遍藏正文。
                 if (target && target.closest && target.closest('[data-igs-internal-reader="1"], [data-igs-parallel-blocks="1"]')) return false;
+                // 插件改写用户楼不碰 AI 正文，不必重跑。
+                if (isUserFloorNode(target, isUserFloorId)) return false;
                 return true;
             });
             if (external) scheduleEmbeddedStoryHide();
@@ -4339,11 +4605,18 @@ export function createIgsReaderHost(options = {}) {
     function updateMountedReader(snapshot) {
         const current = state.activeReader;
         if (!current) return;
+        const leases = current.assetLeases ||= options.media?.cache ? createMediaLeaseScope(options.media.cache) : null;
+        leases?.begin();
+        for (const url of readerPageAssetUrls(snapshot.content)) {
+            const key = isGeneratedAssetUrl(url) ? `asset:${url.slice(8)}`
+                : options.media?.cache?.sourceId?.(url) || imageResourceCache.keyOf(url);
+            leases?.use(key);
+        }
         warmActiveFloorImages(snapshot);
         current.autoPlayer?.setSpeed(snapshot.readerSettings?.typewriter?.speed);
         noteReadingProgress(current, snapshot);
         backfillOldFloor(current);
-        if (!current.dom || !current.dom.root) return;
+        if (!current.dom || !current.dom.root) { current.assetLeases?.releaseAll(); return; }
         generationStripRemount = true;
         const refs = hydrateReaderMount(current.dom.root, snapshot);
         current.dom.overlay = refs.overlay;
@@ -4359,6 +4632,7 @@ export function createIgsReaderHost(options = {}) {
             const titleOn = !snapshot.readerSettings || snapshot.readerSettings.titleScreen !== false;
             if (titleOn && Number(snapshot.content && snapshot.content.currentIndex) === 0) {
                 renderTitleGate(current);
+                current.assetLeases?.releaseAll();
                 return;
             }
             dropTitleGate(current);
@@ -4381,6 +4655,7 @@ export function createIgsReaderHost(options = {}) {
             onCgPortraitMove: (statusHud) => saveReaderSettingsPatch({ statusHud }),
             onLivePortraitMove: (liveFx) => saveReaderSettingsPatch({ liveFx }),
         });
+        current.assetLeases?.end();
         if (current.dom.progress) {
             const progressText = formatReaderProgress(snapshot);
             current.dom.progress.textContent = progressText;
@@ -4580,10 +4855,22 @@ export function createIgsReaderHost(options = {}) {
         if (!overlay || !overlay.querySelector || !service || typeof service.listReview !== 'function') return;
         let container = overlay.querySelector('#igs-asset-review');
         const floorKey = currentFloorKey(current);
+        // 没读完就重 roll：流式期间不弹，记下旧楼，等新回复载入完在最后一页一并补问。
+        if (current.streamPhase === 'streaming') {
+            if (floorKey && !current.deferredReviewKey && service.listReview(floorKey).length) current.deferredReviewKey = floorKey;
+            if (container) container.setAttribute('hidden', '');
+            return;
+        }
         const lastPage = isReaderLastPage(snapshot);
-        const items = floorKey && lastPage
+        let items = floorKey && lastPage
             ? service.listReview(floorKey)
             : [];
+        const deferredKey = current.deferredReviewKey;
+        if (deferredKey && deferredKey !== floorKey) {
+            const deferred = service.listReview(deferredKey);
+            if (!deferred.length) current.deferredReviewKey = '';
+            else if (lastPage) items = deferred.concat(items);
+        } else if (deferredKey) current.deferredReviewKey = '';
         const outfitAsks = lastPage ? pendingOutfitAsks : [];
         if (!items.length && !outfitAsks.length) {
             if (container) container.setAttribute('hidden', '');
@@ -4678,35 +4965,52 @@ export function createIgsReaderHost(options = {}) {
         const withDna = status === 'library-dna' && item.type === 'sprite';
         if (status === 'library-dna') status = 'library';
         let addedName = '';
-        if (status === 'library' && item.type === 'background') {
+        let previous = null;
+        if (status === 'library') {
+            const background = item.type === 'background';
             const added = mutateSceneLibrary((assets) => {
-                const bound = bindGeneratedBackground(assets, item, name || item.name);
-                if (!bound.ok) return bound;
-                assets.scenes = bound.scenes;
-                return bound;
-            });
-            if (!added || added.ok === false) {
-                writeToastSafe('加入场景素材失败：名称不能为空');
-                return;
-            }
-            addedName = added.name;
-            writeToastSafe(`已放入场景素材「${added.name}」`);
-        } else if (status === 'library') {
-            const added = mutateSceneLibrary((assets) => {
+                previous = background
+                    ? { scenes: assets.scenes }
+                    : { characters: assets.characters, characterAliases: assets.characterAliases };
+                if (background) {
+                    const bound = bindGeneratedBackground(assets, item, name || item.name);
+                    if (bound.ok) assets.scenes = bound.scenes;
+                    return bound;
+                }
                 const bound = bindGeneratedSprite(assets, name || item.name, item.imageId ? `igs-gen:${item.imageId}` : '', { replace: true });
-                if (!bound.ok) return bound;
-                assets.characters = bound.characters;
-                assets.characterAliases = bound.characterAliases;
+                if (bound.ok) {
+                    assets.characters = bound.characters;
+                    assets.characterAliases = bound.characterAliases;
+                }
                 return bound;
-            }, { character: name || item.name });
+            }, background ? {} : { character: name || item.name });
             if (!added || added.ok === false) {
-                writeToastSafe('放入角色立绘失败：名称不能为空');
+                // 设置草稿可能已被改写但保存失败；恢复该条操作前的映射，不保留未保存的假成功。
+                if (previous && state.activeSettings) {
+                    const assets = draftAssetLibrary(state.activeSettings, background ? undefined : { collections: CHARACTER_COLLECTIONS, name: name || item.name });
+                    Object.assign(assets, previous);
+                }
+                writeToastSafe('素材入库失败，请检查名称与保存状态后重试');
                 return;
             }
             addedName = added.name;
-            writeToastSafe(`已放入角色立绘「${added.name}」`);
         }
-        if (typeof service.setStatus === 'function') await service.setStatus(item.key, status);
+        let updated;
+        try { updated = typeof service.setStatus === 'function' ? await service.setStatus(item.key, status) : { ok: false }; }
+        catch (error) { updated = { ok: false }; }
+        if (!updated || updated.ok === false) {
+            if (previous && addedName) {
+                const rolled = mutateSceneLibrary((assets) => {
+                    Object.assign(assets, previous);
+                    return { ok: true };
+                }, item.type === 'background' ? {} : { character: name || item.name });
+                writeToastSafe(rolled && rolled.ok !== false
+                    ? '审核状态更新失败，素材库已恢复，请重试'
+                    : '审核状态更新失败，素材库无法恢复，请检查素材库后重试');
+            } else writeToastSafe('审核状态更新失败，请重试');
+            return;
+        }
+        if (addedName) writeToastSafe(`已放入${item.type === 'background' ? '场景素材' : '角色立绘'}「${addedName}」`);
         if (state.activeReader) rerenderActiveReader();
         if (withDna && addedName) openDnaCandidate(addedName, item.tags);
     }
@@ -4800,6 +5104,7 @@ export function createIgsReaderHost(options = {}) {
         readerSettings._tempSpriteTags = spriteTagService && typeof spriteTagService.tempSpriteTags === 'function'
             ? spriteTagService.tempSpriteTags() : {};
         readerSettings._sentencePaging = Boolean(bridge.sentencePaging);
+        readerSettings._dialogueSentencePaging = Boolean(bridge.dialogueSentencePaging);
         readerSettings._optionBubble = bridge.optionBubble && typeof bridge.optionBubble === 'object' ? bridge.optionBubble : {};
         const bilingualOverride = state.bilingualDisplay;
         readerSettings._bilingualDisplay = bilingualOverride && bilingualOverride.base === normalizeBilingualSettings(readerSettings.bilingual).display ? bilingualOverride.value : '';

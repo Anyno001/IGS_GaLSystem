@@ -1,3 +1,4 @@
+import { createAssetGenerationService } from './helpers/media-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -6,7 +7,7 @@ import { lookupSceneBackground, sceneTimeSlot } from '../src/scene/scene-directi
 import { resolveBackgroundAsset, collectAssetNeeds, bindGeneratedBackground } from '../src/scene/asset-match.js';
 import { promptTimeBucket, sceneVariantTags } from '../src/generated-images/scene-variant-tags.js';
 import { createMemoryGeneratedAssetStore } from '../src/media/generated-asset-store.js';
-import { createAssetGenerationService } from '../src/generated-images/illustration/asset-generation-service.js';
+
 
 const GEN_SCENES = { enabled: true, scenes: { 教室: { url: 'igs-gen:base', times: {} }, 天台: { url: 'roof.png', times: {} } }, characters: {} };
 

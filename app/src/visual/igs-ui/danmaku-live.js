@@ -700,7 +700,7 @@ function refreshFace(state) {
     } else {
         const dims = state.faceDims;
         const url = state.portraitUrl && !state.cgUrl ? state.portraitUrl : '';
-        const probed = url ? peekSpriteHead(url) : null;
+        const probed = url ? peekSpriteHead(url, fly.ownerDocument) : null;
         if (url && !probed && !state.faceProbing.has(url)) {
             state.faceProbing.add(url);
             probeSpriteHead(url, state.doc).then(() => { if (state.els.root.isConnected) refreshFace(state); });

@@ -228,11 +228,11 @@ export const FX_STYLE_TEXT = `
 .igs-fx-title-card.is-ancient::after{width:22px;height:22px;align-self:flex-end;border-radius:3px;background:#b8452f;box-shadow:inset 0 0 0 2px #f6ecd4,inset 0 0 0 3px #b8452f;}
 .igs-fx-title-card.is-ancient .igs-fx-title-main{font-size:clamp(28px,6vmin,48px);font-weight:400;letter-spacing:.3em;padding:0;}
 .igs-fx-title-card.is-ancient .igs-fx-title-sub{font-size:clamp(14px,2.2vmin,18px);color:#7a2a1a;opacity:1;letter-spacing:.3em;padding-top:1.2em;}
-/* 仙侠水墨过场卡：去宣纸框，墨字落在一团实色淡墨上，保留竖排与朱印；只换静态外观，入场节奏不变。 */
-.igs-fx-title-card.is-ancient.is-xianxia{border:0;border-radius:0;background:#f4f1ea;box-shadow:0 10px 30px rgba(31,37,35,.4);color:#1f2523;}
-.igs-fx-title-card.is-ancient.is-xianxia::before{content:"";display:block;position:absolute;z-index:-1;left:-14%;right:-14%;top:-8%;bottom:-8%;background:radial-gradient(ellipse 54% 60% at 42% 44%,rgba(31,37,35,.16),rgba(31,37,35,.08) 48%,transparent 72%);}
-.igs-fx-title-card.is-ancient.is-xianxia::after{background:#b23a2a;box-shadow:inset 0 0 0 2px #f4f1ea,inset 0 0 0 3px #b23a2a;}
-.igs-fx-title-card.is-ancient.is-xianxia .igs-fx-title-sub{color:#5f7f86;}
+/* 仙侠水墨过场卡：焦墨一块，象牙白字落在一团化开的墨晕上，保留竖排与朱砂印；只换静态外观，入场节奏不变。 */
+.igs-fx-title-card.is-ancient.is-xianxia{border:0;border-radius:0;background:rgba(18,22,27,.94);box-shadow:0 6px 22px rgba(6,8,11,.34);color:#f3ecdd;}
+.igs-fx-title-card.is-ancient.is-xianxia::before{content:"";display:block;position:absolute;z-index:-1;left:-18%;right:-18%;top:-12%;bottom:-12%;background:radial-gradient(ellipse 56% 62% at 42% 44%,rgba(9,12,17,.5),rgba(9,12,17,.24) 50%,transparent 74%);}
+.igs-fx-title-card.is-ancient.is-xianxia::after{background:#b23a2a;box-shadow:none;}
+.igs-fx-title-card.is-ancient.is-xianxia .igs-fx-title-sub{color:#a8c6cd;}
 .igs-fx-favor-stack{position:absolute;top:56px;right:14px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;}
 .igs-fx-favor{padding:4px 12px;border-radius:999px;font-size:13px;color:#fff;background:rgba(20,20,28,.62);border:1px solid rgba(255,255,255,.18);animation:igs-fx-rise var(--igs-fx-life,2.4s) ease both;}
 .igs-fx-favor[data-dir="up"]{border-color:rgba(255,140,180,.7);}

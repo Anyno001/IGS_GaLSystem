@@ -1,10 +1,25 @@
+import { createCgLibraryView } from './helpers/media-fixtures.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCgLibraryView } from '../src/visual/igs-ui/cg-library-view.js';
+
+import { createLocalImageCache } from '../src/media/tavern-image-cache.js';
+import { pixel, settleMedia } from './helpers/fake-media-server.js';
 
 const entry = (i, extra = {}) => ({
     key: `chat|${i}|0|1`, kind: 'cg', chatId: 'chat', messageId: i, swipeId: 0, slot: 1, photoId: '',
     updatedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), ready: true, hidden: false, favorite: false, ...extra,
+});
+
+test('gate:media:cg-clear-starts-current-thumbnails-without-waiting-for-old-generation', async () => {
+    const cache = createLocalImageCache({}), item = entry(1);
+    let finishOld, calls = 0;
+    const library = { mediaCache: cache, readIndex: async () => ({ ok: true, entries: [item] }), syncIndex: async () => ({ ok: true, entries: [item] }), readThumbs: async () => new Map(),
+        makeThumb: async () => ++calls === 1 ? new Promise(resolve => { finishOld = resolve; }) : { ok: true, dataUrl: pixel('new') } };
+    const view = createCgLibraryView(library); await view.open(); await settleMedia();
+    await cache.clear(); await view.whenIdle();
+    assert.equal(view.tileOf(item.key).url, pixel('new'));
+    finishOld({ ok: true, dataUrl: pixel('old') }); await settleMedia();
+    assert.equal(view.tileOf(item.key).url, pixel('new')); view.dispose();
 });
 
 function fakeLibrary({ index = [], synced = null, thumbs = new Map(), makeThumb } = {}) {

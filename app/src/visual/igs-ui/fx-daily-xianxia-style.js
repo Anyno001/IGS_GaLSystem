@@ -41,7 +41,7 @@ export const XIANXIA_FX_STYLE_TEXT = `
 #igs-overlay .igs-dfx-dianxue-node.is-1{animation-delay:.6s;}
 #igs-overlay .igs-dfx-dianxue-node.is-2{animation-delay:.75s;}
 #igs-overlay .igs-dfx-dianxue-stage{position:absolute;width:0;height:0;}
-#igs-overlay .igs-dfx-dianxue-dot{position:absolute;left:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:#c44030;box-shadow:0 0 7px 2px rgba(196,64,48,.38);animation:igs-dfx-dianxue-dot .5s ease-out .28s both;}
+#igs-overlay .igs-dfx-dianxue-dot{position:absolute;left:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:#b23a2a;box-shadow:0 0 5px 1px rgba(178,58,42,.38);animation:igs-dfx-dianxue-dot .5s ease-out .28s both;}
 #igs-overlay .igs-dfx-dianxue-ring{position:absolute;left:-40px;top:-40px;width:80px;height:80px;border-radius:50%;border:1px solid rgba(196,64,48,.55);opacity:0;animation:igs-dfx-dianxue-ring 1.4s ease-out .5s both;}
 #igs-overlay .igs-dfx-dianxue-ring.is-2{border-color:rgba(118,154,162,.5);animation-delay:.85s;}
 #igs-overlay .igs-dfx-dianxue-frozen{position:absolute;inset:0;opacity:0;animation:igs-dfx-dx-frozen var(--igs-dfx-life) ease-in-out both;}

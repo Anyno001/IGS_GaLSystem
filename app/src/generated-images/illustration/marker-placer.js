@@ -1,10 +1,10 @@
-import { stripOutfitFields } from '../../scene/directive-tags.js';
+import { splitIgsDirectiveLines, stripOutfitFields } from '../../scene/directive-tags.js';
+import { imageMarkerBoundary, insertImageMarkerOnLine } from '../../scene/image-marker-layout.js';
 
 const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^\]\n]*))?\]/g;
 const CHAR_RE = /\[igs-char:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
 const THOUGHT_RE = /\[igs-thought:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
 const IMG_RE = /(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi;
-const LEADING_SCENE_RE = /^(\s*(?:\[igs-scene:[^\]\n]*\]\s*)+)/;
 
 // 一段正文里可以有多段 <content>。只认第一段会漏掉后面的场景标签。
 function contentSpans(lines) {
@@ -44,17 +44,17 @@ export function numberParagraphs(raw, options = {}) {
     const paragraphs = [];
     const scenes = [];
     const characters = new Set();
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = stripOutfitFields(lines[i], options && options.outfitResolver);
+    for (const { text, lineIndex } of splitIgsDirectiveLines(raw)) {
+        const line = stripOutfitFields(text, options && options.outfitResolver);
         // 场景标签整楼都认。写在第一段 </content> 之后的转场也要算进 NSFW 和背景。
         for (const m of line.matchAll(SCENE_RE)) {
             scenes.push({ scene: m[1].trim(), time: m[2].trim(), weather: m[3].trim(), nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw' });
         }
-        if (!lineInSpans(i, spans)) continue;
+        if (!lineInSpans(lineIndex, spans)) continue;
         for (const m of line.matchAll(CHAR_RE)) characters.add(m[1].trim());
         for (const m of line.matchAll(THOUGHT_RE)) characters.add(m[1].trim());
-        const text = readableLine(line);
-        if (text) paragraphs.push({ no: paragraphs.length + 1, lineIndex: i, text });
+        const readable = readableLine(line);
+        if (readable) paragraphs.push({ no: paragraphs.length + 1, lineIndex, text: readable });
     }
     return { paragraphs, scenes, characters: Array.from(characters), isNsfw: scenes.some((s) => s.nsfw) };
 }
@@ -73,7 +73,7 @@ export function formatNumberedParagraphs(paragraphs, maxChars = 6000) {
 
 /**
  * 与数据库生图插件的生成点定位相同：精确 → 去掉空白和标点 → 最长公共子串。
- * 命中后落回本插件的段落编号，标记仍插在该段前面。
+ * 命中后落回完整结构结束处对应的段落编号。
  * @param {string} raw
  * @param {Array<{ no: number, lineIndex: number }>} paragraphs
  * @param {string} anchor
@@ -97,7 +97,7 @@ export function paragraphNoForAnchor(raw, paragraphs, anchor) {
 }
 
 /**
- * 在 text 中定位 anchor，返回插入下标（anchor 结束之后）；找不到返回 -1。
+ * 在 text 中定位 anchor，返回完整结构与所在行之后的安全插入下标；找不到返回 -1。
  * @param {string} text
  * @param {string} anchorSentence
  * @returns {{ index: number, mode: string }}
@@ -106,12 +106,13 @@ export function findAnchorInsertIndex(text, anchorSentence) {
     const source = typeof text === 'string' ? text : '';
     const anchor = typeof anchorSentence === 'string' ? anchorSentence : '';
     if (!anchor) return { index: -1, mode: 'fail' };
+    const located = (anchorIndex, mode) => ({ index: imageMarkerBoundary(source, anchorIndex), anchorIndex, mode });
     const exact = source.indexOf(anchor);
-    if (exact !== -1) return { index: exact + anchor.length, mode: 'exact' };
+    if (exact !== -1) return located(exact + anchor.length, 'exact');
     const normResult = findNormalized(source, anchor);
-    if (normResult.index >= 0) return { index: normResult.index, mode: 'normalized' };
+    if (normResult.index >= 0) return located(normResult.index, 'normalized');
     const lcsResult = findByLongestCommonSubstring(source, anchor);
-    if (lcsResult.index >= 0) return { index: lcsResult.index, mode: 'lcs' };
+    if (lcsResult.index >= 0) return located(lcsResult.index, 'lcs');
     return { index: -1, mode: 'fail' };
 }
 
@@ -177,7 +178,7 @@ function findByLongestCommonSubstring(text, anchor) {
     return { index: bestEndInText };
 }
 
-// 同一段里可以有多句生成点。按句尾插入，不按整段，避免四张标记叠在同一处。
+// 锚句落在同一结构时，保留锚句顺序并统一放到结构结束之后。
 export function insertMarkersAtAnchors(raw, slots) {
     const source = String(raw || '');
     const placed = [];
@@ -185,41 +186,32 @@ export function insertMarkersAtAnchors(raw, slots) {
         if (!slot) continue;
         const found = findAnchorInsertIndex(source, slot.anchorSentence);
         if (found.index < 0) continue;
-        placed.push({ index: found.index, slot: Number(slot.slot) || placed.length + 1 });
+        placed.push({ index: found.index, anchorIndex: found.anchorIndex, slot: Number(slot.slot) || placed.length + 1 });
     }
-    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
+    placed.sort((a, b) => b.index - a.index || b.anchorIndex - a.anchorIndex || b.slot - a.slot);
     let text = source;
     for (const item of placed) {
-        text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
+        text = insertImageMarkerOnLine(text, item.index, `[igs-img:${item.slot}]`);
     }
     return text;
 }
 
-function insertTokenOnOwnLine(text, index, token) {
-    const at = Math.max(0, Math.min(text.length, Number(index) || 0));
-    const before = text.slice(0, at);
-    const after = text.slice(at);
-    const lead = before.length === 0 || before.endsWith('\n') ? '' : '\n';
-    const trail = after.length === 0 || after.startsWith('\n') ? '' : '\n';
-    return before + lead + token + trail + after;
-}
-
 export function insertMarkers(raw, paragraphs, slots) {
-    const lines = String(raw || '').split('\n');
-    const ordered = [...slots].sort((a, b) => b.at - a.at);
-    for (const s of ordered) {
+    const source = String(raw || ''), lines = source.split('\n');
+    const ends = [];
+    let offset = 0;
+    for (const line of lines) { ends.push(offset + line.length); offset += line.length + 1; }
+    const placed = [];
+    for (const s of slots) {
         const p = paragraphs[s.at - 1];
         if (!p) continue;
-        const marker = `[igs-img:${s.slot}]`;
-        const line = lines[p.lineIndex];
-        const lead = line.match(LEADING_SCENE_RE);
-        if (lead) {
-            lines[p.lineIndex] = `${lead[1].trimEnd()}${marker}${line.slice(lead[1].length)}`;
-        } else {
-            lines.splice(p.lineIndex, 0, marker);
-        }
+        const index = imageMarkerBoundary(source, ends[p.lineIndex]);
+        if (index >= 0) placed.push({ index, slot: s.slot });
     }
-    return lines.join('\n');
+    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
+    let text = source;
+    for (const item of placed) text = insertImageMarkerOnLine(text, item.index, `[igs-img:${item.slot}]`);
+    return text;
 }
 
 /**
@@ -253,7 +245,7 @@ const TRANSPLANT_MARKER_RE = /\[igs-img:(\d+)\]/g;
 const TRANSPLANT_CONTEXT = 60;
 
 function contextLine(text, fromEnd) {
-    const lines = String(text || '').replace(/\[igs-img:\d+\]/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
+    const lines = splitIgsDirectiveLines(String(text || '').replace(/\[igs-img:\d+\]/g, '')).map((line) => line.text.trim()).filter(Boolean);
     const line = fromEnd ? lines[lines.length - 1] : lines[0];
     if (!line) return '';
     return fromEnd ? line.slice(-TRANSPLANT_CONTEXT) : line.slice(0, TRANSPLANT_CONTEXT);
@@ -285,6 +277,6 @@ export function transplantMarkers(marked, current) {
     }
     placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
     let text = target;
-    for (const item of placed) text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
+    for (const item of placed) text = insertImageMarkerOnLine(text, item.index, `[igs-img:${item.slot}]`);
     return { text, slots: placed.map((item) => item.slot).sort((a, b) => a - b) };
 }

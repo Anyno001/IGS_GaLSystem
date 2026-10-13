@@ -3,6 +3,62 @@
 export const IGS_INLINE_DIRECTIVE_NAMES = Object.freeze(['scene', 'char', 'thought', 'img', 'fx']);
 
 const NAMES = IGS_INLINE_DIRECTIVE_NAMES.join('|');
+const LOOSE_START_SOURCE = `[\\[［【]\\s*igs\\s*-?\\s*(${NAMES}|chat(?:-end|-time)?|msg)\\s*[:：]`;
+const DIALOGUE_START_RE = /([\[［【])\s*igs\s*-?\s*(?:char|thought)\s*[:：]/gi;
+const DIRECTIVE_AT_RE = new RegExp(LOOSE_START_SOURCE, 'iy');
+const CONTENT_BOUNDARY_AT_RE = /<\/?(?:content|now_plot)\b/iy;
+const BRACKET_CLOSE = { '[': ']', '［': '］', '【': '】' };
+
+function closedDialogueEnd(source, start, opener) {
+    const closes = [BRACKET_CLOSE[opener]];
+    for (let i = start; i < source.length; i++) {
+        const ch = source[i];
+        if (BRACKET_CLOSE[ch]) {
+            DIRECTIVE_AT_RE.lastIndex = i;
+            const directive = DIRECTIVE_AT_RE.exec(source);
+            if (directive && directive[1].toLowerCase() !== 'img') return -1;
+            closes.push(BRACKET_CLOSE[ch]);
+        } else if (ch === closes.at(-1) || (closes.length === 1 && opener !== '[' && ch === ']')) {
+            closes.pop();
+            if (!closes.length) return i;
+        } else if (ch === '<') {
+            CONTENT_BOUNDARY_AT_RE.lastIndex = i;
+            if (CONTENT_BOUNDARY_AT_RE.test(source)) return -1;
+        }
+    }
+    return -1;
+}
+
+export function normalizeClosedIgsDialogueLines(text) {
+    const source = String(text || '');
+    if (!/[\r\n]/.test(source)) return source;
+    const out = [];
+    let from = 0;
+    DIALOGUE_START_RE.lastIndex = 0;
+    let match;
+    while ((match = DIALOGUE_START_RE.exec(source))) {
+        const end = closedDialogueEnd(source, DIALOGUE_START_RE.lastIndex, match[1]);
+        if (end < 0) continue;
+        out.push(source.slice(from, match.index), source.slice(match.index, end + 1).replace(/[\r\n]/g, ' '));
+        from = end + 1;
+        DIALOGUE_START_RE.lastIndex = from;
+    }
+    return out.length ? out.join('') + source.slice(from) : source;
+}
+
+export function splitIgsDirectiveLines(text) {
+    const source = String(text || '');
+    const lines = normalizeClosedIgsDialogueLines(source).split('\n');
+    let offset = 0;
+    let lineIndex = 0;
+    return lines.map((line) => {
+        const entry = { text: line, offset, lineIndex };
+        const end = offset + line.length + 1;
+        lineIndex += (source.slice(offset, end).match(/\n/g) || []).length;
+        offset = end;
+        return entry;
+    });
+}
 
 // 「[igs-名:」起始，用于判断是否含指令、查找下一条指令。
 export const IGS_DIRECTIVE_START_RE = new RegExp(`\\[igs-(?:${NAMES}):`);
@@ -32,7 +88,7 @@ const LOOSE_DIRECTIVE_RE = new RegExp(
 );
 
 export function canonicalizeIgsDirectives(text) {
-    return String(text || '').replace(LOOSE_DIRECTIVE_RE, (all, name, body, close, wideName, wideBody, wideClose) => {
+    return normalizeClosedIgsDialogueLines(text).replace(LOOSE_DIRECTIVE_RE, (all, name, body, close, wideName, wideBody, wideClose) => {
         const inner = String(name ? body : wideBody);
         const fields = (inner.includes('|') ? inner : inner.replace(/｜/g, '|')).split('|').map((field) => field.trim());
         return `[igs-${String(name || wideName).toLowerCase()}:${fields.join('|')}${(name ? close : wideClose) ? ']' : ''}`;
@@ -75,7 +131,7 @@ function classifyOutfitField(outfitResolver, character, token) {
 
 export function matchOutfitDirectiveAt(text, outfitResolver) {
     if (typeof outfitResolver !== 'function') return null;
-    const m = String(text || '').match(OUTFIT_DIRECTIVE_AT_RE);
+    const m = normalizeClosedIgsDialogueLines(text).match(OUTFIT_DIRECTIVE_AT_RE);
     if (!m) return null;
     const character = m[2].trim();
     const token = m[4].trim();
@@ -88,8 +144,8 @@ export function matchOutfitDirectiveAt(text, outfitResolver) {
 
 // 正文格式化前按同一规则改写四栏标签：服装与未登记服装栏剥掉，其余拼回对白，交给只认三栏的格式化正则。
 export function stripOutfitFields(text, outfitResolver) {
-    const source = String(text || '');
-    if (typeof outfitResolver !== 'function') return source;
+    if (typeof outfitResolver !== 'function') return String(text || '');
+    const source = normalizeClosedIgsDialogueLines(text);
     return source.replace(new RegExp(OUTFIT_DIRECTIVE_GLOBAL_SOURCE, 'gm'), (all, type, name, mood, outfit, body, close) => {
         const field = classifyOutfitField(outfitResolver, name.trim(), outfit.trim());
         const kept = field.kind === 'text' ? `${outfit}|${body}` : body;

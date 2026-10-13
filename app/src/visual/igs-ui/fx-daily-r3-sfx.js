@@ -12,18 +12,18 @@ const bell = (freq, start, ring, gain) => [
 
 // 木棋子落在棋盘上清脆的「嗒」：一记短促的高频敲击、一点木质的低共鸣、一个略下坠的音头。
 const clack = (start, freq, gain = 0.5) => [
-    p('triangle', freq, freq * 0.62, start, 0.09, gain * 0.5, { attack: 0.001, sweep: 1 }),
-    n(start, 0.03, gain, { freq: 2400, q: 1.6, attack: 0.001 }),
+    p('triangle', freq, freq * 0.62, start, 0.09, gain * 0.5 * 0.8, { attack: 0.001, sweep: 1 }),
+    n(start, 0.03, gain * 0.8, { freq: 1900, q: 1.6, attack: 0.001 }),
     n(start, 0.1, gain * 0.5, { filter: 'lowpass', freq: 700, q: 0.8, attack: 0.002 }),
 ];
 
 export const R3_SFX_DEFS = Object.freeze({
     // 落子：开局几下旧子归位的轻响，随后四记落子，节拍对应棋盘上新子落下的时刻。
     'go-play': {
-        partials: [880, 820, 900, 780].flatMap((f, i) => clack(0.9 + i * 0.65, f, 0.5).slice(0, 1)),
+        partials: [720, 660, 700, 650].flatMap((f, i) => clack(0.9 + i * 0.65, f, 0.5).slice(0, 1)),
         noise: [
             n(0.08, 0.02, 0.14, { freq: 2200, q: 1.2, attack: 0.001 }), n(0.22, 0.02, 0.1, { freq: 2000, q: 1.2, attack: 0.001 }), n(0.36, 0.02, 0.12, { freq: 2300, q: 1.2, attack: 0.001 }),
-            ...[0.9, 1.55, 2.2, 2.85].flatMap((t) => clack(t, 800, 0.5).slice(1)),
+            ...[0.9, 1.55, 2.2, 2.85].flatMap((t, i) => clack(t, 700 + [-60, 40, -30, 60][i], 0.5).slice(1)),
         ],
     },
     // 斟茶：一线细水冲入盏中、音调渐高，随后盏底轻轻碰上托碟的瓷声，衣袖一动。
@@ -47,7 +47,8 @@ export const R3_SFX_DEFS = Object.freeze({
     // 圣旨：开卷一声磬响，绢帛滑开的长长一道摩擦，玉轴分开的清脆一碰，末尾落玺的沉闷一声。
     'edict-open': {
         partials: [
-            ...bell(392, 0, 1.8, 0.2), p('sine', 98, 70, 0.02, 0.5, 0.2, { attack: 0.004, sweep: 1 }),
+            p('sine', 330, 330, 0, 1.8, 0.2, { attack: 0.01 }), p('sine', 330 * 2.4, 330 * 2.4, 0, 0.54, 0.052, { attack: 0.01 }), p('sine', 330 * 4.1, 330 * 4.1, 0, 0.18, 0.024, { attack: 0.01 }),
+            p('sine', 98, 70, 0.02, 0.5, 0.2, { attack: 0.004, sweep: 1 }),
             p('sine', 110, 58, 2.6, 0.3, 0.3, { attack: 0.002, sweep: 1 }),
         ],
         noise: [
@@ -61,8 +62,8 @@ export const R3_SFX_DEFS = Object.freeze({
     // 点穴：指尖一点的短促「笃」，一声细而冷的清鸣，被定住后一缕低沉的、渐强又渐隐的嗡。
     'freeze-point': {
         partials: [
-            p('sine', 1800, 1500, 0.3, 0.45, 0.14, { attack: 0.002 }),
-            p('sine', 4100, 4100, 0.3, 0.18, 0.05, { attack: 0.002 }),
+            p('sine', 1400, 1200, 0.3, 0.45, 0.14, { attack: 0.002 }),
+            p('sine', 4100, 4100, 0.3, 0.18, 0.03, { attack: 0.002 }),
             p('sine', 320, 296, 0.35, 1.4, 0.08, { attack: 0.3 }),
         ],
         noise: [
@@ -78,7 +79,7 @@ export const R3_SFX_DEFS = Object.freeze({
     },
     // 灵气汇成金光的一闪：清亮的钟声叠一个更高的泛音，呼吸末尾落下。
     'qi-chime': {
-        partials: [...bell(1318.5, 2.4, 1.4, 0.18), ...bell(1760, 2.5, 1.2, 0.12)],
+        partials: [p('sine', 1046.5, 1046.5, 2.4, 1.0, 0.12, { attack: 0.004 }), p('sine', 1046.5 * 2.76, 1046.5 * 2.76, 2.4, 0.3, 0.03, { attack: 0.002 })],
         noise: [n(2.4, 0.5, 0.06, { filter: 'highpass', freq: 6000, q: 0.7, attack: 0.05 })],
     },
     // 运功失败：光点碎裂的一记脆响，随后一声下坠的低叹。

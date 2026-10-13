@@ -224,9 +224,9 @@ function entryLeft(root, motion, stageH) {
 }
 
 // 内心弹幕的落点：有头部标定时围着头，否则围着立绘上半身；没有立绘就在舞台中上部。
-function innerAnchor(geo, sprite) {
+function innerAnchor(geo, sprite, doc) {
     const floor = Math.min(geo.dialogTop, geo.stageH) - 24;
-    const probed = sprite ? peekSpriteHead(sprite.url) : null;
+    const probed = sprite ? peekSpriteHead(sprite.url, doc) : null;
     const shape = spriteGeometry(sprite, probed);
     const rect = shape ? spriteDrawRect(geo.stageW, geo.stageH, shape) : null;
     if (rect && shape.head) {
@@ -277,7 +277,7 @@ export function layoutInnerFlight(anchor, phrases, count, fontSize, rng = Math.r
 function playInner(ctx, inner, stage) {
     const { state, doc, reduced, options } = ctx;
     const sprite = options.sprite && options.sprite.url ? options.sprite : null;
-    const anchor = innerAnchor(stage, sprite);
+    const anchor = innerAnchor(stage, sprite, doc);
     const size = Math.round(Math.max(15, Math.min(26, Math.min(anchor.stageW, anchor.stageH) * 0.036)));
     // 减少动态效果时横飞退回静态落位的爆发样式。
     const fly = ctx.settings.inner.style === 'fly' && !reduced;
@@ -625,7 +625,7 @@ function fitFaceFor(host, stage, sprite, doc, refit) {
     if (!stage) return;
     let info = { w: stage.stageW, h: stage.stageH };
     if (sprite && sprite.url) {
-        const probed = peekSpriteHead(sprite.url);
+        const probed = peekSpriteHead(sprite.url, doc);
         const shape = spriteGeometry(sprite, probed);
         const rect = shape ? spriteDrawRect(stage.stageW, stage.stageH, shape) : null;
         if (!probed && !faceProbed.has(sprite.url)) {

@@ -1,8 +1,9 @@
+import { createAssetGenerationService } from './helpers/media-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryGeneratedAssetStore } from '../src/media/generated-asset-store.js';
-import { withTavernGeneratedAssetFiles } from '../src/media/tavern-image-files.js';
-import { createAssetGenerationService } from '../src/generated-images/illustration/asset-generation-service.js';
+import { withTavernGeneratedAssetFiles } from '../src/media/tavern-generated-assets.js';
+
 
 const cap = (t) => ({ v4_prompt: { caption: { base_caption: t, char_captions: [] } }, v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } } });
 const flush = async () => { for (let i = 0; i < 10; i += 1) await new Promise((r) => setTimeout(r, 0)); };

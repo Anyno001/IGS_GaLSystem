@@ -1,3 +1,4 @@
+import { decodeImage } from './image-decode.js';
 // 纯色底立绘抠图：从图像四边洪泛，只抠与边缘连通、颜色接近底色的像素，
 // 角色内部的白色（衬衫、高光）不与边缘连通，不会被误抠。
 const HARD_TOLERANCE = 28;
@@ -98,14 +99,6 @@ export function findOpaqueBounds(imageData, alphaThreshold = 8) {
     return { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
 }
 
-function loadImage(globalObject, src) {
-    return new Promise((resolve, reject) => {
-        const img = new globalObject.Image();
-        img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error('image-load-failed'));
-        img.src = src;
-    });
-}
 
 // ---- PNG 文本块保留：canvas 重编码会丢掉 NAI 写入的 tEXt/iTXt/zTXt（Comment 里有正负提示词与参数），
 // 裁边后把原图的文本块原样拷回输出 PNG 的 IHDR 之后。块自带 CRC，原样拷贝即有效。
@@ -221,7 +214,8 @@ export function createAlphaMatte(globalObject = globalThis) {
     async function matteWithMask(dataUrl, alreadyTransparent) {
         if (!canUseCanvas || !/^data:image\//i.test(String(dataUrl || ''))) return passthrough(dataUrl, 'no-canvas');
         try {
-            const img = await loadImage(globalObject, dataUrl);
+            const img = await decodeImage(globalObject, dataUrl);
+            if (!img) return passthrough(dataUrl, 'image-load-failed');
             const canvas = doc.createElement('canvas');
             canvas.width = img.naturalWidth || img.width;
             canvas.height = img.naturalHeight || img.height;

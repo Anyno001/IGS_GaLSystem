@@ -245,6 +245,7 @@ test('gate:expression-set:fills-groups-that-have-no-image', async () => {
     };
     const asks = [];
     const seen = [];
+    const persistedChanges = [];
     const draft = {
         bridge: {
             sceneAssets: {
@@ -270,7 +271,7 @@ test('gate:expression-set:fills-groups-that-have-no-image', async () => {
                 },
             },
         },
-        persistSettingsDraft: () => ({ ok: true }),
+        persistSettingsDraft: (options = {}) => { persistedChanges.push(options.spriteAssetChanged === true); return { ok: true }; },
         rerenderSettings: () => ({ ok: true }),
         dialogs: { confirm: async (message) => { asks.push(message); return true; } },
     };
@@ -285,15 +286,18 @@ test('gate:expression-set:fills-groups-that-have-no-image', async () => {
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['愤怒'], 'https://kept.example/a.png');
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['悲伤'], 'igs-gen:new-悲伤');
     assert.equal(draft.bridge.sceneAssets.characters['冬月']['默认'], 'igs-gen:def');
+    assert.deepEqual(persistedChanges, [true], '画好差分才失效舞台立绘清单');
     const again = await handleSettingsAction('char-expression-set:%E5%86%AC%E6%9C%88', ctx);
     assert.equal(again.ok, true);
     assert.equal(seen.length, 1);
+    assert.deepEqual(persistedChanges, [true], '没有待画差分不重复保存或刷新');
     const outfit = await handleSettingsAction('outfit-expression-set:%E5%86%AC%E6%9C%88:%E6%97%A5%E5%B8%B8', ctx);
     assert.equal(outfit.ok, true);
     const missingOutfit = moodTierLabels(8).filter((mood) => mood !== '喜悦');
     assert.match(asks[1], new RegExp(`这一档还有${missingOutfit.length}张尚未生成：${missingOutfit.join('、')}`));
     assert.equal(draft.bridge.sceneAssets.characterOutfits['冬月']['日常'].moods['喜悦'], 'igs-gen:old-outfit');
     assert.equal(draft.bridge.sceneAssets.characterOutfits['冬月']['日常'].moods['愤怒'], 'igs-gen:new-愤怒');
+    assert.deepEqual(persistedChanges, [true, true], '服装差分同样失效当前立绘清单');
 });
 
 // 新衣服（睡衣这类）还没有自己的图：档位里多一项「1 张」，只画这套的「平和」，所有表情共用；整套差分之后照它画；不改角色记住的档位。

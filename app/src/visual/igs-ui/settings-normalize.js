@@ -93,6 +93,8 @@ export function normalizeSettingsValue(path, value) {
         if (path === 'readerSettings.statusHud.nsfwCgPortraitShift' || path === 'readerSettings.statusHud.nsfwCgPortraitZoom') return Number(value);
         if (/^readerSettings\.statusHud\.position\.(pc|mobile)\.[xy]$/.test(path)) return normalizeStatusHudPercent(value);
         if (path === 'readerSettings.dialogFontWeight') return [300, 400, 500, 700].includes(Number(value)) ? Number(value) : null;
+        if (/^readerSettings\.waitStage\.(enabled|games|voice)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
+        if (path === 'readerSettings.waitStage.lineSeconds') return Math.min(16, Math.max(3, Math.round(Number(value) || 6)));
         if (path === 'readerSettings.dialogTextEffect') return ['off', 'outline', 'shadow'].includes(value) ? value : 'off';
         if (path === 'readerSettings.dialogTextEffectColor') return /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#000000';
         if (path === 'readerSettings.spriteDefaultScale') return normalizeSpriteHeight(value, 100);
@@ -368,6 +370,10 @@ export function resolveSpriteLayout(layouts, mode, character, mood, outfit = '',
             const moodKey = `${mode}::${character}::${mood}`;
             if (layouts[moodKey]) return placed(layouts[moodKey]);
         }
+        // 原装默认槽：未命中情绪的页把 spriteMood 改写成「默认」，但旁白/无情绪页 mood 为空，
+        // 不写这一层的话，调整「默认」立绘的缩放只在带情绪词的页生效，其余页全部回弹。
+        const baseSlotKey = `${mode}::${character}::默认`;
+        if (identity === character && (!mood || mood === '默认') && layouts[baseSlotKey]) return placed(layouts[baseSlotKey]);
         const charKey = `${mode}::${character}`;
         if (layouts[charKey]) return placed(layouts[charKey]);
     }

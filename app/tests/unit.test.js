@@ -1,3 +1,4 @@
+import { createReaderImageService } from './helpers/media-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -40,7 +41,7 @@ import { resolveVisualMode, VISUAL_MODES } from '../src/visual/visual-mode.js';
 import { createPromptAdapter } from '../src/prompts/adapters/prompt-adapter.js';
 import { naiRequestBuilder } from '../src/generated-images/request-builders/nai-builder.js';
 import { fetchModels as fetchImageModels, generateImage as generateImageFromApi } from '../src/generated-images/image-api-client.js';
-import { createReaderImageService } from '../src/generated-images/reader-image-service.js';
+
 import { createPublicApi, attachPublicApi } from '../src/api/public-api.js';
 import { createIgsCompatApi } from '../src/api/igs-compat.js';
 import {
@@ -48,6 +49,7 @@ import {
     ensureMessageImagePlaceholders,
 } from '../src/host/tavern-helper-adapter.js';
 import { createIgsReaderHost } from '../src/visual/igs-ui/reader-host.js';
+import { syncSpriteTextWait } from '../src/visual/igs-ui/reader-dom-render.js';
 import { createPromptInjector } from '../src/host/prompt-injector.js';
 import {
     extractSceneDirectives,
@@ -193,6 +195,18 @@ test('gate:igs-ui:embedded-source-cache-parses-once-per-signature', () => {
     });
     cache.get(pagingSignature, { mark: 2 });
     assert.equal(cache.getParseCount(), 2);
+    const dialogueSignature = buildReaderSourceSignature({
+        messageId: 7,
+        rawText: 'line one\nline two',
+        visibleText: 'line one\nline two',
+        sourceFilter: { enabled: true },
+        virtualRegex: { enabled: true, pattern: 'x', flags: 'g', replacement: 'y' },
+        sceneAssetsEnabled: false,
+        sentencePaging: false,
+        dialogueSentencePaging: true,
+    });
+    cache.get(dialogueSignature, { mark: 3 });
+    assert.equal(cache.getParseCount(), 3, '对白开关变化不得复用未拆分的旧阅读源');
 });
 
 test('gate:igs-ui:embedded-source-cache-tolerates-circular-host-objects', () => {
@@ -537,8 +551,8 @@ test('gate:igs-ui:embedded-chat-observer-uses-generation-end-and-ignores-late-do
         off(name, handler) {
             listeners.set(name, (listeners.get(name) || []).filter((item) => item !== handler));
         },
-        emit(name) {
-            for (const handler of listeners.get(name) || []) handler();
+        emit(name, ...args) {
+            for (const handler of listeners.get(name) || []) handler(...args);
         },
     };
     const globalObject = {
@@ -581,7 +595,7 @@ test('gate:igs-ui:embedded-chat-observer-uses-generation-end-and-ignores-late-do
     assert.equal(stableCount, 0);
 
     eventSource.emit('generation_ended');
-    eventSource.emit('generation_started');
+    eventSource.emit('generation_started', 'quiet', {}, false);
     const stableTimer = Array.from(timers.entries()).find(([, timer]) => timer.delay === 800);
     assert.ok(stableTimer);
     timers.delete(stableTimer[0]);
@@ -658,6 +672,13 @@ test('gate:igs-ui:embedded-chat-observer-ignores-quiet-and-dry-run-generations',
     idleTimer[1].handler();
     await Promise.resolve();
     await Promise.resolve();
+    assert.equal(stableCount, 0, '生成中的静默不触发完成回调');
+    eventSource.emit('generation_ended');
+    const finishedTimer = Array.from(timers.entries()).find(([, timer]) => timer.delay === 800);
+    assert.ok(finishedTimer);
+    timers.delete(finishedTimer[0]);
+    finishedTimer[1].handler();
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(stableCount, 1);
     observer.stop();
 });
@@ -1282,6 +1303,26 @@ test('gate:scene:sentence-paging-only-splits-narration-when-scene-assets-on', ()
     assert.deepEqual(payload.textSegments, ['旁白第一句。', '旁白第二句。', '[玉子]：你好呀。请坐。']);
 });
 
+test('gate:scene:sentence-paging-keeps-punctuation-spaces-and-quoted-text', () => {
+    const source = '她轻声说“走吧。” 随后出门。门开了！ 她停下。';
+    const pages = buildIgsTextPayload({ text: source }, { sentencePaging: true }).textSegments;
+    assert.deepEqual(pages, ['她轻声说“走吧。”', '随后出门。', '门开了！', '她停下。']);
+});
+
+test('gate:scene:dialogue-and-thought-paging-is-independent-and-preserves-markup', () => {
+    const source = '旁白第一句。旁白第二句。\n[玉子]：你好呀。请坐。\n*[玉子]：先别急。再等等。*';
+    const options = { sceneAssets: { enabled: true }, dialogueSentencePaging: true };
+    const dialogueOnly = buildIgsTextPayload({ text: source }, options);
+    assert.deepEqual(dialogueOnly.textSegments, [
+        '旁白第一句。旁白第二句。', '[玉子]：你好呀。', '[玉子]：请坐。',
+        '*[玉子]：先别急。*', '*[玉子]：再等等。*',
+    ]);
+    const both = buildIgsTextPayload({ text: source }, { ...options, sentencePaging: true });
+    assert.deepEqual(both.textSegments.slice(0, 2), ['旁白第一句。', '旁白第二句。']);
+    const noAssets = buildIgsTextPayload({ text: '一段旁白。另一句。\n[玉子]：你好。再见。', }, { dialogueSentencePaging: true });
+    assert.deepEqual(noAssets.textSegments.slice(0, 1), ['一段旁白。另一句。'], '对白开关不能误拆旁白');
+});
+
 test('gate:igs-ui:apply-align-style-maps-left-center-indent', () => {
     const makeEl = () => ({ style: {} });
     const left = makeEl();
@@ -1350,6 +1391,18 @@ test('gate:igs-ui:resolve-sprite-layout-keeps-mode-isolated', () => {
     // 切到没有该 key 的模式回退默认，不会串用其他模式的数据
     assert.deepEqual(resolveSpriteLayout(layouts, 'web', '小林海斗', '平和'), { posX: 50, posY: 100, scale: 100 });
 });
+
+test('gate:igs-ui:resolve-sprite-layout-base-default-slot-reads-back-on-mood-less-pages', () => {
+    // 调整原装立绘时编辑条把情绪改写到「默认」槽；旁白页 spriteMood 为空，必须仍能读到这条。
+    const layouts = { 'pc::雪乃::默认': { posX: 60, posY: 95, scale: 150 } };
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '雪乃', '默认'), { posX: 60, posY: 95, scale: 150 });
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '雪乃', ''), { posX: 60, posY: 95, scale: 150 });
+    // 其他情绪词有自己的槽键时不被默认槽盖住；没键时落到默认 100。
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '雪乃', '喜悦'), { posX: 50, posY: 100, scale: 100 });
+    // 服装身份不借用原装的默认槽。
+    assert.deepEqual(resolveSpriteLayout(layouts, 'pc', '雪乃', '', '校服'), { posX: 50, posY: 100, scale: 100 });
+});
+
 
 test('gate:igs-ui:resolve-sprite-layout-default-scale-only-fills-unplaced', () => {
     const layouts = { 'pc::小林海斗::平和': { posX: 70, posY: 30, scale: 180 } };
@@ -1951,7 +2004,7 @@ test('gate:settings:generated-asset-actions-manage-library-and-temp-status', asy
     let promptValue = '';
     let confirmed = true;
     const service = {
-        getRecord: (key) => key === 'temp/bg' ? {
+        readRecord: async (key) => key === 'temp/bg' ? {
             key,
             imageId: 'bg-temp',
             type: 'background',
@@ -2078,7 +2131,7 @@ test('gate:settings:generated-asset-actions-rollback-on-persist-and-service-fail
             { alert: () => {} },
             () => { persistCount += 1; return { ok: true }; },
             {
-                getRecord: () => ({ imageId: 'temp-image', type: 'background', name: '临时景' }),
+                readRecord: async () => ({ imageId: 'temp-image', type: 'background', name: '临时景' }),
                 setStatus: async () => ({ ok: false, reason: 'status-failed' }),
             },
         ));
@@ -2086,6 +2139,58 @@ test('gate:settings:generated-asset-actions-rollback-on-persist-and-service-fail
         assert.equal(persistCount, 2);
         assert.equal(draft.bridge.sceneAssets.generated.scenes['临时景'], undefined);
         assert.equal(draft.bridge.sceneAssets.scenes['临时景'], undefined);
+    }
+
+    {
+        const draft = makeDraft();
+        draft.bridge.sceneAssets.characters = { 临时人: { 默认: 'igs-gen:old-sprite' } };
+        const saved = [];
+        const result = await handleSettingsAction('gen-temp-accept:sprite', makeContext(
+            draft,
+            { alert: () => {} },
+            (options = {}) => {
+                saved.push({ changed: options.spriteAssetChanged, url: draft.bridge.sceneAssets.characters.临时人.默认 });
+                return { ok: true };
+            },
+            {
+                readRecord: async () => ({ imageId: 'new-sprite', type: 'sprite', name: '临时人' }),
+                setStatus: async () => ({ ok: false, reason: 'status-failed' }),
+            },
+        ));
+        assert.equal(result.reason, 'status-failed');
+        assert.deepEqual(saved, [
+            { changed: true, url: 'igs-gen:new-sprite' },
+            { changed: true, url: 'igs-gen:old-sprite' },
+        ], '立绘入库及服务失败后的回滚都须失效舞台预热清单');
+    }
+
+    {
+        const draft = makeDraft();
+        draft.bridge.sceneAssets.generated.characters.临时人 = { 默认: 'igs-gen:adopted-sprite' };
+        draft.bridge.sceneAssets.characters = { 临时人: { 默认: 'igs-gen:old-sprite' } };
+        const saved = [];
+        const result = await handleSettingsAction(`gen-adopt-sprite:${enc('临时人')}`, makeContext(
+            draft, { alert: () => {} },
+            (options = {}) => {
+                saved.push({ changed: options.spriteAssetChanged, url: draft.bridge.sceneAssets.characters.临时人.默认 });
+                return { ok: true };
+            }, null,
+        ));
+        assert.equal(result.ok, true);
+        assert.deepEqual(saved, [{ changed: true, url: 'igs-gen:adopted-sprite' }]);
+        assert.equal(draft.bridge.sceneAssets.generated.characters.临时人, undefined);
+    }
+
+    {
+        const draft = makeDraft();
+        draft.bridge.sceneAssets.generated.characters.空图 = { 默认: '' };
+        let saves = 0;
+        const result = await handleSettingsAction(`gen-adopt-sprite:${enc('空图')}`, makeContext(
+            draft, { alert: () => {} },
+            () => { saves += 1; return { ok: true }; }, null,
+        ));
+        assert.equal(result.reason, 'generated-sprite-adopt-failed');
+        assert.equal(saves, 0, '未绑定图片不得提交设置或失效舞台清单');
     }
 
     {
@@ -2482,6 +2587,97 @@ test('gate:igs-ui:scene-assets-keeps-sprite-with-existing-background', () => {
     assert.equal(opened.snapshot.styles['#igs-sprite'].display, 'block');
 
     host.destroy();
+});
+
+test('gate:igs-ui:generated-sprite-arrival-only-warms-that-sprite', () => {
+    let notify = () => {};
+    const calls = [];
+    const timers = [];
+    const pictures = new Map();
+    const host = createIgsReaderHost({
+        global: { setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {} },
+        onGeneratedAssetUpdated: (handler) => { notify = handler; return () => {}; },
+        generatedAssets: { resolveUrl: (ref) => { calls.push(ref); return pictures.get(ref) || ''; } },
+        getUnifiedSettings: () => ({
+            version: '0.36.45',
+            bridge: {
+                openMode: 'pc',
+                sceneAssets: {
+                    enabled: true,
+                    scenes: {},
+                    characters: { Alice: { 默认: 'igs-gen:first' }, Bob: { 默认: 'igs-gen:second' } },
+                    characterAliases: {},
+                    characterOutfits: {},
+                },
+            },
+            readerMode: 'pc',
+            readerSettings: {},
+        }),
+        saveUnifiedSettings: () => ({ ok: true }),
+    });
+    try {
+        const source = [
+            '[igs-char:Alice|平和|你好]',
+            '开场。',
+            '[igs-char:Bob|平和|再见]',
+        ].join('\n');
+        const opened = host.openReader({ raw: source, message: { text: source } }, { mode: 'pc' });
+        assert.equal(opened.snapshot.content.pendingSpriteRef, 'igs-gen:first', '首屏未就绪的立绘应留下等待标记');
+        assert.equal(opened.snapshot.content.spriteImage, null);
+        assert.ok(calls.includes('igs-gen:first'));
+        assert.ok(calls.includes('igs-gen:second'));
+        calls.length = 0;
+        pictures.set('igs-gen:first', 'data:image/png;base64,QQ==');
+        notify({ reason: 'image-loaded', imageId: 'first' });
+        assert.ok(calls.includes('igs-gen:first'));
+        assert.ok(!calls.includes('igs-gen:second'), '异步到达立绘不应重新遍历其他立绘');
+        assert.equal(timers.length, 1, '保留原有合并重绘调度，不新增重绘');
+        calls.length = 0;
+        notify({ reason: 'image-loaded', imageId: 'unrelated' });
+        assert.deepEqual(calls, [], '无关图片到达不得再次读取整楼预热素材');
+        assert.equal(timers.length, 1, '多个图片事件仍沿用合并重绘');
+    } finally {
+        host.destroy();
+    }
+});
+
+test('gate:igs-ui:sprite-text-wait-is-bounded-and-released-without-rerender', () => {
+    const current = {}, text = { style: { visibility: '' } };
+    const timers = new Map();
+    let nextId = 0, scheduled = 0;
+    const schedule = (fn, ms) => {
+        assert.equal(ms, 160);
+        const id = ++nextId;
+        timers.set(id, fn);
+        scheduled += 1;
+        return id;
+    };
+    const cancel = (id) => timers.delete(id);
+    const sync = (page, pending) => syncSpriteTextWait(current, text, { page, pending, schedule, cancel });
+    sync('floor:0', false);
+    assert.equal(scheduled, 0, '没有待加载立绘不额外唤醒');
+    sync('floor:0', true);
+    assert.equal(text.style.visibility, 'hidden');
+    sync('floor:0', true);
+    assert.equal(scheduled, 1, '同页更新不重复安排定时器');
+    sync('floor:0', false);
+    assert.equal(text.style.visibility, '', '立绘先到立即放开文字');
+    assert.equal(timers.size, 0);
+    sync('floor:0', true);
+    assert.equal(scheduled, 1, '同页不再次隐藏已显示文字');
+    sync('floor:1', true);
+    assert.equal(scheduled, 2);
+    const timeout = timers.values().next().value;
+    timers.clear();
+    timeout();
+    assert.equal(text.style.visibility, '', '到时先让读者看见文字');
+    sync('floor:1', true);
+    assert.equal(scheduled, 2, '超时后本页不重复等待');
+    sync('floor:2', true);
+    assert.equal(scheduled, 3);
+    current.spriteTextWait.release();
+    assert.equal(text.style.visibility, '', '关闭阅读器时可释放文字和计时器');
+    assert.equal(timers.size, 0);
 });
 
 test('gate:igs-ui:settings-repaints-thumbs-when-generated-images-arrive', () => {
@@ -5202,7 +5398,7 @@ test('gate:generated-images:nai-client-edit-uses-infill-and-hides-key', async ()
 test('gate:generated-images:inpaint-transaction-preview-accept-cancel-and-stale', async () => {
     const { createInpaintTransaction, buildInpaintPrompt } = await import('../src/generated-images/illustration/inpaint-transaction.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
-    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createAssetGenerationService } = await import('./helpers/media-fixtures.js');
     const store = createMemoryGeneratedAssetStore();
     await store.putImage({ id: 'sp', schemaVersion: 2, type: 'sprite', originalDataUrl: 'data:image/png;base64,ORIG', workingDataUrl: '', dataUrl: 'cut0', alphaMaskDataUrl: 'mask0', revision: 1 });
     await store.putImage({ id: 'old', type: 'sprite', dataUrl: 'legacy' });

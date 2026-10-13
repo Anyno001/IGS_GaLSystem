@@ -1,3 +1,4 @@
+import { createMemoryAssetThumbStore } from './helpers/media-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -16,7 +17,7 @@ import { DIALOG_FONT_OPTIONS } from '../src/visual/igs-ui/reader-host-constants.
 import { DIALOG_FONT_CHILL_ROUND } from '../src/visual/igs-ui/dialog-theme-typography.js';
 import { isGlobalSettingKey } from '../src/storage/tavern-settings-file.js';
 import { renderCustomFontManager } from '../src/visual/igs-ui/settings-fields.js';
-import { createMemoryAssetThumbStore } from '../src/media/asset-thumb-store.js';
+
 
 const appRoot = path.resolve(import.meta.dirname, '..');
 

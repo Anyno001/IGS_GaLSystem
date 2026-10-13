@@ -4,7 +4,7 @@ import { buildIgsTextPayload, normalizeSourceFilter, normalizeVirtualRegex } fro
 import { dropConfirmedOutfitReview } from '../../scene/outfit-review-store.js';
 import { assetOwnerKey, assetShadowsGlobal, draftEffectiveAssets, effectiveSceneAssets, rememberAssetScope } from '../../scene/asset-scope.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
-import { menuItem, renderOutfitReviewList, renderRowMenu, renderWardrobe } from './settings-outfit-fields.js';
+import { menuItem, renderMigrateEntry, renderOutfitReviewList, renderRowMenu, renderWardrobe } from './settings-outfit-fields.js';
 import { normalizeItemImageSettings } from '../../generated-images/illustration/item-image-settings.js';
 import { createCgLibraryView } from './cg-library-view.js';
 import { countEnabledPerformance, performanceGroupCounts, renderPerformancePage, renderPerformancePresetBar } from './performance-settings-layout.js';
@@ -45,6 +45,7 @@ import { renderAssetFolderView, renderAssetFolderSelect } from './asset-folder-v
 import { loadMoodReview } from '../../scene/mood-review-store.js';
 import { CLASSIC_DIALOG_THEME_DEFAULTS, DIALOG_SKIN_GRADIENT_VEIL, DIALOG_SKIN_WESTERN_CLASSIC, isIllustratedDialogSkin, supportsDialogAutoHeight } from './classic-dialog-skin.js';
 import { dialogSkinLabel, getDialogSkinChoices } from './dialog-skin-catalog.js';
+import { DIALOG_SKIN_XIANXIA_INK } from './dialog-theme-xianxia.js';
 import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_HOUSES, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { VOICE_BARK_FREQUENCIES, normalizeVoiceBarkSettings } from './voice-bark.js';
 import { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_PROVIDERS, TTS_RATES, TTS_TRANSPORTS, normalizeTtsSettings, systemVoiceOptions, ttsApiVoiceList } from './tts.js';
@@ -241,6 +242,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 imageLogStatus: esc(asyncState.imageLogStatus || ''),
                 imageLogList: page === 'logs' && !idx ? renderImageJobLogList() : '',
                 imageCacheCountField: field('bridge.imageCache.maxCount', '本地缓存张数', numberInput('bridge.imageCache.maxCount', normalizeImageCacheCount(bridge.imageCache && bridge.imageCache.maxCount), 1, 2000)),
+                imageCacheStatus: esc(asyncState.imageCacheStatus || '图片按需加载；编码字节内存上限 64 MB。跨会话缓存取决于 IndexedDB 是否可用，点击查看实际占用。'),
                 imageCgStatus: esc(asyncState.imageCgStatus || ''),
                 imageCgList: page === 'cglib' && !idx ? renderImageCgList() : '',
                 imageCgOldestFirst: String(Boolean(asyncState.imageCg && asyncState.imageCg.state.filters.oldestFirst)),
@@ -480,6 +482,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 temp: !idx && generatedService && typeof generatedService.listTemp === 'function' ? generatedService.listTemp() : [],
                 resolveUrl: resolveGenerated,
                 moodGroups: sceneAssets.moodGroups || [],
+                tempPage: !idx && generatedService?.tempPage ? generatedService.tempPage() : null,
+                readError: asyncState.genRecordsError || options.itemImages?.metadataStatus?.().error || '',
             };
             // 待确认：AI 写出但没登记的服装词、词库外的情绪词、生成了还没入库的图。索引模式和不在角色分类时不读。
             const reviewData = memo(() => {
@@ -546,6 +550,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
           ${CHARACTER_ADD_MENU}
         </div>
         ${renderDnaCandidateBar(asyncState.dnaCandidate)}
+        ${idx ? '' : renderMigrateEntry(asyncState.migrateRows)}
         ${idx ? '' : charsHtml()}
         ${idx ? '' : renderDnaOnlyCharacterList(sceneAssets.characterDna || {}, sceneAssets.characters || {})}
       </div>`;
@@ -652,7 +657,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                     ? `<div class="igs-source-filter-note igs-card-skin-note">当前角色卡在主界面选定了「${esc(dialogSkinLabel(worldviewAssets.dialogSkin))}」，阅读这张卡时以此为准，上方选项仅对其他角色卡生效。<button type="button" class="igs-settings-action" data-action="card-dialog-skin-clear">跟随上方</button></div>`
                     : ''),
             gradientVeilFields: gradientVeilDialog ? '<div class="igs-gradient-veil-settings">' + field('readerSettings.gradientVeil.color', '黑幕颜色', colorInput('readerSettings.gradientVeil.color', reader.gradientVeil.color)) + field('readerSettings.gradientVeil.heightPercent', '渐变高度', selectInput('readerSettings.gradientVeil.heightPercent', reader.gradientVeil.heightPercent, [30, 40, 50, 60, 70].map((n) => [n, `${n}%`]))) + field('readerSettings.gradientVeil.opacity', '最大不透明度', selectInput('readerSettings.gradientVeil.opacity', reader.gradientVeil.opacity, [.4, .55, .7, .85, 1].map((n) => [n, `${Math.round(n * 100)}%`]))) + field('readerSettings.gradientVeil.speakerStyle', '姓名样式', selectInput('readerSettings.gradientVeil.speakerStyle', reader.gradientVeil.speakerStyle, [['default', '默认风格'], ['plain-text', '纯文字']])) + '</div>' : '',
-            magicHouseField: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY ? field('readerSettings.magicHouse', resolveWorldview(bridge.sceneAssets) === 'magic' ? '学院配色' : '配色', selectInput('readerSettings.magicHouse', normalizeMagicHouse(reader.magicHouse), MAGIC_HOUSES.map((house) => [house.id, house.label]))) + (MAGIC_HOUSES.find((house) => house.id === normalizeMagicHouse(reader.magicHouse)).custom ? field('readerSettings.magicAccent', '装饰颜色', colorInput('readerSettings.magicAccent', normalizeMagicAccent(reader.magicAccent))) : '') : reader.dialogSkin === DIALOG_SKIN_HORROR_GORE || reader.dialogSkin === DIALOG_SKIN_HORROR_PSYCH ? field('readerSettings.horrorDreadCap', '恐怖强度上限', selectInput('readerSettings.horrorDreadCap', normalizeHorrorDreadCap(reader.horrorDreadCap), HORROR_DREAD_LEVELS.map((n) => [n, HORROR_DREAD_CAP_LABELS[n]]))) : '',
+            magicHouseField: reader.dialogSkin === DIALOG_SKIN_XIANXIA_INK ? field('readerSettings.xianxiaSpeaker', '姓名排布', selectInput('readerSettings.xianxiaSpeaker', reader.xianxiaSpeaker === 'center' ? 'center' : 'left', [['left', '左侧落款'], ['center', '居中（名字+剑气下划线）']])) : reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY ? field('readerSettings.magicHouse', resolveWorldview(bridge.sceneAssets) === 'magic' ? '学院配色' : '配色', selectInput('readerSettings.magicHouse', normalizeMagicHouse(reader.magicHouse), MAGIC_HOUSES.map((house) => [house.id, house.label]))) + (MAGIC_HOUSES.find((house) => house.id === normalizeMagicHouse(reader.magicHouse)).custom ? field('readerSettings.magicAccent', '装饰颜色', colorInput('readerSettings.magicAccent', normalizeMagicAccent(reader.magicAccent))) : '') : reader.dialogSkin === DIALOG_SKIN_HORROR_GORE || reader.dialogSkin === DIALOG_SKIN_HORROR_PSYCH ? field('readerSettings.horrorDreadCap', '恐怖强度上限', selectInput('readerSettings.horrorDreadCap', normalizeHorrorDreadCap(reader.horrorDreadCap), HORROR_DREAD_LEVELS.map((n) => [n, HORROR_DREAD_CAP_LABELS[n]]))) : '',
             classicDialogWidthPercentField: classicDialog ? field('readerSettings.classicDialogWidthPercent', '电脑端宽度', selectInput('readerSettings.classicDialogWidthPercent', reader.classicDialogWidthPercent, [60, 70, 80, 90, 100].map((n) => [n, `${n}%`]))) : '',
             skinDialogScaleField: classicDialog || illustratedDialog ? field('readerSettings.skinDialogScale', '对话框高度', selectInput('readerSettings.skinDialogScale', reader.skinDialogScale, SKIN_DIALOG_SCALE_OPTIONS.map((n) => [n, n === 1 ? '原尺寸' : `${Math.round(n * 100)}%`]))) : '',
             optionFontSizeField: field('readerSettings.optionFontSize', '选项字体大小', selectInput('readerSettings.optionFontSize', reader.optionFontSize, [10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map((n) => [n, `${n}px`]))),
@@ -725,6 +730,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             narrationFilterToggle: checkbox('readerSettings.statusHud.dimSpriteOnNarration', reader.statusHud && reader.statusHud.dimSpriteOnNarration !== false, '旁白时压暗立绘'),
             cgHoldField: field('readerSettings.cgHoldPages', '日常CG停留', selectInput('readerSettings.cgHoldPages', reader.cgHoldPages || 4, [[2, '2页'], [3, '3页'], [4, '4页'], [6, '6页'], [8, '8页']]), 'NSFW插图保持到下一张'),
             sentencePagingToggle: checkbox('bridge.sentencePaging', Boolean(bridge.sentencePaging), '旁白按句号分页'),
+            dialogueSentencePagingToggle: checkbox('bridge.dialogueSentencePaging', Boolean(bridge.dialogueSentencePaging), '对白／心理话也按句分页'),
             nsfwSpriteModeField: `<div class="igs-settings-field">${segmentedInput('readerSettings.statusHud.nsfwSpriteMode', statusHud.nsfwSpriteMode, [['show', '显示立绘'], ['hide', '隐藏立绘'], ['shade', '仅露脸剪影']], 'NSFW场景立绘')}<em>使用剪影前，请先在立绘编辑中标定头部</em></div>`,
             nsfwVeilLevelField: field('readerSettings.statusHud.nsfwVeilLevel', '黑幕强度', segmentedInput('readerSettings.statusHud.nsfwVeilLevel', (reader.statusHud && reader.statusHud.nsfwVeilLevel) || 'medium', [['light', '弱'], ['medium', '中'], ['strong', '强']], '黑幕强度')),
             nsfwCgPortraitToggle: checkbox('readerSettings.statusHud.nsfwCgPortrait', statusHud.nsfwCgPortrait, 'CG时对话框旁显示裸体头像（需衣柜里有引用「裸体」的服装）'),
@@ -779,6 +785,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 cinemaBars: readerValues.cinemaBarsToggle,
                 sentencePaging: readerValues.sentencePagingToggle,
                 sentencePagingOn: Boolean(bridge.sentencePaging),
+                dialogueSentencePaging: readerValues.dialogueSentencePagingToggle,
+                dialogueSentencePagingOn: Boolean(bridge.dialogueSentencePaging),
                 nsfwSprite: readerValues.nsfwSpriteModeField,
                 nsfwVeil: readerValues.nsfwVeilLevelField,
                 nsfwCgPortrait: [readerValues.nsfwCgPortraitToggle, readerValues.nsfwCgPortraitControls],

@@ -8,6 +8,7 @@ import { drawLinks, LINK_MAX } from './fx-links.js';
 import { cloneSpriteLayer, resolveHeadAnchor, resolveRegionCrop } from './stage-snapshot.js';
 import { SPRITE_ACTION_FRAMES, playSpriteSpec } from './sprite-actions.js';
 import { isLowQuality, punchStage } from './fx-beats-punch.js';
+import { buildItemCard } from './fx-item-card.js';
 import { CROWD_CAPTIONS, PANEL_TYPE_LABELS } from './fx-beats-model.js';
 
 export const BEATS_LIFE_MS = Object.freeze({ reveal: 3600, panel: 4200, count: 3600, evidence: 3800, link: 3800, crowd: 2400, reunion: 3200, order: 3600, os: 2600 });
@@ -61,7 +62,7 @@ function avatar(env, name, className) {
     wrap.setAttribute('aria-hidden', 'true');
     const sprite = spriteOn(env, name);
     if (sprite && String(name || '').trim()) {
-        const crop = resolveRegionCrop({ url: urlOfImage(sprite.style && sprite.style.backgroundImage) }, 'face', 1);
+        const crop = resolveRegionCrop({ url: urlOfImage(sprite.style && sprite.style.backgroundImage) }, 'face', 1, sprite.ownerDocument);
         const face = cloneSpriteLayer(env.root, name, { speaker: env.speaker, crop });
         if (face) {
             wrap.appendChild(face);
@@ -151,10 +152,18 @@ export const BEATS_BUILDERS = {
         return { layer: 'front', life: life('count', env), sounds: ['bt-tick'], node };
     },
 
-    // 证物卡：一张细线证物卡从画面远侧滑入，标签、名称、说明三行排版。
+    // 出示证据沿用物品小弹窗的卡片与皮肤；只复用视图，不进入物品的获得/背包状态机。
     evidence(item, env) {
-        const desc = item.desc ? `<div class="igs-bt-ev-desc">${esc(item.desc)}</div>` : '';
-        const node = make(env.doc, classOf('evidence', env), `<div class="igs-bt-ev-card"><div class="igs-bt-ev-tag">${env.ancient ? '物证' : '证物'}</div><div class="igs-bt-ev-name">${esc(item.name)}</div>${desc}</div>`);
+        let imageUrl = '';
+        try { imageUrl = typeof env.resolveItemImage === 'function' ? env.resolveItemImage(item.name) : ''; } catch { /* 缺图显示物品占位图标 */ }
+        const card = buildItemCard(env.doc, {
+            action: 'present', actionLabel: '出示证据', name: item.name,
+            description: item.desc, imageUrl,
+        });
+        const stack = make(env.doc, 'igs-fx-item-stack igs-bt-evidence-stack');
+        stack.appendChild(card);
+        const node = make(env.doc, classOf('evidence', { ...env, ancient: false }));
+        node.appendChild(stack);
         return { layer: 'front', life: life('evidence', env), sounds: ['bt-slap'], node };
     },
 

@@ -1,3 +1,5 @@
+import { getSillyTavernContext } from '../host/tavern-helper-adapter.js';
+import { imageFingerprint } from '../media/image-identity.js';
 import { collectProviderImages, listBuiltinImageProviders } from './provider-runtime.js';
 import { createMessageImageCache } from '../media/message-image-cache.js';
 import {
@@ -13,12 +15,20 @@ import {
 export function createReaderImageService(options = {}) {
     const globalObject = options.global || globalThis.window || globalThis;
     const hostAdapter = options.hostAdapter || null;
-    const cache = options.cache || createMessageImageCache();
+    const cache = options.cache || createMessageImageCache(new Map(), { mediaCache: options.mediaCache });
     const builtinProviders = normalizeProviders(options.providers || listBuiltinImageProviders());
     const imageGenerator = typeof options.imageGenerator === 'function' ? options.imageGenerator : null;
     const fetchFn = typeof options.fetch === 'function' ? options.fetch : null;
 
+    function cacheScope(context, message) {
+        const host = getSillyTavernContext(globalObject);
+        const chatId = context.chatId ?? host?.getCurrentChatId?.() ?? host?.chatId ?? message?.chatId ?? '';
+        const swipeId = context.swipeId ?? message?.swipeId ?? message?.raw?.swipe_id ?? host?.chat?.[context.messageId]?.swipe_id ?? 0;
+        return { chatId, swipeId, revision: imageFingerprint(String(host?.chat?.[context.messageId]?.mes ?? message?.raw?.mes ?? message?.text ?? '')) };
+    }
     return {
+        clearCache() { cache.clear(); },
+        destroy() { cache.destroy?.(); },
         registerProviders(registry) {
             if (!registry || typeof registry.register !== 'function') return;
             for (const provider of builtinProviders) {
@@ -57,8 +67,10 @@ export function createReaderImageService(options = {}) {
                 ? ensureMessageImagePlaceholders(message, imageSlots)
                 : null;
             const roots = scope.roots;
-            const cachedEntry = context.skipCache ? null : cache.get(messageId);
-            if (context.skipCache) cache.clearMessage(messageId);
+            const identity = cacheScope({ ...context, messageId }, message), generation = cache.epoch?.();
+            const liveIdentity = cacheScope({ messageId }, message);
+            const cachedEntry = context.skipCache ? null : cache.get(messageId, identity);
+            if (context.skipCache) cache.clearMessage(messageId, identity);
             const providerImages = await collectProviderImages(buildProviderContext({
                 context,
                 message,
@@ -68,6 +80,9 @@ export function createReaderImageService(options = {}) {
                 globalObject,
                 fetchFn,
             }), resolveActiveProviders(context.providers, builtinProviders, imageApi));
+            if (generation !== cache.epoch?.()) return emptyImageState({ ok: false, reason: 'cache-cleared' });
+            const currentIdentity = cacheScope({ messageId }, message);
+            if (liveIdentity.chatId !== currentIdentity.chatId || liveIdentity.swipeId !== currentIdentity.swipeId || liveIdentity.revision !== currentIdentity.revision) return emptyImageState({ ok: false, reason: 'stale-message' });
             const sceneImages = collectSceneImages(context.scene, context.render);
             const cachedImages = cachedEntry && Array.isArray(cachedEntry.images) ? cachedEntry.images : [];
             const preferredImageIndex = resolvePreferredImageIndex(context, imageSlots.length);
@@ -88,7 +103,7 @@ export function createReaderImageService(options = {}) {
                 const stored = cache.remember(messageId, [
                     ...extractStoredSlotImages(imageState.slots),
                     ...imageState.unboundImages,
-                ]);
+                ], { scope: identity });
                 if (stored.ok === false) return emptyImageState(stored);
                 return {
                     ...imageState,
@@ -104,7 +119,7 @@ export function createReaderImageService(options = {}) {
                 ...cachedImages,
                 ...sceneImages,
             ]);
-            const stored = cache.remember(messageId, images);
+            const stored = cache.remember(messageId, images, { scope: identity });
             if (stored.ok === false) return emptyImageState(stored);
             return buildImageState(stored.entry, context.currentIndex, {
                 scopeKind: scope.kind,
@@ -236,6 +251,8 @@ export function createReaderImageService(options = {}) {
                 return { ok: false, reason: 'invalid-message-id', messageId };
             }
 
+            const message = await resolveMessageContext(context, hostAdapter, messageId);
+            const identity = cacheScope({ ...context, messageId }, message);
             const imageIndex = resolvePreferredImageIndex(context, countImageSlots(context.imageState));
             const unifiedSettings = context.unifiedSettings || {};
             const imageApi = resolveImageApi(unifiedSettings);
@@ -274,7 +291,7 @@ export function createReaderImageService(options = {}) {
                     const stored = cache.remember(messageId, [
                         ...extractStoredSlotImages(nextSlots),
                         ...nextUnbound,
-                    ]);
+                    ], { scope: identity });
                     const nextState = buildSlottedImageState({
                         messageId,
                         imageSlots: nextSlots,
@@ -294,7 +311,7 @@ export function createReaderImageService(options = {}) {
                     };
                 }
                 const nextImages = replaceImageAtIndex(currentState.images, imageIndex, nextImage);
-                const stored = cache.remember(messageId, nextImages);
+                const stored = cache.remember(messageId, nextImages, { scope: identity });
                 return {
                     ok: stored.ok !== false,
                     reason: 'generated-image-updated',
