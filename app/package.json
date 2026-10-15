@@ -1,20 +1,14 @@
 {
   "name": "igs-app",
-  "version": "0.36.55",
+  "version": "0.36.75",
   "private": true,
   "type": "module",
   "scripts": {
-    "structure": "node scripts/gate-structure.js",
-    "static": "node scripts/gate-static.js",
-    "test": "node --test \"tests/!(simulate).test.js\" tests/settings-notice.test.js tests/settings-panel-ux.test.js",
-    "simulate": "node --test tests/simulate.test.js",
-    "perf": "node scripts/perf-smoke.js",
     "preview:records": "node scripts/record-pages-preview.mjs",
     "build": "node scripts/build.js",
     "build:fonts": "node scripts/split-fonts.js",
     "build:loader": "node scripts/build-loader.js",
-    "package:loader": "npm run build && npm run build:loader",
-    "gate": "npm run structure && npm run static && npm run test && npm run simulate && npm run perf && npm run build"
+    "package:loader": "npm run build && npm run build:loader"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

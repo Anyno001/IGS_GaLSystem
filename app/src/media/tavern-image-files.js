@@ -32,12 +32,16 @@ export function createTavernImageFiles(globalObject, legacyDir) {
         flights.set(hash, job);
         return job;
     }
-    async function read(path) {
-        return cache.load(path, async signal => {
+    async function read(path, { strictRead = false } = {}) {
+        const task = cache.load(path, async signal => {
             const response = await mediaRequest(globalObject, `/${String(path).replace(/^\//, '')}`, { cache: 'no-store', signal });
-            if (!response?.ok) throw new Error('image-file-unreadable');
+            if (!response?.ok) throw Object.assign(new Error(response?.status === 404 || response?.status === 410 ? 'image-file-not-found' : 'image-file-unreadable'), { status: response?.status });
             return blobDataUrl(await response.blob(), globalObject, { signal });
-        }, { download: true }).catch(() => '');
+        }, { download: true });
+        if (!strictRead) return task.catch(() => '');
+        const value = await task;
+        if (!value) throw new Error('image-read-incomplete');
+        return value;
     }
     async function offload(record, key, old) {
         if (!record) return record;
@@ -72,7 +76,7 @@ export function createTavernImageFiles(globalObject, legacyDir) {
         const fields = options.fields === '*' ? IMAGE_FIELDS : options.fields || ['dataUrl'];
         const references = {};
         await Promise.all(fields.map(async field => {
-            if (isImagePath(record[field])) { references[field] = record[field]; next[field] = await read(record[field]); }
+            if (isImagePath(record[field])) { references[field] = record[field]; next[field] = await read(record[field], options); }
         }));
         Object.defineProperty(next, IMAGE_PROVENANCE, { value: references, enumerable: true });
         return next;

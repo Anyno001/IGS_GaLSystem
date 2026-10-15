@@ -87,7 +87,7 @@ export const WAIT_STAGE_GAME_LABELS = Object.freeze({
 });
 
 // 只有素材够玩时才列出对应的游戏；都不够就只剩猜拳（不需要任何素材）。
-export function availableWaitStageGames(art = {}, lines = []) {
+export function availableWaitStageGames(art = {}, lines = [], extraNames = []) {
     // 翻牌按去重后的图算：同一张图重复只算一对，否则列出来也翻不出几手。
     const pictures = new Set((Array.isArray(art.pictures) ? art.pictures : [])
         .map((item) => String(item && item.url || '').trim())
@@ -98,11 +98,14 @@ export function availableWaitStageGames(art = {}, lines = []) {
         const who = String((line && line.who) || '').trim();
         if (who) names.add(who);
     }
+    for (const name of Array.isArray(extraNames) ? extraNames : []) {
+        if (String(name || '').trim()) names.add(String(name).trim());
+    }
     const moods = new Set(sprites.map((item) => String(item.mood || '').trim()).filter(Boolean));
     const quotedCount = lines.filter((line) => line && String(line.text || '').trim() && String(line.who || '').trim()).length;
     return WAIT_STAGE_GAMES.filter((id) => {
         if (id === 'rps') return true;
-        if (id === 'whosaid') return quotedCount >= 2 && names.size >= 2;
+        if (id === 'whosaid') return quotedCount >= 1 && names.size >= 2;
         if (id === 'memory') return pictures.size >= 3;
         return sprites.length >= 2 && moods.size >= 2;
     });

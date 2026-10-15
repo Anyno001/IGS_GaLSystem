@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { insertMarkersAtAnchors, insertMarkers, numberParagraphs, transplantMarkers } from '../src/generated-images/illustration/marker-placer.js';
+import { findAnchorInsertIndex, insertMarkersAtAnchors, insertMarkers, numberParagraphs, transplantMarkers } from '../src/generated-images/illustration/marker-placer.js';
 import { buildIgsTextPayload } from '../src/scene/message-source.js';
 import { normalizeImageMarkerLayout } from '../src/scene/image-marker-layout.js';
 
@@ -98,4 +98,74 @@ test('gate:marker-layout:crlf-and-unclosed-structures-do-not-get-corrupted', () 
     assert.equal(insertMarkersAtAnchors(unfinished, [{ slot: 1, anchorSentence: '先把画挂起来。' }]), unfinished);
     const attribute = '<content>\n<img alt="先把画挂起来。\n更多文字" src="a.png">\n</content>';
     assert.equal(insertMarkersAtAnchors(attribute, [{ slot: 1, anchorSentence: '先把画挂起来。' }]), '<content>\n<img alt="先把画挂起来。\n更多文字" src="a.png">\n[igs-img:1]\n</content>');
+});
+
+test('marker-layout:thinking-examples-cannot-block-body-anchors', () => {
+    const dialogue = '[igs-char:角色甲|平和|先把画挂起来。\n\n再把灯点上。]';
+    for (const tag of ['thinking', 'think', 'Subtext_think']) {
+        const prefix = `<${tag}>遵循<sentence_hard_constraints>；记录[未闭合；\n\`\`\`html\n<content>示例\n</${tag}>\n`;
+        const raw = `${prefix}<content>\n${dialogue}\n</content>`;
+        const found = findAnchorInsertIndex(raw, '先把画挂起来。');
+        assert.equal(found.mode, 'exact');
+        assert.equal(found.index, raw.indexOf(dialogue) + dialogue.length);
+        assert.equal(insertMarkersAtAnchors(raw, [{ slot: 1, anchorSentence: '先把画挂起来。' }]), `${prefix}<content>\n${dialogue}\n[igs-img:1]\n</content>`);
+    }
+});
+
+test('marker-layout:literal-content-examples-do-not-consume-real-body', () => {
+    const dialogue = '[igs-char:角色甲|平和|先把画挂起来。]';
+    for (const prefix of ['<thinking>示例<content>\n</thinking>\n', '```html\n<content>\n```\n', '<!-- 示例<content> -->\n']) {
+        const raw = `${prefix}<content>\n${dialogue}\n</content>`;
+        assert.equal(insertMarkersAtAnchors(raw, [{ slot: 2, anchorSentence: '先把画挂起来。' }]), `${prefix}<content>\n${dialogue}\n[igs-img:2]\n</content>`);
+    }
+});
+
+test('marker-layout:repeated-anchor-only-binds-inside-body', () => {
+    const anchor = '先把画挂起来。';
+    const prefix = `<thinking>计划：${anchor}</thinking>\n<meta>${anchor}</meta>\n<content-example>${anchor}</content-example>\n`;
+    const dialogue = `[igs-char:角色甲|平和|${anchor}]`;
+    const raw = `${prefix}<content>\r\n${dialogue}\r\n</content>`;
+    assert.equal(findAnchorInsertIndex(raw, anchor).anchorIndex, raw.lastIndexOf(anchor) + anchor.length);
+    assert.equal(insertMarkersAtAnchors(raw, [{ slot: 3, anchorSentence: anchor }]), `${prefix}<content>\r\n${dialogue}\r\n[igs-img:3]\r\n</content>`);
+    assert.deepEqual(findAnchorInsertIndex('<thinking>只在计划里出现。</thinking><content>这是正文。</content>', '只在计划里出现。'), { index: -1, mode: 'fail' });
+});
+
+test('marker-layout:each-body-has-its-own-structure-scope', () => {
+    const prefix = '<now_plot>未闭合[示例\n<content><panel>第一段还没结束。\n</content>\n';
+    const dialogue = '[igs-char:角色甲|平和|先把画挂起来。]';
+    const raw = `${prefix}<content>\n${dialogue}\n</content>\n</now_plot>`;
+    assert.equal(findAnchorInsertIndex(raw, '第一段还没结束。').index, -1);
+    assert.equal(insertMarkersAtAnchors(raw, [{ slot: 4, anchorSentence: '先把画挂起来。' }]), `${prefix}<content>\n${dialogue}\n[igs-img:4]\n</content>\n</now_plot>`);
+});
+
+test('marker-layout:exact-anchor-in-later-body-beats-approximate-earlier-body', () => {
+    const raw = '<content>先把画挂起来！</content>\n<content>[igs-char:角色甲|平和|先把画挂起来。]</content>';
+    const found = findAnchorInsertIndex(raw, '先把画挂起来。');
+    assert.equal(found.mode, 'exact');
+    assert.equal(found.anchorIndex, raw.lastIndexOf('先把画挂起来。') + '先把画挂起来。'.length);
+    assert.equal(insertMarkersAtAnchors(raw, [{ slot: 5, anchorSentence: '先把画挂起来。' }]), '<content>先把画挂起来！</content>\n<content>[igs-char:角色甲|平和|先把画挂起来。]\n[igs-img:5]\n</content>');
+});
+
+test('marker-layout:body-html-and-code-stay-complete-with-misleading-prelude', () => {
+    const prefix = '<thinking>遵循<sentence_hard_constraints></thinking>\n';
+    for (const unit of ['<div>先把画挂起来。\n再把灯点上。</div>', '```html\n先把画挂起来。\n</content>\n```']) {
+        const raw = `${prefix}<content>\n${unit}\n</content>`;
+        assert.equal(insertMarkersAtAnchors(raw, [{ slot: 6, anchorSentence: '先把画挂起来。' }]), `${prefix}<content>\n${unit}\n[igs-img:6]\n</content>`);
+    }
+    for (const unit of ['[igs-char:角色甲|平和|先把画挂起来。', '<div>先把画挂起来。', '```html\n先把画挂起来。']) {
+        const raw = `${prefix}<content>\n${unit}\n</content>`;
+        const found = findAnchorInsertIndex(raw, '先把画挂起来。');
+        assert.equal(found.mode, 'exact');
+        assert.ok(found.anchorIndex >= 0);
+        assert.equal(found.index, -1);
+        assert.equal(insertMarkersAtAnchors(raw, [{ slot: 6, anchorSentence: '先把画挂起来。' }]), raw);
+    }
+});
+
+test('marker-layout:legacy-marker-repair-ignores-unclosed-prelude-examples', () => {
+    const prefix = '<thinking>遵循<sentence_hard_constraints></thinking>\n';
+    const raw = `${prefix}<content>\n[igs-char:角色甲|平和|先把画挂起来。\n[igs-img:7]\n再把灯点上。]\n</content>`;
+    const expected = `${prefix}<content>\n[igs-char:角色甲|平和|先把画挂起来。再把灯点上。]\n[igs-img:7]\n</content>`;
+    assert.equal(normalizeImageMarkerLayout(raw), expected);
+    assert.equal(normalizeImageMarkerLayout(expected), expected);
 });

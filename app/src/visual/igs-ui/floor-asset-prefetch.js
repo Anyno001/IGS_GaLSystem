@@ -34,11 +34,17 @@ export function collectFloorAssetUrls({
     onSpriteUrl = null,
     systemRole = null,
     readClues = null,
+    prepared = null,
 } = {}) {
     const urls = [];
     const seen = new Set();
     for (const slot of Array.isArray(imageSlots) ? imageSlots : []) {
         pushUrl(urls, seen, slot && slot.url);
+    }
+    if (prepared) {
+        for (const url of prepared.assets?.urls || []) pushUrl(urls, seen, url);
+        for (const hit of prepared.eventCgs || []) pushUrl(urls, seen, hit?.url);
+        return urls;
     }
     if (!sceneAssets || !sceneAssets.enabled) return urls;
     const ctx = assetMatchCtx || { sceneAssets };

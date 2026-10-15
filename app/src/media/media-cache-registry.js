@@ -8,6 +8,7 @@ export const MEDIA_CACHE_POLICIES = Object.freeze({
     maps: { purpose: '地图生成任务和结果索引', maxEntries: 4, failureTtlMs: 30000, ttlFor: value => value.status === 'failed' ? 30000 : 0 },
     'sprite-geometry': { purpose: '立绘尺寸、头部和脚底探测结果', maxEntries: 48 },
     'sprite-failures': { purpose: '立绘探测失败，抑制反复解码', maxEntries: 48, ttlMs: 30000 },
+    'asset-image-failures': { purpose: '素材图片短期读取失败', maxEntries: 128, ttlFor: value => value.missing ? 30000 : 1500 },
     'sprite-probes': { purpose: '立绘在途探测去重', maxEntries: 48, retention: 'in-flight' },
     'cg-failures': { purpose: 'CG 缩略图失败，抑制反复读图', maxEntries: 320, ttlMs: 30000 },
     'cg-catalogue': { purpose: '当前 CG 库视图目录和任务', maxScopes: 1, retention: 'view' },
@@ -18,7 +19,7 @@ export const MEDIA_CACHE_POLICIES = Object.freeze({
 const OWNER_BYTE_BUDGETS = Object.freeze({
     messages: 512 * 1024, 'asset-records': 4 * 1024 * 1024, 'item-records': 4 * 1024 * 1024,
     'cg-states': 512 * 1024, maps: 128 * 1024, 'sprite-geometry': 64 * 1024,
-    'sprite-failures': 64 * 1024, 'sprite-probes': 64 * 1024, 'cg-failures': 256 * 1024,
+    'sprite-failures': 64 * 1024, 'sprite-probes': 64 * 1024, 'asset-image-failures': 64 * 1024, 'cg-failures': 256 * 1024,
     'cg-catalogue': 8 * 1024 * 1024, directories: 512 * 1024, 'reader-sources': 256 * 1024,
 });
 

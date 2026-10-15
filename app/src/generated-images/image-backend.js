@@ -82,9 +82,13 @@ function parseSize(size) {
 }
 
 async function blobToDataUrl(blob, mimeType, globalObject) {
-    if (typeof blob === 'string') return blob;
+    if (typeof blob === 'string') {
+        if (!blob.trim() || /^data:[^,]*,\s*$/.test(blob)) throw new Error('返回空图，未返回图片字节');
+        return blob;
+    }
     const buffer = typeof blob.arrayBuffer === 'function' ? await blob.arrayBuffer() : await new Response(blob).arrayBuffer();
     const bytes = new Uint8Array(buffer);
+    if (!bytes.length) throw new Error('返回空图，未返回图片字节');
     let binary = '';
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
     const encode = (globalObject && typeof globalObject.btoa === 'function' ? globalObject.btoa.bind(globalObject) : null) || globalThis.btoa;

@@ -63,7 +63,7 @@ import { buildTagGrammar, DEPTH0_REMINDER, GRAMMAR_HEADER, normalizePromptPlacem
 import { resolvePromptTriggers, setLastPromptReport } from '../scene/prompt-triggers.js';
 import { collectPromptContext } from '../host/prompt-context.js';
 
-const IGS_VERSION = '0.36.55';
+const IGS_VERSION = '0.36.75';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
@@ -178,6 +178,7 @@ export function bootstrapIGS(options = {}) {
     // 物品图与素材补全共用 igs-generated-assets 存储实例。
     const generatedAssetStore = options.generatedAssetStore || withTavernGeneratedAssetFiles(createIndexedDbGeneratedAssetStore(globalObject), globalObject);
     const assetGenerationService = options.assetGenerationService || createAssetGenerationService({
+        global: globalObject,
         messageHost: illustrationMessageHost,
         llm: secondaryLlm,
         nai: imageBackend,
@@ -277,6 +278,7 @@ export function bootstrapIGS(options = {}) {
         imageEditBackend: imageBackend,
         alphaMatte: options.alphaMatte || createAlphaMatte(globalObject),
         onGeneratedAssetUpdated: (handler) => events.on(GENERATED_ASSET_UPDATED_EVENT, handler),
+        onSettingsUpdated: (handler) => events.on('igs:legacy-settings-updated', handler),
         itemImages: itemCg.itemImages,
         cgGallery: itemCg.cgGallery,
         onItemImageUpdated: itemCg.onItemImageUpdated,
@@ -401,8 +403,10 @@ export function bootstrapIGS(options = {}) {
     if (!options.storage && storageLike && options.tavernSettingsSync !== false) {
         state.settingsSync = createTavernSettingsSync(globalObject, {
             storage: storageLike,
+            onUploaded: () => { if (!state.destroyed) void media.referencesChanged().catch(() => {}); },
             onRestored: () => {
                 if (state.destroyed) return;
+                void media.referencesChanged().catch(() => {});
                 state.legacyIgs = readLegacyIgsSettings(storageLike);
                 state.config = mergeInitialConfig(options.config, state.legacyIgs);
                 state.settingsRevision = (state.settingsRevision || 0) + 1;

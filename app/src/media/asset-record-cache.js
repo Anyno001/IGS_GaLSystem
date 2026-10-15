@@ -1,7 +1,7 @@
 import { requireMediaCache } from './media-cache-owner.js';
 
 // variantOf 必须留着：时段差分入库时主图地址要回指原图（asset-match.bindGeneratedBackground）。
-const DISPLAY_FIELDS = ['chatId', 'floorKey', 'type', 'name', 'time', 'status', 'imageId', 'tags', 'variantOf'];
+const DISPLAY_FIELDS = ['chatId', 'floorKey', 'type', 'name', 'time', 'status', 'skipReason', 'imageId', 'tags', 'variantOf'];
 const QUERY_FIELDS = DISPLAY_FIELDS.filter(field => field !== 'tags');
 const project = record => record ? Object.fromEntries(['key', ...DISPLAY_FIELDS].filter(field => Object.hasOwn(record, field)).map(field => [field, record[field]])) : null;
 const staleError = () => Object.assign(new Error('media-metadata-stale'), { code: 'media-metadata-stale' });

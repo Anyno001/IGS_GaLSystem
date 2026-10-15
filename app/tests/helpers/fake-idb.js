@@ -60,6 +60,23 @@ export function createFakeIndexedDB() {
                             if (active) schedule();
                             return result;
                         }
+                        function cursor(source, direction = 'next', keyOf = entry => entry[0]) {
+                            const request = {};
+                            let entries;
+                            const next = () => {
+                                const pending = req(() => {
+                                    if (!entries) {
+                                        entries = source().sort((a, b) => keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+                                        if (direction === 'prev') entries.reverse();
+                                    }
+                                    const entry = entries.shift();
+                                    return entry ? { key: keyOf(entry), primaryKey: entry[0], value: structuredClone(entry[1]), continue: next } : null;
+                                });
+                                pending.onsuccess = () => { request.result = pending.result; request.onsuccess?.(); };
+                            };
+                            next();
+                            return request;
+                        }
                         const tx = {
                             objectStore(storeName) {
                                 if (!list.includes(storeName)) throw new Error('store-not-in-transaction');
@@ -71,7 +88,13 @@ export function createFakeIndexedDB() {
                                     put: value => req(() => { const key = value[definition.keyPath]; rows().set(key, structuredClone(value)); return key; }, true, storeName),
                                     delete: key => req(() => rows().delete(key), true, storeName),
                                     clear: () => req(() => rows().clear(), true, storeName),
-                                    index(index) { return { getAll: key => req(() => [...rows().values()].filter(row => row[definition.indexes.get(index)] === key).map(row => structuredClone(row))) }; },
+                                    index(index) {
+                                        const field = definition.indexes.get(index);
+                                        return {
+                                            getAll: key => req(() => [...rows().values()].filter(row => row[field] === key).map(row => structuredClone(row))),
+                                            openCursor: (key, direction) => cursor(() => [...rows()].filter(([, row]) => key == null || row[field] === key), direction, entry => entry[1][field]),
+                                        };
+                                    },
                                 };
                             },
                             abort() { finish(new Error('aborted')); },

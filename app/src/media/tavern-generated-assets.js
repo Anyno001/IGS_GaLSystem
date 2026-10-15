@@ -44,6 +44,8 @@ export function withTavernGeneratedAssetFiles(store, globalObject = globalThis) 
     }
     const wrapper = {
         ...store,
+        restore: journal.restore,
+        hydrateImage: files.hydrate,
         getImageRecord: raw,
         async listImages() { await journal.restore(); return store.listImages(); },
         async listAssets() { await journal.restore(); return store.listAssets(); },
@@ -52,7 +54,7 @@ export function withTavernGeneratedAssetFiles(store, globalObject = globalThis) 
         async getImage(id, options = {}) {
             let record = await raw(id);
             if (!record && id && !await journal.deleted(`image:${id}`)) {
-                record = await files.recover(id).catch(() => null);
+                record = await files.recover(id).catch(error => { if (options.strictRead) throw error; return null; });
                 if (record) await saveImage(record);
             }
             if (files.hasData(record)) files.later(async () => {

@@ -32,8 +32,10 @@ export function collectWaitStageLines(turns, options = {}) {
         for (const item of directives) {
             if (!item || item.type !== 'char') continue;
             const who = String(item.character || '').trim();
-            const text = String(item.dialogue || '').replace(/\s+/g, ' ').trim();
-            if (!who || !text || text.length > QUOTE_MAX) continue;
+            const full = String(item.dialogue || '').replace(/\s+/g, ' ').trim();
+            // 长句截断而不是丢掉：正经对白大多超过一行，丢掉后回放池常年是空的。
+            const text = Array.from(full).length > QUOTE_MAX ? `${Array.from(full).slice(0, QUOTE_MAX - 1).join('')}…` : full;
+            if (!who || !text) continue;
             const key = `${who}\u0000${text}`;
             if (seen.has(key)) continue;
             seen.add(key);
@@ -103,12 +105,20 @@ export function buildWaitStageModel(options = {}) {
     const art = collectWaitStageArt(options.sceneAssets, options);
     const fallback = Array.isArray(options.fallback) && options.fallback.length ? options.fallback : WAIT_STAGE_FALLBACK_LINES;
     const playlist = weaveWaitStageLines(lines, fallback, { limit: 14, random: options.random });
+    // 「这句是谁说的」的干扰项也从本卡角色里挑：单人卡最近几楼只有一个人开口，也能玩。
+    const assets = options.sceneAssets && typeof options.sceneAssets === 'object' ? options.sceneAssets : {};
+    const names = Array.from(new Set([
+        ...lines.map((line) => line.who),
+        ...Object.keys(assets.characters || {}),
+        ...Object.keys(assets.characterOutfits || {}),
+    ].map((name) => String(name || '').trim()).filter(Boolean)));
     return {
         settings,
         playlist: playlist.length ? playlist : [{ who: '', text: fallback[0] }],
         replay: lines,
+        names,
         art,
-        games: availableWaitStageGames(art, lines),
+        games: availableWaitStageGames(art, lines, names),
     };
 }
 
@@ -181,11 +191,11 @@ export function buildMoodRound(sprites, options = {}) {
 }
 
 // 这句是谁说的：从回放池里抽一句台词，混入其他角色的名字。
-export function buildWhoSaidRound(lines, random = Math.random) {
+export function buildWhoSaidRound(lines, random = Math.random, extraNames = []) {
     const quoted = (Array.isArray(lines) ? lines : []).filter((line) => line && line.who && line.text);
-    if (quoted.length < 2) return null;
+    if (!quoted.length) return null;
     const answer = quoted[Math.floor(random() * quoted.length)];
-    const names = Array.from(new Set(quoted.map((line) => line.who)));
+    const names = Array.from(new Set(quoted.map((line) => line.who).concat(Array.isArray(extraNames) ? extraNames : [])));
     if (names.length < 2) return null;
     const others = names.filter((name) => name !== answer.who);
     return { text: answer.text, answer: answer.who, options: pickOptions(answer.who, others, 3, random) };
@@ -399,7 +409,7 @@ export function createWaitStageRuntime(options = {}) {
     }
 
     function startWhoSaid() {
-        const round = buildWhoSaidRound(model ? model.replay : [], random);
+        const round = buildWhoSaidRound(model ? model.replay : [], random, model ? model.names : []);
         const status = gameShell(WAIT_STAGE_GAME_LABELS.whosaid);
         if (!round) {
             say(status, '能回放的台词还不够，多聊几句再来。');
@@ -579,11 +589,17 @@ export function createWaitStageRuntime(options = {}) {
             return root;
         },
         // 楼层读完后再补一遍回放台词与牌面素材：开层时不等数据，先显示兜底句。
+        // 图片每读回一张就会补一次模型：台词池只在回放首次到位时换，否则每次都洗牌重画、计时不重置，台词忽快忽慢地乱跳。
         update(nextModel) {
             if (!nextModel || !root) return;
-            model = nextModel;
+            const prev = model;
+            const swap = !prev || (!(prev.replay || []).length && (nextModel.replay || []).length > 0);
+            model = swap ? nextModel : { ...nextModel, playlist: prev.playlist, replay: prev.replay };
             if (!game && phase === 'wait') {
-                renderLine();
+                if (swap) {
+                    renderLine();
+                    scheduleLine();
+                }
                 renderGames();
             }
         },

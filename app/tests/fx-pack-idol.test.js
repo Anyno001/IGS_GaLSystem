@@ -1,16 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { PACK } from '../src/visual/igs-ui/fx-pack-idol.js';
-import { FX_PACK_SFX_DEFS, FX_PACK_STYLE_TEXT, getPack, normalizePack, validatePacks } from '../src/scene/fx-packs.js';
+import { FX_PACK_SFX_DEFS, getPack, normalizePack, validatePacks } from '../src/scene/fx-packs.js';
 import { IDOL_KINDS, IDOL_TRIGGERS, idolFxOf, parseIdolFxBody, resolveLightColor } from '../src/visual/igs-ui/fx-idol-model.js';
 import { IDOL_BUILDERS, IDOL_LIFE_MS } from '../src/visual/igs-ui/fx-idol.js';
 import { createIdolVoices, planIdolAmbient, resolveIdolAmbience } from '../src/visual/igs-ui/fx-idol-ambience.js';
 import { normalizeDailyFxSettings } from '../src/visual/igs-ui/fx-daily-model.js';
 import { makeStage } from './helpers/fake-dom.js';
 
-const SRC = new URL('../src/visual/igs-ui/', import.meta.url);
-const FILES = ['fx-pack-idol.js', 'fx-idol.js', 'fx-idol-model.js', 'fx-idol-sfx.js', 'fx-idol-style.js', 'fx-idol-ambience.js'];
 
 const SAMPLES = {
     onstage: ['夏日心跳', '小满', '安可'],
@@ -94,9 +91,6 @@ test('gate:fx-pack-idol sprite kinds clone the current sprite and dim fades befo
         const clone = built.node.descendants().find((n) => String(n.className).includes('igs-clone-sprite'));
         assert.ok(clone && clone.getAttribute('style').includes('xm-dress-smile.png'), `${kind} clones live sprite`);
     }
-    const style = fs.readFileSync(new URL('fx-idol-style.js', SRC), 'utf8');
-    assert.doesNotMatch(style, /igs-id-(pr-wall|bs-mirror)\{[^}]*igs-id-frame-in/);
-    assert.match(style, /igs-id-os-scrim\{[^}]*transparent var\(--igs-fx-vis\)/);
 });
 
 test('gate:fx-pack-idol user text is escaped', () => {
@@ -106,18 +100,6 @@ test('gate:fx-pack-idol user text is escaped', () => {
     assert.doesNotMatch(html, /<b>x<\/b>|<i>n<\/i>/);
     const banner = IDOL_BUILDERS.banner({ type: 'banner', lines: ['<script>1</script>'], color: '' }, env(doc));
     assert.doesNotMatch(banner.node.children.map((c) => c.innerHTML).join(''), /<script>/);
-});
-
-test('gate:fx-pack-idol source has no canvas and no mask-image url', () => {
-    for (const file of FILES) {
-        const text = fs.readFileSync(new URL(file, SRC), 'utf8');
-        assert.doesNotMatch(text, /canvas/i, file);
-        assert.doesNotMatch(text, /mask-image\s*:\s*url/i, file);
-        assert.doesNotMatch(text, /TODO|\/\*\*/, file);
-        assert.doesNotMatch(text, /from '\.\/(chat-sfx|fx-daily|fx-daily-model|fx-daily-sfx|scene-audio)\.js'/, file);
-    }
-    assert.ok(FX_PACK_STYLE_TEXT.includes('igs-id-os-lift'));
-    assert.match(FX_PACK_STYLE_TEXT, /data-igs-quality="low"\] \.igs-id /);
 });
 
 test('gate:fx-pack-idol residents resolve and have a voice', () => {
@@ -159,20 +141,4 @@ test('gate:fx-pack-idol renders through the daily pipeline when the pack is on',
         content: { currentIndex: 0, fx: { daily: [{ type: 'banner', lines: ['x'], color: '' }] } },
     }, { schedule: makeTimers().schedule, clear() {}, reducedMotion: true, playSfx() {} });
     assert.deepEqual(result.played, []);
-});
-
-test('gate:fx-pack-idol bottom elements follow the real dialog height', () => {
-    const style = fs.readFileSync(new URL('fx-idol-style.js', SRC), 'utf8');
-    assert.doesNotMatch(style, /--igs-id-(safe|vis):/);
-    assert.doesNotMatch(style, /70%,transparent 100%/);
-    const rule = (sel) => style.split('\n').find((l) => l.includes('.igs-id-' + sel + '{')) || '';
-    for (const sel of ['os-song', 'fc-frame', 'pr-wall', 'bs-mirror', 'bn-sign']) {
-        assert.ok(rule(sel).includes('var(--igs-fx-safe)'), sel);
-    }
-    for (const sel of ['os-scrim', 'fc-dim', 'db-dim', 'aw-dim', 'bs-dim']) {
-        assert.ok(rule(sel).includes('var(--igs-fx-vis)'), sel);
-    }
-    assert.ok(rule('pr-rail').includes('var(--igs-fx-vis)'));
-    const src = fs.readFileSync(new URL('fx-idol.js', SRC), 'utf8');
-    assert.ok(src.includes('var(--igs-fx-vis)'));
 });

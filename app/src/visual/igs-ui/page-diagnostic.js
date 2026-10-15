@@ -10,6 +10,7 @@ const SOURCE_LABELS = Object.freeze({
 });
 
 const label = (source) => SOURCE_LABELS[source] || String(source || '');
+const SPRITE_REASONS = { 'original-unavailable': '原装候选暂时不可读取，同角色兜底也未命中', 'original-empty': '原装无有效图片引用，同角色兜底也未命中', 'character-unregistered': '当前素材库未找到该角色或对应图片' };
 
 export function summarizeImageRef(value) {
     const url = typeof value === 'string' ? value : value && typeof value === 'object' ? String(value.url || value.src || '') : '';
@@ -47,7 +48,7 @@ function spriteLine(c) {
     if (c.spriteImage) return `${want} → ${label(m.source)}，槽位「${m.slot || '默认'}」${m.quality ? `，匹配度 ${m.quality}` : ''}`;
     if (c.pendingSpriteRef) return `${want} → ${label(m.source)}，槽位「${m.slot || '默认'}」，原图读取中`;
     if (c.sceneNsfw) return `${want} → NSFW 场景隐藏立绘`;
-    return `${want} → 未命中（${label(m.source)}${m.quality ? `，匹配度 ${m.quality}` : ''}）`;
+    return `${want} → 未命中（${SPRITE_REASONS[m.reason] || label(m.source)}${m.quality ? `，匹配度 ${m.quality}` : ''}）`;
 }
 
 function backgroundLine(c) {

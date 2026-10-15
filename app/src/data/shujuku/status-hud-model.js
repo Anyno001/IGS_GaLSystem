@@ -244,13 +244,16 @@ export function buildStatusHudModel(input = {}) {
         model.loadReason = String((readResult && readResult.reason) || 'missing-api');
         return model;
     }
-    const resolved = resolveSelectedStatusHudTables(settings.tables, readResult);
+    const resolved = resolveSelectedStatusHudTables(settings.tables, readResult, input.parsedTables);
     const metrics = [];
     let missingTables = 0;
     for (const entry of resolved) {
         if (!entry.table) { missingTables += 1; continue; }
-        metrics.push(...extractStatusHudMetrics(entry.table, character, sceneAssets.characterAliases, entry.pick));
-        if (!model.relation) model.relation = extractStatusHudRelation(entry.table, character, sceneAssets.characterAliases);
+        const row = typeof input.rowFor === 'function'
+            ? input.rowFor(entry.table, character, sceneAssets.characterAliases)
+            : findStatusHudRow(entry.table, character, sceneAssets.characterAliases);
+        metrics.push(...extractStatusHudMetrics(entry.table, character, sceneAssets.characterAliases, entry.pick, row));
+        if (!model.relation) model.relation = extractStatusHudRelation(entry.table, character, sceneAssets.characterAliases, row);
     }
     model.metrics = metrics.slice(0, STATUS_HUD_MAX_METRICS);
     model.hiddenCount = Math.max(0, metrics.length - model.metrics.length);
@@ -259,10 +262,10 @@ export function buildStatusHudModel(input = {}) {
     return model;
 }
 
-export function resolveSelectedStatusHudTables(selected, readResult) {
+export function resolveSelectedStatusHudTables(selected, readResult, parsedTables) {
     const wanted = normalizeStatusHudTables(selected);
     if (!wanted.length) return [];
-    const available = readResult && readResult.ok !== false ? parseTables(readResult.data) : [];
+    const available = parsedTables || (readResult && readResult.ok !== false ? parseTables(readResult.data) : []);
     return wanted.map((pick) => {
         const table = available.find((item) => (pick.uid && item.uid === pick.uid))
             || available.find((item) => pick.name && item.name === pick.name)
@@ -271,9 +274,9 @@ export function resolveSelectedStatusHudTables(selected, readResult) {
     });
 }
 
-export function extractStatusHudMetrics(table, character, characterAliases, pick) {
+export function extractStatusHudMetrics(table, character, characterAliases, pick, preparedRow) {
     if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows)) return [];
-    const row = findStatusHudRow(table, character, characterAliases);
+    const row = preparedRow === undefined ? findStatusHudRow(table, character, characterAliases) : preparedRow;
     if (!row) return [];
     const metrics = [];
     for (let index = 0; index < row.values.length; index += 1) {
@@ -298,9 +301,9 @@ export function extractStatusHudMetrics(table, character, characterAliases, pick
 const RELATION_COLUMN_RE = /关系/;
 const RELATION_MAX = 20;
 
-export function extractStatusHudRelation(table, character, characterAliases) {
+export function extractStatusHudRelation(table, character, characterAliases, preparedRow) {
     if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows)) return '';
-    const row = findStatusHudRow(table, character, characterAliases);
+    const row = preparedRow === undefined ? findStatusHudRow(table, character, characterAliases) : preparedRow;
     if (!row) return '';
     for (let index = 0; index < table.columns.length; index += 1) {
         if (index === row.headerIndex || !RELATION_COLUMN_RE.test(String(table.columns[index] || ''))) continue;
@@ -330,6 +333,49 @@ export function findStatusHudRow(table, character, characterAliases) {
         }
     }
     return null;
+}
+
+// 一次索引供整楼角色共享。先保持显式姓名列的优先级；需要兼容旧表时才建立旧格式标题索引。
+export function createStatusHudRowLookup(table) {
+    const columns = table.columns || [], rows = table.rows || [];
+    const primary = new Map();
+    let fallback = null;
+    const remember = (map, name, values, headerIndex, rank) => {
+        if (name && !map.has(name)) map.set(name, { values, headerIndex, rank });
+    };
+    let rank = 0;
+    for (let column = 0; column < columns.length; column++) {
+        if (!isTitleColumn(columns[column], column)) continue;
+        for (const values of rows) {
+            if (Array.isArray(values)) remember(primary, String(values[column] ?? '').trim(), values, column, rank);
+            rank++;
+        }
+    }
+    function best(map, names) {
+        let hit = null;
+        for (const name of names) {
+            const row = map.get(name);
+            if (row && (!hit || row.rank < hit.rank)) hit = row;
+        }
+        return hit ? { values: hit.values, headerIndex: hit.headerIndex } : null;
+    }
+    return (character, aliases) => {
+        const names = buildCharacterNameSet(character, aliases);
+        if (!names.size) return null;
+        const direct = best(primary, names);
+        if (direct) return direct;
+        if (!fallback) {
+            fallback = new Map();
+            let order = 0;
+            for (const values of rows) {
+                if (!Array.isArray(values)) continue;
+                for (const title of collectRowTitles(columns, values)) {
+                    remember(fallback, title, values, resolveTitleColumnIndex(columns, values, title), order++);
+                }
+            }
+        }
+        return best(fallback, names);
+    };
 }
 
 export function collectRowTitles(columns, values) {
@@ -447,7 +493,6 @@ function buildCharacterNameSet(character, characterAliases) {
 }
 
 function isTitleColumn(column, index) {
-    if (index === 0) return false;
     const normalized = String(column || '').trim();
     return Boolean(normalized) && STATUS_HUD_TITLE_KEYS.includes(normalized);
 }

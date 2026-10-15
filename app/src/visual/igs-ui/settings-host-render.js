@@ -520,9 +520,15 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             const spriteEnhance = sceneAssets.spriteEnhance || {};
             const spriteGenderScale = normalizeSpriteGenderScale(reader.spriteGenderScale);
             // 立绘显示与情绪匹配是整区设置：单独一张折叠卡放在角色列表上面，不再压在「角色立绘」标题下。
-            const charactersSettingsCard = `<div class="igs-source-filter igs-perf-group"><details data-advanced="sprite-display"${advancedOpen('sprite-display')}><summary><b>立绘设置</b><span class="igs-perf-brief">缩放 · 高度 · 增强 · 情绪匹配</span></summary><div class="igs-perf-group-body">
+            const charactersSettingsCard = `<div class="igs-source-filter igs-perf-group"><details data-advanced="sprite-display"${advancedOpen('sprite-display')}><summary><b>立绘设置</b><span class="igs-perf-brief">缩放 · 高度 · 增强 · 名字/情绪匹配</span></summary><div class="igs-perf-group-body">
         ${checkbox('bridge.sceneAssets.moodFuzzyMatch', sceneAssets.moodFuzzyMatch, '情绪词模糊匹配')}
         <div class="igs-source-filter-note">相近的情绪词也会归入组中（可能归错，可在「待确认」中核对）。</div>
+        ${checkbox('bridge.sceneAssets.nameFallback', sceneAssets.nameFallback !== false, '名字兜底匹配')}
+        <div class="igs-source-filter-note">名字只写对一部分（如「小雨」对「林小雨」）也认作同一人；「路人A」「路人B」只差编号的不会混。</div>
+        ${checkbox('bridge.sceneAssets.narrationNameSwitch', sceneAssets.narrationNameSwitch !== false, '旁白点名切换立绘')}
+        <div class="igs-source-filter-note">旁白开头点名、写到看见某人或以她/他指代时，立绘换成此人。</div>
+        ${field('bridge.sceneAssets.sceneCarryMode', '换场景立绘', selectInput('bridge.sceneAssets.sceneCarryMode', sceneAssets.sceneCarryMode || 'smart', [['strict', '严格'], ['smart', '智能'], ['loose', '宽松']]))}
+        <div class="igs-source-filter-note">换场景时，原立绘是否随行。严格：须明写同行或新场景首页即出场；智能：依正文判断；宽松：除非写明分开或时间跳转，否则保留。</div>
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
         ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强（手机较耗电）')}
         ${checkbox('readerSettings.spriteGenderScale.enabled', spriteGenderScale.enabled, '按性别区分默认高度')}

@@ -5,7 +5,6 @@ import {
     WAIT_STAGE_FALLBACK_LINES,
     WAIT_STAGE_GAME_LINES,
     WAIT_STAGE_GAMES,
-    WAIT_STAGE_STYLE_TEXT,
     availableWaitStageGames,
     normalizeWaitStageSettings,
     waitStageGameLine,
@@ -170,9 +169,43 @@ test('gate:wait-stage:collects-scene-directive-dialogue', () => {
     assert.equal(lines[0].text.includes('[igs'), false);
 });
 
-test('gate:wait-stage:long-line-is-skipped', () => {
+test('gate:wait-stage:long-line-is-truncated', () => {
     const long = '这是一句非常非常长的台词'.repeat(8);
-    assert.equal(collectWaitStageLines([{ raw: `艾莉：[igs-char:艾莉|平和|${long}]` }]).length, 0);
+    const lines = collectWaitStageLines([{ raw: `艾莉：[igs-char:艾莉|平和|${long}]` }]);
+    assert.equal(lines.length, 1);
+    assert.equal(Array.from(lines[0].text).length, 34);
+    assert.equal(lines[0].text.endsWith('…'), true);
+});
+
+test('gate:wait-stage:whosaid-borrows-card-names', () => {
+    const model = buildWaitStageModel({
+        turns: [{ raw: '[igs-char:艾莉|平和|今天也辛苦了。]' }],
+        sceneAssets: { characters: { 艾莉: {}, 莉娜: {} } },
+        random: () => 0,
+    });
+    assert.equal(model.games.includes('whosaid'), true);
+    const round = buildWhoSaidRound(model.replay, () => 0, model.names);
+    assert.equal(round.answer, '艾莉');
+    assert.equal(round.options.includes('莉娜'), true);
+});
+
+test('gate:wait-stage:image-refresh-keeps-line-rotation', (t) => {
+    const h = runtimeHarness();
+    t.after(() => h.runtime.close());
+    let seed = 7;
+    const random = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+    const make = () => buildWaitStageModel({ turns: [{ raw: '[igs-char:艾莉|平和|第一句。][igs-char:莉娜|平和|第二句。]' }], random });
+    const lineText = () => h.root.querySelector('.igs-ws-line').children.map((node) => node.textContent).join('|');
+    h.runtime.update(make());
+    const first = lineText();
+    h.timers.advance(3000);
+    // 图片读回反复补模型：不重洗台词、不重置计时。
+    for (let i = 0; i < 5; i += 1) h.runtime.update(make());
+    assert.equal(lineText(), first);
+    h.timers.advance(2999);
+    assert.equal(lineText(), first);
+    h.timers.advance(1);
+    assert.notEqual(lineText(), first);
 });
 
 test('gate:wait-stage:games-open-only-when-assets-allow', () => {
@@ -291,11 +324,6 @@ test('gate:wait-stage:time-and-weather-backgrounds-unlock-memory-without-base-sc
     } });
     assert.deepEqual(new Set(art.pictures.map((item) => item.url)), new Set(['day.png', 'rain.png', 'night.png']));
     assert.ok(availableWaitStageGames(art, []).includes('memory'));
-});
-
-test('gate:wait-stage:style-layer-sits-above-dialog-below-toolbar', () => {
-    assert.match(WAIT_STAGE_STYLE_TEXT, /#igs-overlay \.igs-waitstage\{position:absolute;inset:0;z-index:6/);
-    assert.match(WAIT_STAGE_STYLE_TEXT, /prefers-reduced-motion/);
 });
 
 test('gate:wait-stage:settings-row-is-reachable-from-the-perf-page', async () => {

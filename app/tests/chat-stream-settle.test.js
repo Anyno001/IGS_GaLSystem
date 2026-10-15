@@ -30,6 +30,7 @@ function harness(options = {}) {
         now: () => clock,
         onStable: options.onStable || (() => true),
         onTimeout: options.onTimeout,
+        onActivity: options.onActivity,
     });
     observer.start();
     return {
@@ -177,5 +178,31 @@ test('gate:fullscreen-wait:late-write-invalidates-an-inflight-settle', async () 
     await new Promise((resolve) => setImmediate(resolve));
     assert.ok([...h.timers].some(([, timer]) => timer.delay === 800));
     assert.ok([...h.timers].some(([, timer]) => timer.delay === DEFAULT_HARD_TIMEOUT_MS));
+    h.observer.stop();
+});
+
+test('gate:fullscreen-wait:host-stop-button-probe-reports-activity-without-chat-mutation', async () => {
+    const stopButton = { style: { display: 'none' } };
+    let activity = 0;
+    const h = harness({ stopButton, onActivity: () => { activity += 1; } });
+    h.observer.prepareForReply();
+    h.eventSource.emit('generation_started', 'normal', {}, false);
+    assert.equal(activity, 0, '生成刚开始还没探到');
+    stopButton.style.display = 'block';
+    await h.fire(120);
+    assert.equal(activity, 1, '#chat 无变更，探到停止按钮亮起也要报活动');
+    h.observer.stop();
+});
+
+test('gate:fullscreen-wait:impersonate-does-not-probe-host-stop-button', () => {
+    const stopButton = { style: { display: 'none' } };
+    let activity = 0;
+    const h = harness({ stopButton, onActivity: () => { activity += 1; } });
+    h.observer.prepareForReply();
+    h.eventSource.emit('generation_started', 'impersonate', {}, false);
+    stopButton.style.display = 'block';
+    assert.equal([...h.timers].some(([, timer]) => timer.delay === 120), false);
+    assert.equal(activity, 0);
+    h.advance(200);
     h.observer.stop();
 });

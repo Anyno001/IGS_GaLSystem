@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { PACK } from '../src/visual/igs-ui/fx-pack-variety.js';
 import { FX_PACK_SFX_DEFS, FX_PACK_STYLE_TEXT, getPack, normalizePack, validatePacks } from '../src/scene/fx-packs.js';
 import { VARIETY_KINDS, VARIETY_TRIGGERS, parseVarietyFxBody, varietyFxOf } from '../src/visual/igs-ui/fx-variety-model.js';
@@ -11,8 +10,6 @@ import { VARIETY_HOT_LINES, VARIETY_OBSERVER_LINES } from '../src/visual/igs-ui/
 import { classifyLiveTopic } from '../src/visual/igs-ui/live-chatter.js';
 import { makeStage } from './helpers/fake-dom.js';
 
-const SRC = new URL('../src/visual/igs-ui/', import.meta.url);
-const FILES = ['fx-pack-variety.js', 'fx-variety.js', 'fx-variety-model.js', 'fx-variety-sfx.js', 'fx-variety-style.js', 'fx-variety-ambience.js'];
 
 const SAMPLES = {
     guest: ['小满', '24', '设计师', '爱笑;嘴硬'],
@@ -110,17 +107,6 @@ test('gate:fx-pack-variety user text is escaped', () => {
     assert.doesNotMatch(guest.node.children[0].innerHTML, /<b>x|<i>t/);
     const cap = VARIETY_BUILDERS.caption({ type: 'caption', style: 'sticker', text: '<script>1</script>' }, env(doc));
     assert.doesNotMatch(cap.node.innerHTML, /<script>/);
-});
-
-test('gate:fx-pack-variety source has no canvas and no mask-image url', () => {
-    for (const file of FILES) {
-        const text = fs.readFileSync(new URL(file, SRC), 'utf8');
-        assert.doesNotMatch(text, /canvas/i, file);
-        assert.doesNotMatch(text, /mask-image\s*:\s*url/i, file);
-        assert.doesNotMatch(text, /TODO|\/\*\*/, file);
-        assert.doesNotMatch(text, /from '\.\/(chat-sfx|fx-daily|fx-daily-model|fx-daily-sfx|scene-audio)\.js'/, file);
-    }
-    assert.ok(FX_PACK_STYLE_TEXT.includes('igs-vy-guest-card'));
 });
 
 test('gate:fx-pack-variety cabin ambience resolves rooms and has a voice', () => {

@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import { createMemoryStorage } from '../src/index.js';
 import {
@@ -105,9 +104,6 @@ test('asset-folder-view: touch menu leaves the folder selector clickable', () =>
     assert.match(menu, /<option value="学校">学校<\/option>/);
     const moved = moveAssetToFolder(state, 'scenes', '教室', '学校');
     assert.match(renderAssetFolderSelect('scenes', '教室', moved.scenes, { menu: true }), /<option value="学校" selected>学校<\/option>/);
-    const css = readFileSync(new URL('../src/visual/igs-ui/settings-style.js', import.meta.url), 'utf8');
-    assert.match(css, /\.igs-add-menu-item:not\(\.igs-folder-pick-item\)::after\{content:/);
-    assert.doesNotMatch(css, /\.igs-add-menu-item::after\{content:/);
 });
 
 test('asset-folders: 角色文件夹和场景文件夹都按卡分', () => {

@@ -1183,3 +1183,29 @@ test('gate:character-sprite:one-click-user-protagonist-from-tavern-persona', asy
     assert.equal(seen.length, 2);
     assert.match(alerts[0], /没读到酒馆的用户名/);
 });
+
+test('gate:settings-dialog:character-dropdown-confirms-and-keeps-selection', async () => {
+    const panel = makePanel();
+    const dialogs = createSettingsDialogs({ getContainer: () => panel.container });
+    const choices = [{ value: '冬月', label: '冬月' }, { value: '雪乃', label: '雪乃' }];
+    const answer = dialogs.choose('选择生成立绘的角色', choices, '冬月', { dropdown: true, cancelLabel: '暂不生成' });
+    let bar = panel.overlay.querySelector('.igs-settings-dialog');
+    let select = bar.querySelector('select');
+    assert.ok(select);
+    assert.ok(!bar.querySelector('.igs-settings-dialog-choice'));
+    assert.equal(select.children[0].selected, true);
+    assert.ok(panel.doc.activeElement === select);
+    select.value = '雪乃';
+    select.dispatch('change');
+    assert.equal(dialogs.isOpen(), true, '切换角色后仍需确认');
+    rebuildPanel(panel, () => {});
+    dialogs.remount();
+    bar = panel.overlay.querySelector('.igs-settings-dialog');
+    select = bar.querySelector('select');
+    assert.equal(select.children[1].selected, true);
+    bar.querySelector('[data-settings-dialog="ok"]').dispatch('click');
+    assert.equal(await answer, '雪乃');
+    const cancelled = dialogs.choose('选择角色', choices, '冬月', { dropdown: true });
+    panel.overlay.querySelector('[data-settings-dialog="cancel"]').dispatch('click');
+    assert.equal(await cancelled, null);
+});

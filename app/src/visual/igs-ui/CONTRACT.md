@@ -2,6 +2,41 @@
 
 本目录是 IGS 的 `Immersive Galgame System` 原版 UI 等价层。
 
+## 静态页的图片完成通知（test-v0.36.65）
+
+- 读取完成仅在当前页仍需要该图、中央缓存确实出现新显示地址时重绘。读空、失败、结果未被缓存接纳、已同步显示的地址及 inline 图片不推动下一次重绘和读取。
+- 在途任务按请求身份去重；清缓存后迟到的旧任务不能删除新任务或触发旧完成通知。不新增失败黑名单、周期重试或第二套像素缓存，后续翻页、补图及明确读取仍可恢复。
+
+## 稳定页的演出调度（test-v0.36.64）
+
+- 保留用户开启的天气、立绘呼吸、背景运镜与节律，不因静置或触屏自动冻结、关闭或切换画质。正文/素材仍按既有准备与变更通知驱动，持续动画不重新解析正文。
+- 亲密演出复用舞台暂停状态；面板遮挡、内嵌离屏、直播盖住背景、页面隐藏时立即停止不可见画面的逐帧调度。前景 `.igs-rm-front` 纳入 CSS 暂停范围；面板里自己的画布和自动翻页不受背景遮挡影响。
+- 声画节拍按下一次心跳、呼吸、节律或钟声的时间提前排程，不以固定 50ms 轮询。没有真实声音也没有动态画面时不保留时钟；面板遮挡时有意继续播放的音频仍按节拍排程。
+- 相同 CSS 变量值不重复写入。关闭或舞台节点移除后取消帧、计时器和订阅，迟到回调不能重启旧演出。`onStageIdleChange` 只在合并的暂停/遮挡状态发生变化时通知。
+
+## 整楼准备（v0.36.62）
+
+- `reader-source-cache` 同时持有解析与准备结果，最多八楼，同步失效/淘汰；配置修订不变时按实际准备依赖判断，世界观重绘创建的新对象不代表正文变化。
+- `reader-floor-plan` 预先建立页位置、对白/心理归属、场景/NSFW/CG/演出状态，演出区间与旁白继承顺序累积；`reader-floor-assets` 预先建立换装、同台与资源匹配，正常翻页只取当前页。资源命中只持有稳定身份，不能永久缓存 blob URL 或复制像素。
+- 单图读取事件只使该图的依赖失效；临时生成记录沿用素材键与聊天身份定位依赖，补齐后仅预热新增引用。缺失/过期只在实际使用或既有通知到达时处理，不设置轮询或第二套图片缓存。
+- 状态栏、服装线索、约定复用 `reader-table-data` 的本楼只读快照；数据库更新回调先失效、再按既有 250ms 窗口刷新。服装启用时即使状态栏关闭也订阅；切楼、API 变化、手动重读、关闭与销毁正确失效并解绑。
+- `.mes_text` 是宿主可见正文指纹来源，阅读器自身的页码和台词变动不能反过来改变正文指纹。
+
+## 原装立绘恢复（v0.36.59）
+
+- 显示匹配分别接入确认缺图和暂不可读取探针，临时失败可以换同角色可用图，但不等于要求生成替代图；online 恢复通知通过已有合并窗口刷新当前舞台。
+- 本页诊断在未命中时区分原装候选暂不可读、原装无有效引用、当前库未找到对应角色图片；诊断保持手机端可复制，不要求开发者控制台。
+
+## 首楼素材就绪（v0.36.57）
+
+- `onSettingsUpdated` 通知使配置快照及整楼预热计划失效，通过已有图片刷新窗口更新当前页；设置器遮挡时记下待刷新，舞台实际重绘后清除该标记。
+- `records-ready` 与 `image-loaded` 接入既有素材更新链路，首楼背景和立绘异步读取完成后自动显示，不需要打开设置器。销毁解除配置通知订阅，不新增周期扫描。
+
+## 媒体任务重试（v0.36.56）
+
+- 设置的缓存占用页提供「重试待备份记录」与「重试待删除文件」，分别调用既有媒体 `flush` 与 `retryDeletes`；操作后读取统计并显示等待引用解除和失败暂停状态。
+- UI 不设置备份或回收轮询，不自行改写媒体日志或跳过引用检查。
+
 ## 立绘与图片等待（v0.36.51）
 
 - `cgActive` 只表示已经取得显示地址的 CG；只有标记没有图片时 `cgWaiting=true`，背景与立绘继续按正常页匹配，诊断不报告 CG 显示中。
@@ -49,7 +84,7 @@
 - 设置页面以 `settings-pages.js` 的分类与页面表为准；切换只改变当前设置视图，不改写设置值。「对话框」承载皮肤、尺寸与面板玻璃；「文字」承载字号、字重与文字主题；「演出」分台词、画面、情绪与提示、题材、节奏，声音独立分类。「界面」分阅读器（`ui-reader`，打开方式、提示弹窗与快捷键）、背景状态（`ui-bg`）、选项（`ui-option`）、工具栏（`ui-bar`）四个子页。旧 `ui` 页面与 `switchReaderSubTab('interface')` 兼容映射到 `ui-reader`，搜索与引导应直达控件所属子页；仪表盘也提供打开方式。重分类不得改写既有持久化路径。
 - 设置面板提供持久化的四种配色：`地雷色`（默认）、`奶油风`、`浅色`、`深色`；四套配色只作用于 IGS 设置面板，均保留毛玻璃遮罩、水波纹材质、浏览器不支持毛玻璃时的实心回退和 `prefers-reduced-transparency` 降级。历史 `night` / `day` 值读取时分别兼容迁移为 `landmine` / `cream`，新保存值使用四主题内部值。
 - 天气演出（`readerSettings.weatherFx`，默认关闭）由 `weather-fx-runtime.js` 按当前 `[igs-scene:地点|时间|天气]` 解析出类型（雨/雪/雾/沙尘/风/阴/晴，按序先命中者为主）、程度、雷与风修饰、室内外与五时段，只写 `#igs-effect-layer`（背景之上、立绘之下）与 `#igs-effect-front-layer`（立绘之上、对话层之下）的 `data-igs-weather-fx-*` 属性；程度由 `resolveWeatherFxGrade` 细分为 `drizzle / light / medium / heavy / storm`（毛毛雨、小雨、中雨、大雨、暴雨，重词先于轻词判定），方案同时带旧三档 `level`（由细分档折算，与细分前判定一致，场景音频等旧消费方继续用 `level`）；粒子密度/速度/雨丝长度、天气调色幅度、地图光照与暴雨闪电间隔按 `grade` 取值，调用方不得另写程度词表；样式集中在 `weather-fx-style.js`，时段只提供色彩与光源方位变量。室内外按地点末尾命中词判定（室内词与 `outdoorWords` 均可在设置编辑），室内不得出现雨雪粒子，只保留压暗、窗面水痕、窗光尘埃与闪电侧光，室内风不演出。雨/雪/风/沙尘室外粒子由 `weather-fx-particles.js` 的双画布承担，必须锁 30fps、按 CSS 像素绘制、合批、图层隐藏时停帧、脱离文档时自退；减少动态效果时只保留静态调色。
-- 舞台暂停（`stage-pause.js`）：每个 `#igs-overlay` 维护暂停原因集合，任一成立即暂停，overlay 挂 `data-igs-paused`（值为原因列表），全部解除后移除并通知 `onStageResume` 订阅者。原因：`hidden`（页面隐藏）、`offscreen`（仅内嵌模式，IntersectionObserver 观察阅读器根）、`panel:settings` / `panel:record` / `panel:map` / `panel:gallery`（盖住舞台的面板打开期间）。`openReader` 起驱动、`closeReader` 解绑。CSS 只对舞台层（背景、立绘、多人立绘、天气双层、演出双层、日常天空层、调色层、亲密演出后层、舞台指示残影与幕布）及其子元素和伪元素设 `animation-play-state:paused`；对话层（打字机、点击等待）、工具栏、资料页 / 地图 / CG 库与设置面板不暂停，WAAPI 动画与计时器不受影响。常驻粒子循环（天气粒子、花瓣落叶）暂停时不排帧、恢复后重新拉起；烟花与孔明灯是带音效与计时的一次性演出，不暂停。面板内的画布（如地图天气层）不属于舞台，不受暂停影响。
+- 舞台暂停（`stage-pause.js`）：每个 `#igs-overlay` 维护暂停原因集合，任一成立即暂停，overlay 挂 `data-igs-paused`（值为原因列表），全部解除后移除并通知 `onStageResume` 订阅者。原因：`hidden`（页面隐藏）、`offscreen`（仅内嵌模式，IntersectionObserver 观察阅读器根）、`panel:settings` / `panel:record` / `panel:map` / `panel:gallery`（盖住舞台的面板打开期间）。`openReader` 起驱动、`closeReader` 解绑。CSS 只对舞台层（背景、立绘、多人立绘、天气双层、演出双层、日常天空层、调色层、亲密演出前后层、舞台指示残影与幕布）及其子元素和伪元素设 `animation-play-state:paused`；对话层（打字机、点击等待）、工具栏、资料页 / 地图 / CG 库与设置面板不暂停，WAAPI 动画和一次性计时器保持原有规则；亲密演出的逐帧循环与可见声画节拍接入暂停通知。常驻粒子循环（天气粒子、花瓣落叶）暂停时不排帧、恢复后重新拉起；烟花与孔明灯是带音效与计时的一次性演出，不暂停。面板内的画布（如地图天气层）不属于舞台，不受暂停影响。
 - 画质档（`render-quality.js`，`readerSettings.performance.quality`：`auto` / `normal` / `low`，缺失或非法值视为 `auto`；不属于一键演出档位）：`auto` 在 `navigator.deviceMemory <= 4`、或 `hardwareConcurrency <= 4` 且为粗指针触屏、或 `prefers-reduced-motion` 时判为低画质。每次渲染由 `applyReaderSnapshotToDom` 先于天气与日常演出写入：低画质时 `#igs-overlay` 挂 `data-igs-quality="low"`，否则移除该属性。低画质的 CSS 集中在 `stage-direction-style.js`：停推镜与立绘呼吸（含亲密演出呼吸），亲密演出背景不再模糊并隐藏 `#igs-bg-blur`，梦境雾去 blur；滤镜层与 bokeh 由 `scene-grade.js` / `romance-style.js` 各自处理。粒子模块读取 `getQualityFactor()`（低画质 `{ density: .5, fps: 20, dprCap: 1 }`，标准 `{ density: 1, fps: null, dprCap: null }` 即沿用模块默认值）：天气粒子、花瓣数量减半，烟花每朵火花数与孔明灯数量减半，帧率 20，烟花与孔明灯 dprCap 由 2 降为 1；天气与花瓣在运行中察觉档位变化会重新布点。标准档的画质参数（密度、帧率、dprCap）与改动前一致。设置入口：首页演出档位条与「阅读器 › 演出」一键档位卡片内的「画质」下拉（`render-quality-fields.js`）。
 - 场景设置必须按「规则 / 素材」二级页面分组；素材页内继续保留「场景素材 / 角色立绘」切换。
 - 场景条目的 `words` 在设置页作为场景别名管理；角色别名存于 `sceneAssets.characterAliases[主角色名]`。别名只参与名称归约，必须复用主条目的背景、情绪立绘和 `spriteLayouts` 位置键；角色改名/删除及场景预设保存、应用、导入、导出必须同步别名。
@@ -156,7 +191,7 @@
   - 恋爱回忆（`memories`）：瞬时 `[igs-fx:memory|名称]`（`fx.memory`），读取舞台背景与立绘交给宿主 `onRomanceMemory` → `cgGallery.capturePhoto` 写入相册，宿主按「chatId|messageId|名称」记在 localStorage `igs-romance-memory-keys`（上限 300）跨会话去重；NSFW 不拍。
   - 快捷动作（`quickActions` / `actions`，上限 8 项，模板 `{角色}` 替换为当前立绘角色）：1、2 档或好感常驻、有立绘、非 NSFW 时在 `#igs-fx-front` 放心形按钮（头部右上方，复用「心」的落点），菜单项写入 `#igs-input` 并聚焦、不自动发送，输入框不可见时复制到剪贴板；翻页收起菜单；按钮点击不冒泡到翻页。
   - NSFW 强度曲线（`nsfwCurve`，默认开）：`reader-host` 在开启且当前页为 NSFW 时按与当前页相同的场景判定得出 `content.nsfwSpan`（`resolveNsfwSpan`），3 档参数乘 `nsfwCurveFactor`：前 3 页 0.55 / 0.8 / 1，段在本楼结束时最后 2 页 0.8 / 0.6；上一楼层末尾为 NSFW 时不渐强，延续到楼层末尾不回落；不影响剪影显隐。
-  - 亲密声画（`romance-intimate.js` 纯函数 / `romance-intimate-audio.js` 合成音色 / `romance-intimate-runtime.js` 调度与 DOM / `romance-intimate-style.js`，由 `applyRomanceToDom` 末尾调用 `syncRomanceIntimate`）：子开关 `edgeFx`（默认开）、`softSound`（默认开）、`nsfwSound`（默认关）、`rhythm`（默认关）、`rhythmSound`（默认开，旧设置缺字段时保持开启；关闭后停止节律音效但保留晃动及节拍时钟）、`sway`（`off/weak/medium/strong`，默认 `medium`）；声音另受 `fxSound` 开关与音量约束。情事阶段由 `content.nsfwSpan` 得出（`resolveIntimatePhase`：开头 2 页升温、段在本楼结束时倒数第 3 页顶点、最后 2 页余韵），`reader-host` 在亲密演出开启且当前页为 NSFW 时总是计算该段（不再只看 `nsfwCurve`）。一个节拍时钟同时驱动吱呀声与晃动、心跳声与暗角脉动：有声音时以 AudioContext 时间为准并扣掉输出延迟，否则用 performance 时间；排程器 50ms 一次、前瞻 0.3s。速度越往后越快（中段按段内进度 +16 bpm、同页停留最多 +10；顶点页按停留时间每秒 +1.5 至 150 bpm，晃动放大至 1.3 倍）。床的材质按地点选（`resolveIntimateMaterial`：木床 / 铁床 / 皮革 / 沙发 / 被褥，被褥没有吱呀）。压低场景声音复用 `duckSceneAudio`（1 档 .75、2 档 .55、3 档 .4），顶点页向前翻到余韵页时全场静音 1.5s（含 BGM 与环境声）、白场，随后心跳回来、床落定两声；从非情事页进入情事段开头时暗转。前景层 `.igs-rm-front`（z-index 3，插在 `#igs-click-layer` 前，即立绘之上、对话框之下）含窗帘光影 / 心跳暗角 / 热浪 / 色散 / 白场暗转，全部只画在边缘；热浪用 `backdrop-filter`，触屏与低画质不做。晃动每帧往 `#igs-bg`（×0.45）、`#igs-sprite`、`#igs-cast`（×0.8）写 `--igs-rm-sx/sy/sr`，样式沿用视差与恋爱逼近的 translate 算式再加晃动量、并去掉 translate 过渡；对话框不动，减少动态效果时不晃，触屏限约 30 帧。`whisper` 为真时 `reader-dom-render` 在没有情绪的页给打字音补「耳语」（`speech-prosody` 的 whisper 档）。
+  - 亲密声画（`romance-intimate.js` 纯函数 / `romance-intimate-audio.js` 合成音色 / `romance-intimate-runtime.js` 调度与 DOM / `romance-intimate-style.js`，由 `applyRomanceToDom` 末尾调用 `syncRomanceIntimate`）：子开关 `edgeFx`（默认开）、`softSound`（默认开）、`nsfwSound`（默认关）、`rhythm`（默认关）、`rhythmSound`（默认开，旧设置缺字段时保持开启；关闭后停止节律音效但保留晃动及节拍时钟）、`sway`（`off/weak/medium/strong`，默认 `medium`）；声音另受 `fxSound` 开关与音量约束。情事阶段由 `content.nsfwSpan` 得出（`resolveIntimatePhase`：开头 2 页升温、段在本楼结束时倒数第 3 页顶点、最后 2 页余韵），`reader-host` 在亲密演出开启且当前页为 NSFW 时总是计算该段（不再只看 `nsfwCurve`）。一个节拍时钟同时驱动吱呀声与晃动、心跳声与暗角脉动：有声音时以 AudioContext 时间为准并扣掉输出延迟，否则用 performance 时间；按下一次声画节拍提前排程、前瞻 0.3s，不固定轮询。速度越往后越快（中段按段内进度 +16 bpm、同页停留最多 +10；顶点页按停留时间每秒 +1.5 至 150 bpm，晃动放大至 1.3 倍）。床的材质按地点选（`resolveIntimateMaterial`：木床 / 铁床 / 皮革 / 沙发 / 被褥，被褥没有吱呀）。压低场景声音复用 `duckSceneAudio`（1 档 .75、2 档 .55、3 档 .4），顶点页向前翻到余韵页时全场静音 1.5s（含 BGM 与环境声）、白场，随后心跳回来、床落定两声；从非情事页进入情事段开头时暗转。前景层 `.igs-rm-front`（z-index 3，插在 `#igs-click-layer` 前，即立绘之上、对话框之下）含窗帘光影 / 心跳暗角 / 热浪 / 色散 / 白场暗转，全部只画在边缘；热浪用 `backdrop-filter`，触屏与低画质不做。晃动每帧往 `#igs-bg`（×0.45）、`#igs-sprite`、`#igs-cast`（×0.8）写 `--igs-rm-sx/sy/sr`，样式沿用视差与恋爱逼近的 translate 算式再加晃动量、并去掉 translate 过渡；对话框不动，减少动态效果时不晃，触屏限约 30 帧。`whisper` 为真时 `reader-dom-render` 在没有情绪的页给打字音补「耳语」（`speech-prosody` 的 whisper 档）。
   - 素材保护：`content.illustrationActive`（生成 CG / 插图）为真时，`#igs-stage-motion` 挂 `data-igs-rm-asset`，亲密演出不柔焦背景、环境层 `.igs-rm-back` 遮成只留边缘；`applySceneGrade({ asset })` 把时段与天气调色整体乘 `ASSET_GRADE_RATIO`（0.35）。亲密演出的背景 filter 叠在 `var(--igs-grade-bg)` 之后，不再整条替换环境滤镜。
   - 关闭阅读器调用 `closeRomanceFx`（清环境层、卡片、按钮、计时器、好感缓存、关系基线与修罗场对象）；普通页的 `cancelRomanceFx` 只收环境层与快捷动作按钮。
 - Meta 互动（`meta-settings.js` 纯函数 / `meta-runtime.js` DOM 投影 / `meta-style.js` / `meta-fields.js` / `meta-digest.js` 摘要暂存；`readerSettings.metaFx`，总开关默认关闭，不进入 `PERFORMANCE_FEATURES` 一键档位，「演出」页单独一张卡片）：

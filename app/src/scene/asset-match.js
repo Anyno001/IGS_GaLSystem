@@ -301,13 +301,16 @@ function isTrustedUserMatch(quality, strict) {
     return strict ? TRUSTED.has(quality) : true;
 }
 
-// 已登记场景缺当前时段的图：原图是插件生成的才补一张时段差分。本聊天补过（含失败、丢弃）就不再补。
+// 失败不算已有差分；自动避免重复发送，手动补全允许重试。明确丢弃的仍尊重用户选择。
 function missingTimeVariant(state, hit, ctx) {
     if (hit.timed === true || !hit.key || !TRUSTED.has(hit.quality) || !isGeneratedAssetUrl(hit.url)) return null;
     const time = sceneTimeSlot(state.time, ctx.sceneAssets && ctx.sceneAssets.timeGroups);
     if (!time) return null;
     const temp = typeof ctx.tempSceneTime === 'function' ? ctx.tempSceneTime(hit.key, time) : null;
-    return { scene: hit.key, time, baseImageId: generatedAssetIdOf(hit.url), url: (temp && temp.url) || '', tried: Boolean(temp) };
+    const retry = temp && ((temp.status === 'failed' && (ctx.retryFailedVariants === true || (ctx.floorKey && temp.floorKey !== ctx.floorKey)))
+        || (temp.status === 'skipped' && temp.skipReason !== 'same-time'));
+    const url = temp?.url && !unavailableImage(temp.url, ctx) ? temp.url : '';
+    return { scene: hit.key, time, baseImageId: generatedAssetIdOf(hit.url), url, tried: Boolean(temp) && !retry && !(temp?.url && lostImage(temp.url, ctx)) };
 }
 
 function withTimeVariant(result, state, hit, ctx) {
@@ -322,12 +325,16 @@ function lostImage(url, ctx) {
     return Boolean(url) && isGeneratedAssetUrl(url) && typeof ctx.isMissingImage === 'function' && ctx.isMissingImage(url);
 }
 
+function unavailableImage(url, ctx) {
+    return lostImage(url, ctx) || (Boolean(url) && isGeneratedAssetUrl(url) && typeof ctx.isUnavailableImage === 'function' && ctx.isUnavailableImage(url));
+}
+
 // 已丢失的 igs-gen 图不能挡住兜底：先把它从候选里摘掉，再按正常顺序查情绪组/平和/默认。
 function liveSlots(record, ctx) {
-    if (!record || typeof record !== 'object' || typeof ctx.isMissingImage !== 'function') return record;
+    if (!record || typeof record !== 'object' || (typeof ctx.isMissingImage !== 'function' && typeof ctx.isUnavailableImage !== 'function')) return record;
     let out = record;
     for (const [slot, url] of Object.entries(record)) {
-        if (lostImage(url, ctx)) {
+        if (unavailableImage(url, ctx)) {
             if (out === record) out = { ...record };
             delete out[slot];
         }
@@ -335,17 +342,10 @@ function liveSlots(record, ctx) {
     return out;
 }
 
-function liveCharacters(characters, ctx) {
-    if (!characters || typeof characters !== 'object' || typeof ctx.isMissingImage !== 'function') return characters;
-    let out = characters;
-    for (const [name, record] of Object.entries(characters)) {
-        const live = liveSlots(record, ctx);
-        if (live !== record) {
-            if (out === characters) out = { ...characters };
-            out[name] = live;
-        }
-    }
-    return out;
+function liveCharacter(characters, aliases, name, ctx) {
+    const key = resolveCharacterKey(characters, aliases, name);
+    // 先定位角色，再检查他的槽位。另一角色读图失败不能让整库逐槽检查。
+    return key ? { [key]: liveSlots(characters[key], ctx) } : {};
 }
 
 function hasLostImage(record, ctx) {
@@ -355,23 +355,21 @@ function hasLostImage(record, ctx) {
 export function resolveBackgroundAsset(sceneState, ctx = {}) {
     const state = sceneState || {};
     if (!state.scene) return { url: '', source: 'none', needsGeneration: false };
-    const user = ctx.sceneAssets ? lookupSceneBackground(state, ctx.sceneAssets) : { url: null, quality: 'none' };
-    if (lostImage(user.url, ctx)) return { url: '', source: 'none', quality: user.quality, needsGeneration: true };
-    if (user.url && isTrustedUserMatch(user.quality, ctx.strict === true)) {
+    const availability = { isUnavailableImage: url => unavailableImage(url, ctx) };
+    const user = ctx.sceneAssets ? lookupSceneBackground(state, ctx.sceneAssets, availability) : { url: null, quality: 'none' };
+    const userAvailable = user.url && !unavailableImage(user.url, ctx);
+    if (userAvailable && isTrustedUserMatch(user.quality, ctx.strict === true)) {
         return withTimeVariant({ url: user.url, source: 'user', quality: user.quality, timed: user.timed === true, needsGeneration: false }, state, user, ctx);
     }
-    // 用户已登记的场景（精确/别名/强模糊命中）哪怕该时段没图，也不替用户生成。
-    if (TRUSTED.has(user.quality)) {
-        return { url: user.url || '', source: user.url ? 'user' : 'none', quality: user.quality, timed: Boolean(user.url) && user.timed === true, needsGeneration: false };
-    }
     const library = normalizeGeneratedLibrary(ctx.generatedAssets);
-    const generated = lookupSceneBackground(state, { ...ctx.sceneAssets, scenes: library.scenes });
-    if (generated.url && TRUSTED.has(generated.quality) && !lostImage(generated.url, ctx)) {
+    const generated = lookupSceneBackground(state, { ...ctx.sceneAssets, scenes: library.scenes }, availability);
+    if (generated.url && TRUSTED.has(generated.quality) && !unavailableImage(generated.url, ctx)) {
         return withTimeVariant({ url: generated.url, source: 'library', quality: generated.quality, timed: generated.timed === true, needsGeneration: false }, state, generated, ctx);
     }
     const temp = typeof ctx.tempBackground === 'function' ? ctx.tempBackground(state.scene, state.time || '') : '';
-    if (temp && !lostImage(temp, ctx)) return { url: temp, source: 'temp', needsGeneration: false };
-    return { url: user.url || '', source: user.url ? 'placeholder' : 'none', quality: user.quality, needsGeneration: true };
+    if (temp && !unavailableImage(temp, ctx)) return { url: temp, source: 'temp', needsGeneration: false };
+    const placeholder = userAvailable ? user : lookupSceneBackground({ ...state, scene: '默认' }, ctx.sceneAssets, availability);
+    return { url: placeholder.url || '', source: placeholder.url ? 'placeholder' : 'none', quality: placeholder.quality, needsGeneration: true };
 }
 
 function lookupSpriteWithFallback(sceneState, sceneAssets) {
@@ -401,7 +399,7 @@ export function resolveSpriteAsset(character, mood, ctx = {}, outfit = '') {
         if (entry && entry.moods) {
             const hit = lookupAssetValue(entry.moods, mood, userAssets.moodGroups, userAssets.moodFuzzyMatch === true, false);
             const base = isBuiltinNudeOutfit(entry.wardrobe) ? String(entry.base || '').trim() : '';
-            const nudeBase = lostImage(base, ctx) ? '' : base;
+            const nudeBase = unavailableImage(base, ctx) ? '' : base;
             const calm = hit.url || nudeBase ? {} : lookupAssetValue(entry.moods, '平和', userAssets.moodGroups, false, false);
             const anySlot = hit.url || nudeBase || calm.url ? '' : Object.keys(entry.moods).find((slot) => String(entry.moods[slot] || '').trim());
             const own = hit.url ? hit
@@ -409,40 +407,35 @@ export function resolveSpriteAsset(character, mood, ctx = {}, outfit = '') {
                 : calm.url ? calm
                 : anySlot ? { url: entry.moods[anySlot], slot: anySlot, quality: 'group' } : {};
             const picked = own.url ? own : lookupAssetValue(liveSlots((userAssets.characters || {})[found.key || name], ctx), '默认', userAssets.moodGroups, false, false);
-            if (picked.url && !lostImage(picked.url, ctx)) return { url: picked.url, slot: picked.slot, outfit: outfitName, character: found.key || name, source: 'user-outfit', quality: hit.url ? hit.quality : (nudeBase && picked.url === nudeBase ? 'exact' : 'group'), needsGeneration: false };
+            if (picked.url && !unavailableImage(picked.url, ctx)) return { url: picked.url, slot: picked.slot, outfit: outfitName, character: found.key || name, source: 'user-outfit', quality: hit.url ? hit.quality : (nudeBase && picked.url === nudeBase ? 'exact' : 'group'), needsGeneration: false };
         }
     }
     // 原装查表前先摘掉已丢失的内部图槽：未命中情绪照样落到组/同向档/平和/默认，不被死链截断。
-    const liveChars = liveCharacters(userAssets.characters, ctx);
-    const liveUserAssets = liveChars !== userAssets.characters ? { ...userAssets, characters: liveChars } : userAssets;
+    const liveChars = liveCharacter(userAssets.characters, userAssets.characterAliases, name, ctx);
+    const liveUserAssets = { ...userAssets, characters: liveChars };
     const user = lookupSpriteWithFallback({ character: name, mood }, liveUserAssets);
-    if (lostImage(user.spriteUrl, ctx)) {
-        // 兜底本身也已丢失时才标记缺图；否则 liveSlots 已摘掉死槽、由正常兜底链接管。
-        return { url: '', slot: '', character: name, source: 'none', needsGeneration: true };
-    }
-    if (user.spriteUrl) {
+    if (user.spriteUrl && !unavailableImage(user.spriteUrl, ctx)) {
         // 兜住的图还在，但同一角色名下还有死链槽：照常显示兜底图，同时保留缺图标记让补图链重画那张。
         const key = resolveCharacterKey(userAssets.characters, userAssets.characterAliases, name);
         const dangling = key ? hasLostImage((userAssets.characters || {})[key], ctx) : false;
         return { url: user.spriteUrl, slot: user.spriteSlot, character: user.spriteCharacter || name, source: 'user', quality: user.spriteQuality, needsGeneration: dangling };
     }
-    // 用户已登记该角色（哪怕槽位空着）就不是「无名角色」，不替用户生成。
-    if (resolveCharacterKey(userAssets.characters, userAssets.characterAliases, name)) {
-        // 已登记角色名下所有立绘槽都丢了：按缺图处理，让补图链重画。
-        const key = resolveCharacterKey(userAssets.characters, userAssets.characterAliases, name);
-        if (key && hasLostImage((userAssets.characters || {})[key], ctx)) {
-            return { url: '', slot: '', character: name, source: 'none', needsGeneration: true };
-        }
-        return { url: '', slot: '', character: name, source: 'none', quality: user.spriteQuality, needsGeneration: false };
-    }
-    const library = normalizeGeneratedLibrary(ctx.generatedAssets);
-    const generated = lookupSpriteWithFallback({ character: name, mood }, { characters: liveCharacters(library.characters, ctx), characterAliases: library.characterAliases, moodGroups: userAssets.moodGroups, moodFuzzyMatch: userAssets.moodFuzzyMatch });
-    if (generated.spriteUrl && !lostImage(generated.spriteUrl, ctx)) {
+    const registeredKey = resolveCharacterKey(userAssets.characters, userAssets.characterAliases, name);
+    // 显示匹配只读图片引用，不整理全库的 expressionNotes。
+    const library = plainObject(ctx.generatedAssets);
+    const libraryAliases = { ...userAssets.characterAliases, ...library.characterAliases };
+    const libraryName = resolveCharacterKey(library.characters, libraryAliases, name) ? name : registeredKey || name;
+    const libraryAssets = { characters: liveCharacter(library.characters, libraryAliases, libraryName, ctx), characterAliases: libraryAliases, moodGroups: userAssets.moodGroups, moodFuzzyMatch: userAssets.moodFuzzyMatch };
+    let generated = lookupSpriteWithFallback({ character: name, mood }, libraryAssets);
+    if (!generated.spriteUrl && registeredKey && registeredKey !== name) generated = lookupSpriteWithFallback({ character: registeredKey, mood }, libraryAssets);
+    if (generated.spriteUrl && !unavailableImage(generated.spriteUrl, ctx)) {
         return { url: generated.spriteUrl, slot: generated.spriteSlot, character: generated.spriteCharacter || name, source: 'library', quality: generated.spriteQuality, needsGeneration: false };
     }
-    const temp = typeof ctx.tempSprite === 'function' ? ctx.tempSprite(name) : '';
-    if (temp && !lostImage(temp, ctx)) return { url: temp, slot: '默认', character: name, source: 'temp', needsGeneration: false };
-    return { url: '', slot: '', character: name, source: 'none', needsGeneration: !isNonSpriteSpeaker(name) && !isKnownCharacterName(name, userAssets) };
+    const temp = typeof ctx.tempSprite === 'function' ? ctx.tempSprite(name) || (registeredKey && registeredKey !== name ? ctx.tempSprite(registeredKey) : '') : '';
+    if (temp && !unavailableImage(temp, ctx)) return { url: temp, slot: '默认', character: name, source: 'temp', needsGeneration: false };
+    const missingRegistered = registeredKey && hasLostImage((userAssets.characters || {})[registeredKey], ctx);
+    const unavailableRegistered = registeredKey && Object.values((userAssets.characters || {})[registeredKey] || {}).some(url => unavailableImage(url, ctx));
+    return { url: '', slot: '', character: name, source: 'none', reason: unavailableRegistered ? 'original-unavailable' : registeredKey || generated.spriteCharacter ? 'original-empty' : 'character-unregistered', needsGeneration: Boolean(missingRegistered) || (!registeredKey && !isNonSpriteSpeaker(name) && !isKnownCharacterName(name, userAssets)) };
 }
 
 // NSFW 挂 CG 时的对话框头像：只在衣柜引用「裸体」的那几套里找（当条表情 → 裸体底图 → 这一套的「平和」），

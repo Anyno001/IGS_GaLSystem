@@ -85,7 +85,7 @@ export function resolveSyncAction(file, meta, hasLocal) {
     return 'none';
 }
 
-export function createTavernSettingsSync(globalObject, { storage, onRestored, debounceMs = 1500, now = () => Date.now() } = {}) {
+export function createTavernSettingsSync(globalObject, { storage, onRestored, onUploaded, debounceMs = 1500, now = () => Date.now() } = {}) {
     let timer = null;
     let stopped = false;
     let applying = false;
@@ -146,6 +146,7 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
         // 上传途中本机又改了：保留 changedAt，等下一次防抖上传。
         const after = readMeta(storage);
         writeMeta({ ...after, syncedAt: savedAt, changedAt: after.changedAt > before.changedAt ? after.changedAt : 0, changedKeys: after.changedAt > before.changedAt ? after.changedKeys : [] });
+        if (typeof onUploaded === 'function') onUploaded({ savedAt });
         return true;
     }
 
@@ -174,13 +175,15 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
     function hook() {
         if (!proto || proto === Object.prototype || typeof rawSet !== 'function' || typeof rawRemove !== 'function') return null;
         const setItem = function setItem(key, value) {
+            const previous = this.getItem(key);
             const result = rawSet.call(this, key, value);
-            if (this === storage && isGlobalSettingKey(key)) markChanged(key);
+            if (this === storage && isGlobalSettingKey(key) && previous !== this.getItem(key)) markChanged(key);
             return result;
         };
         const removeItem = function removeItem(key) {
+            const previous = this.getItem(key);
             const result = rawRemove.call(this, key);
-            if (this === storage && isGlobalSettingKey(key)) markChanged(key, true);
+            if (this === storage && isGlobalSettingKey(key) && previous !== null) markChanged(key, true);
             return result;
         };
         proto.setItem = setItem;

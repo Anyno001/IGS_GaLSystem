@@ -177,7 +177,16 @@ export function createChatStreamObserver(opts = {}) {
         clearHard();
         ensureHard();
         // 酒馆生成事件是全局信号，插件自身的 API 请求也会触发它。
-        // 这里只武装生命周期；必须先看到 #chat 的外部变更，才进入载入态。
+        // 这里只武装生命周期；必须先看到 #chat 的外部变更，或宿主停止按钮亮起（插件请求不亮），才进入载入态。
+        // 非流式时 #chat 要等整段回复落地才变，只等 DOM 会让等待过场迟到到回复写完。代写不落楼，不进等待。
+        if (type === 'impersonate') return;
+        const armed = revision;
+        const probe = (left) => getSetter()(() => {
+            if (!active || !generationActive || revision !== armed) return;
+            if (isHostGenerating(resolveDocument()) === true) { scheduleActivity(false); return; }
+            if (left > 0) probe(left - 1);
+        }, 120);
+        probe(4);
     };
 
     const onGenerationFinished = (reason) => {

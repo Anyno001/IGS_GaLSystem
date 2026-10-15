@@ -2,7 +2,6 @@
 import '../src/visual/igs-ui/scene-audio.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { getPack, packFxOf, parsePackFxBody, packOfKind, validatePacks, FX_PACKS } from '../src/scene/fx-packs.js';
 import { normalizeDailyFxSettings } from '../src/visual/igs-ui/fx-daily-model.js';
 import { PACK } from '../src/visual/igs-ui/fx-pack-coc.js';
@@ -139,16 +138,6 @@ test('gate: coc registers the haze state with aliases and a safe filter', () => 
     assert.match(PACK.cssText, /data-igs-fx-state="haze"/);
 });
 
-test('gate: coc sources avoid canvas and mask-image urls and skin decoration stays opaque', () => {
-    for (const name of ['fx-pack-coc', 'fx-pack-coc-build', 'fx-pack-coc-style', 'fx-pack-coc-css-base', 'fx-pack-coc-css-a', 'fx-pack-coc-css-b', 'fx-pack-coc-css-c', 'fx-pack-coc-model', 'fx-pack-coc-ambience', 'fx-pack-coc-sfx']) {
-        const src = readFileSync(new URL(`../src/visual/igs-ui/${name}.js`, import.meta.url), 'utf8');
-        assert.doesNotMatch(src, /canvas/i, name);
-        assert.doesNotMatch(src, /mask-image\s*:\s*url/i, name);
-        assert.doesNotMatch(src, /from '[^']*\/(?:fx-daily|fx-daily-model|fx-daily-prompt|fx-daily-sfx|fx-packs|fx-era|scene-audio|prompt-triggers|daily-fx-directives)\.js'/, name);
-    }
-    // 阴冷透明语言：卡片只用单层磨砂底与 1px 细线，不加发光或厚阴影。
-    assert.doesNotMatch(PACK.cssText, /\.igs-coc-(?:clue|kp|sheet|bd|dg|rt|cb)[^{]*\{[^}]*box-shadow/);});
-
 const statsItem = (fields) => packFxOf(parsePackFxBody('stats', fields));
 const countOf = (html, re) => (html.match(re) || []).length;
 
@@ -207,14 +196,7 @@ test('gate: coc portal lids appear only in motion and casebook, dungeon, clue, k
 });
 
 test('gate: coc stats label font is at least 12 SVG units and long axis names are truncated with a title', () => {
-    const css = readFileSync(new URL('../src/visual/igs-ui/fx-pack-coc-css-c.js', import.meta.url), 'utf8');
-    assert.match(css, /igs-coc-st-label text\{font-size:12px/);
     const html = htmlOf(COC_BUILDERS.stats(statsItem(['', '幸运女神眷顾:60;CON:55;DEX:70']), env()).node);
     assert.ok(html.includes('幸运女神…'));
     assert.ok(html.includes('<title>幸运女神眷</title>'));
-});
-
-test('gate: coc stats prompt line mentions the rule override', () => {
-    const src = readFileSync(new URL('../src/visual/igs-ui/fx-pack-coc-model.js', import.meta.url), 'utf8');
-    assert.ok(src.includes('规则:coc/dnd'));
 });

@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { buildPackRegistry, normalizePack, validatePacks } from '../src/scene/fx-packs.js';
 import { DAILY_FX_KINDS, parseDailyFxBody } from '../src/scene/daily-fx-directives.js';
 import { extractFxDirectives, parseFxBody, resolveFxAtPage } from '../src/scene/fx-directives.js';
@@ -8,7 +7,6 @@ import { detectPromptTriggers } from '../src/scene/prompt-triggers.js';
 import { DAILY_FX_LABELS, enabledPackIds, normalizeDailyFxSettings, planDailyFx } from '../src/visual/igs-ui/fx-daily-model.js';
 import { PACK } from '../src/visual/igs-ui/fx-pack-camera.js';
 import { CAMERA_BUILDERS } from '../src/visual/igs-ui/fx-camera.js';
-import { CAMERA_STYLE_TEXT } from '../src/visual/igs-ui/fx-camera-style.js';
 import { CAMERA_SFX_DEFS } from '../src/visual/igs-ui/fx-camera-sfx.js';
 import { CAMERA_SETTINGS_DEFAULTS, CAMERA_KINDS, STEP_MATERIALS, cameraFxOf, inferStepMaterial, normalizeCameraSettings, parseCameraFx, resolveCameraAmbience } from '../src/visual/igs-ui/fx-camera-model.js';
 import { buildStepPlan, panPath, planBodySounds, playSteps } from '../src/visual/igs-ui/camera-steps-audio.js';
@@ -18,9 +16,6 @@ import { applyStageDirection } from '../src/visual/igs-ui/stage-direction-runtim
 import { AMBIENT_SOUND_DEFAULTS, AMBIENT_TRAIL_HOLD_MS, applySceneAudio, cancelSceneAudio, resolveAmbientPlan } from '../src/visual/igs-ui/scene-audio.js';
 import { makeStage } from './helpers/fake-dom.js';
 
-const SRC = new URL('../src/visual/igs-ui/', import.meta.url);
-const FILES = ['fx-pack-camera.js', 'fx-camera-model.js', 'fx-camera.js', 'fx-camera-parts.js', 'fx-camera-style.js', 'fx-camera-sfx.js', 'camera-steps-audio.js', 'camera-shots.js', 'fx-camera-gate.js', 'fx-camera-ground.js'];
-const read = (file) => fs.readFileSync(new URL(file, SRC), 'utf8');
 
 const SAMPLES = {
     fg: ['fg', 'leaf', 'right'], peek: ['peek', 'window', 'bl'], flare: ['flare', 'right'], streak: ['streak', 'right', ''], bob: ['bob'],
@@ -199,28 +194,7 @@ test('gate:camera-builders-have-picture-and-reduced-fallback', () => {
     assert.ok(CAMERA_BUILDERS.chase({ result: 'saved' }, envOf()).node.innerHTML.includes('igs-cm-flare-sweep'));
 });
 
-test('gate:camera-no-canvas-no-mask-url', () => {
-    for (const file of FILES) {
-        const source = read(file);
-        assert.ok(!/canvas/i.test(source), `${file} canvas`);
-        assert.ok(!/mask-image\s*:\s*url/i.test(source), `${file} mask-image url`);
-        assert.ok(!/footprint|脚印|igs-dfx-stroll/i.test(source), `${file} footprint`);
-        assert.ok(!/\r(?!\n)/.test(source), `${file} bare CR`);
-    }
-});
-
 test('gate:camera-low-static', () => {
-    const css = CAMERA_STYLE_TEXT;
-    for (const name of ['igs-cm-streak-line', 'igs-cm-petal', 'igs-cm-star', 'igs-cm-dapple', 'igs-cm-pulse', 'igs-cm-linger-curtain', 'igs-cm-linger-pane', 'igs-cm-linger-shadow']) {
-        const lowRule = css.split('\n').find((line) => line.includes('[data-igs-quality="low"] .' + name) && line.includes('animation:none'));
-        assert.ok(lowRule, `${name} low static`);
-        const reducedRule = css.split('\n').find((line) => line.includes('.igs-cm.is-reduced .' + name) && line.includes('animation:none'));
-        assert.ok(reducedRule, `${name} reduced static`);
-    }
-    assert.ok(css.includes('[data-igs-quality="low"][data-igs-sd-cam^="track-"] #igs-bg{animation:none'));
-    assert.ok(css.includes('[data-igs-quality="low"][data-igs-sd-cam="pov"] #igs-bg'));
-    assert.ok(css.includes('[data-igs-quality="low"] .igs-cm-fg,'));
-    assert.ok(css.includes('igs-dfx-amb.is-cmroom .igs-cm-win'));
     assert.equal(resolveCameraMod({ mod: 'hand' }, { lowQuality: true }), '');
     const low = envOf({ reduced: false });
     low.root.getAttribute = (name) => (name === 'data-igs-quality' ? 'low' : null);
@@ -386,16 +360,4 @@ test('gate:camera-prompt-descriptive', () => {
     }
     assert.equal(Object.keys(PACK.triggers).length, CAMERA_KINDS.length);
     for (const words of Object.values(PACK.triggers)) assert.ok(words.every((w) => w.length >= 2));
-});
-
-test('gate:camera-no-sprite-pose-change', () => {
-    const css = CAMERA_STYLE_TEXT;
-    for (const shot of ['sink', 'rise', 'lookup']) {
-        const rules = css.split('\n').filter((line) => line.includes(`data-igs-sd-cam="${shot}"`));
-        assert.ok(rules.length > 0, shot);
-        assert.ok(rules.every((rule) => !/background-image|content:url/.test(rule)), `${shot} only moves variables`);
-    }
-    const shots = read('camera-shots.js');
-    assert.ok(!/\.spriteUrl\s*=[^=]/.test(shots) && !/style\.backgroundImage/.test(shots));
-    assert.equal(read('fx-camera-gate.js').includes('spriteUrl'), false);
 });

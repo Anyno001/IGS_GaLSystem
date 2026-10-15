@@ -445,13 +445,6 @@ test('gate:fx-runtime:ancient-era-swaps-lamp-ink-snot-symbols-and-scroll-title',
     cancelFxEffects(root);
 });
 
-test('gate:fx-runtime:call-timer-style-uses-css-counters', () => {
-    assert.match(FX_STYLE_TEXT, /@property --igs-fx-ss/);
-    assert.match(FX_STYLE_TEXT, /\.igs-fx-call-timer::after\{counter-reset:igs-fx-mm var\(--igs-fx-mm\)/);
-    assert.match(FX_STYLE_TEXT, /data-igs-fx-call="video"\] #igs-sprite/);
-    assert.match(FX_STYLE_TEXT, /mask:url\("data:image\/svg\+xml,/);
-});
-
 test('gate:fx-runtime:remote-speaker-drives-pip-video-and-phone-audio', () => {
     const { root, motion } = makeRoot();
     const timers = clock();

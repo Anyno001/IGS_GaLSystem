@@ -81,7 +81,9 @@ export function createLocalImageCache(globalObject = globalThis, options = {}) {
         const visible = new Set([...aliases].filter(([key]) => pins.has(key)).map(([, identity]) => identity));
         // 预热不能挤掉正在显示的图；只有活跃图本身超出硬字节预算才淘汰活跃资源。
         for (const active of [false, true]) {
-            for (const [id, entry] of memory) {
+            // 活跃图总量超限时先拒绝后来读入的图，避免当前页图片互相挤出、反复读回。
+            const entries = active ? [...memory].reverse() : memory;
+            for (const [id, entry] of entries) {
                 if (memory.size <= maxCount && bytes <= memoryBytes) return;
                 if (visible.has(id) !== active) continue;
                 if (active && bytes <= memoryBytes) return;

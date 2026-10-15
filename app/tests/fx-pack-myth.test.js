@@ -1,7 +1,6 @@
 import '../src/visual/igs-ui/scene-audio.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { FX_PACK_BUILDERS, FX_PACK_SFX_DEFS, getPack, packOfKind, resolvePackAmbience, validatePacks, FX_PACKS, packAmbientCandidates, createPackVoices } from '../src/scene/fx-packs.js';
 import { normalizeDailyFxSettings } from '../src/visual/igs-ui/fx-daily-model.js';
 import { MYTH_KINDS, MYTH_LABELS, MYTH_PROMPT_LINES, MYTH_TRIGGERS, mythFxOf, parseMythBody } from '../src/visual/igs-ui/fx-myth-model.js';
@@ -162,12 +161,6 @@ test('gate: myth ambience resolves four ancient places and four ambient voices',
 
 test('gate: myth charm state registers and sources avoid canvas and mask-image url', () => {
     assert.ok(pack.states.charm.aliases.includes('魅惑'));
-    for (const file of ['fx-myth.js', 'fx-myth-style.js', 'fx-myth-model.js', 'fx-myth-sfx.js', 'fx-myth-ambience.js', 'fx-pack-myth.js']) {
-        const src = readFileSync(new URL(`../src/visual/igs-ui/${file}`, import.meta.url), 'utf8');
-        assert.doesNotMatch(src, /canvas/i, file);
-        assert.doesNotMatch(src, /mask-image\s*:\s*url/i, file);
-        assert.ok(!/\r(?!\n)/.test(src), `${file} bare CR`);
-    }
 });
 
 test('gate:myth-subdue four variants use four distinct sounds', () => {

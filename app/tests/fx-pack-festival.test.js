@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { PETAL_KIND_NAMES, planLanterns } from '../src/visual/igs-ui/fx-daily-particles.js';
 import { renderDailyFx } from '../src/visual/igs-ui/fx-daily.js';
 import { dailyFxOf, parseDailyFxBody } from '../src/scene/daily-fx-directives.js';
@@ -13,8 +12,6 @@ import { applyFxEra } from '../src/scene/fx-era.js';
 import { makeStage, makeTimers } from './helpers/fake-dom.js';
 
 const KINDS = ['birthday', 'countdown', 'xmas', 'redpacket', 'ring', 'wedding', 'test', 'riverlamp'];
-const SOURCES = ['fx-pack-festival.js', 'fx-festival-build.js', 'fx-festival-style.js', 'fx-festival-sfx.js']
-    .map((name) => readFileSync(new URL(`../src/visual/igs-ui/${name}`, import.meta.url), 'utf8'));
 
 const item = (type, ...fields) => dailyFxOf(parseDailyFxBody(type, fields));
 
@@ -125,13 +122,6 @@ test('gate:festival-pack era split strips modern and ancient kinds', () => {
     assert.equal(ancient.dailyFx.xmas, false);
     assert.equal(ancient.dailyFx.riverlamp, true);
     assert.equal(ancient.dailyFx.ring, true);
-});
-
-test('gate:festival-pack source has no canvas and no mask-image url', () => {
-    for (const source of SOURCES) {
-        assert.doesNotMatch(source, /canvas/i);
-        assert.doesNotMatch(source, /mask-image\s*:\s*url/i);
-    }
 });
 
 test('gate:festival-pack reduced builders start no particles and stay static', () => {

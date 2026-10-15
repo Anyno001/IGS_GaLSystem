@@ -280,3 +280,116 @@ test('gate:outfits:reference-replacement-preserves-old-image-until-save-and-repo
     assert.deepEqual(deleted, ['new-ref', 'old-ref']);
     assert.ok(t.alerts.some((message) => message.includes('旧参考图未能从本机清除')));
 });
+
+test('gate:outfits:wardrobe-prompt-continues-to-selected-character-sprite', async () => {
+    const t = createCtx();
+    t.sa().wardrobe = { 校服: { prompt: '' } };
+    t.sa().characters.雪乃 = { 默认: 'igs-gen:base' };
+    const choices = [], generated = [], saves = [];
+    t.ctx.persistSettingsDraft = (options = {}) => {
+        saves.push({ assets: structuredClone(t.sa()), spriteAssetChanged: options.spriteAssetChanged === true });
+        return { ok: true };
+    };
+    t.ctx.dialogs = {
+        edit: async (_message, value) => value,
+        confirm: async () => true,
+        choose: async (message, items, current, labels) => {
+            choices.push({ message, items, current, labels });
+            return items.some((item) => item.value === '雪乃') ? '雪乃' : '1';
+        },
+    };
+    t.ctx.options.generatedAssets = {
+        writeWardrobePrompt: async () => ({ ok: true, prompt: 'school uniform' }),
+        getImagePrompt: async () => ({ positive: '1girl, black hair', negative: '' }),
+        generateExpressionSet: async (input) => {
+            generated.push(input);
+            return { ok: true, items: [{ mood: '平和', ok: true, imageId: 'uniform-sprite' }] };
+        },
+        paintWardrobeReference: async () => { throw new Error('手动写词无需先画参考图'); },
+    };
+    const result = await handleSettingsAction(`wardrobe-generate-prompt:${enc('校服')}`, t.ctx);
+    assert.equal(result.ok, true);
+    assert.equal(choices[0].labels.dropdown, true);
+    assert.equal(choices[0].labels.cancelLabel, '暂不生成');
+    assert.equal(choices[0].current, choices[0].items[0].value);
+    assert.equal(generated.length, 1);
+    assert.equal(generated[0].name, '雪乃');
+    assert.equal(generated[0].outfit.name, '校服');
+    assert.equal(generated[0].outfit.prompt, 'school uniform');
+    assert.deepEqual(generated[0].moods, ['平和']);
+    assert.equal(saves[0].assets.wardrobe.校服.prompt, 'school uniform');
+    assert.equal(saves.at(-1).assets.characterOutfits.雪乃.校服.moods.平和, 'igs-gen:uniform-sprite');
+    assert.equal(saves.at(-1).spriteAssetChanged, true);
+    assert.equal(t.sa().characters.雪乃.默认, 'igs-gen:base');
+    assert.equal(t.sa().characterOutfits.小林海斗, undefined);
+    assert.equal(t.state.activeSettings.asyncState.outfitTabs.雪乃, '校服');
+});
+
+
+test('gate:outfits:wardrobe-prompt-cancel-and-failure-do-not-start-sprites', async () => {
+    for (const scenario of ['cancel', 'write-failed', 'save-failed']) {
+        const t = createCtx();
+        t.sa().wardrobe = { 校服: { prompt: 'old' } };
+        let asked = 0, rerun = 0;
+        const ctx = { ...t.ctx, settingsState: t.state.activeSettings,
+            dialogs: { edit: async () => '', choose: async () => { asked++; return null; }, alert: async () => true },
+            rerun: async () => { rerun++; return { ok: true }; },
+        };
+        ctx.options.generatedAssets = { writeWardrobePrompt: async () => scenario === 'write-failed'
+            ? { ok: false } : { ok: true, prompt: 'new uniform' } };
+        if (scenario === 'save-failed') ctx.persistSettingsDraft = () => ({ ok: false });
+        await handleOutfitAction(`wardrobe-generate-prompt:${enc('校服')}`, ctx);
+        assert.equal(asked, scenario === 'cancel' ? 1 : 0);
+        assert.equal(rerun, 0);
+        assert.deepEqual(t.sa().characterOutfits, {});
+        if (scenario === 'cancel') assert.equal(t.sa().wardrobe.校服.prompt, 'new uniform');
+    }
+});
+
+test('gate:outfits:wardrobe-auto-offers-character-once-after-reference', async () => {
+    const t = createCtx();
+    const steps = [];
+    const ctx = { ...t.ctx, settingsState: t.state.activeSettings,
+        dialogs: {
+            prompt: async () => '校服', edit: async () => '',
+            choose: async (_message, _choices, _current, labels) => {
+                assert.equal(labels.dropdown, true);
+                steps.push('choose'); return '雪乃';
+            },
+        },
+        rerun: async (action) => { steps.push(action); return { ok: true }; },
+    };
+    ctx.options.generatedAssets = {
+        writeWardrobePrompt: async () => { steps.push('prompt'); return { ok: true, prompt: 'uniform' }; },
+        paintWardrobeReference: async () => { steps.push('reference'); return { ok: true, imageId: 'ref' }; },
+    };
+    assert.equal((await handleOutfitAction('wardrobe-add', ctx)).ok, true);
+    assert.deepEqual(steps, ['prompt', 'reference', 'choose', `outfit-expression-set:${enc('雪乃', '校服')}`]);
+    assert.equal(t.sa().characterOutfits.雪乃.校服.wardrobe, '校服');
+});
+
+
+test('gate:outfits:wardrobe-review-prompt-continues-with-known-character', async () => {
+    const { recordOutfitReview, loadOutfitReview } = await import('../src/scene/outfit-review-store.js');
+    const t = createCtx();
+    const stored = new Map();
+    t.ctx.options.global.localStorage = {
+        getItem: (key) => stored.get(key) || null,
+        setItem: (key, value) => stored.set(key, value),
+    };
+    recordOutfitReview(t.ctx.options.global.localStorage, { character: '雪乃', word: '校服' });
+    const seen = [];
+    const ctx = { ...t.ctx, settingsState: t.state.activeSettings,
+        dialogs: { confirm: async () => true, choose: async () => { throw new Error('已知角色不再询问'); } },
+        rerun: async (action) => { seen.push(action); return { ok: true }; },
+    };
+    ctx.options.generatedAssets = { writeWardrobePrompt: async (input) => {
+        assert.equal(input.character, '雪乃');
+        return { ok: true, prompt: 'school uniform' };
+    } };
+    assert.equal((await handleOutfitAction(`wardrobe-generate-prompt:${enc('雪乃', '校服')}`, ctx)).ok, true);
+    assert.deepEqual(seen, [`outfit-expression-set:${enc('雪乃', '校服')}`]);
+    assert.equal(t.sa().wardrobe.校服.prompt, 'school uniform');
+    assert.equal(t.sa().characterOutfits.雪乃.校服.wardrobe, '校服');
+    assert.deepEqual(loadOutfitReview(t.ctx.options.global.localStorage), []);
+});

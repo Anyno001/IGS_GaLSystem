@@ -16,12 +16,12 @@
 
 ## 风险与验证
 
-- 文档、结构和 fixtures 修改：运行相关静态检查。
-- 单模块运行逻辑修改：运行目标测试和模拟测试。
-- 跨模块、loader、dist、版本或发布链修改：运行 `npm.cmd run gate`，并记录构建证据。
+- 文档、结构和 fixtures 修改：核对相关说明与引用。
+- 运行逻辑修改：按实际风险选择已有行为用例，使用 `node --test tests/<文件>.test.js` 定向验证。
+- loader、dist、版本或发布链修改：构建后核对 loader、实际下载产物与启动行为，不以构建成功代替启动。
 - 真实酒馆、真实 provider、真实用户数据和不可逆 Git/远端操作：先用 fake host/fixtures 验证，必须得到维护者明确确认。
 
-在 `app/` 中使用 `npm.cmd` 执行 `structure`、`static`、`test`、`simulate`、`perf`、`build` 和 `gate`。失败命令不得宣称通过。
+已同步删除结构、静态、性能门禁及批量测试入口，不重建等价全量运行器，不以 skip/todo 隐藏失败。保留行为、兼容、安全、异步生命周期和加载启动回归，见 `app/tests/README.md`。构建与预览命令保留，失败命令不得宣称通过。
 
 ## 发布规则
 

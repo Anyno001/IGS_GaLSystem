@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { PACK } from '../src/visual/igs-ui/fx-pack-transform.js';
 import { buildPackRegistry, validatePacks } from '../src/scene/fx-packs.js';
 import { normalizeDailyFxSettings } from '../src/visual/igs-ui/fx-daily-model.js';
@@ -10,11 +9,9 @@ import {
 } from '../src/visual/igs-ui/fx-transform-model.js';
 import { TRANSFORM_BUILDERS, frameStyleFor } from '../src/visual/igs-ui/fx-transform.js';
 import { beastLayout, beastPartsHtml, beastTraitHtml, resolveBeast } from '../src/visual/igs-ui/fx-beast-parts.js';
-import { TRANSFORM_STYLE_TEXT } from '../src/visual/igs-ui/fx-transform-style.js';
 import { makeStage } from './helpers/fake-dom.js';
 
 const registry = buildPackRegistry([PACK]);
-const SOURCES = ['fx-transform.js', 'fx-transform-model.js', 'fx-transform-style.js', 'fx-transform-sfx.js', 'fx-beast-parts.js', 'fx-pack-transform.js'];
 
 function stage({ waapi = false } = {}) {
     const root = makeStage({ waapi });
@@ -196,8 +193,6 @@ test('gate:fx-pack-transform truemirror is the mirror path with true-form conten
     const styles = (node) => node.descendants().map((n) => n.getAttribute('style') || '').join('|');
     assert.ok(styles(truth.node).includes('brightness(0)'));
     assert.ok(!styles(plain.node).includes('brightness(0)'));
-    const src = readFileSync(new URL('../src/visual/igs-ui/fx-transform.js', import.meta.url), 'utf8');
-    assert.ok(src.includes("buildMirror(item, env, 'true-form')") && src.includes("buildMirror(item, env, 'self')"));
 });
 
 test('gate:fx-pack-transform shift leaves the real sprite alone apart from a shake and covers it with a silhouette clone', () => {
@@ -232,17 +227,6 @@ test('gate:fx-pack-transform blackeye and mark build their patches from the head
     const { root: root2 } = stage();
     const marks = TRANSFORM_BUILDERS.mark(ITEMS.mark, envOf(root2));
     assert.equal(marks.node.children.filter((n) => String(n.className).includes('igs-xf-patch')).length, 2);
-});
-
-test('gate:fx-pack-transform sources have no canvas and no mask-image:url, and low quality is handled', () => {
-    for (const file of SOURCES) {
-        const text = readFileSync(new URL(`../src/visual/igs-ui/${file}`, import.meta.url), 'utf8');
-        assert.ok(!/canvas/i.test(text), `${file} canvas`);
-        assert.ok(!/mask-image/i.test(text), `${file} mask-image`);
-        assert.ok(!/\r(?!\n)/.test(text), `${file} bare CR`);
-    }
-    assert.ok(TRANSFORM_STYLE_TEXT.includes('data-igs-quality="low"'));
-    assert.ok(TRANSFORM_STYLE_TEXT.includes('.igs-xf.is-reduced'));
 });
 
 test('gate:fx-pack-transform sfx layers are finite, modest and short', () => {

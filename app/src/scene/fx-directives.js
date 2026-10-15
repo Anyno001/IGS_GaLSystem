@@ -370,7 +370,27 @@ function applyStageDirective(result, d, current) {
     result.links.push({ a, b, kind: action });
 }
 
-export function resolveFxAtPage(directives, offset, prevOffset = -1, initial = null, nextOffset = -1) {
+const FX_PERSISTENT_KEYS = ['call', 'flashback', 'dream', 'letterbox', 'whisper', 'stateFx', 'movie', 'movieMode',
+    'lightsOff', 'umbrella', 'battle', 'poses', 'links', 'goneAt', 'romance', 'romanceTarget', 'romanceAt',
+    'live', 'bgmMood', 'sense', 'solo', 'dlcRanges'];
+
+// 顺序准备整楼时沿用上一页的区间状态，只消费新指令。随机单页调用仍走原有纯解析入口。
+export function createFxPageResolver(directives, initial = null) {
+    const feed = directives.filter(d => ['app', 'post', 'reply'].includes(d.kind));
+    const storm = directives.filter(d => d.kind === 'storm' || d.kind === 'mention');
+    let previous = null, previousOffset = -1, startIndex = 0;
+    return (offset, prevOffset = -1, nextOffset = -1, pagedDirectives = directives) => {
+        const incremental = previous && previousOffset === prevOffset && offset >= previousOffset && pagedDirectives === directives;
+        const result = resolveFxAtPage(pagedDirectives, offset, prevOffset, initial, nextOffset,
+            { previous: incremental ? previous : null, startIndex: incremental ? startIndex : 0, feed, storm });
+        if (offset < previousOffset) startIndex = 0;
+        previous = result; previousOffset = offset;
+        while (startIndex < directives.length && directives[startIndex].offset <= offset) startIndex++;
+        return result;
+    };
+}
+
+export function resolveFxAtPage(directives, offset, prevOffset = -1, initial = null, nextOffset = -1, prepared = null) {
     const carried = initial && initial.battle && typeof initial.battle === 'object' ? { foe: String(initial.battle.foe || ''), title: String(initial.battle.title || '') } : null;
     const result = { instants: [], call: null, flashback: false, dream: false, letterbox: false, whisper: false, stateFx: null, movie: false, movieMode: '', lightsOff: false, umbrella: false, items: [], itemOverflow: 0, daily: [], battle: carried, battleStart: false, battleEnd: '', hits: [], reacts: [], poses: {}, links: [], goneAt: {}, entrances: {}, turns: {}, romance: '', romanceTarget: '', romanceAt: -1, confess: false, memory: '', live: null, dms: [], danmaku: [], bgmMood: '', cam: null, storm: null };
     // 感官调度：区间状态，作用到下一条 sense / sense-end。
@@ -384,8 +404,15 @@ export function resolveFxAtPage(directives, offset, prevOffset = -1, initial = n
     const at = Number(offset);
     if (!Array.isArray(directives) || !directives.length || !Number.isFinite(at) || at < 0) return result;
     const from = Number.isFinite(Number(prevOffset)) ? Number(prevOffset) : -1;
+    if (prepared?.previous) {
+        for (const key of FX_PERSISTENT_KEYS) result[key] = prepared.previous[key];
+        result.poses = { ...result.poses };
+        result.goneAt = { ...result.goneAt };
+        result.dlcRanges = { ...result.dlcRanges };
+    }
     const seen = new Set();
-    for (const d of directives) {
+    for (let index = prepared?.startIndex || 0; index < directives.length; index++) {
+        const d = directives[index];
         if (d.offset > at) break;
         const openCall = result.call;
         if (d.kind === 'call') result.call = d.end ? null : { ...callOf(d), at: d.offset };
@@ -478,10 +505,10 @@ export function resolveFxAtPage(directives, offset, prevOffset = -1, initial = n
         result.instants.push(instant);
     }
     // 手机社区：区间内取最近几条帖子，本页新出现的标 fresh。
-    const feed = foldFeedDirectives(directives, at, Number(nextOffset));
+    const feed = foldFeedDirectives(prepared?.feed || directives, at, Number(nextOffset));
     result.feed = feed ? { platform: feed.platform, owner: feed.owner, posts: feed.posts.slice(-FEED_VIEW_MAX).map((post) => ({ ...post, fresh: post.offset > from })) } : null;
     // 舆论风暴：区间内累积到当前页的 @ 评论，本页新出现的标 fresh。
-    result.storm = foldStormDirectives(directives, at, from);
+    result.storm = foldStormDirectives(prepared?.storm || directives, at, from);
     return result;
 }
 

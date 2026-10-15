@@ -2628,12 +2628,13 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
-    if (normalizedAction === 'image-cache-status' || normalizedAction === 'image-files-retry-delete') {
+    if (normalizedAction === 'image-cache-status' || normalizedAction === 'image-files-retry-delete' || normalizedAction === 'image-records-retry-backup') {
         if (!options.media) return { ok: false, reason: 'media-unavailable' };
         try {
             if (normalizedAction === 'image-files-retry-delete') await options.media.retryDeletes();
+            if (normalizedAction === 'image-records-retry-backup') await options.media.flush();
             settingsState.asyncState.imageCacheStatus = describeMediaUsage(await options.media.stats());
-        } catch (error) { settingsState.asyncState.imageCacheStatus = `读取或回收失败：${error.message}`; }
+        } catch (error) { settingsState.asyncState.imageCacheStatus = `读取、备份或回收失败：${error.message}`; }
         return rerenderSettings();
     }
 

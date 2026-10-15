@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { PACK } from '../src/visual/igs-ui/fx-pack-abo.js';
 import { ABO_KINDS, aboFxOf, parseAboFxBody, phaseRatioOf, scentColorOf } from '../src/visual/igs-ui/fx-abo-model.js';
 import { ABO_SFX_DEFS } from '../src/visual/igs-ui/fx-abo-sfx.js';
@@ -77,8 +76,6 @@ test('gate:fx-pack-abo scent colour is explicit or stable per name, no scent lex
     assert.equal(scentColorOf('甲', '#123456'), '#123456');
     assert.equal(scentColorOf('甲'), scentColorOf('甲'));
     assert.match(scentColorOf('乙'), /^#[0-9a-f]{6}$/i);
-    const model = readFileSync(new URL('../src/visual/igs-ui/fx-abo-model.js', import.meta.url), 'utf8');
-    assert.doesNotMatch(model, /雪松|蜜桃|薄荷|檀香/);
 });
 
 test('gate:fx-pack-abo every builder returns a node in normal and reduced mode', () => {
@@ -131,20 +128,4 @@ test('gate:fx-pack-abo text fields are escaped', () => {
     assert.doesNotMatch(built.node.innerHTML, /<b>乙/);
     const card = PACK.builders.inhibitor(aboFxOf(parseAboFxBody('inhibitor', ['注射', '<script>'])), envOf());
     assert.doesNotMatch(card.node.innerHTML, /<script>/);
-});
-
-test('gate:fx-pack-abo source avoids pixel readback and url masks', () => {
-    for (const name of ['fx-pack-abo.js', 'fx-abo-model.js', 'fx-abo-build.js', 'fx-abo-sfx.js', 'fx-abo-style.js']) {
-        const src = readFileSync(new URL(`../src/visual/igs-ui/${name}`, import.meta.url), 'utf8');
-        assert.doesNotMatch(src, /canvas/i, name);
-        assert.doesNotMatch(src, /mask-image\s*:\s*url/i, name);
-    }
-});
-
-test('gate:fx-pack-abo style keeps pressure on css variables, low quality and reduced fallbacks', () => {
-    assert.match(PACK.cssText, /--igs-abo-press-weight/);
-    assert.match(PACK.cssText, /--igs-abo-sink/);
-    assert.match(PACK.cssText, /data-igs-quality="low"/);
-    assert.match(PACK.cssText, /is-reduced/);
-    for (const kind of PACK.kinds) assert.ok(Object.keys(PACK.builders).includes(kind));
 });

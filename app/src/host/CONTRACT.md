@@ -1,5 +1,17 @@
 # host 模块契约
 
+## 固定版本启动器（test-v0.36.66）
+
+- 固定版 loader 的 tag 属于脚本内部常量，不允许页面残留的 `IGS_LOADER_REF`、配置 ref 或 base 改写。该版本失败明确报错，禁止请求 main 或其他版本。
+- 只有已记录的来源 ref、base 与实际 API 版本均匹配时复用实例；来源未知或不匹配先等待现有 `shutdown()` 完成。关闭失败停止替换，不能让两个媒体所有者并存。
+- 模块加载完成还要核实 API 的实际版本；返回错误版本时关闭该实例并报要求版本与实际版本，不把脚本 load 事件当作指定版本就绪。
+
+## 副 LLM 转发（v0.36.58）
+
+- 独立 OpenAI 兼容接口的模型列表与生成，分别 POST 到酒馆同源 `/api/backends/chat-completions/status` 和 `/generate`；使用宿主 `getRequestHeaders` 的 CSRF 头和当前酒馆会话，不向浏览器直连上游，也不依赖通用 `/proxy`。
+- 两种请求均使用 `custom` 来源，地址和插件密钥通过请求内的 `custom_url/custom_include_headers` 传递，不更改主连接或酒馆密钥库。空密钥显式覆盖 Authorization，不能借用主连接密钥。
+- HTTP 错误和 HTTP 200 的 `error` 响应都返回可展示失败；文案隐藏插件密钥。超时覆盖响应体读取并中止网络请求。宿主请求头不可用时明确报错，不退回跨域直连。
+
 ## 职责
 
 - 适配 TavernHelper、SillyTavern DOM 和酒馆魔法棒菜单。
@@ -17,7 +29,7 @@
 - 提供 `setInputText(text)` 只填入酒馆默认输入框，以及 `typeAndSend(text)` 填入并发送；内嵌阅读器不得维护第二套发送框。
 - 地图独用 `fillEmptyInputText(text)`：必须读取酒馆真实草稿，只有确知为空才纯文本填入并触发输入事件；非空、不可读取或失败均返回诊断，不改变原 `setInputText` / `typeAndSend` 调用语义。
 - `chat-stream-observer.js` 在五种阅读器模式打开时观察阅读器实际挂载文档的 `#chat`，不得观察整个 document 或按固定间隔扫描正文。`onActivity` 按 `activityThrottleMs`（默认 150ms）首尾节流：首批变更立即回调，窗口内其余合并为窗口末一次；稳定 / 空闲判定仍按每批变更重置，`stop` / `cancelPending` 清掉节流定时器。
-- 酒馆 `GENERATION_STARTED / GENERATION_ENDED / GENERATION_STOPPED` 是流式起止主信号；DOM 静默窗口仅作兼容兜底。
+- 酒馆 `GENERATION_STARTED / GENERATION_ENDED / GENERATION_STOPPED` 是流式起止主信号；DOM 静默窗口仅作兼容兜底。非流式生成可通过启动后有界探测宿主停止按钮来报告活动，不必等整段正文写入；代写不走该探测，过期 revision 不触发载入。
 - `GENERATION_STARTED` 的 `dryRun === true` 与 `type === 'quiet'`（非 `quietToLoud`）是插件后台请求/提示词组装，不得武装载入态；quiet 的结束和 IGS 自身后台生成的结束也不能完成前台等待。
 - 静默和 120s 无活动超时不代表完成：后者仅调用 `onTimeout` 提醒，不解除观察；每批外部活动重置时限。完成需要结束事件，或宿主停止按钮已收起且有生成/回复活动证据、静默满 10s。停止按钮仍显示时不收尾，按钮不可读取不能推断已结束。
 - `onStable({ reason, revision })` 只在完成信号和稳定窗口后调用；`reason` 区分 ended、stopped、failed（失败事件仅在宿主暴露该 eventType 时订阅）。每批写入、生成起止和取消更新 revision，异步读完后用 `isCurrentRevision` 丢弃过期结果；停止后再发 ended 不覆盖 stopped。

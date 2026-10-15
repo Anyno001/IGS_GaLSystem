@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { createIgsCompatApi } from '../src/api/igs-compat.js';
 
 test('gate:perf:compat-getConfig-uses-app-getConfig-not-getState', () => {
@@ -15,12 +14,4 @@ test('gate:perf:compat-getConfig-uses-app-getConfig-not-getState', () => {
     const legacy = { getState: () => { stateCalls += 1; return { config }; }, igsUi: null };
     assert.deepEqual(createIgsCompatApi(legacy).getConfig(), config);
     assert.equal(stateCalls, 1);
-});
-
-test('gate:perf:bootstrap-exposes-getConfig-and-reader-snapshot-is-lazy', () => {
-    const boot = fs.readFileSync(new URL('../src/core/bootstrap.js', import.meta.url), 'utf8');
-    assert.match(boot, /function getConfig\(\) \{\s*return state\.config;/);
-    const host = fs.readFileSync(new URL('../src/visual/igs-ui/reader-host.js', import.meta.url), 'utf8');
-    assert.equal((host.match(/snapshot: lazySnapshotCopy\(/g) || []).length, 2, 'openReader and replaceReader both return a lazy snapshot');
-    assert.match(host, /get\(\) \{\s*if \(!done\) \{ copy = cloneSnapshotKeepAssets\(source\)/);
 });

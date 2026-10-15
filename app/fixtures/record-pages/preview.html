@@ -159,6 +159,7 @@ function openSettingsScene() {
   // ?gen=1：假的生成图服务，igs-gen: 地址都显示成示例图，另放两张刚生成的图。
   const fakeGen = q.get('gen') ? new Proxy({
     resolveUrl: (url) => (String(url || '').startsWith('igs-gen:') ? img : url),
+    writeWardrobePrompt: async () => ({ ok: true, prompt: 'pink pajamas' }),
     listTemp: () => [
       { key: 'temp/sp', type: 'sprite', name: '小雪 · 泳装', status: '临时', imageId: 'tmp-sp', url: img },
       { key: 'temp/bg', type: 'background', name: '海边黄昏', status: '临时', imageId: 'tmp-bg', url: img },
@@ -181,6 +182,13 @@ function openSettingsScene() {
   const subtab = q.get('subtab');
   if (subtab) opened.controller?.switchSceneSubTab?.(subtab);
   // ?act=命令:参数:参数,… 依次点设置里的 data-action 按钮（参数按原文写，这里替它编码）。
+  if (fakeGen && q.get('wardrobe-pick') === '1') {
+    document.querySelector(`[data-action="wardrobe-generate-prompt:${encodeURIComponent('睡衣')}"]`)?.click();
+    setTimeout(() => {
+      const editor = document.querySelector('.igs-settings-dialog.is-edit');
+      editor?.querySelector('[data-settings-dialog="ok"]')?.click();
+    }, 0);
+  }
   for (const step of (q.get('act') || '').split(',').filter(Boolean)) {
     const [command, ...rest] = step.split(':');
     // ui-toggle-open 的键本身带冒号，整段当一个参数。

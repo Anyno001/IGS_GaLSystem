@@ -30,10 +30,11 @@ function assertLoaderButtonConfig(button, label) {
     }
 }
 
-// 版本化固定 loader：在 loader 源前注入 IGS_LOADER_REF，把它锁定到具体 tag（不追 main、不自动更新）。
+// 固定版使用内部常量，不受页面遗留 ref/base 配置影响。
 function buildPinnedContent(source, ref) {
-    const prefix = `(function(){try{(window.parent&&window.parent.document?window.parent:window).IGS_LOADER_REF=${JSON.stringify(ref)};}catch(e){try{window.IGS_LOADER_REF=${JSON.stringify(ref)};}catch(e2){}}})();\n`;
-    return prefix + source;
+    const marker = "const PINNED_REF = '';";
+    if (!source.includes(marker)) throw new Error('Loader source missing fixed ref marker.');
+    return source.replace(marker, `const PINNED_REF = ${JSON.stringify(ref)};`);
 }
 
 function writePinnedLoader(ref) {
@@ -57,7 +58,7 @@ function writePinnedLoader(ref) {
     };
     fs.writeFileSync(pinnedPath, `${JSON.stringify(pinnedJson, null, 2)}\n`, 'utf8');
     const verify = JSON.parse(fs.readFileSync(pinnedPath, 'utf8'));
-    if (verify.content !== pinnedContent || !verify.content.includes(`IGS_LOADER_REF=${JSON.stringify(ref)}`)) {
+    if (verify.content !== pinnedContent || !verify.content.includes(`const PINNED_REF = ${JSON.stringify(ref)};`)) {
         throw new Error(`Pinned loader JSON for ${ref} does not match source.`);
     }
     console.log(`loader:pinned ok ${path.relative(projectRoot, pinnedPath)}`);
@@ -96,8 +97,9 @@ console.log(`loader:build ok ${path.relative(projectRoot, jsonPath)}`);
 const releaseArgIndex = process.argv.indexOf('--release');
 if (releaseArgIndex !== -1) {
     const releaseRef = process.argv[releaseArgIndex + 1];
-    if (!/^v\d+\.\d+\.\d+$/.test(releaseRef || '')) {
-        throw new Error('--release requires a vX.Y.Z ref.');
+    const version = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).version;
+    if (releaseRef !== `v${version}`) {
+        throw new Error(`--release requires v${version}, matching app/package.json.`);
     }
     const releasePath = path.join(loaderRoot, `酒馆助手脚本-沉浸式Galgame系统（自动更新） ${releaseRef}.json`);
     fs.writeFileSync(releasePath, `${JSON.stringify(loaderJson, null, 2)}\n`, 'utf8');

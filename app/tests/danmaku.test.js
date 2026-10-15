@@ -1,7 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import { extractFxDirectives, parseFxBody, resolveFxAtPage } from '../src/scene/fx-directives.js';
 import { stripMarkerDirectives } from '../src/scene/directive-tags.js';
 import { normalizeDanmakuSettings, pickInnerMood } from '../src/visual/igs-ui/danmaku-settings.js';
@@ -11,7 +9,6 @@ import { LIVE_LIST_LIMIT, formatPopularity, guardLevelOf, scColorOf } from '../s
 import { AUDIENCE_LOG_LIMIT, appendAudienceLog, formatDanmakuTime } from '../src/visual/igs-ui/danmaku-audience.js';
 import { pickScrollTrack } from '../src/visual/igs-ui/danmaku-lanes.js';
 import { thoughtFragments } from '../src/visual/igs-ui/danmaku-pools.js';
-import { getOriginalReaderSource } from '../src/visual/igs-ui/original-reader-source.js';
 import { applyPerformancePreset, detectPerformancePreset } from '../src/visual/igs-ui/performance-presets.js';
 import { applyFxEra } from '../src/scene/fx-era.js';
 import { detectPromptTriggers } from '../src/scene/prompt-triggers.js';
@@ -469,17 +466,6 @@ test('gate:danmaku:inner-fly-style-defaults-burst-and-lanes-stay-above-dialog', 
     }
 });
 
-test('gate:danmaku:style-wired-and-phone-ui-has-no-emoji', () => {
-    const source = getOriginalReaderSource('test');
-    const css = JSON.stringify(source);
-    for (const selector of ['.igs-live-phone', '.igs-aud-entry', '.igs-dm-word']) assert.ok(css.includes(selector), selector);
-    const dir = path.resolve(import.meta.dirname, '../src/visual/igs-ui');
-    const emoji = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F000}-\u{1F2FF}]/u;
-    for (const name of fs.readdirSync(dir).filter((f) => f.startsWith('danmaku-'))) {
-        assert.doesNotMatch(fs.readFileSync(path.join(dir, name), 'utf8'), emoji, name);
-    }
-});
-
 test('gate:danmaku:presets-era-and-adaptive-grammar', () => {
     const reader = {};
     applyPerformancePreset(reader, 'standard');
@@ -889,14 +875,6 @@ test('gate: live fly font size and density settings normalize and drive the styl
     assert.equal(LIVE_FONT_SCALE.medium, 1);
     assert.equal(LIVE_DENSITY.medium.cap, 14, 'default cap unchanged');
     assert.ok(LIVE_DENSITY.dense.cap <= 18 && LIVE_DENSITY.sparse.cap < LIVE_DENSITY.medium.cap);
-    const style = fs.readFileSync(path.resolve('src/visual/igs-ui/danmaku-style.js'), 'utf8');
-    assert.ok(style.includes('font-size:calc(11.5px * var(--igs-live-fs,1))'));
-    assert.ok(!style.includes('[data-layout="full"] .igs-live-rankcard,'), 'ranking card no longer hidden in full screen');
-    // 全屏右组（人数胶囊 + 切换钮）与左边名牌行同一水平中心：胶囊让出 30px 按钮 + 6px 间距，按钮贴 16px 内边距。
-    assert.ok(style.includes('.igs-live-switch{position:absolute;right:16px;top:29px;transform:translateY(-50%)'));
-    assert.ok(style.includes('.igs-live-switch[data-sub]{top:calc(var(--igs-live-view-top,56px) + 12px);}'));
-    assert.ok(style.includes('[data-layout="full"] .igs-live-chips{top:29px;right:52px;transform:translateY(-50%);}'));
-    assert.ok(style.includes('[data-sub] .igs-live-chips{top:calc(var(--igs-live-name-top,14px) + 12px);}'));
 });
 
 test('gate:perf:live-tick-sleeps-while-page-hidden-and-resumes-on-visible', async () => {

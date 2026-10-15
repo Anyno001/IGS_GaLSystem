@@ -62,7 +62,7 @@ const BACKUP_TEMPLATE = `
     <div class="igs-source-filter-title">本地缓存</div>
     <div class="igs-source-filter-grid">{{imageCacheCountField}}</div>
     <div class="igs-settings-row"><button class="igs-settings-action" data-action="purge-asset-cache" type="button" title="清空浏览器里缓存的图片和设置页缩略图，酒馆上的原图不动">清素材缓存</button></div>
-    <div class="igs-settings-row"><button class="igs-settings-action" data-action="image-cache-status" type="button">查看占用</button><button class="igs-settings-action" data-action="image-files-retry-delete" type="button">重试待删除文件</button></div>
+    <div class="igs-settings-row"><button class="igs-settings-action" data-action="image-cache-status" type="button">查看占用</button><button class="igs-settings-action" data-action="image-records-retry-backup" type="button">重试待备份记录</button><button class="igs-settings-action" data-action="image-files-retry-delete" type="button">重试待删除文件</button></div>
     <div class="igs-source-filter-note">{{imageCacheStatus}}</div>
   </div>
 </div>
@@ -196,7 +196,7 @@ const READER_DIALOG_TEMPLATE = `
     {{dialogSkinField}}
     {{gradientVeilFields}}
     {{magicHouseField}}
-    <div class="igs-settings-row igs-switch-stack">{{statusLineToggle}}</div>
+    <div class="igs-settings-row igs-switch-stack igs-dialog-style-options">{{statusLineToggle}}</div>
   </div>
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">尺寸{{resetReaderDialogSize}}</div>

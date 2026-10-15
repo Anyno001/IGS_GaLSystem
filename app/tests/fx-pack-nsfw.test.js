@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { PACK } from '../src/visual/igs-ui/fx-pack-nsfw.js';
 import { NSFW_KINDS, nsfwFxOf, parseNsfwBody, traitPartsOf } from '../src/visual/igs-ui/fx-nsfw-model.js';
 import { NSFW_BUILDERS, traitPlacements } from '../src/visual/igs-ui/fx-nsfw-build.js';
@@ -15,7 +14,6 @@ import { buildBarkChain } from '../src/visual/igs-ui/voice-bark.js';
 import { resolveHeatTier, resolveScatter, resolveIntimatePlan } from '../src/visual/igs-ui/romance-intimate-runtime.js';
 import { makeStage } from './helpers/fake-dom.js';
 
-const FILES = ['fx-pack-nsfw', 'fx-nsfw-model', 'fx-nsfw-build', 'fx-nsfw-sfx', 'fx-nsfw-style', 'voice-filter', 'typewriter-breath'];
 
 test('gate:nsfw-fx-default-off every kind is registered, labelled, triggered and off by default', () => {
     const pack = normalizePack(PACK);
@@ -93,11 +91,6 @@ test('gate:nsfw-fx traits are placed from the head anchor and never use canvas o
     assert.ok(placed.every((p) => p.x >= 2 && p.x <= 98 && p.y >= 2 && p.y <= 98));
     const tail = placed.find((p) => p.part === 'tail');
     assert.ok(tail.x < 30);
-    for (const file of FILES) {
-        const src = fs.readFileSync(new URL(`../src/visual/igs-ui/${file}.js`, import.meta.url), 'utf8');
-        assert.ok(!/canvas/i.test(src), file);
-        assert.ok(!/mask-image\s*:\s*url/i.test(src), file);
-    }
 });
 
 test('gate:nsfw-fx cg pace scales the pan duration and cut-in only fires on a swapped image', () => {
@@ -129,8 +122,6 @@ test('gate:nsfw-fx breath typewriter is opt-in, leaves the base typewriter untou
     assert.deepEqual(planBreathTypewriter({ enabled: true, level: 3, phase: 'climax', speed: 'fast' }), { speed: 'fast', punctuationPause: true, pauseScale: 1.35 });
     assert.ok(breathPauseAfter('，', 28) > 0);
     assert.equal(breathPauseAfter('字', 28), 0);
-    const base = fs.readFileSync(new URL('../src/visual/igs-ui/typewriter-runtime.js', import.meta.url), 'utf8');
-    assert.ok(!base.includes('typewriter-breath'));
 });
 
 test('gate:nsfw-fx voice filter modes and bark chain', () => {

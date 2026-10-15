@@ -29,6 +29,7 @@ export function createMediaRuntime(globalObject, { generatedAssetStore } = {}) {
         },
         flush: () => flushMediaJournals(globalObject),
         retryDeletes: () => gc.drain(),
+        referencesChanged: () => gc.referencesChanged(),
         destroy() {
             if (destroying) return destroying;
             offReferences();

@@ -350,6 +350,28 @@ async function resolveInheritedOutfits(app, sceneAssets, messageId) {
     return result;
 }
 
+// 旁白点名跨楼判断：前 3 个 AI 楼里说过话 / 有心理活动的角色名。本楼没露面但在这里面的用默认，不在的视为久违提到、不出立绘。
+async function resolveRecentCast(app, messageId) {
+    if (!app || !app.hostAdapter || typeof app.hostAdapter.getAdjacentMessage !== 'function') return [];
+    const names = new Set();
+    let cursor = Number(messageId);
+    if (!Number.isFinite(cursor) || cursor < 0) return [];
+    for (let depth = 0; depth < INHERITED_SCENE_MAX_FLOORS; depth += 1) {
+        let previous = null;
+        try {
+            previous = await app.hostAdapter.getAdjacentMessage(cursor, -1);
+        } catch (error) {
+            break;
+        }
+        if (!previous || previous.id == null || Number(previous.id) === cursor) break;
+        cursor = Number(previous.id);
+        for (const d of extractSceneDirectives(getMessagePrimaryText(previous)).directives) {
+            if ((d.type === 'char' || d.type === 'thought') && d.character) names.add(String(d.character));
+        }
+    }
+    return [...names];
+}
+
 // 恐怖档位跨楼层延续：本楼没有 [igs-dread:N] 时，向前最多追溯 6 个楼层取最近的一个；都没有返回 null。
 const INHERITED_DREAD_MAX_FLOORS = 6;
 async function resolveInheritedDread(app, messageId) {
@@ -396,6 +418,9 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
     const inheritedOutfits = sceneAssetsEnabled
         ? await resolveInheritedOutfits(app, bridge.sceneAssets, messageId)
         : {};
+    const recentCast = sceneAssetsEnabled && bridge.sceneAssets.narrationNameSwitch !== false
+        ? await resolveRecentCast(app, messageId)
+        : [];
     // 只有恐怖世界观、且本楼没写档位时才向前追溯。
     const inheritedDread = resolveWorldview(sceneAssetsForContext(bridge.sceneAssets, getSillyTavernContext())) === 'horror' && findLastDreadLevel(getMessagePrimaryText(message)) === null
         ? await resolveInheritedDread(app, messageId)
@@ -428,6 +453,7 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
         ...visualNovelText,
         inheritedSceneState,
         inheritedOutfits,
+        recentCast,
         inheritedDread,
         battleContext,
         liveContext,

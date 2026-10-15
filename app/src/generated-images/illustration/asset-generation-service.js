@@ -60,8 +60,7 @@ export function createAssetGenerationService(deps) {
     const locks = new Map();
     const cache = requireMediaCache(deps.mediaCache, 'asset-generation', deps.thumbStore?.mediaCache);
     const pendingImages = new Set();
-    // 读回为空的图本体：记一次、通知一次，之后不再重读；舞台按缺图走平和/默认兜底。
-    const lostImages = new Set();
+    const failedImages = cache.auxiliary.createMap('asset-image-failures');
     const thumbStore = deps.thumbStore || null;
     const makeThumb = typeof deps.makeThumb === 'function' ? deps.makeThumb : null;
     const smallThumbs = Boolean(thumbStore && makeThumb);
@@ -71,12 +70,31 @@ export function createAssetGenerationService(deps) {
     let tempCursor = {}, retryTarget = null;
     const tempCache = createAssetRecordCache({ store, mediaCache: cache, owner: 'asset-records',
         onChanged: chatId => emit({ chatId, reason: 'hydrated' }),
-        onClear: () => { pendingImages.clear(); lostImages.clear(); pendingThumbs.clear(); tempCursor = {}; },
+        onClear: () => { pendingImages.clear(); failedImages.clear(); pendingThumbs.clear(); tempCursor = {}; },
         onError: () => report('error', '素材记录读取失败，本次补图暂停；可在素材 → 待确认中重新读取。'),
         pendingCount: () => pendingImages.size + pendingThumbs.size,
     });
     let offRendered = null;
+    let offOnline = null;
     let stopped = false;
+    let preparing = null, prepared = false;
+
+    function ready() {
+        if (stopped) return Promise.reject(new Error('media-stopped'));
+        if (prepared) return Promise.resolve();
+        if (!preparing) preparing = Promise.resolve().then(() => store.restore?.()).then(() => {
+            if (stopped) throw new Error('media-stopped');
+            prepared = true;
+        }).finally(() => { preparing = null; });
+        return preparing;
+    }
+    async function displayRecord(id) {
+        await ready().catch(error => { if (stopped || typeof store.getImageRecord !== 'function') throw error; });
+        return typeof store.getImageRecord === 'function' ? store.getImageRecord(id) : null;
+    }
+    async function displayImage(id, record) {
+        return store.hydrateImage && record ? store.hydrateImage(record, { fields: ['dataUrl'], strictRead: true }) : store.getImage(id, { fields: ['dataUrl'], strictRead: true });
+    }
 
     const readSettings = () => {
         const raw = getSettings ? getSettings() || {} : {};
@@ -107,10 +125,31 @@ export function createAssetGenerationService(deps) {
         void cache.drop(thumbKey(id)).catch(() => {});
         if (smallThumbs) void thumbStore.remove([id]).catch(() => {});
     }
-    function forgetImage(id) { lostImages.delete(id); cache.forget(imageKey(id)); }
-    function rememberImage(id, dataUrl) { if (!stopped) { lostImages.delete(id); cache.forget(imageKey(id)); cache.remember(imageKey(id), dataUrl); } }
-    const isMissingImage = (url) => lostImages.size > 0 && isGeneratedAssetUrl(url) && lostImages.has(generatedAssetIdOf(url));
-    const hasMissingImages = () => lostImages.size > 0;
+    function forgetImage(id) { failedImages.delete(id); cache.forget(imageKey(id)); }
+    function rememberImage(id, dataUrl) { if (!stopped) { failedImages.delete(id); cache.forget(imageKey(id)); cache.remember(imageKey(id), dataUrl); } }
+    function imageFailure(url) {
+        if (!isGeneratedAssetUrl(url)) return null;
+        const id = generatedAssetIdOf(url);
+        if (cache.peek(imageKey(id))) { failedImages.delete(id); return null; }
+        const failure = failedImages.get(id);
+        if (failure && failure.token !== cache.token(imageKey(id))) { failedImages.delete(id); return null; }
+        return failure || null;
+    }
+    const isMissingImage = url => imageFailure(url)?.missing === true;
+    const hasMissingImages = () => [...failedImages.values()].some(value => value.missing);
+    const isUnavailableImage = url => Boolean(imageFailure(url));
+    const hasUnavailableImages = () => failedImages.size > 0;
+    function noteImageFailure(id, error) {
+        const missing = ['image-file-not-found', 'image-empty'].includes(error.message);
+        const existed = failedImages.has(id);
+        failedImages.set(id, { missing, reason: error.message || 'image-read-failed', token: cache.token(imageKey(id)) });
+        if (!existed) emit({ imageId: id, reason: missing ? 'image-lost' : 'image-unavailable' });
+    }
+    function retryImageReads() {
+        if (stopped || !failedImages.size) return;
+        failedImages.clear();
+        emit({ reason: 'image-retry-ready' });
+    }
 
     async function persistTempRecord(record) {
         let old;
@@ -148,7 +187,7 @@ export function createAssetGenerationService(deps) {
         const chatId = currentChat();
         if (!chatId) return null;
         const record = tempCache.peek(chatId, tempAssetKeyOf(chatId, { type: 'background', name: scene, time }));
-        return record ? { url: tempUrl(record) } : null;
+        return record ? { url: tempUrl(record), status: record.status, skipReason: record.skipReason, floorKey: record.floorKey } : null;
     }
     function tempSprite(name) {
         if (stopped) return '';
@@ -170,34 +209,51 @@ export function createAssetGenerationService(deps) {
         if (!isGeneratedAssetUrl(url)) return String(url || '');
         if (stopped) return '';
         const id = generatedAssetIdOf(url), key = imageKey(id), hit = cache.peek(key);
-        if (hit) return hit;
-        if (!pendingImages.has(id) && !lostImages.has(id)) {
+        if (hit) { failedImages.delete(id); return hit; }
+        if (!pendingImages.has(id) && !imageFailure(url)) {
             pendingImages.add(id);
             const generation = tempCache.epoch();
-            const stamp = cache.token(key);
-            cache.load(key, async () => (await store.getImage(id, { fields: ['dataUrl'] }))?.dataUrl || '', { persist: false })
-                .then(value => {
-                    if (tempCache.epoch() !== generation || cache.token(key) !== stamp) return;
-                    if (value) emit({ imageId: id, reason: 'image-loaded' });
-                    else { lostImages.add(id); emit({ imageId: id, reason: 'image-lost' }); }
-                })
-                .catch(() => {}).finally(() => { if (tempCache.epoch() === generation) pendingImages.delete(id); });
+            let stamp = null;
+            // 恢复记录会失效旧像素引用，必须先完成恢复再取得读图 token。
+            displayRecord(id).then(async record => {
+                if (stopped || tempCache.epoch() !== generation) return;
+                stamp = cache.token(key);
+                const value = await cache.load(key, async () => {
+                    const value = (await displayImage(id, record))?.dataUrl || '';
+                    if (!value) throw new Error('image-empty');
+                    return value;
+                }, { persist: false });
+                if (tempCache.epoch() !== generation || cache.token(key) !== stamp) return;
+                if (value) failedImages.delete(id);
+                if (cache.peek(key)) emit({ imageId: id, reason: 'image-loaded' });
+            })
+                .catch(error => {
+                    if (!stopped && tempCache.epoch() === generation && (stamp == null || cache.token(key) === stamp || error.message === 'image-load-timeout')) noteImageFailure(id, error);
+                }).finally(() => { if (tempCache.epoch() === generation) pendingImages.delete(id); });
         }
         return '';
     }
 
     async function loadSmallThumb(id) {
-        const key = thumbKey(id), stamp = cache.token(key), generation = tempCache.epoch();
-        const value = await cache.load(key, async () => {
-            let dataUrl = await thumbStore.get(id).catch(() => '');
-            if (dataUrl) return dataUrl;
-            const full = (await store.getImage(id, { fields: ['dataUrl'] }))?.dataUrl || '';
-            if (!full) return '';
-            const small = await Promise.resolve().then(() => makeThumb(full)).catch(() => '');
-            if (small && cache.token(key) === stamp) await thumbStore.put(id, small, stamp);
-            return small || full;
-        });
-        if (value && tempCache.epoch() === generation && cache.token(key) === stamp) emit({ imageId: id, reason: 'image-loaded' });
+        const generation = tempCache.epoch();
+        const cached = cache.peek(imageKey(id));
+        const release = cached ? cache.pin(imageKey(id)) : () => {};
+        try {
+            const record = cached ? null : await displayRecord(id);
+            if (stopped || tempCache.epoch() !== generation) return;
+            const key = thumbKey(id), stamp = cache.token(key);
+            const value = await cache.load(key, async () => {
+                let dataUrl = await thumbStore.get(id).catch(() => '');
+                if (dataUrl) return dataUrl;
+                const full = cached || (await displayImage(id, record))?.dataUrl || '';
+                if (!full) return '';
+                if (!stopped && tempCache.epoch() === generation) failedImages.delete(id);
+                const small = await Promise.resolve().then(() => makeThumb(full)).catch(() => '');
+                if (small && cache.token(key) === stamp) await thumbStore.put(id, small, stamp);
+                return small || full;
+            });
+            if (value && tempCache.epoch() === generation && cache.token(key) === stamp && cache.peek(key)) emit({ imageId: id, reason: 'image-loaded' });
+        } finally { release(); }
     }
 
     function thumbSourceId(url) {
@@ -218,7 +274,8 @@ export function createAssetGenerationService(deps) {
     }
 
     // 本楼匹配的临时工作区，不依赖缓存是否接纳记录；完成后释放。
-    function matchContext(s, chatId, numbered) {
+    function matchContext(s, floor, numbered, manual) {
+        const chatId = floor.chatId;
         const exact = new Map(), backgrounds = new Map(), requests = new Map();
         const assertChat = () => { if (stopped || messageHost.getChatId() !== chatId) throw Object.assign(new Error('media-metadata-stale'), { code: 'media-metadata-stale' }); };
         const recordOf = (type, name, time = '') => {
@@ -226,9 +283,9 @@ export function createAssetGenerationService(deps) {
             if (!exact.has(key)) requests.set(`r:${key}`, async () => { assertChat(); exact.set(key, await tempCache.read(chatId, key)); });
             return exact.get(key);
         };
-        const match = { sceneAssets: s.sceneAssets, generatedAssets: s.sceneAssets.generated, strict: s.strict,
+        const match = { sceneAssets: s.sceneAssets, generatedAssets: s.sceneAssets.generated, strict: s.strict, retryFailedVariants: manual, floorKey: floorKeyOf(floor),
             tempSprite: name => tempUrl(recordOf('sprite', name)),
-            tempSceneTime(scene, time) { const record = recordOf('background', scene, time); return record ? { url: tempUrl(record) } : null; },
+            tempSceneTime(scene, time) { const record = recordOf('background', scene, time); return record ? { url: tempUrl(record), status: record.status, skipReason: record.skipReason, floorKey: record.floorKey } : null; },
             tempBackground(scene, time) {
                 const hit = tempUrl(recordOf('background', scene, time));
                 if (hit) return hit;
@@ -321,6 +378,7 @@ export function createAssetGenerationService(deps) {
         const base = {
             key, chatId: floor.chatId, floorKey, messageId: floor.messageId, swipeId: floor.swipeId,
             type: item.need.type, name: item.need.name, time: item.need.time || '', weather: item.need.weather || '',
+            ...(item.need.variantOf && { variantOf: item.need.variantOf }),
             tags: item.tags, createdAt: now(),
         };
         let record;
@@ -344,7 +402,7 @@ export function createAssetGenerationService(deps) {
     }
 
     // 已登记场景缺这个时段：拿原图存下的提示词换时间标签直接出图，不写词。
-    // 原图没存提示词、或本来就是这个时段，记成 skipped，本聊天不再查。
+    // 原图没词时交还既有背景写词队列；只有原图本来就是这个时段才跳过。
     async function generateTimeVariant(need, s, floor, floorKey) {
         const key = tempAssetKeyOf(floor.chatId, need);
         const base = {
@@ -354,9 +412,10 @@ export function createAssetGenerationService(deps) {
         const stored = await getImagePrompt(need.variantOf);
         const caption = stored ? sceneVariantCaption(stored, sceneVariantTags(need.time, '')) : null;
         const baseText = stored && stored.caption ? stored.caption.v4_prompt.caption.base_caption : stored && stored.positive;
+        if (!caption) return { ...base, status: 'needs-prompt' };
         let record;
-        if (!caption || promptTimeBucket(baseText) === sceneTimeBucket(need.time)) {
-            record = { ...base, imageId: '', status: 'skipped' };
+        if (promptTimeBucket(baseText) === sceneTimeBucket(need.time)) {
+            record = { ...base, imageId: '', status: 'skipped', skipReason: 'same-time' };
         } else {
             let result;
             try {
@@ -422,6 +481,7 @@ export function createAssetGenerationService(deps) {
             const base = {
                 key, chatId: floor.chatId, floorKey, messageId: floor.messageId, swipeId: floor.swipeId,
                 type: item.need.type, name: item.need.name, time: item.need.time || '', weather: item.need.weather || '',
+                ...(item.need.variantOf && { variantOf: item.need.variantOf }),
                 tags: item.tags, createdAt: now(),
             };
             let record;
@@ -533,7 +593,7 @@ export function createAssetGenerationService(deps) {
             return { ok: true, reason: 'body-too-short' };
         }
         const numbered = numberParagraphs(floor.text);
-        const match = matchContext(s, floor.chatId, numbered);
+        const match = matchContext(s, floor, numbered, manual);
         // 命中的 igs-gen 图先记下，查一遍图片本体还在不在；丢了的按缺图重算，否则一直「已有素材」却显示不出来。
         const probed = new Set();
         const lost = new Set();
@@ -555,12 +615,14 @@ export function createAssetGenerationService(deps) {
             let record;
             try { record = await (store.getImageRecord ? store.getImageRecord(id) : store.getImage(id)); }
             catch { report('warn', '素材记录暂时读不到，保留已有引用'); continue; }
-            if (!record || !record.dataUrl) lost.add(url);
+            if (!record || !record.dataUrl) {
+                lost.add(url);
+                await match.hydrate();
+                [backgroundNeeds, spriteNeeds] = collectNeeds();
+            }
         }
         if (lost.size) {
-            report('warn', `第 ${messageId} 楼有 ${lost.size} 张已登记素材的图片找不到了，按缺图重新生成`);
-            await match.hydrate();
-            [backgroundNeeds, spriteNeeds] = collectNeeds();
+            report('warn', `第 ${messageId} 楼有 ${lost.size} 张已登记素材的图片找不到了，已跳过失效槽并重新检查兜底`);
         }
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
@@ -582,6 +644,7 @@ export function createAssetGenerationService(deps) {
         if (variantNeeds.length) report('info', `第 ${messageId} 楼按原图提示词补 ${variantNeeds.length} 张场景时段差分…`);
         for (const need of variantNeeds) {
             const record = await generateTimeVariant(need, s, floor, key);
+            if (record.status === 'needs-prompt') { needs.push(need); continue; }
             if (record.status === 'skipped') continue;
             attempted += 1;
             if (record.status === 'review') count += 1;
@@ -663,6 +726,7 @@ export function createAssetGenerationService(deps) {
 
     async function processMessage(messageId, { manual = false } = {}) {
         const s = readSettings();
+        if (manual) s.auto.assets = { ...s.auto.assets, spriteEnabled: true, backgroundEnabled: true };
         if (!s.auto.assets.spriteEnabled && !s.auto.assets.backgroundEnabled) return { ok: true, reason: 'disabled' };
         if (!s.sceneAssets.enabled) return { ok: true, reason: 'scene-assets-disabled' };
         const floor = messageHost.readFloor(messageId);
@@ -1191,7 +1255,7 @@ export function createAssetGenerationService(deps) {
     }
 
     return {
-        processMessage, resolveUrl, isMissingImage, hasMissingImages, resolveThumbUrl, thumbSourceId, tempBackground, tempSceneTime, tempSprite, tempSpriteTags, listReview, reviewPage, listTemp, tempPage, changeTempPage, retryMetadata, readRecord, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
+        processMessage, resolveUrl, isMissingImage, hasMissingImages, isUnavailableImage, hasUnavailableImages, resolveThumbUrl, thumbSourceId, tempBackground, tempSceneTime, tempSprite, tempSpriteTags, listReview, reviewPage, listTemp, tempPage, changeTempPage, retryMetadata, readRecord, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
         generateExpressionSet, generateExpressionImage, paintExpressionCaptions, generateSceneVariants, generateCharacterSprite, generateCharacterAvatar, writeWardrobePrompt, paintWardrobeReference,
         getEditableImage, saveMatteEdit,
         getRecord: (key) => !stopped && currentChat() ? tempCache.peek(tempCache.scope, key) : null,
@@ -1201,11 +1265,18 @@ export function createAssetGenerationService(deps) {
             offRendered = messageHost.on('CHARACTER_MESSAGE_RENDERED', (messageId) => {
                 void processMessage(Number(messageId));
             });
+            if (typeof deps.global?.addEventListener === 'function') {
+                deps.global.addEventListener('online', retryImageReads);
+                offOnline = () => deps.global.removeEventListener('online', retryImageReads);
+            }
+            if (readSettings().sceneAssets.enabled) void ready().then(() => emit({ reason: 'records-ready' }))
+                .catch(error => { if (!stopped) report('error', `素材记录恢复失败：${error.message}`); });
         },
         clearCache() { tempCache.clear(); },
         stop() {
             stopped = true;
             tempCache.clear();
+            if (offOnline) { offOnline(); offOnline = null; }
             if (offRendered) { offRendered(); offRendered = null; }
         },
     };

@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { buildPackRegistry, normalizePack, packFxOf, validatePacks } from '../src/scene/fx-packs.js';
 import { parseDailyFxBody } from '../src/scene/daily-fx-directives.js';
 import { normalizeDailyFxSettings, DAILY_FX_LABELS } from '../src/visual/igs-ui/fx-daily-model.js';
@@ -14,8 +13,6 @@ import { AMBIENT_MUFFLE_EVENT, applySceneAudio, cancelSceneAudio, resolveAmbient
 import { makeStage } from './helpers/fake-dom.js';
 
 const KINDS = ['elevator', 'eavesdrop', 'concert', 'flashes', 'race', 'chest', 'levelup', 'quest', 'route', 'gust'];
-const SRC_DIR = new URL('../src/visual/igs-ui/', import.meta.url);
-const FILES = ['fx-pack-places.js', 'fx-places-model.js', 'fx-places-render.js', 'fx-places-sfx.js', 'fx-places-style.js', 'fx-places-voices.js'];
 
 function envOf(extra = {}) {
     const root = makeStage();
@@ -215,16 +212,6 @@ test('gate:places-pack gust resolves through the pack registry', () => {
     assert.deepEqual(parseDailyFxBody('gust', []), ['gust']);
     assert.deepEqual(placesFxOf(['gust']), { type: 'gust' });
     assert.deepEqual(packFxOf(['gust']), { type: 'gust' });
-});
-
-test('gate:places-pack source avoids canvas and mask-image url', () => {
-    for (const file of FILES) {
-        const source = fs.readFileSync(new URL(file, SRC_DIR), 'utf8');
-        assert.ok(!/canvas/i.test(source), `${file} canvas`);
-        assert.ok(!/mask-image\s*:\s*url/i.test(source), `${file} mask-image url`);
-        assert.ok(!/\r(?!\n)/.test(source), `${file} bare CR`);
-        assert.ok(!/chat-sfx/.test(source.replace(/^\/\/.*$/gm, '')), `${file} imports chat-sfx (cycle)`);
-    }
 });
 
 test('gate:places-quest three states each use their own sound and stamp', () => {

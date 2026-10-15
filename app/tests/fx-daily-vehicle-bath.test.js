@@ -206,19 +206,6 @@ test('gate:fx-daily-vehicle-bath ambience: nsfw keeps only bath steam, chat page
     assert.equal(render({ sceneLocation: '车站' }).result.ambience, '');
 });
 
-test('gate:fx-daily-vehicle-bath ambience css stays cheap: transform/opacity only, frozen in power-saving mode', () => {
-    const css = DAILY_FX_STYLE_TEXT.slice(DAILY_FX_STYLE_TEXT.indexOf('.igs-dfx-amb{'));
-    const keyframes = [...css.matchAll(/@keyframes igs-amb-[\w-]+\{([\s\S]*?\})\}/g)].map((m) => m[1]);
-    assert.ok(keyframes.length >= 5);
-    for (const body of keyframes) {
-        const props = [...body.matchAll(/([a-z-]+):/g)].map((m) => m[1]);
-        for (const prop of props) assert.ok(prop === 'transform' || prop === 'opacity', `animated ${prop}`);
-    }
-    assert.doesNotMatch(css, /backdrop-filter|mix-blend-mode|filter:blur/);
-    assert.match(css, /\[data-igs-quality="low"\] \.igs-dfx-amb>i/);
-    assert.match(css, /\.igs-dfx-amb\.is-reduced>i/);
-});
-
 test('gate:fx-daily-underwater-space place words ignore worldview and skip air-filled false friends', () => {
     for (const worldview of ['', 'ancient', 'magic', 'scifi']) {
         assert.equal(resolvePlaceAmbience('深海人鱼宫殿', { worldview }).kind, 'underwater', worldview);

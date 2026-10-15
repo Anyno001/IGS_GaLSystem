@@ -1,7 +1,7 @@
 import { splitIgsDirectiveLines, stripOutfitFields } from '../../scene/directive-tags.js';
-import { imageMarkerBoundary, insertImageMarkerOnLine } from '../../scene/image-marker-layout.js';
+import { imageMarkerBoundary, imageMarkerContentRanges, insertImageMarkerOnLine } from '../../scene/image-marker-layout.js';
 
-const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^\]\n]*))?\]/g;
+const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^|\]\n]*))?(?:\|[^\]\n]*)?\]/g;
 const CHAR_RE = /\[igs-char:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
 const THOUGHT_RE = /\[igs-thought:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
 const IMG_RE = /(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi;
@@ -107,12 +107,16 @@ export function findAnchorInsertIndex(text, anchorSentence) {
     const anchor = typeof anchorSentence === 'string' ? anchorSentence : '';
     if (!anchor) return { index: -1, mode: 'fail' };
     const located = (anchorIndex, mode) => ({ index: imageMarkerBoundary(source, anchorIndex), anchorIndex, mode });
-    const exact = source.indexOf(anchor);
-    if (exact !== -1) return located(exact + anchor.length, 'exact');
-    const normResult = findNormalized(source, anchor);
-    if (normResult.index >= 0) return located(normResult.index, 'normalized');
-    const lcsResult = findByLongestCommonSubstring(source, anchor);
-    if (lcsResult.index >= 0) return located(lcsResult.index, 'lcs');
+    const bodies = imageMarkerContentRanges(source);
+    const scopes = bodies.length ? bodies.map(body => [body.openEnd, body.closeStart]) : [[0, source.length]];
+    // 优先级跨正文块统一：后一个正文块的精确命中优先于前一块的模糊相似句。
+    for (const mode of ['exact', 'normalized', 'lcs']) for (const [from, to] of scopes) {
+        const text = source.slice(from, to);
+        const at = mode === 'exact' ? text.indexOf(anchor) : -1;
+        const hit = mode === 'exact' ? (at >= 0 ? at + anchor.length : -1)
+            : mode === 'normalized' ? findNormalized(text, anchor).index : findByLongestCommonSubstring(text, anchor).index;
+        if (hit >= 0) return located(from + hit, mode);
+    }
     return { index: -1, mode: 'fail' };
 }
 

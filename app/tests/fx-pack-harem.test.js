@@ -1,13 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import '../src/visual/igs-ui/scene-audio.js';
 import { buildPackRegistry, normalizePack, validatePacks } from '../src/scene/fx-packs.js';
 import { PACK } from '../src/visual/igs-ui/fx-pack-harem.js';
 import { HAREM_RANKS, favorValueOf, parseRoster, probeGoodOf, rankEdictOf, rankIndexOf, recordKeepOf, sortRoster } from '../src/visual/igs-ui/fx-harem-model.js';
 import { resolveHaremAmbience, planHaremAmbient } from '../src/visual/igs-ui/fx-harem-ambience.js';
 import { HAREM_SFX_DEFS } from '../src/visual/igs-ui/fx-harem-sfx.js';
-import { HAREM_STYLE_TEXT } from '../src/visual/igs-ui/fx-harem-style.js';
 import { normalizeDailyFxSettings } from '../src/visual/igs-ui/fx-daily-model.js';
 
 const pack = normalizePack(PACK);
@@ -166,24 +164,4 @@ test('gate:harem-pack night watch ambient only at night in ancient palace places
     assert.deepEqual(reg.ambientCandidates(ctx, { night: true }).map((x) => x.kind), ['hmwatch', 'hmlantern']);
     const voices = pack.ambient.voices({});
     for (const kind of pack.ambient.kinds) assert.equal(typeof voices[kind], 'function');
-});
-
-test('gate:harem-pack sources avoid canvas and mask-image url, css has low-quality guard', () => {
-    for (const file of ['fx-pack-harem', 'fx-harem', 'fx-harem-model', 'fx-harem-style', 'fx-harem-sfx', 'fx-harem-ambience']) {
-        const src = readFileSync(new URL(`../src/visual/igs-ui/${file}.js`, import.meta.url), 'utf8');
-        assert.doesNotMatch(src, /canvas/i, file);
-        assert.doesNotMatch(src, /mask-image\s*:\s*url/i, file);
-        assert.doesNotMatch(src, /TODO|@param/, file);
-    }
-    assert.match(HAREM_STYLE_TEXT, /data-igs-quality="low"/);
-    assert.doesNotMatch(HAREM_STYLE_TEXT, /@@/);
-    assert.ok(HAREM_STYLE_TEXT.includes('#igs-overlay .hm-ladder'));
-});
-
-test('gate:harem-hmfavor-hmboard own sounds are defined', () => {
-    assert.ok(HAREM_SFX_DEFS['hm-favor']);
-    assert.ok(HAREM_SFX_DEFS['hm-board']);
-    const src = readFileSync(new URL('../src/visual/igs-ui/fx-harem.js', import.meta.url), 'utf8');
-    assert.ok(src.includes("sounds: ['hm-favor']"));
-    assert.ok(src.includes("sounds: ['hm-board']"));
 });

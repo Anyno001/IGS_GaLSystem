@@ -1,6 +1,7 @@
 import { createAssetGenerationService } from './helpers/media-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { fakeLlmHost } from './helpers/fake-llm-host.js';
 
 import { classifySceneKey, lookupSceneBackground } from '../src/scene/scene-directives.js';
 import {
@@ -558,7 +559,7 @@ test('gate:assets:nai-request-drops-smea-and-invalid-sampler', async () => {
 
 test('gate:assets:secondary-llm-accepts-sse-reply', async () => {
     const { createSecondaryLlm } = await import('../src/host/secondary-llm.js');
-    const llm = createSecondaryLlm({}, { fetch: async () => ({
+    const llm = createSecondaryLlm(fakeLlmHost(), { fetch: async () => ({
         ok: true, status: 200,
         text: async () => 'data: {"choices":[{"delta":{"content":"id: "}}]}\n\ndata: {"choices":[{"delta":{"content":"bg1"}}]}\n\ndata: [DONE]\n',
     }) });
@@ -1045,7 +1046,7 @@ test('gate:llm:user-head-and-tail-wrap-requests-and-default-empty', async () => 
     const defaults = normalizeAutoIllustrationSettings({}).llm;
     assert.deepEqual([defaults.jailbreakHead, defaults.jailbreakTail], ['', ''], '插件不内置任何附加词');
     const bodies = [];
-    const llm = createSecondaryLlm({}, { fetch: async (url, init) => { bodies.push(JSON.parse(init.body)); return { ok: true, status: 200, text: async () => '{"choices":[{"message":{"content":"ok"}}]}' }; } });
+    const llm = createSecondaryLlm(fakeLlmHost(), { fetch: async (url, init) => { bodies.push(JSON.parse(init.body)); return { ok: true, status: 200, text: async () => '{"choices":[{"message":{"content":"ok"}}]}' }; } });
     const base = { source: 'openai', endpoint: 'https://x/v1', model: 'm' };
     await llm.request({ system: 'SYS', user: 'USR' }, base);
     await llm.request({ system: 'SYS', user: 'USR' }, { ...base, jailbreakHead: 'HEAD', jailbreakTail: 'TAIL' });

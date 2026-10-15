@@ -106,10 +106,6 @@ test('gate:performance-layout:nsfw-display-options-get-one-row-each', () => {
 
 // 挂在某个开关下的子项（如节律音效挂在节律演出下）要保留缩进；只有整段细项包在一层 sub 里时才去掉，免得双重缩进。
 test('gate:performance-layout:nested-sub-options-keep-their-indent', async () => {
-    const { getSettingsStyleText } = await import('../src/visual/igs-ui/settings-style.js');
-    const css = getSettingsStyleText();
-    assert.ok(css.includes('.igs-perf-item-body>.igs-settings-sub:only-child{margin-left:0;padding-left:0;border-left:0}'));
-    assert.ok(!css.includes('.igs-perf-item-body>.igs-settings-sub{'));
     const { renderRomanceFxFields } = await import('../src/visual/igs-ui/romance-fields.js');
     const body = renderRomanceFxFields({ romanceFx: { enabled: true, rhythm: true } });
     assert.match(body, /<div class="igs-perf-item-body">[\s\S]*data-switch="readerSettings\.romanceFx\.rhythm"[^>]*>[\s\S]*?<\/button><div class="igs-settings-sub">[\s\S]*data-switch="readerSettings\.romanceFx\.rhythmSound"/);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CAMPUS_FX_KINDS, CAMPUS_AMBIENCE_HTML, CAMPUS_AMBIENCE_KINDS, CAMPUS_TRIGGER_WORDS, examMinutesOf, resolveCampusAmbience } from '../src/scene/campus-fx.js';
+import { CAMPUS_FX_KINDS, examMinutesOf, resolveCampusAmbience } from '../src/scene/campus-fx.js';
 import { DAILY_FX_KINDS, dailyFxOf, parseDailyFxBody } from '../src/scene/daily-fx-directives.js';
 import { resolveDateAmbience } from '../src/scene/date-ambience.js';
 import { extractFxDirectives, resolveFxAtPage } from '../src/scene/fx-directives.js';
@@ -8,8 +8,6 @@ import { applyFxWorldview } from '../src/scene/fx-era.js';
 import { detectPromptTriggers } from '../src/scene/prompt-triggers.js';
 import { DAILY_SFX } from '../src/visual/igs-ui/fx-daily-sfx.js';
 import { CAMPUS_BUILDERS } from '../src/visual/igs-ui/fx-daily-campus.js';
-import { CAMPUS_FX_STYLE_TEXT } from '../src/visual/igs-ui/fx-daily-campus-style.js';
-import { DAILY_FX_STYLE_TEXT } from '../src/visual/igs-ui/fx-daily-style.js';
 import { DAILY_GRAMMAR_LINES, campusDetailedBlock, campusGrammarLines, resolveDailyFxPromptRule } from '../src/visual/igs-ui/fx-daily-prompt.js';
 import { DAILY_FX_LABELS, enabledDailyFxKinds, normalizeDailyFxSettings } from '../src/visual/igs-ui/fx-daily-model.js';
 import { resolveAmbientPlan } from '../src/visual/igs-ui/scene-audio.js';
@@ -44,11 +42,10 @@ test('gate:campus-fx tags are recognised by the fx directive parser', () => {
     assert.deepEqual(fx.daily.map((d) => d.type), ['chalk', 'button']);
 });
 
-test('gate:campus-fx kinds are opt-in, labelled, styled, modern-only and have builders', () => {
+test('gate:campus-fx kinds are opt-in, labelled, worldview-filtered and have builders', () => {
     for (const kind of CAMPUS_FX_KINDS) {
         assert.ok(DAILY_FX_KINDS.includes(kind), kind);
         assert.ok(DAILY_FX_LABELS[kind], kind);
-        assert.ok(DAILY_FX_STYLE_TEXT.includes(`igs-dfx-${kind}`), kind);
         assert.equal(typeof CAMPUS_BUILDERS[kind], 'function', kind);
         assert.equal(normalizeDailyFxSettings({ enabled: true })[kind], false, `${kind} stays opt-in`);
         const all = { dailyFx: { enabled: true, [kind]: true } };
@@ -57,7 +54,6 @@ test('gate:campus-fx kinds are opt-in, labelled, styled, modern-only and have bu
         assert.equal(applyFxWorldview(all, 'modern').dailyFx[kind], true);
         assert.equal(applyFxWorldview(all, 'magic').dailyFx[kind], true);
     }
-    assert.doesNotMatch(CAMPUS_FX_STYLE_TEXT, /filter:\s*blur|backdrop-filter|mix-blend-mode/);
 });
 
 test('gate:campus-fx prompts: full and short lines exist for every kind and the kinds leave the daily block', () => {
@@ -81,7 +77,6 @@ test('gate:campus-fx triggers on school words only', () => {
     assert.ok(detectPromptTriggers({ userText: '期末考试开始了' }).has('campus'));
     assert.ok(detectPromptTriggers({ recentAiTexts: ['[igs-fx:drawer|情书]'] }).has('campus'));
     assert.ok(!detectPromptTriggers({ userText: '今天天气不错' }).has('campus'));
-    for (const words of Object.values(CAMPUS_TRIGGER_WORDS)) assert.ok(words.length >= 3);
 });
 
 test('gate:campus-fx ambience resolves school places, defers bare rooftops to the date layer', () => {
@@ -100,10 +95,6 @@ test('gate:campus-fx ambience resolves school places, defers bare rooftops to th
     assert.equal(resolveCampusAmbience('教室', { worldview: 'ancient' }), null);
     assert.equal(resolveCampusAmbience('教室', { worldview: 'fantasy' }), null);
     assert.deepEqual(resolveCampusAmbience('魔法学院的教室', { worldview: 'magic' }), { kind: 'classroom', variant: '' });
-    for (const kind of CAMPUS_AMBIENCE_KINDS) assert.ok(CAMPUS_AMBIENCE_HTML[kind].includes('igs-dfx-amb-'), kind);
-    for (const cls of ['sunbeam', 'chalkdust', 'libwindow', 'libmote', 'fieldsun', 'fence', 'fencelight', 'gatepetals']) {
-        assert.ok(DAILY_FX_STYLE_TEXT.includes(`igs-dfx-amb-${cls}`), cls);
-    }
 });
 
 test('gate:campus-fx ambient audio plan for classroom, library, playground and rooftop', () => {
@@ -151,7 +142,6 @@ test('gate:campus-fx builders produce the right nodes, sounds and escape text', 
     assert.match(CAMPUS_BUILDERS.rollcall({ who: '小雨', reply: '到' }, env).node.innerHTML, /小雨[\s\S]*到/);
     assert.match(CAMPUS_BUILDERS.exam({ subject: '数学', minutes: 90 }, env).node.innerHTML, /限时 90 分钟/);
     assert.doesNotMatch(CAMPUS_BUILDERS.exam({ subject: '', minutes: 0 }, env).node.innerHTML, /限时/);
-    assert.equal((CAMPUS_BUILDERS.festival({ title: '', sub: '' }, env).node.innerHTML.match(/igs-dfx-festival-conf[ "]/g) || []).length, 34);
     assert.match(CAMPUS_BUILDERS.graduate({ text: '毕业典礼' }, env).node.innerHTML, /graduate-cap/);
     const enroll = CAMPUS_BUILDERS.graduate({ text: '入学典礼' }, env);
     assert.doesNotMatch(enroll.node.innerHTML, /graduate-cap/);

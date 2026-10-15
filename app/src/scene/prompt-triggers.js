@@ -119,7 +119,7 @@ const BLOCK_TRIGGERS = Object.freeze({
     },
     romance: {
         // 最近几层出现 NSFW 场景标签也展开：感官调度的写法要在情事段里用得上。
-        tag: /\[igs-fx:(?:romance|romance-end|confess|memory|sense|sense-end|solo|solo-end|noise)[|\]]|\[igs-scene:[^\]\n]*\|\s*nsfw\s*\]/i,
+        tag: /\[igs-fx:(?:romance|romance-end|confess|memory|sense|sense-end|solo|solo-end|noise)[|\]]|\[igs-scene:[^\]\n]*\|\s*nsfw\s*(?:\|[^\]\n]*)?\]/i,
         words: ['告白', '表白', '约会', '亲吻', '接吻', '拥抱', '心动', '暧昧', '喜欢你', '爱你'],
         open: /\[igs-fx:romance[|\]]/g,
         close: /\[igs-fx:romance-end\]/g,
@@ -153,7 +153,7 @@ const BLOCK_TRIGGERS = Object.freeze({
     // 体贴与礼仪：开门礼让、护身、照料、公主抱，及点灯烛火 / 递接 / 站位身段三块积木（约会与后宫共用）。
     // 亲密场景标签在场也展开：写法要在约会、情事段里用得上。
     courtesy: {
-        tag: new RegExp(`\\[igs-fx:(?:${COURTESY_FX_KINDS.join('|')})[|\\]]|\\[igs-scene:[^\\]\\n]*\\|\\s*nsfw\\s*\\]`, 'i'),
+        tag: new RegExp(`\\[igs-fx:(?:${COURTESY_FX_KINDS.join('|')})[|\\]]|\\[igs-scene:[^\\]\\n]*\\|\\s*nsfw\\s*(?:\\|[^\\]\\n]*)?\\]`, 'i'),
         words: [...new Set(Object.entries(DAILY_TRIGGER_WORDS).filter(([k]) => COURTESY_FX_KINDS.includes(k)).flatMap(([, w]) => w))],
     },
     // 校园：黑板写字、传纸条、抽屉里的发现、点名、考试发卷、文化祭、毕业典礼、第二颗纽扣，只在正文 / 用户提到校园场面时才补完整写法。

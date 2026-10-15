@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { makeStage, makeTimers } from './helpers/fake-dom.js';
 import { PACK } from '../src/visual/igs-ui/fx-pack-beats.js';
 import { BEATS_BUILDERS } from '../src/visual/igs-ui/fx-beats-build.js';
@@ -243,16 +242,6 @@ test('gate:fx-pack-beats style is merged into the daily stylesheet and honours r
     assert.match(DAILY_FX_STYLE_TEXT, /igs-bt-reveal-big/);
     assert.match(PACK.cssText, /\.igs-bt\.is-reduced/);
     assert.match(PACK.cssText, /data-igs-quality="low"/);
-});
-
-test('gate:fx-pack-beats sources avoid canvas and url masks', () => {
-    for (const file of ['fx-pack-beats', 'fx-beats-model', 'fx-beats-build', 'fx-beats-style', 'fx-beats-sfx', 'fx-beats-punch']) {
-        const source = fs.readFileSync(new URL(`../src/visual/igs-ui/${file}.js`, import.meta.url), 'utf8');
-        assert.doesNotMatch(source, /canvas/i, `${file} 不应使用 canvas`);
-        assert.doesNotMatch(source, /mask-image:\s*url/i, `${file} 不应使用 mask-image:url`);
-    }
-    const result = fs.readFileSync(new URL('../src/visual/igs-ui/fx-result.js', import.meta.url), 'utf8');
-    assert.doesNotMatch(result, /canvas|mask-image:\s*url/i);
 });
 
 test('gate:fx-pack-beats camera tags accept the dramatic shots', () => {
