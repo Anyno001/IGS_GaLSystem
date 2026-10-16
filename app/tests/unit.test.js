@@ -954,17 +954,18 @@ test('gate:igs-ui:excluded-yuan-with-invisible-boundaries-does-not-add-pages', (
         global: {},
         getUnifiedSettings: () => ({
             bridge: { openMode: 'pc', sourceFilter, sceneAssets: { enabled: true, scenes: {}, characters: {} } },
-            readerMode: 'pc', readerSettings: {},
+            readerMode: 'pc', readerSettings: { titleCard: { enabled: true } },
         }),
     });
     const opened = host.openReader({ message: { text: raw }, sourceFilter }, { mode: 'pc' });
     assert.equal(opened.ok, true);
     const segments = opened.snapshot.content.segments;
-    assert.deepEqual(segments, ['醒来。', '**怎么回事？**', '又醒了。']);
+    assert.equal(opened.snapshot.content.scenePage, true);
+    assert.deepEqual(segments, ['', '醒来。', '**怎么回事？**', '又醒了。']);
     assert.equal(segments.some((segment) => segment.includes('日本語') || segment.includes('yuan')), false);
     assert.equal(segments.some((segment) => /[\u2060-\u2064]/.test(segment)), false);
-    assert.equal(segments[0], '醒来。');
-    assert.equal(segments[2], '又醒了。');
+    assert.equal(segments[1], '醒来。');
+    assert.equal(segments[3], '又醒了。');
     host.destroy();
 });
 
@@ -977,7 +978,7 @@ test('gate:igs-ui:excluded-yuan-with-default-include-and-untagged-source-keeps-r
         global: {},
         getUnifiedSettings: () => ({
             bridge: { openMode: 'pc', sourceFilter, sceneAssets: { enabled: true, scenes: {}, characters: {} } },
-            readerMode: 'pc', readerSettings: {},
+            readerMode: 'pc', readerSettings: { titleCard: { enabled: true } },
         }),
     });
     const opened = host.openReader({ message: { text: raw }, sourceFilter }, { mode: 'pc' });
@@ -987,7 +988,7 @@ test('gate:igs-ui:excluded-yuan-with-default-include-and-untagged-source-keeps-r
     assert.equal(segments.join('').includes('醒来。'), true);
     assert.equal(segments.join('').includes('继续。'), true);
     assert.equal(segments.join('').includes('日本語'), false);
-    assert.equal(segments.every((segment) => /[^\s\u200B-\u200D\u2060-\u2064]/u.test(segment)), true);
+    assert.equal(segments.filter(Boolean).every((segment) => /[^\s\u200B-\u200D\u2060-\u2064]/u.test(segment)), true);
     assert.equal(segments.join('').includes('李家主宅卧室|早晨|晴]'), false);
     host.destroy();
 });
@@ -1001,17 +1002,17 @@ test('gate:igs-ui:excluded-yuan-inline-formatting-controls-do-not-create-blank-p
         global: {},
         getUnifiedSettings: () => ({
             bridge: { openMode: 'pc', sourceFilter, sceneAssets: { enabled: true, scenes: {}, characters: {} }, sentencePaging: true },
-            readerMode: 'pc', readerSettings: {},
+            readerMode: 'pc', readerSettings: { titleCard: { enabled: true } },
         }),
     });
     const opened = host.openReader({ message: { text: raw }, sourceFilter }, { mode: 'pc' });
     assert.equal(opened.ok, true);
     const segments = opened.snapshot.content.segments;
     // 心理和后面同一行的旁白各占一页（以前「**怎么回事？**又醒了。」挤在一页）。
-    assert.deepEqual(segments, ['醒来。', '**怎么回事？**', '又醒了。']);
+    assert.deepEqual(segments, ['', '醒来。', '**怎么回事？**', '又醒了。']);
     assert.equal(segments.join('').includes('日本語'), false);
     assert.equal(segments.join('').includes('李家主宅卧室|早晨|晴]'), false);
-    assert.equal(segments.every((segment) => /[^\s\u200B-\u200D\u2060-\u2064]/u.test(segment)), true);
+    assert.equal(segments.filter(Boolean).every((segment) => /[^\s\u200B-\u200D\u2060-\u2064]/u.test(segment)), true);
     assert.equal(segments.join('').includes('醒来。'), true);
     assert.equal(segments.join('').includes('又醒了。'), true);
     host.destroy();
@@ -2539,7 +2540,7 @@ test('gate:scene:inline-multi-scene-directives-follow-segment-and-revert', () =>
 });
 
 
-test('gate:igs-ui:scene-assets-keeps-sprite-with-existing-background', () => {
+test('gate:igs-ui:scene-assets-keeps-sprite-with-existing-background', async () => {
     const host = createIgsReaderHost({
         global: {},
         getUnifiedSettings: () => ({
@@ -2559,7 +2560,7 @@ test('gate:igs-ui:scene-assets-keeps-sprite-with-existing-background', () => {
                 },
             },
             readerMode: 'pc',
-            readerSettings: {},
+            readerSettings: { titleCard: { enabled: true } },
         }),
         saveUnifiedSettings: () => ({ ok: true, legacy: {}, unified: {} }),
     });
@@ -2581,10 +2582,16 @@ test('gate:igs-ui:scene-assets-keeps-sprite-with-existing-background', () => {
         },
     }, { mode: 'pc' });
 
+    assert.equal(opened.snapshot.content.scenePage, true);
     assert.equal(opened.snapshot.content.backgroundImage, 'https://example.com/room.png');
-    assert.equal(opened.snapshot.content.spriteImage, 'https://example.com/kaito.png');
-    assert.match(opened.snapshot.html, /id="igs-sprite"/);
-    assert.equal(opened.snapshot.styles['#igs-sprite'].display, 'block');
+    assert.equal(opened.snapshot.content.spriteImage, null);
+    await opened.controller.invokeAction('next');
+    const line = host.getState().activeReader.snapshot;
+    assert.equal(line.content.scenePage, false);
+    assert.equal(line.content.spriteImage, 'https://example.com/kaito.png');
+    assert.equal(line.content.backgroundImage, 'https://example.com/room.png');
+    assert.match(line.html, /id="igs-sprite"/);
+    assert.equal(line.styles['#igs-sprite'].display, 'block');
 
     host.destroy();
 });
@@ -2852,7 +2859,7 @@ test('gate:igs-ui:scene-assets-keeps-narration-out-of-dialogue-and-thought-pages
                 version: '0.4.9',
                 bridge: { openMode: 'pc', sentencePaging, sceneAssets: { enabled: true, scenes: {}, characters: {} } },
                 readerMode: 'pc',
-                readerSettings: {},
+                readerSettings: { titleCard: { enabled: true } },
             }),
             saveUnifiedSettings: () => ({ ok: true, legacy: {}, unified: {} }),
         });
@@ -2869,6 +2876,7 @@ test('gate:igs-ui:scene-assets-keeps-narration-out-of-dialogue-and-thought-pages
 
     // 短台词「……」不得认领以它开头的旁白，也不得让独立的「……」旁白认领含它的台词。
     assert.deepEqual(await pagesOf('[igs-scene:教室|傍晚|晴]\n[igs-char:小雪|沉默|……]\n……空气安静得只能听见钟表声。\n……\n[igs-char:小雪|害羞|其实……我等你很久了。]'), [
+        ['scene', '', ''],
         ['dialogue', '小雪', '……'],
         ['narration', '', '……空气安静得只能听见钟表声。'],
         ['narration', '', '……'],

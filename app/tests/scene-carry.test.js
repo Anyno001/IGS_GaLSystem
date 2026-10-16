@@ -133,21 +133,21 @@ function floorOf(lines, { assets = ASSETS, userName = '林远', recentCast = nul
     }
     const source = raw.join('\n');
     const extracted = { sceneDirectives: extractSceneDirectives(source).directives, markerLayoutSource: source };
-    const readerSettings = { _sceneAssets: assets, stageCast: stageCast || { enabled: true } };
+    const readerSettings = { _sceneAssets: assets, stageCast: stageCast || { enabled: true }, titleCard: { enabled: true } };
     return { floor: prepareReaderFloor({ text: segments.join('\n'), segments, extracted, payload: { raw: source, recentCast }, scene: { speaker: '' }, readerSettings, userName }), readerSettings };
 }
 const sprites = (floor) => floor.pages.map((p) => p.spriteChar || '-');
 
 test('楼层：换场景后旧说话人不再沿用，同行的留下且计数重来', () => {
     const { floor } = floorOf(['[igs-scene:教室|下午|晴]', '白墨|平和|走吧。', '钟声响了。', '[igs-scene:图书馆|下午|晴]', '图书馆里很安静。', '书架很高。']);
-    assert.deepEqual(sprites(floor), ['白墨', '白墨', '-', '-']);
+    assert.deepEqual(sprites(floor), ['-', '白墨', '白墨', '-', '-', '-']);
     const { floor: walked } = floorOf(['[igs-scene:教室|下午|晴]', '白墨|平和|走吧。', '我和白墨一起走出了教室。', '[igs-scene:走廊|下午|晴]', '走廊很长。', '窗外有风。', '灯亮着。']);
-    assert.deepEqual(sprites(walked), ['白墨', '白墨', '白墨', '白墨', '-']);
+    assert.deepEqual(sprites(walked), ['-', '白墨', '白墨', '-', '白墨', '白墨', '-']);
 });
 
 test('楼层：场景标签的在场名单优先', () => {
     const { floor } = floorOf(['[igs-scene:教室|下午|晴]', '白墨|平和|走吧。', '我和白墨一起走出了教室。', '[igs-scene:走廊|下午|晴||小雪]', '走廊很长。']);
-    assert.deepEqual(sprites(floor), ['白墨', '白墨', '小雪']);
+    assert.deepEqual(sprites(floor), ['-', '白墨', '白墨', '-', '小雪']);
 });
 
 test('楼层：生成区别名点名并当页离场', () => {
@@ -203,8 +203,8 @@ test('同屏：集体主语带过去的陪衬没被写到就下台', () => {
     const floor = staged(['[igs-scene:教室|下午|晴]', '小雪|平和|走吧。', '白墨|平和|好。', '我们一行人来到了操场。',
         '[igs-scene:操场|下午|晴]', '风很大。', '跑道上没人。', '远处有鸟。', '天色暗了。']);
     const castOf = (i) => floor.pages[i].cast.map((m) => m.character);
-    assert.ok(castOf(3).includes('小雪'));
-    assert.ok(!castOf(6).includes('小雪'));
+    assert.ok(castOf(5).includes('小雪'));
+    assert.ok(!castOf(8).includes('小雪'));
 });
 
 test('同屏：同性别两人时「她离开」不误删陪衬', () => {

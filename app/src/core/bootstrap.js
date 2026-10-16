@@ -264,6 +264,7 @@ export function bootstrapIGS(options = {}) {
     app.igsUi = options.igsUi || createIgsReaderHost({
         global: globalObject,
         media,
+        pageRenderGapMs: options.pageRenderGapMs,
         version: app.version,
         random: options.random,
         getIllustrationSource: (messageId) => illustrationMessageHost.readFloor(messageId),

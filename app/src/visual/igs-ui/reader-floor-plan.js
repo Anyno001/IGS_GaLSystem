@@ -85,17 +85,125 @@ const NARRATION_MOOD_HINTS = Object.freeze({ 怒火: '愤怒', 恼怒: '愤怒',
 const normalizeFingerprint = (s) => stripBilingualTranslation(s)
     .replace(/\*（[^）]*）\*/g, '').replace(/[\[\]\*（）]/g, '').replace(/\s+/g, '').trim();
 
+function titleBroadcastSettings(readerSettings) {
+    const src = readerSettings && readerSettings.titleCard && typeof readerSettings.titleCard === 'object'
+        ? readerSettings.titleCard : {};
+    return {
+        enabled: src.enabled === true,
+        onLocation: src.onLocation !== false,
+        onTime: src.onTime !== false,
+    };
+}
+
+function sceneShouldBroadcast(scene, previous, settings) {
+    if (!settings.enabled) return false;
+    const location = String(scene && scene.scene || '').trim();
+    const time = String(scene && scene.time || '').trim();
+    const locationChanged = Boolean(location) && location !== String(previous.scene || '').trim();
+    const timeChanged = Boolean(time) && time !== String(previous.time || '').trim();
+    return (settings.onLocation && locationChanged) || (settings.onTime && timeChanged);
+}
+
+function sceneTagEnd(source, scene) {
+    const from = Math.max(0, Number(scene && scene.offset) || 0);
+    const end = String(source || '').indexOf(']', from);
+    return end >= 0 ? end + 1 : from + 1;
+}
+
+// 只在标题卡会报幕时插入场景页：总开关开着，且地点或时间相对上一场景变了，并命中对应开关。
+// 天气、NSFW 变化不占页。返回 null 表示分页不变。
+function expandScenePages(source, segments, offsets, locatedOffsets, scenes, inherited, readerSettings) {
+    const inserts = [];
+    const settings = titleBroadcastSettings(readerSettings);
+    let previous = {
+        scene: String(inherited && inherited.scene || '').trim(),
+        time: String(inherited && inherited.time || '').trim(),
+    };
+    const located = offsets.some((offset) => offset >= 0);
+    for (const scene of scenes) {
+        const location = String(scene.scene || '').trim();
+        const time = String(scene.time || '').trim();
+        if (!location && !time) continue;
+        const announce = sceneShouldBroadcast(scene, previous, settings);
+        if (location) previous = { ...previous, scene: location };
+        if (time) previous = { ...previous, time };
+        if (!announce) continue;
+        let at = offsets.findIndex((offset) => offset > scene.offset);
+        if (at < 0) at = located ? offsets.length : 0;
+        inserts.push({ at, offset: sceneTagEnd(source, scene), scene });
+    }
+    if (!inserts.length) return null;
+    let baseSegments = segments;
+    let baseOffsets = offsets;
+    let baseLocated = locatedOffsets;
+    const blankOnly = segments.length === 1 && !String(segments[0] || '').trim();
+    if (blankOnly) {
+        for (const insert of inserts) insert.at = 0;
+        baseSegments = [];
+        baseOffsets = [];
+        baseLocated = [];
+    }
+    const nextSegments = [];
+    const nextOffsets = [];
+    const nextLocated = [];
+    const sourceSegments = [];
+    const sceneFlags = [];
+    let cursor = 0;
+    const pushText = (index) => {
+        nextSegments.push(baseSegments[index]);
+        nextOffsets.push(baseOffsets[index]);
+        nextLocated.push(baseLocated[index]);
+        sourceSegments.push(index);
+        sceneFlags.push(false);
+    };
+    for (const insert of inserts) {
+        const at = Math.min(insert.at, baseSegments.length);
+        while (cursor < at) pushText(cursor++);
+        nextSegments.push('');
+        nextOffsets.push(insert.offset);
+        nextLocated.push(-1);
+        sourceSegments.push(-1);
+        sceneFlags.push(true);
+    }
+    while (cursor < baseSegments.length) pushText(cursor++);
+    return { segments: nextSegments, offsets: nextOffsets, locatedOffsets: nextLocated, sourceSegments, sceneFlags, inserts };
+}
+
+function shiftDirectivesForScenePages(directives, inserts) {
+    const scenePageAt = new Map();
+    inserts.forEach((insert, index) => {
+        let page = insert.at;
+        for (let earlier = 0; earlier < index; earlier += 1) {
+            if (inserts[earlier].at <= insert.at) page += 1;
+        }
+        scenePageAt.set(insert.scene.offset, page);
+    });
+    return directives.map((directive) => {
+        const copy = { ...directive };
+        if (directive.type === 'scene' && scenePageAt.has(directive.offset)) {
+            copy.segmentIndex = scenePageAt.get(directive.offset);
+            return copy;
+        }
+        const index = Number(directive.segmentIndex);
+        if (!Number.isInteger(index)) return copy;
+        let extra = 0;
+        for (const insert of inserts) if (insert.at <= index) extra += 1;
+        copy.segmentIndex = index + extra;
+        return copy;
+    });
+}
+
 // 只准备可复用的正文数据和资源身份；不在这里读取或永久保存 blob URL。
 export function prepareReaderFloor({ text, segments, extracted, payload, scene, readerSettings, userName = '' }) {
     const sceneAssets = readerSettings._sceneAssets || null;
-    const sceneDirectives = Array.isArray(extracted.sceneDirectives) ? extracted.sceneDirectives
+    let sceneDirectives = Array.isArray(extracted.sceneDirectives) ? extracted.sceneDirectives
         : Array.isArray(payload.sceneDirectives) ? payload.sceneDirectives : [];
     const hasIgsDirectives = sceneDirectives.length > 0;
     const source = String(extracted.markerLayoutSource || payload.raw || text || '');
     const locator = createFloorSourceLocator(source);
     let held = -1;
-    const locatedOffsets = [];
-    const offsets = segments.map((segment) => {
+    let locatedOffsets = [];
+    let offsets = segments.map((segment) => {
         const found = locator.segment(segment, held < 0 ? 0 : held + 1);
         locatedOffsets.push(found);
         if (found >= 0) held = found;
@@ -105,6 +213,19 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         ? { ...payload.inheritedSceneState, lastDirectiveType: 'scene' } : null;
     const outfitDirectives = extractSceneDirectives(source, { outfitResolver: createOutfitResolver(sceneAssets) }).directives;
     const scenes = outfitDirectives.filter(d => d.type === 'scene');
+    let sourceSegments = segments.map((_, index) => index);
+    let sceneFlags = segments.map(() => false);
+    if (sceneAssets?.enabled) {
+        const expanded = expandScenePages(source, segments, offsets, locatedOffsets, scenes, inheritedSceneState, readerSettings);
+        if (expanded) {
+            segments = expanded.segments;
+            offsets = expanded.offsets;
+            locatedOffsets = expanded.locatedOffsets;
+            sourceSegments = expanded.sourceSegments;
+            sceneFlags = expanded.sceneFlags;
+            sceneDirectives = shiftDirectivesForScenePages(sceneDirectives, expanded.inserts);
+        }
+    }
     const sceneAt = (offset) => {
         const own = offset >= 0 ? lastBefore(scenes, offset, false) : null;
         return own && own.scene ? { ...own, character: '', mood: '', lastDirectiveType: 'scene' } : inheritedSceneState;
@@ -218,7 +339,8 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
             else {
                 const first = sceneFirstPage.has(d) ? sceneFirstPage.get(d) : segments.length;
                 const ahead = [];
-                for (let j = first; j < segments.length && j < first + SCENE_AHEAD_PAGES && sceneOfPage[j] === d; j++) {
+                for (let j = first; j < segments.length && ahead.length < SCENE_AHEAD_PAGES && sceneOfPage[j] === d; j++) {
+                    if (sceneFlags[j]) continue;
                     const speaker = segmentSpeaker(segments[j]);
                     ahead.push({ text: segments[j], by: !speaker ? '' : castKeyOf(speaker) === key ? 'own' : 'other' });
                 }
@@ -279,6 +401,13 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
             speechFloor = normalizedIndex;
             narrationTracker = null;
             namer.cross(key => carriesAt(sceneHere, key));
+        }
+        if (sceneFlags[normalizedIndex]) {
+            pages.push({ textType: 'scene', scenePage: true, bubbleSpeaker: '', bubbleMood: '', segmentBody: '',
+                spriteChar: '', spriteMood: '', systemSpeaker: '', narrationDropped: false, narrationDroppedKey: '',
+                spriteLeft: false, currentOffset: offsets[normalizedIndex], sourceSegment: -1, sceneStateForBg,
+                sceneDread: (lastBefore(dread, offsets[normalizedIndex] < 0 ? source.length : offsets[normalizedIndex], false)?.value) ?? payload.inheritedDread ?? null });
+            continue;
         }
         let textType = 'narration', bubbleSpeaker = '', bubbleMood = '', segmentBody = currentText;
         let spriteMood = '', systemSpeaker = '', spriteLeft = false;
@@ -420,7 +549,9 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
             if (!narrationTracker || narrationTracker.key !== key || narrationTracker.anchor !== inheritFrom || narrationTracker.index !== normalizedIndex - 1) {
                 narrationTracker = { key, anchor: inheritFrom, index: inheritFrom,
                     push: createNarrationSpriteTracker({ name: spriteChar, aliases: [key, ...(castAliases[key] || [])], others: othersFor(key), pov, gender: genderOf(key), hold: inheritHold }) };
-                for (let i = inheritFrom + 1; i < normalizedIndex; i++) narrationTracker.push(segments[i]);
+                for (let i = inheritFrom + 1; i < normalizedIndex; i++) {
+                    if (!sceneFlags[i]) narrationTracker.push(segments[i]);
+                }
             }
             const keep = narrationTracker.push(currentText);
             narrationTracker.index = normalizedIndex;
@@ -441,7 +572,8 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         if (classified && classified.speaker) lastBubble = { ...classified, index: normalizedIndex };
         if (spriteChar && spriteMood) lastMoodByKey.set(castKeyOf(spriteChar), spriteMood);
         pages.push({ textType, bubbleSpeaker, bubbleMood, segmentBody, systemSpeaker, spriteChar, spriteMood,
-            narrationDropped, narrationDroppedKey, spriteLeft, currentOffset: offsets[normalizedIndex], sceneStateForBg,
+            narrationDropped, narrationDroppedKey, spriteLeft, currentOffset: offsets[normalizedIndex],
+            sourceSegment: sourceSegments[normalizedIndex], sceneStateForBg,
             sceneDread: (lastBefore(dread, offsets[normalizedIndex] < 0 ? source.length : offsets[normalizedIndex], false)?.value) ?? payload.inheritedDread ?? null });
     }
     const flags = sceneStates.map(s => Boolean(s && s.nsfw));

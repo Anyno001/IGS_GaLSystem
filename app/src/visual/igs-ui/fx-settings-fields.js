@@ -80,8 +80,7 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
     const heartbeat = featureRow(more, 'heartbeat-words', `${p}.heartbeatFx.enabled`, s.heartbeatFx.enabled, '心跳脉动', '心动、紧张时', renderWordListField('heartbeatFx.love', '心动', s.heartbeatFx.love)
         + renderWordListField('heartbeatFx.tense', '紧张', s.heartbeatFx.tense));
     const flash = featureRow(more, 'flash-words', `${p}.flashFx.enabled`, s.flashFx.enabled, '闪白与耳鸣', '震惊时', renderWordListField('flashFx.emotions', '触发情绪', s.flashFx.emotions));
-    const title = featureRow(more, 'title-card', `${p}.titleCard.enabled`, s.titleCard.enabled, '地点/时间标题卡', '换场时报幕', field(`${p}.titleCard.speed`, '报幕速度', segmentedInput(`${p}.titleCard.speed`, s.titleCard.speed, [['fast', '快'], ['medium', '中'], ['slow', '慢']], '报幕速度'))
-        + checkbox(`${p}.titleCard.onLocation`, s.titleCard.onLocation, '切换地点时显示')
+    const title = featureRow(more, 'title-card', `${p}.titleCard.enabled`, s.titleCard.enabled, '地点/时间标题卡', '换场时单独一页', checkbox(`${p}.titleCard.onLocation`, s.titleCard.onLocation, '切换地点时显示')
         + checkbox(`${p}.titleCard.onTime`, s.titleCard.onTime, '时间变化时显示'));
     const favor = featureRow(more, 'favor', `${p}.favorToast.enabled`, s.favorToast.enabled, '数值变化提示', '好感等升降');
     const itemFx = featureRow(more, 'item-fx', `${p}.itemFx.enabled`, s.itemFx.enabled, '获得物品演出', '', checkbox(`${p}.itemFx.mention`, s.itemFx.mention, '正文里点亮已获得的物品名'));

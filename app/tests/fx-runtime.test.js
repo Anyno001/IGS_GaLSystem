@@ -115,11 +115,11 @@ test('gate:fx-runtime:settings-default-off-and-keep-explicit-empty-lists', () =>
     const manga = normalizeMangaFxSettings({ enabled: true, symbols: { anger: [] }, speedLines: ['震惊', 'wow'] });
     assert.deepEqual(manga.symbols.anger, []);
     assert.deepEqual(manga.speedLines, ['震惊']);
-    assert.equal(normalizeTitleCardSettings({}).speed, 'medium');
-    assert.equal(normalizeTitleCardSettings({ speed: 'fast' }).speed, 'fast');
-    assert.equal(normalizeTitleCardSettings({ speed: 'invalid' }).speed, 'medium');
-    const titleFields = renderFxFeatureFields({ titleCard: { enabled: true, speed: 'fast' } }).title;
-    assert.match(titleFields, /data-segment-path="readerSettings\.titleCard\.speed"[^>]*data-segment-value="fast"/);
+    assert.equal(Object.hasOwn(normalizeTitleCardSettings({ speed: 'fast' }), 'speed'), false);
+    const titleFields = renderFxFeatureFields({ titleCard: { enabled: true } }).title;
+    assert.equal(titleFields.includes('报幕速度'), false);
+    assert.match(titleFields, /readerSettings\.titleCard\.onLocation/);
+    assert.match(titleFields, /readerSettings\.titleCard\.onTime/);
 });
 
 test('gate:fx-runtime:emotion-matching-is-exact-chinese', () => {
@@ -145,43 +145,39 @@ test('gate:fx-runtime:plan-plays-once-per-page-and-skips-nsfw', () => {
     assert.deepEqual(chat.effects, []);
 });
 
-test('gate:fx-runtime:title-card-on-location-or-time-change-once', () => {
+test('gate:fx-runtime:scene-page-title-stays-and-text-pages-do-not-broadcast', () => {
     const memory = createFxMemory();
     const settings = { titleCard: { enabled: true } };
-    const a = planPageFx(snapshot({ sceneLocation: '天台', sceneTime: '放学后' }, settings), memory, new Map());
-    assert.deepEqual(a.effects, [{ type: 'title', main: '天台', sub: '放学后' }]);
-    const same = planPageFx(snapshot({ sceneLocation: '天台', sceneTime: '放学后', currentIndex: 1 }, settings), memory, new Map());
-    assert.deepEqual(same.effects, []);
-    const later = planPageFx(snapshot({ sceneLocation: '天台', sceneTime: '夜晚', currentIndex: 2 }, settings), memory, new Map());
-    assert.deepEqual(later.effects, [{ type: 'title', main: '', sub: '—— 夜晚' }]);
-    const off = planPageFx(snapshot({ sceneLocation: '教室', sceneTime: '夜晚', currentIndex: 3 }, { titleCard: { enabled: true, onLocation: false } }), memory, new Map());
+    const scene = planPageFx(snapshot({ scenePage: true, sceneLocation: '天台', sceneTime: '放学后' }, settings), memory, new Map());
+    assert.deepEqual(scene.effects, [{ type: 'title', main: '天台', sub: '放学后' }]);
+    const text = planPageFx(snapshot({ sceneLocation: '天台', sceneTime: '放学后', currentIndex: 1 }, settings), memory, new Map());
+    assert.deepEqual(text.effects, []);
+    const back = planPageFx(snapshot({ scenePage: true, sceneLocation: '天台', sceneTime: '放学后' }, settings), memory, new Map());
+    assert.deepEqual(back.effects, [{ type: 'title', main: '天台', sub: '放学后' }]);
+    const timeOnly = planPageFx(snapshot({ scenePage: true, sceneLocation: '天台', sceneTime: '夜晚', currentIndex: 2 }, { titleCard: { enabled: true, onLocation: false } }), memory, new Map());
+    assert.deepEqual(timeOnly.effects, [{ type: 'title', main: '', sub: '—— 夜晚' }]);
+    const off = planPageFx(snapshot({ scenePage: true, sceneLocation: '教室', sceneTime: '清晨', currentIndex: 3 }, { titleCard: { enabled: true, onLocation: false, onTime: false } }), memory, new Map());
     assert.deepEqual(off.effects, []);
 });
 
-test('gate:fx-runtime:title-card-temporarily-hides-stage-chrome', () => {
+test('gate:fx-runtime:scene-page-title-stays-until-the-page-turns', () => {
     const { root, motion } = makeRoot();
     const timers = clock();
-    const result = applyFxToDom(root, snapshot({ sceneLocation: '天台', sceneTime: '放学后' }, { titleCard: { enabled: true, speed: 'fast' }, fxStyle: { hold: 'long' } }), {
-        schedule: timers.schedule, clear: timers.clear, reducedMotion: false,
-    });
+    const opts = { schedule: timers.schedule, clear: timers.clear, reducedMotion: false };
+    const result = applyFxToDom(root, snapshot({ scenePage: true, sceneLocation: '天台', sceneTime: '放学后' }, { titleCard: { enabled: true }, fxStyle: { hold: 'long' } }), opts);
     assert.deepEqual(result.played, ['title']);
-    assert.equal(timers.lives[0], 1800, '报幕速度独立于全局停留时间');
-    assert.equal(motion.getAttribute('data-igs-fx-presentation'), '1');
-    assert.ok(motion.querySelector('.igs-fx-title-card'));
-    assert.ok(FX_STYLE_TEXT.includes('#igs-stage-motion[data-igs-fx-presentation="1"] #igs-status-hud'));
-    assert.ok(FX_STYLE_TEXT.includes('#igs-stage-motion[data-igs-fx-presentation="1"] #igs-sprite'));
-    assert.ok(FX_STYLE_TEXT.includes('#igs-stage-motion[data-igs-fx-presentation="1"] #igs-dialog-layer'));
-    assert.ok(FX_STYLE_TEXT.includes('{display:none!important;pointer-events:none!important;}'));
-    timers.flush();
+    assert.deepEqual(timers.lives, []);
     assert.equal(motion.getAttribute('data-igs-fx-presentation'), null);
+    const card = motion.querySelector('.igs-fx-title-card');
+    assert.equal(card.className.includes('is-static'), true);
+    assert.equal(card.querySelector('.igs-fx-title-main').textContent, '天台');
+    assert.ok(FX_STYLE_TEXT.includes('.igs-fx-title-card.is-static'));
+    timers.flush();
+    assert.ok(motion.querySelector('.igs-fx-title-card'));
+    applyFxToDom(root, snapshot({ scenePage: true, sceneLocation: '天台', sceneTime: '放学后' }, { titleCard: { enabled: true } }), opts);
+    assert.equal(motion.querySelectorAll('.igs-fx-title-card').length, 1);
+    applyFxToDom(root, snapshot({ currentIndex: 1, sceneLocation: '天台', sceneTime: '放学后' }, { titleCard: { enabled: true } }), opts);
     assert.equal(motion.querySelector('.igs-fx-title-card'), null);
-
-    const slow = clock();
-    const slowRoot = makeRoot().root;
-    applyFxToDom(slowRoot, snapshot({ sceneLocation: '教室' }, { titleCard: { enabled: true, speed: 'slow' }, fxStyle: { hold: 'short' } }), {
-        schedule: slow.schedule, clear: slow.clear, reducedMotion: false,
-    });
-    assert.equal(slow.lives[0], 4200);
 });
 
 test('gate:fx-runtime:favor-diff-records-baseline-then-reports-changes', () => {
@@ -424,14 +420,14 @@ test('gate:fx-runtime:ancient-era-swaps-lamp-ink-snot-symbols-and-scroll-title',
         sprite: { url: '/alice.png', posX: 50, posY: 100, scale: 100, head: { x: 0.5, top: 0.08, w: 0.28, aspect: 2 } },
     };
     const ancient = { mangaFx: { enabled: true }, titleCard: { enabled: true }, _ancientEra: true };
-    applyFxToDom(root, snapshot({ statusEmotion: '灵光一闪', sceneLocation: '醉仙楼', sceneTime: '戌时' }, ancient), opts);
+    applyFxToDom(root, snapshot({ scenePage: true, statusEmotion: '灵光一闪', sceneLocation: '醉仙楼', sceneTime: '戌时' }, ancient), opts);
     const symbol = motion.querySelector('.igs-fx-symbol');
     assert.equal(symbol.getAttribute('data-era'), 'ancient');
     assert.equal(symbol.innerHTML, ANCIENT_SYMBOL_SVG.bulb);
     assert.match(symbol.innerHTML, /igs-fx-lamp/);
     const title = motion.querySelector('.igs-fx-title-card');
     assert.equal(title.className.includes('is-ancient'), true);
-    applyFxToDom(root, snapshot({ currentIndex: 1, statusEmotion: '开心', sceneLocation: '醉仙楼', sceneTime: '亥时' }, ancient), opts);
+    applyFxToDom(root, snapshot({ scenePage: true, currentIndex: 1, statusEmotion: '开心', sceneLocation: '醉仙楼', sceneTime: '亥时' }, ancient), opts);
     assert.match(motion.querySelector('.igs-fx-symbol').innerHTML, /igs-fx-inkdot-1/);
     assert.equal(motion.querySelector('.igs-fx-title-sub').textContent, '亥时', 'no leading dash in vertical scroll');
     // 其余符号在古代背景下保持原样，不打 data-era。

@@ -24,6 +24,10 @@ export const FX_STYLE_TEXT = `
 #igs-stage-motion[data-igs-fx-presentation="1"] #igs-status-hud,
 #igs-stage-motion[data-igs-fx-presentation="1"] #igs-sprite,
 #igs-stage-motion[data-igs-fx-presentation="1"] #igs-dialog-layer{display:none!important;pointer-events:none!important;}
+/* 场景单独成页：整页只留背景和标题卡，点一下才进入原来盖在下面的正文。 */
+#igs-overlay.igs-scene-page #igs-dialog-layer,
+#igs-overlay.igs-scene-page #igs-sprite,
+#igs-overlay.igs-scene-page #igs-cast{display:none!important;pointer-events:none!important;}
 /* 区间氛围：只改展示层。关灯压暗挂在 #igs-fx-stage 自身背景上（立绘之上、对话层之下），压过时段调色；看电影用 ::before 屏幕光；撑伞用 ::after 伞面剪影。 */
 #igs-stage-motion[data-igs-fx-lightsoff] #igs-fx-stage{background:linear-gradient(180deg,rgba(6,12,34,.62),rgba(4,8,22,.78));}
 #igs-stage-motion[data-igs-fx-movie] #igs-fx-stage::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 50% 0%,rgba(150,190,255,.28),rgba(0,0,0,.62) 70%);animation:igs-fx-movie-flicker 2.6s ease-in-out infinite;}
@@ -416,6 +420,7 @@ export const FX_STYLE_TEXT = `
 #igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-flash{animation-name:igs-fx-flash-snap;animation-timing-function:steps(1,end);}
 #igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-heartbeat{animation-timing-function:steps(1,end);}
 #igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-title-card,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-favor,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-notify,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-delivery,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-call-end{animation-timing-function:steps(3,end);}
+.igs-fx-title-card.is-static,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-title-card.is-static{animation:none;opacity:1;}
 @media (prefers-reduced-motion: reduce){
 .igs-fx-layer *,.igs-fx-layer *::before,.igs-fx-layer *::after{animation:none!important;transition:none!important;}
 .igs-fx-layer .igs-fx-call-timer::after{animation:${CALL_TIMER_ANIMATION}!important;animation-delay:var(--igs-fx-call-delay,0s)!important;}

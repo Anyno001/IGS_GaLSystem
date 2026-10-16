@@ -27,7 +27,7 @@ function reader(t, { raw, sceneAssets, statusHud, table, generatedAssets } = {})
     } };
     const cache = createLocalImageCache(g);
     const host = createIgsReaderHost({ global: g, media: { cache }, generatedAssets, pageRenderGapMs: 0,
-        getUnifiedSettings: () => ({ bridge, readerSettings: { titleScreen: false, typewriter: { enabled: false }, statusHud } }),
+        getUnifiedSettings: () => ({ bridge, readerSettings: { titleScreen: false, typewriter: { enabled: false }, statusHud, titleCard: { enabled: true } } }),
         getSettingsRevision: () => revision, getCurrentChatId: () => 'floor-preparation-fixture',
         onGeneratedAssetUpdated(fn) { imageEvent = fn; return () => { imageEvent = null; }; },
         onSettingsUpdated(fn) { settingsEvent = fn; return () => { settingsEvent = null; }; },
@@ -154,7 +154,19 @@ test('跨行对白、重复短对白、换场与换装均按预先定位的本�
     const sceneAssets = { enabled: true, scenes: { 室内: { url: 'inside.png' }, 室外: { url: 'outside.png' } },
         characters: { 白墨: { 平和: 'calm.png', 喜悦: 'joy.png' } }, characterOutfits: { 白墨: { 红裙: { moods: { 喜悦: 'red-joy.png' } } } } };
     const r = reader(t, { sceneAssets, raw: '[igs-scene:室内|上午|晴]\n[igs-char:白墨|平和|你好。\n\n]\n[igs-scene:室外|晚上|雨]\n[igs-char:白墨|喜悦|红裙|你好。]' });
-    assert.equal(r.content().displayText, '你好。'); assert.equal(r.content().backgroundImage, 'inside.png');
+    assert.equal(r.content().scenePage, true);
+    assert.equal(r.content().displayText, '');
+    assert.equal(r.content().sceneLocation, '室内');
+    assert.equal(r.content().backgroundImage, 'inside.png');
+    await r.next();
+    assert.equal(r.content().scenePage, false);
+    assert.equal(r.content().displayText, '你好。');
+    assert.equal(r.content().backgroundImage, 'inside.png');
+    await r.next();
+    assert.equal(r.content().scenePage, true);
+    assert.equal(r.content().displayText, '');
+    assert.equal(r.content().sceneLocation, '室外');
+    assert.equal(r.content().backgroundImage, 'outside.png');
     await r.next();
     assert.equal(r.content().displayText, '你好。'); assert.equal(r.content().sceneLocation, '室外');
     assert.equal(r.content().spriteImage, 'red-joy.png');
@@ -186,16 +198,45 @@ test('预先准备的 CG 页计划保持现有 SFW/NSFW、换场、停留与新�
     }
 });
 
+test('相同场景不占页，只有地点或时间变化且对应开关开着才单独成页', () => {
+    const sceneAssets = { enabled: true, scenes: { 室内: { url: 'in.png' }, 室外: { url: 'out.png' } }, characters: {} };
+    const prepare = (raw, inheritedSceneState, titleCard = { enabled: true }) => {
+        const extracted = buildIgsTextPayload(raw, { sceneAssets });
+        return prepareReaderFloor({ text: extracted.formattedText, segments: extracted.textSegments, extracted,
+            payload: { raw, inheritedSceneState }, scene: {}, readerSettings: { _sceneAssets: sceneAssets, titleCard } });
+    };
+    const scenePages = (floor) => floor.pages.map((page) => page.scenePage === true);
+    const repeated = prepare('[igs-scene:室内|上午|晴]\n[igs-scene:室内|上午|晴]\n你好。');
+    assert.deepEqual(scenePages(repeated), [true, false]);
+    const inherited = prepare('[igs-scene:室内|上午|晴]\n你好。', { scene: '室内', time: '上午', weather: '晴', nsfw: false });
+    assert.deepEqual(scenePages(inherited), [false]);
+    const weather = prepare('[igs-scene:室内|上午|晴]\n甲。\n[igs-scene:室内|上午|雨]\n乙。');
+    assert.deepEqual(scenePages(weather), [true, false, false]);
+    const nsfw = prepare('[igs-scene:室内|上午|晴]\n甲。\n[igs-scene:室内|上午|晴|NSFW]\n乙。');
+    assert.deepEqual(scenePages(nsfw), [true, false, false]);
+    const time = prepare('[igs-scene:室内|上午|晴]\n甲。\n[igs-scene:室内|晚上|晴]\n乙。');
+    assert.deepEqual(scenePages(time), [true, false, true, false]);
+    const place = prepare('[igs-scene:室内|上午|晴]\n甲。\n[igs-scene:室外|上午|晴]\n乙。');
+    assert.deepEqual(scenePages(place), [true, false, true, false]);
+    const samePlace = { scene: '室内', time: '上午', weather: '晴', nsfw: false };
+    assert.deepEqual(scenePages(prepare('[igs-scene:室外|上午|晴]\n乙。', samePlace, { enabled: true, onLocation: false })), [false]);
+    assert.deepEqual(scenePages(prepare('[igs-scene:室内|晚上|晴]\n乙。', samePlace, { enabled: true, onTime: false })), [false]);
+    assert.deepEqual(scenePages(prepare('[igs-scene:室外|晚上|雨|NSFW]\n乙。', samePlace, { enabled: false })), [false]);
+    assert.deepEqual(scenePages(prepare('[igs-scene:室外|上午|晴]\n乙。', samePlace, { enabled: true, onLocation: false, onTime: true })), [false]);
+    assert.deepEqual(scenePages(prepare('[igs-scene:室内|晚上|晴]\n乙。', samePlace, { enabled: true, onLocation: false, onTime: true })), [true, false]);
+});
+
 test('演出与 NSFW 连续段在整楼准备时完成，翻页只取当前页的状态', () => {
     const raw = '[igs-scene:室内|晚上|晴|nsfw]\n[igs-fx:letterbox]\n[igs-char:白墨|平和|你好。]\n[igs-fx:letterbox-end]\n[igs-char:白墨|喜悦|再见。]';
     const sceneAssets = { enabled: true, characters: { 白墨: { 平和: 'calm.png' } } };
     const extracted = buildIgsTextPayload(raw, { sceneAssets });
     const floor = prepareReaderFloor({ text: extracted.formattedText, segments: extracted.textSegments, extracted,
-        payload: { raw }, scene: {}, readerSettings: { _sceneAssets: sceneAssets } });
-    assert.equal(floor.pages.length, 2);
+        payload: { raw }, scene: {}, readerSettings: { _sceneAssets: sceneAssets, titleCard: { enabled: true } } });
+    assert.equal(floor.pages.length, 3);
+    assert.equal(floor.pages[0].scenePage, true);
     assert.deepEqual(floor.pages.map(p => p.fx), floor.pages.map((p, i) => resolveFxAtPage(floor.fxDirectives, p.fxOffset, i ? floor.offsets[i - 1] : -1)));
-    assert.equal(floor.pages[0].fx.letterbox, true); assert.equal(floor.pages[1].fx.letterbox, false);
-    assert.equal(floor.pages[1].nsfwSpan.length, 2); assert.equal(floor.pages[1].nsfwSpan.index, 1);
+    assert.equal(floor.pages[1].fx.letterbox, true); assert.equal(floor.pages[2].fx.letterbox, false);
+    assert.equal(floor.pages[2].nsfwSpan.length, 3); assert.equal(floor.pages[2].nsfwSpan.index, 2);
 });
 
 test('表格行索引保持姓名首列、标准 row_id、别名和旧格式标题的查找顺序', () => {

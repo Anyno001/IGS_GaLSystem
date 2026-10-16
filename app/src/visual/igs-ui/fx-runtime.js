@@ -30,7 +30,6 @@ export const FX_LIFETIME_MS = Object.freeze({
     symbol: 1000, speedLines: 700, heartbeat: 2400, flash: 1500,
     favor: 2400, notify: 3300, delivery: 3300, eye: 1600, call: 2400, 'call-end': 1800, nickname: 3400, voicemail: 4200, contact: 3000, cutin: 1400, promise: 3200, 'promise-due': 3600,
 });
-export const TITLE_CARD_LIFETIME_MS = Object.freeze({ fast: 1800, medium: 2700, slow: 4200 });
 const SEEN_LIMIT = 256;
 const FAVOR_LIMIT = 256;
 const MIN_FAVOR_DELTA = 1;
@@ -143,15 +142,13 @@ export function resetFavorBaseline() {
 function planTitle(content, settings, memory, effects) {
     const location = text(content.sceneLocation);
     const time = text(content.sceneTime);
-    const locationChanged = Boolean(location) && location !== memory.lastLocation;
-    const timeChanged = Boolean(time) && time !== memory.lastTime;
     if (location) memory.lastLocation = location;
     if (time) memory.lastTime = time;
-    if (!settings.enabled) return;
+    if (!settings.enabled || content.scenePage !== true) return;
     let card = null;
-    if (settings.onLocation && locationChanged) card = { type: 'title', main: location, sub: time };
-    else if (settings.onTime && timeChanged) card = { type: 'title', main: '', sub: `—— ${time}` };
-    if (card && markOnce(memory, `title:${content.messageId}:${location}:${time}`)) effects.push(card);
+    if (settings.onLocation && location) card = { type: 'title', main: location, sub: time };
+    else if (settings.onTime && time) card = { type: 'title', main: '', sub: `—— ${time}` };
+    if (card) effects.push(card);
 }
 
 // 纯规划：根据快照与记忆决定本次渲染要播放的瞬时演出和需要保持的区间状态。
@@ -224,7 +221,6 @@ export function planPageFx(snapshot, memory, baseline = favorBaseline, normalize
         atmos,
         callEnd: fx.instants.find((item) => item.kind === 'call-end') || null,
         eyeHold,
-        titleSpeed: settings.titleCard.speed,
         sound: settings.fxSound,
         style: settings.fxStyle,
     };
@@ -625,9 +621,7 @@ function pulseSpriteBeat(root, tone, reduced) {
 
 function playEffect(effect, ctx) {
     const { state, layers, doc, snapshot, options, reduced, plan, root } = ctx;
-    const base = effect.type === 'title'
-        ? (TITLE_CARD_LIFETIME_MS[plan.titleSpeed] || TITLE_CARD_LIFETIME_MS.medium)
-        : (FX_LIFETIME_MS[effect.type] || 1000);
+    const base = FX_LIFETIME_MS[effect.type] || 1000;
     const life = HOLDABLE.has(effect.type) ? Math.round(base * (FX_HOLD_SCALE[plan.style.hold] || 1)) : base;
     const busy = BUSY_EFFECTS.has(effect.type);
     if (effect.type === 'symbol') {
@@ -647,12 +641,18 @@ function playEffect(effect, ctx) {
         sound(state, 'tinnitus', plan.sound, options);
         duckBgm(plan.sound, 0.3, life);
     } else if (effect.type === 'title') {
-        // 古代背景是一条宣纸竖幅：地点、时间竖排，末尾朱印；竖排里不要「——」引线。
-        const el = node(doc, (ctx.ancient ? 'igs-fx-title-card is-ancient' : 'igs-fx-title-card') + (ctx.worldSkin || '') + (ctx.xianxiaInk || ''));
+        // 场景页上的地点和时间一直停着，翻页才收起；不走淡出计时，也不挡住地点栏。
+        const signature = `${effect.main || ''}\0${effect.sub || ''}`;
+        const existing = layers.front.querySelector('.igs-fx-title-card');
+        if (existing && existing.classList.contains('is-static') && existing.getAttribute('data-igs-title') === signature) return;
+        if (existing) existing.remove();
+        const el = node(doc, (ctx.ancient ? 'igs-fx-title-card is-ancient is-static' : 'igs-fx-title-card is-static') + (ctx.worldSkin || '') + (ctx.xianxiaInk || ''));
         const sub = ctx.ancient && effect.sub ? effect.sub.replace(/^——\s*/, '') : effect.sub;
         if (effect.main) el.appendChild(node(doc, 'igs-fx-title-main', effect.main));
         if (sub) el.appendChild(node(doc, 'igs-fx-title-sub', sub));
-        spawn(state, layers.front, el, life, false, true);
+        el.classList.add('igs-fx-transient');
+        el.setAttribute('data-igs-title', signature);
+        layers.front.appendChild(el);
     } else if (effect.type === 'favor') {
         const up = effect.delta > 0;
         const el = node(doc, 'igs-fx-favor', `${effect.character} ${effect.label} ${up ? '↑' : '↓'} ${up ? '+' : ''}${effect.delta}`);

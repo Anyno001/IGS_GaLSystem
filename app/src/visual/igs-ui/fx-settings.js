@@ -95,12 +95,9 @@ function plain(value) {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-export const TITLE_CARD_SPEEDS = Object.freeze(['fast', 'medium', 'slow']);
-
 export function normalizeTitleCardSettings(value) {
     const src = plain(value);
-    const speed = TITLE_CARD_SPEEDS.includes(src.speed) ? src.speed : 'medium';
-    return { enabled: src.enabled === true, onLocation: src.onLocation !== false, onTime: src.onTime !== false, speed };
+    return { enabled: src.enabled === true, onLocation: src.onLocation !== false, onTime: src.onTime !== false };
 }
 
 export function normalizeMangaFxSettings(value) {

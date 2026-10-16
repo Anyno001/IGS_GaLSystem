@@ -1394,6 +1394,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     if (!materialDialog) rootClasses.push('igs-default-reader-chrome');
     if (gradientVeilDialog) rootClasses.push('igs-gradient-veil-active');
     if (nsfwVeilActive) rootClasses.push('igs-scene-nsfw');
+    if (snapshot.content && snapshot.content.scenePage === true) rootClasses.push('igs-scene-page');
     if (current && current.awaitingReply) rootClasses.push('igs-awaiting-reply');
     // applyReaderSettingsToDom 随后还会 toggle 这两个类：先按同样条件带上，免得每次翻页先删后加、整页样式失效。
     if (snapshot.mode !== 'embedded' && snapshot.readerSettings.toolbarDock !== 'float') rootClasses.push('igs-toolbar-top');

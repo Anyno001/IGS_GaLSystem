@@ -576,6 +576,7 @@ test('gate:simulation:scene-assets-injects-prompt-and-renders-single-configured-
             },
         }),
     });
+    storage.setItem('igs-reader-settings-v9-default', JSON.stringify({ titleCard: { enabled: true } }));
     const message = {
         id: 38,
         text: '<now_plot>\n<content>\n[igs-scene:B班教室|下午|晴天]\n[igs-char:小林海斗|平静|できるもん！]\n</content>\n</now_plot>',
@@ -627,8 +628,13 @@ test('gate:simulation:scene-assets-injects-prompt-and-renders-single-configured-
 
     const opened = await vn.openLatestAvailable('pc');
     assert.equal(opened.ok, true);
+    assert.equal(opened.reader.snapshot.content.scenePage, true);
     assert.equal(opened.reader.snapshot.content.backgroundImage, 'https://example.com/classroom.png');
-    assert.equal(opened.reader.snapshot.content.spriteImage, 'https://example.com/kaito.png');
+    assert.equal(opened.reader.snapshot.content.spriteImage, null);
+    await opened.reader.controller.invokeAction('next');
+    const line = vn.getState().igsUi.activeReader.snapshot.content;
+    assert.equal(line.scenePage, false);
+    assert.equal(line.spriteImage, 'https://example.com/kaito.png');
 
     vn.destroy();
     assert.equal(Object.hasOwn(extensionPrompts, 'igs-scene-assets-format-rule'), false);
@@ -827,6 +833,7 @@ test('gate:assets:review-rename-accept-persists-status-and-hides-card-or-rolls-b
         try {
             const opened = host.openReader({ messageId: 39, message: { id: 39, text: raw }, raw }, { mode: 'pc' });
             assert.equal(opened.ok, true);
+            await opened.controller.invokeAction('next');
             const panel = document.getElementById('igs-asset-review');
             assert.ok(panel, '最后一页须挂载待确认素材卡片');
             const input = panel.querySelector('input');
@@ -922,6 +929,7 @@ test('gate:simulation:html-card-page-hides-inherited-sprite-and-restores-it-afte
 </content>`;
     const host = createIgsReaderHost({
         global: { document },
+        pageRenderGapMs: 0,
         getUnifiedSettings: () => ({
             bridge: {
                 sceneAssets: {
@@ -931,7 +939,7 @@ test('gate:simulation:html-card-page-hides-inherited-sprite-and-restores-it-afte
                     moodGroups: [],
                 },
             },
-            readerSettings: {},
+            readerSettings: { titleCard: { enabled: true } },
         }),
     });
     const opened = host.openReader({ messageId: 49, message: { id: 49, text: raw }, raw }, { mode: 'pc' });
@@ -940,6 +948,7 @@ test('gate:simulation:html-card-page-hides-inherited-sprite-and-restores-it-afte
         const overlay = document.getElementById('igs-overlay');
         const sprite = overlay.querySelector('#igs-sprite');
         const current = () => host.getState().activeReader.snapshot.content;
+        opened.controller.invokeAction('next');
         assert.match(current().spriteImage, /alice\.png/);
         assert.equal(sprite.style.display, 'block');
 
@@ -984,6 +993,7 @@ test('gate:illustration:reader-rerenders-after-marker-write-and-keeps-veil-until
     assert.equal(opened.ok, true);
     const before = host.getState().activeReader.snapshot;
     assert.equal(before.content.illustrationActive, false);
+    opened.controller.invokeAction('next');
     raw = '[igs-scene:Room|night|rain|NSFW]\n[igs-img:1]\n更新后正文。\n二段。';
     trigger({ chatId: 'chat-1', messageId: 39, swipeId: 1, slot: 1 });
     assert.equal(host.getState().activeReader.snapshot.content.illustrationActive, false);
@@ -1037,6 +1047,7 @@ test('gate:illustration:failed-cg-point-can-reroll-and-does-not-borrow-another-i
             },
         }, { mode: 'pc' });
         assert.equal(opened.ok, true);
+        await opened.controller.invokeAction('next');
         const content = host.getState().activeReader.snapshot.content;
         assert.equal(content.illustrationSlot, 1);
         assert.equal(content.illustrationActive, false);
@@ -1342,6 +1353,7 @@ test('gate:illustration:cg-page-keeps-scene-until-image-arrives-and-then-shows-c
     assert.equal(opened.ok, true);
     const content = () => host.getState().activeReader.snapshot.content;
     const bg = document.getElementById('igs-bg');
+    opened.controller.invokeAction('next');
     assert.equal(content().backgroundImage, 'https://example.com/room.png');
     assert.equal(content().cgActive, false);
     assert.equal(content().cgWaiting, true);
@@ -1370,9 +1382,10 @@ test('gate:illustration:unavailable-slot-19-keeps-both-speakers-through-page-75-
     let imageUrl = '', notify;
     const host = createIgsReaderHost({
         global: { document },
+        pageRenderGapMs: 0,
         getUnifiedSettings: () => ({
             bridge: { sceneAssets: { enabled: true, scenes: { 东路宫道: { url: 'data:image/png;base64,Qkc=' } }, characters: { 白墨: { 默认: 'data:image/png;base64,QkFJ' }, 小林: { 默认: 'data:image/png;base64,TElO' } } } },
-            readerSettings: { titleScreen: false, stageCast: { enabled: true } },
+            readerSettings: { titleScreen: false, stageCast: { enabled: true }, titleCard: { enabled: true } },
         }),
         getIllustrationSource: () => ({ chatId: 'fixture', messageId: 22, swipeId: 0, text: raw }),
         getIllustrationUrl: ({ slot }) => slot === 19 ? imageUrl : '',
@@ -1381,9 +1394,11 @@ test('gate:illustration:unavailable-slot-19-keeps-both-speakers-through-page-75-
     try {
         const opened = host.openReader({ messageId: 22, message: { id: 22, text: raw }, raw }, { mode: 'fullscreen' });
         const content = () => host.getState().activeReader.snapshot.content;
-        assert.equal(content().segments.length, 75);
+        assert.equal(content().segments.length, 76);
+        assert.equal(content().scenePage, true);
+        assert.equal(content().spriteImage, null);
         for (let i = 0; i < 75; i++) {
-            if (i) opened.controller.invokeAction('next');
+            opened.controller.invokeAction('next');
             assert.equal(content().spriteImage, i < 73 ? 'data:image/png;base64,TElO' : 'data:image/png;base64,QkFJ', `第 ${i + 1} 页`);
             assert.equal(content().cgActive, false);
             assert.equal(content().backgroundImage, 'data:image/png;base64,Qkc=');
@@ -1546,7 +1561,8 @@ test('gate:simulation:white-thought-with-empty-cg-keeps-a-same-character-library
             getUnifiedSettings: () => ({ bridge: { sceneAssets: { enabled: true, characters: { 白墨: { 平和: 'igs-gen:unreadable' } }, generated: { characters: { 白墨: { 默认: 'igs-gen:available' } } } } }, readerSettings: { titleScreen: false } }),
         });
         try {
-            host.openReader({ messageId: 40, message: { id: 40, text: raw }, raw }, { mode });
+            const opened = host.openReader({ messageId: 40, message: { id: 40, text: raw }, raw }, { mode });
+            await opened.controller.invokeAction('next');
             await new Promise(resolve => setTimeout(resolve, 400));
             const content = host.getState().activeReader.snapshot.content;
             assert.equal(content.textType, 'thought'); assert.equal(content.speaker, '白墨');
@@ -1629,6 +1645,7 @@ test('gate:simulation:nsfw-scene-keeps-sprite-when-hide-toggle-off', async () =>
     });
 
     const opened = await vn.openLatestAvailable('pc');
+    await opened.reader.controller.invokeAction('next');
     const overlay = document.getElementById('igs-overlay');
     const sprite = overlay.querySelector('#igs-sprite');
     assert.equal(opened.reader.snapshot.content.sceneNsfw, true);
@@ -1650,6 +1667,7 @@ test('gate:simulation:page-turn-skips-unchanged-root-class-and-background-writes
     ].join('\n');
     const host = createIgsReaderHost({
         global: { document },
+        pageRenderGapMs: 0,
         getUnifiedSettings: () => ({
             bridge: {
                 sceneAssets: {
@@ -1660,11 +1678,12 @@ test('gate:simulation:page-turn-skips-unchanged-root-class-and-background-writes
                     moodGroups: [],
                 },
             },
-            readerSettings: { statusHud: { enabled: false } },
+            readerSettings: { statusHud: { enabled: false }, titleCard: { enabled: true } },
         }),
     });
     const opened = host.openReader({ messageId: 42, message: { id: 42, text: raw }, raw }, { mode: 'pc' });
     assert.equal(opened.ok, true);
+    opened.controller.invokeAction('next');
     const overlay = document.getElementById('igs-overlay');
     const sprite = overlay.querySelector('#igs-sprite');
     const bg = overlay.querySelector('#igs-bg');
@@ -1687,7 +1706,7 @@ test('gate:simulation:page-turn-skips-unchanged-root-class-and-background-writes
     opened.controller.invokeAction('next');
     opened.controller.invokeAction('next');
     opened.controller.invokeAction('prev');
-    assert.equal(host.getState().activeReader.index, 1);
+    assert.equal(host.getState().activeReader.index, 2);
     // 同一场景同一立绘翻页：最终值不变就不应重写，避免反复样式失效与大图地址重解析
     assert.deepEqual(writes, { className: 0, sprite: 0, bg: 0 });
     assert.equal(overlay.classList.contains('igs-scene-nsfw'), true);
@@ -1745,11 +1764,12 @@ test('gate:simulation:nsfw-veil-level-strong-applies-and-clears-on-safe-scene', 
         }),
     });
     storage.setItem('igs-reader-settings-v9-default', JSON.stringify({
-        statusHud: { enabled: false, nsfwVeilLevel: 'strong' },
+        statusHud: { enabled: false, nsfwVeilLevel: 'strong' }, titleCard: { enabled: true },
     }));
     const vn = bootstrapIGS({
         global: { document, localStorage: storage },
         autoAttachMagicWand: false,
+        pageRenderGapMs: 0,
         hostAdapter: {
             getCurrentMessage: async () => ({
                 id: 43,
@@ -1773,7 +1793,9 @@ test('gate:simulation:nsfw-veil-level-strong-applies-and-clears-on-safe-scene', 
     assert.equal(overlay.classList.contains('igs-scene-nsfw'), true);
     assert.equal(overlay.style['--igs-nsfw-veil-center'], '.55');
     assert.equal(overlay.style['--igs-nsfw-veil-edge'], '.88');
-    // 走到下一条不带 NSFW 的场景后变量清除，回落 CSS 内默认值。
+    // 场景页、同场旁白都还是 NSFW；再翻到下一条不带 NSFW 的场景页后变量清除。
+    await opened.reader.controller.invokeAction('next');
+    assert.equal(overlay.classList.contains('igs-scene-nsfw'), true);
     await opened.reader.controller.invokeAction('next');
     assert.equal(overlay.classList.contains('igs-scene-nsfw'), false);
     assert.equal(overlay.style['--igs-nsfw-veil-center'], '');
@@ -1846,7 +1868,8 @@ test('gate:simulation:scene-and-character-aliases-reuse-original-assets-and-layo
     });
 
     const opened = await vn.openLatestAvailable('pc');
-    const snapshot = opened.reader.snapshot;
+    await opened.reader.controller.invokeAction('next');
+    const snapshot = vn.getState().igsUi.activeReader.snapshot;
     assert.equal(snapshot.content.backgroundImage, 'https://example.com/old-city.png');
     assert.equal(snapshot.content.spriteImage, 'https://example.com/alice.png');
     assert.equal(snapshot.content.speaker, '爱丽');
@@ -1935,7 +1958,9 @@ test('gate:simulation:restart-first-gal-loads-stored-background-and-sprite-witho
     });
     try {
         service.start();
-        assert.equal(reader.openReader({ messageId: 1, raw: f.raw, message: { id: 1, text: f.raw } }, { mode: 'pc' }).ok, true);
+        const opened = reader.openReader({ messageId: 1, raw: f.raw, message: { id: 1, text: f.raw } }, { mode: 'pc' });
+        assert.equal(opened.ok, true);
+        await opened.controller.invokeAction('next');
         for (let i = 0; i < 80; i += 1) {
             const content = reader.getState().activeReader.snapshot.content;
             if (content.spriteImage && content.backgroundImage) break;
@@ -1969,12 +1994,17 @@ test('gate:simulation:startup-settings-restore-refreshes-an-already-open-first-g
             hostAdapter: { getCurrentMessage: async () => ({ id: 1, text: f.raw }), typeAndSend: async () => ({ ok: true }) },
         });
         try {
-            assert.equal((await app.openLatestAvailable('pc')).ok, true);
+            const opened = await app.openLatestAvailable('pc');
+            assert.equal(opened.ok, true);
             await new Promise(resolve => setTimeout(resolve, 160));
             assert.equal(app.getState().igsUi.activeReader.snapshot.content.spriteImage, null);
             release();
             for (let i = 0; i < 100; i += 1) {
                 const content = app.getState().igsUi.activeReader.snapshot.content;
+                if (content.scenePage) {
+                    await opened.reader.controller.invokeAction('next');
+                    continue;
+                }
                 if (content.spriteImage && content.backgroundImage) break;
                 await new Promise(resolve => setTimeout(resolve, 10));
             }
@@ -8565,6 +8595,12 @@ function createFakeElement(tagName, ownerDocument) {
         get clientHeight() {
             return Math.round(element.getBoundingClientRect().height);
         },
+        get firstChild() {
+            return element.children[0] || null;
+        },
+        get lastChild() {
+            return element.children[element.children.length - 1] || null;
+        },
         get offsetWidth() {
             return element.clientWidth;
         },
@@ -9242,7 +9278,8 @@ test('gate:simulation:status-hud-snapshot-keeps-raw-emotion-and-skips-narration'
     });
 
     const opened = await vn.openLatestAvailable('pc');
-    const content = opened.reader.snapshot.content;
+    await opened.reader.controller.invokeAction('next');
+    const content = vn.getState().igsUi.activeReader.snapshot.content;
     assert.equal(content.statusEmotion, '喜悦');
     assert.equal(content.statusHud.character, 'H');
     assert.equal(content.statusHud.emotion, '喜悦');
@@ -9336,6 +9373,7 @@ test('gate:simulation:status-hud-dom-renders-avatar-emotion-and-caps-at-four', a
     });
 
     const opened = await vn.openLatestAvailable('pc');
+    await opened.reader.controller.invokeAction('next');
     const host = document.getElementById('igs-status-hud');
     assert.equal(host.hasAttribute('hidden'), false);
     assert.equal(host.classList.contains('igs-hud-bg-dialog'), true);
@@ -9494,6 +9532,7 @@ test('gate:simulation:bgm-bars-sit-left-of-location-and-reveal-title-on-click', 
     });
 
     const opened = await vn.openLatestAvailable('pc');
+    await opened.reader.controller.invokeAction('next');
     const location = document.getElementById('igs-status-hud').querySelector('.igs-hud-location');
     const bars = location.querySelector('.igs-hud-bgm-bars');
     assert.ok(bars, 'two-bar mark sits in the location row');
@@ -9526,7 +9565,7 @@ test('gate:simulation:status-hud-location-details-render-on-narration', async ()
         }),
     });
     storage.setItem('igs-reader-settings-v9-default', JSON.stringify({
-        statusHud: { enabled: true, showLocation: true, showLocationDetails: true, tables: [] },
+        statusHud: { enabled: true, showLocation: true, showLocationDetails: true, tables: [] }, titleCard: { enabled: true },
     }));
     const vn = bootstrapIGS({
         global: { document, localStorage: storage },
@@ -9540,7 +9579,7 @@ test('gate:simulation:status-hud-location-details-render-on-narration', async ()
     const opened = await vn.openLatestAvailable('pc');
     const content = opened.reader.snapshot.content;
     const host = document.getElementById('igs-status-hud');
-    assert.equal(content.textType, 'narration');
+    assert.equal(content.textType, 'scene');
     assert.equal(content.statusHud.character, '');
     assert.equal(content.statusHud.location, '旧城');
     assert.equal(content.statusHud.time, '深夜');
@@ -9629,6 +9668,7 @@ test('gate:simulation:stage-shake-settings-and-raw-emotion-drive-igs-stage-only'
     answerSettingsDialog(document, '震撼');
     assert.equal((await adding).ok, true);
     assert.equal(settings.close().ok, true);
+    await opened.reader.controller.invokeAction('next');
     const persisted = JSON.parse(storage.getItem('igs-reader-settings-v9-default'));
     assert.equal(persisted.stageShake.enabled, true);
     assert.equal(persisted.stageShake.intensity, 'medium');
@@ -9648,11 +9688,12 @@ test('gate:simulation:chat-show-pops-bubbles-per-click-then-pages-and-replays-fu
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
     const storage = createMemoryStorage();
     storage.setItem('igs-reader-settings-v9-default', JSON.stringify({
-        chatShow: { enabled: true, frame: 'none', contacts: { 爱丽丝: { aliases: ['alice_cat'], side: 'left', color: '#ffb3d1' } } },
+        chatShow: { enabled: true, frame: 'none', contacts: { 爱丽丝: { aliases: ['alice_cat'], side: 'left', color: '#ffb3d1' } } }, titleCard: { enabled: true },
     }));
     const vn = bootstrapIGS({
         global: { document, localStorage: storage, SillyTavern: { getContext: () => ({ name1: '小明' }) } },
         autoAttachMagicWand: false,
+        pageRenderGapMs: 0,
         hostAdapter: {
             getCurrentMessage: async () => ({
                 id: 91,
@@ -9669,6 +9710,7 @@ test('gate:simulation:chat-show-pops-bubbles-per-click-then-pages-and-replays-fu
         const reader = opened.reader.controller;
         const overlay = document.getElementById('igs-overlay');
         const content = () => vn.getState().igsUi.activeReader.snapshot.content;
+        await reader.invokeAction('next');
         assert.equal(content().chatPage, false);
         await reader.invokeAction('next');
         assert.equal(content().chatPage, true);
@@ -9699,13 +9741,13 @@ test('gate:simulation:chat-show-pops-bubbles-per-click-then-pages-and-replays-fu
         layer.dispatchEvent({ type: 'click', target: layer, clientX: 100 });
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.equal(content().chatPage, false);
-        assert.equal(content().currentIndex, 0);
+        assert.equal(content().currentIndex, 1);
         await reader.invokeAction('next');
         assert.equal(content().chatPage, true);
         layer.dispatchEvent({ type: 'click', target: layer, clientX: 900 });
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.equal(content().chatPage, false);
-        assert.equal(content().currentIndex, 2);
+        assert.equal(content().currentIndex, 3);
     } finally {
         vn.destroy();
     }
@@ -9954,10 +9996,11 @@ test('gate:simulation:chat-layer-typing-indicator-message-types-and-theme-vars',
 test('gate:simulation:system-role-lines-use-own-style-and-hide-speaker-and-sprite', async () => {
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
     const storage = createMemoryStorage();
-    storage.setItem('igs-reader-settings-v9-default', JSON.stringify({ systemRole: { color: '#33ccff', align: 'center' } }));
+    storage.setItem('igs-reader-settings-v9-default', JSON.stringify({ systemRole: { color: '#33ccff', align: 'center' }, titleCard: { enabled: true } }));
     const vn = bootstrapIGS({
         global: { document, localStorage: storage, prompt: () => '【公告】' },
         autoAttachMagicWand: false,
+        pageRenderGapMs: 0,
         hostAdapter: {
             getCurrentMessage: async () => ({ id: 95, text: '[igs-scene:Room|晚上|晴天]\n[igs-char:Alice|平和|你好。]\n[igs-char:【系统】|平静|任务已更新。]\n[igs-msg:系统|获得道具：钥匙]' }),
             typeAndSend: async () => ({ ok: true }),
@@ -9969,6 +10012,7 @@ test('gate:simulation:system-role-lines-use-own-style-and-hide-speaker-and-sprit
     try {
         const opened = await vn.openLatestAvailable('pc');
         const content = () => vn.getState().igsUi.activeReader.snapshot.content;
+        await opened.reader.controller.invokeAction('next');
         assert.equal(content().textType, 'dialogue');
         assert.equal(content().speaker, 'Alice');
         await opened.reader.controller.invokeAction('next');
@@ -10226,6 +10270,7 @@ test('gate:simulation:igs-fx-tag-next-to-dialogue-lands-on-its-page', () => {
     ].join('\n');
     const host = createIgsReaderHost({
         global: { document },
+        pageRenderGapMs: 0,
         getUnifiedSettings: () => ({
             bridge: { sceneAssets: { enabled: true, scenes: {}, characters: { Alice: { 默认: 'https://example.com/alice.png' } } } },
             readerSettings: { fxTags: { enabled: true }, fxSound: { enabled: false } },
@@ -10259,13 +10304,15 @@ test('gate:simulation:igs-fx-tags-stay-out-of-text-and-drive-page-fx', () => {
     const raw = '[igs-scene:Room|night|clear]\n[igs-fx:flashback]\n[igs-fx:sfx|砰]一段。\n[igs-fx:call|Alice]\n二段。\n[igs-fx:flashback-end][igs-fx:call-end]\n三段。';
     const host = createIgsReaderHost({
         global: { document },
+        pageRenderGapMs: 0,
         getUnifiedSettings: () => ({
             bridge: { sceneAssets: { enabled: true, scenes: {}, characters: {} } },
-            readerSettings: { fxTags: { enabled: true }, fxSound: { enabled: false } },
+            readerSettings: { fxTags: { enabled: true }, fxSound: { enabled: false }, titleCard: { enabled: true } },
         }),
     });
     const opened = host.openReader({ messageId: 41, message: { id: 41, text: raw }, raw }, { mode: 'pc' });
     assert.equal(opened.ok, true);
+    opened.controller.invokeAction('next');
     const first = host.getState().activeReader.snapshot.content;
     assert.ok(first.segments.length >= 3);
     assert.ok(first.segments.every((segment) => !segment.includes('[igs-fx')));
@@ -10365,6 +10412,7 @@ test('gate:simulation:ancient-era-reader-strips-and-skips-modern-fx', () => {
     });
     const opened = host.openReader({ messageId: 42, message: { id: 42, text: raw }, raw }, { mode: 'pc' });
     assert.equal(opened.ok, true);
+    opened.controller.invokeAction('next');
     const content = host.getState().activeReader.snapshot.content;
     assert.ok(content.segments.every((segment) => !segment.includes('[igs-fx')));
     // 快照里是原始解析结果；按开关过滤在播放时进行，古代模式下 call 开关已被拨成关。
@@ -10788,9 +10836,11 @@ test('gate:simulation:outfit-scene-bound-expires-after-scene-change', async () =
     const config = JSON.parse(outfitBridgeConfig({ scenes: { 海边: { url: '', times: {} }, 教室: { url: '', times: {} } } }));
     config.sceneAssets.characterOutfits.小林海斗.泳装.scenes = ['海边'];
     const storage = createMemoryStorage({ igs_bridge_config: JSON.stringify(config) });
+    storage.setItem('igs-reader-settings-v9-default', JSON.stringify({ titleCard: { enabled: true } }));
     const vn = bootstrapIGS({
         global: { document, localStorage: storage },
         autoAttachMagicWand: false,
+        pageRenderGapMs: 0,
         hostAdapter: {
             getCurrentMessage: async () => ({
                 id: 40,
@@ -10807,8 +10857,11 @@ test('gate:simulation:outfit-scene-bound-expires-after-scene-change', async () =
     try {
         const opened = await vn.openLatestAvailable('pc');
         const content = () => vn.getState().igsUi.activeReader.snapshot.content;
+        await opened.reader.controller.invokeAction('next');
         assert.equal(content().spriteOutfit, '泳装');
         assert.equal(content().spriteImage, 'https://example.com/swim-joy.png');
+        await opened.reader.controller.invokeAction('next');
+        assert.equal(content().scenePage, true);
         await opened.reader.controller.invokeAction('next');
         assert.equal(content().displayText, '回到学校了。');
         assert.equal(content().spriteOutfit, '');
@@ -10836,9 +10889,10 @@ test('gate:simulation:romance-nsfw-curve-ramps-and-falls-across-real-pages', () 
     ].join('\n');
     const host = createIgsReaderHost({
         global: { document },
+        pageRenderGapMs: 0,
         getUnifiedSettings: () => ({
             bridge: { sceneAssets: { enabled: true, scenes: {}, characters: {} } },
-            readerSettings: { romanceFx: { enabled: true, confess: true }, statusHud: { nsfwSpriteMode: 'show' } },
+            readerSettings: { romanceFx: { enabled: true, confess: true }, statusHud: { nsfwSpriteMode: 'show' }, titleCard: { enabled: true } },
         }),
     });
     try {
@@ -10852,11 +10906,13 @@ test('gate:simulation:romance-nsfw-curve-ramps-and-falls-across-real-pages', () 
             pages.push({ text: content().text, level: stage.getAttribute('data-igs-rm-level'), span: content().nsfwSpan, backlight: stage.style['--igs-rm-backlight'] || '' });
         }
         assert.ok(content().segments.every((segment) => !/igs-fx:/.test(segment)));
-        assert.deepEqual(pages.map((p) => p.level), ['1', '3', '3', '3', '3', null]);
+        // 普通切到 NSFW 不另起场景页；清晨是时间变化，仍单独成页。
+        assert.deepEqual(pages.map((p) => p.level), [null, '1', '3', '3', '3', '3', '1', null]);
         assert.equal(pages[0].span, null);
-        assert.deepEqual(pages.slice(1, 5).map((p) => p.span && p.span.index), [0, 1, 2, 3]);
-        // 渐强 0.55 → 0.8，末两页回落 0.8 → 0.6（中档 3 档逆光基准为 1）。
-        assert.deepEqual(pages.slice(1, 5).map((p) => p.backlight), ['0.55', '0.8', '0.8', '0.6']);
+        assert.equal(pages[1].span, null);
+        assert.equal(pages[6].span, null);
+        assert.deepEqual(pages.slice(2, 6).map((p) => p.span && p.span.index), [0, 1, 2, 3]);
+        assert.deepEqual(pages.slice(2, 6).map((p) => p.backlight), ['0.55', '0.8', '0.8', '0.6']);
     } finally {
         host.destroy();
     }

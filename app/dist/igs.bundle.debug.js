@@ -316,6 +316,7 @@ function bootstrapIGS(options = {}) {
     app.igsUi = options.igsUi || createIgsReaderHost({
         global: globalObject,
         media,
+        pageRenderGapMs: options.pageRenderGapMs,
         version: app.version,
         random: options.random,
         getIllustrationSource: (messageId) => illustrationMessageHost.readFloor(messageId),
@@ -36794,12 +36795,15 @@ function createIgsReaderHost(options = {}) {
         const { text, segments } = prepared;
         if (!segments.length) return { content: { segments: [] } };
         const normalizedIndex = Math.max(0, Math.min(segments.length - 1, Number(index) || 0));
+        const page = prepared.pages[normalizedIndex];
+        const scenePage = page.scenePage === true;
+        const slotIndex = scenePage ? -1 : (Number.isInteger(page.sourceSegment) ? page.sourceSegment : normalizedIndex);
         const segmentImageSlots = Array.isArray(payload.segmentImageSlots) && payload.segmentImageSlots.length
             ? payload.segmentImageSlots
             : extracted.segmentImageSlots;
         const imageState = normalizeSnapshotImageState(
             payload.imageState,
-            resolveSegmentImageIndex({ imageState: payload.imageState, segmentImageSlots }, normalizedIndex),
+            resolveSegmentImageIndex({ imageState: payload.imageState, segmentImageSlots }, slotIndex >= 0 ? slotIndex : normalizedIndex),
         );
         const displayImageState = applyImageCountOverride(imageState, readerSettings.imageCountOverride);
         // 分段缺失时给空串：绝不用整篇 text 兜底，否则会凭空多出一页「全文」。
@@ -36850,7 +36854,6 @@ function createIgsReaderHost(options = {}) {
             isUnavailableImage: unavailableImageProbe(generatedAssets),
         };
         const floorAssets = prepareReaderFloorAssets(prepared, { payload, readerSettings, assetMatchCtx, tableData });
-        const page = prepared.pages[normalizedIndex];
         let finalBackgroundImage = backgroundImage;
         let finalBackgroundTimed = false;
         const hideSpriteOnNsfw = !normalizeStatusHudSettings(readerSettings && readerSettings.statusHud).showSpriteOnNsfw;
@@ -36870,7 +36873,7 @@ function createIgsReaderHost(options = {}) {
         let spriteMatch = null;
         let backgroundMatch = null;
         const extractedSegmentImageSlots = Array.isArray(extracted.segmentImageSlots) ? extracted.segmentImageSlots : [];
-        const rawSegmentSlotValue = extractedSegmentImageSlots[normalizedIndex];
+        const rawSegmentSlotValue = slotIndex >= 0 ? extractedSegmentImageSlots[slotIndex] : undefined;
         const segmentHasBoundSlot = rawSegmentSlotValue != null
             && Number.isFinite(Number(rawSegmentSlotValue))
             && Number(rawSegmentSlotValue) >= 0;
@@ -36905,7 +36908,7 @@ function createIgsReaderHost(options = {}) {
             pageFx.foeImage = resolveGenerated(floorAssets.sprite(battleFoe, '').url) || '';
         }
         // NSFW 页整楼挂图；SFW 页只在事件那几页显示，之后回到背景和立绘。
-        const illustrationHit = prepared.illustrations[normalizedIndex];
+        const illustrationHit = scenePage ? null : prepared.illustrations[normalizedIndex];
         const floorIdentity = state.activeReader && Number(state.activeReader.payload.messageId) === Number(payload.messageId)
             ? state.activeReader.illustrationIdentity
             : readIllustrationIdentity(payload.messageId);
@@ -36923,7 +36926,7 @@ function createIgsReaderHost(options = {}) {
             ? resolveBoundSlotImageUrl(displayImageState, illustrationHit.slot)
             : '';
         // CG 库：本页没有生成 / 插件 CG 时，按关键词或 [igs-cg:名字] 显示作者预置的那张，停留同 CG 停留页数。
-        const eventCg = !illustrationHit && !slotBoundUrl && sceneAssets && sceneAssets.enabled && sceneAssets.eventCgs
+        const eventCg = !scenePage && !illustrationHit && !slotBoundUrl && sceneAssets && sceneAssets.enabled && sceneAssets.eventCgs
             ? prepared.eventCgs[normalizedIndex]
             : null;
         const eventCgUrl = eventCg ? String(resolveGenerated(eventCg.url) || '') : '';
@@ -37095,13 +37098,22 @@ function createIgsReaderHost(options = {}) {
             pendingCastRefs = [];
             speakerCastOrder = null;
         }
+        if (scenePage) {
+            textType = 'scene';
+            resolvedSpeaker = '';
+            bubbleMood = '';
+            spriteImage = null;
+            castSprites = [];
+            pendingCastRefs = [];
+            speakerCastOrder = null;
+        }
         const statusSceneInfo = {
             location: firstDefined(sceneStateForBg && sceneStateForBg.scene, scene.location, ''),
             time: firstDefined(sceneStateForBg && sceneStateForBg.time, scene.time, ''),
             weather: firstDefined(sceneStateForBg && sceneStateForBg.weather, scene.weather, ''),
         };
         const isDialogueText = textType === 'dialogue' || textType === 'system' || (!sceneAssetsEnabled && Boolean(scene.speaker) && Boolean(currentText));
-        const displayText = htmlCardIndex >= 0 || chatPage ? '' : systemOnlyChat ? chatBlock.messages.map((m) => m.text).filter(Boolean).join('\n') : chatBlock ? formatChatBlockAsText(chatBlock) : (!sceneAssetsEnabled && scene.speaker && currentText)
+        const displayText = scenePage || htmlCardIndex >= 0 || chatPage ? '' : systemOnlyChat ? chatBlock.messages.map((m) => m.text).filter(Boolean).join('\n') : chatBlock ? formatChatBlockAsText(chatBlock) : (!sceneAssetsEnabled && scene.speaker && currentText)
             ? `${scene.speaker}: ${stripWrappingQuotes(currentText)}`
             : (sceneAssetsEnabled
                 ? (isDialogueText ? stripWrappingQuotes(segmentBody) : segmentBody)
@@ -37149,11 +37161,12 @@ function createIgsReaderHost(options = {}) {
                 spriteBackArt,
                 statusEmotion: bubbleMood,
                 textType,
-                text: currentText,
+                text: scenePage ? '' : currentText,
                 fullText: text,
                 displayText,
                 htmlCard,
                 htmlCardPage: htmlCardIndex >= 0,
+                scenePage,
                 chatPage,
                 chat,
                 fx: pageFx,
@@ -37200,7 +37213,7 @@ function createIgsReaderHost(options = {}) {
                 nsfwCgPortrait,
                 illustrationSlot: illustrationHit ? illustrationHit.slot : null,
                 illustrationUrl,
-                statusHud: buildStatusHudForSnapshot(readerSettings, sceneStateForBg && sceneStateForBg.nsfw ? '' : resolvedSpeaker, sceneStateForBg && sceneStateForBg.nsfw ? '' : bubbleMood, statusSceneInfo, textType === 'narration' || textType === 'thought' || textType === 'chat' || textType === 'system' || Boolean(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw), { character: spriteCharacter, outfit: spriteOutfit }),
+                statusHud: buildStatusHudForSnapshot(readerSettings, sceneStateForBg && sceneStateForBg.nsfw ? '' : resolvedSpeaker, sceneStateForBg && sceneStateForBg.nsfw ? '' : bubbleMood, statusSceneInfo, textType === 'scene' || textType === 'narration' || textType === 'thought' || textType === 'chat' || textType === 'system' || Boolean(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw), { character: spriteCharacter, outfit: spriteOutfit }),
             },
             // _sceneAssets 是整份有效素材库，只读不改；跟着整份深拷贝会让翻页随素材库变大而变慢。
             readerSettings: sceneDialogSkin(cloneReaderSettingsShallowAssets(readerSettings), statusSceneInfo.location),
@@ -45428,11 +45441,9 @@ const FLASH_FX_DEFAULT_EMOTIONS = freezeList(['崩溃', '恍然大悟', '茫然'
 function plain(value) {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
-const TITLE_CARD_SPEEDS = Object.freeze(['fast', 'medium', 'slow']);
 function normalizeTitleCardSettings(value) {
     const src = plain(value);
-    const speed = TITLE_CARD_SPEEDS.includes(src.speed) ? src.speed : 'medium';
-    return { enabled: src.enabled === true, onLocation: src.onLocation !== false, onTime: src.onTime !== false, speed };
+    return { enabled: src.enabled === true, onLocation: src.onLocation !== false, onTime: src.onTime !== false };
 }
 function normalizeMangaFxSettings(value) {
     const src = plain(value);
@@ -45638,7 +45649,6 @@ __igsDefine(exports, "MANGA_FX_DEFAULT_SPEED_LINES", () => MANGA_FX_DEFAULT_SPEE
 __igsDefine(exports, "HEARTBEAT_FX_DEFAULT_LOVE", () => HEARTBEAT_FX_DEFAULT_LOVE);
 __igsDefine(exports, "HEARTBEAT_FX_DEFAULT_TENSE", () => HEARTBEAT_FX_DEFAULT_TENSE);
 __igsDefine(exports, "FLASH_FX_DEFAULT_EMOTIONS", () => FLASH_FX_DEFAULT_EMOTIONS);
-__igsDefine(exports, "TITLE_CARD_SPEEDS", () => TITLE_CARD_SPEEDS);
 __igsDefine(exports, "FX_PROMPT_OVERRIDE_MAX", () => FX_PROMPT_OVERRIDE_MAX);
 __igsDefine(exports, "FX_PROMPT_KEYS", () => FX_PROMPT_KEYS);
 __igsDefine(exports, "FX_PROMPT_STYLES", () => FX_PROMPT_STYLES);
@@ -50435,8 +50445,7 @@ function renderFxFeatureFields(reader, more = collapsible, fontOptions = DIALOG_
     const heartbeat = featureRow(more, 'heartbeat-words', `${p}.heartbeatFx.enabled`, s.heartbeatFx.enabled, '心跳脉动', '心动、紧张时', renderWordListField('heartbeatFx.love', '心动', s.heartbeatFx.love)
         + renderWordListField('heartbeatFx.tense', '紧张', s.heartbeatFx.tense));
     const flash = featureRow(more, 'flash-words', `${p}.flashFx.enabled`, s.flashFx.enabled, '闪白与耳鸣', '震惊时', renderWordListField('flashFx.emotions', '触发情绪', s.flashFx.emotions));
-    const title = featureRow(more, 'title-card', `${p}.titleCard.enabled`, s.titleCard.enabled, '地点/时间标题卡', '换场时报幕', field(`${p}.titleCard.speed`, '报幕速度', segmentedInput(`${p}.titleCard.speed`, s.titleCard.speed, [['fast', '快'], ['medium', '中'], ['slow', '慢']], '报幕速度'))
-        + checkbox(`${p}.titleCard.onLocation`, s.titleCard.onLocation, '切换地点时显示')
+    const title = featureRow(more, 'title-card', `${p}.titleCard.enabled`, s.titleCard.enabled, '地点/时间标题卡', '换场时单独一页', checkbox(`${p}.titleCard.onLocation`, s.titleCard.onLocation, '切换地点时显示')
         + checkbox(`${p}.titleCard.onTime`, s.titleCard.onTime, '时间变化时显示'));
     const favor = featureRow(more, 'favor', `${p}.favorToast.enabled`, s.favorToast.enabled, '数值变化提示', '好感等升降');
     const itemFx = featureRow(more, 'item-fx', `${p}.itemFx.enabled`, s.itemFx.enabled, '获得物品演出', '', checkbox(`${p}.itemFx.mention`, s.itemFx.mention, '正文里点亮已获得的物品名'));
@@ -68565,7 +68574,7 @@ function buildPageDiagnostic(snapshot, { version = '', worldview = '', promptRep
     const c = snapshot.content;
     const rs = snapshot.readerSettings || {};
     const segments = Array.isArray(c.segments) ? c.segments.length : 0;
-    const kind = c.chatPage ? '聊天页' : c.htmlCardPage ? '卡片页' : `正文(${c.textType || '?'})`;
+    const kind = c.scenePage ? '场景页' : c.chatPage ? '聊天页' : c.htmlCardPage ? '卡片页' : `正文(${c.textType || '?'})`;
     const cast = Array.isArray(c.castSprites) ? c.castSprites.map((m) => m && m.character).filter(Boolean) : [];
     const notes = [...(c.warnings || []), ...(c.errors || [])].map((w) => (w && w.code) || '').filter(Boolean);
     const lines = [
@@ -76099,6 +76108,7 @@ function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     if (!materialDialog) rootClasses.push('igs-default-reader-chrome');
     if (gradientVeilDialog) rootClasses.push('igs-gradient-veil-active');
     if (nsfwVeilActive) rootClasses.push('igs-scene-nsfw');
+    if (snapshot.content && snapshot.content.scenePage === true) rootClasses.push('igs-scene-page');
     if (current && current.awaitingReply) rootClasses.push('igs-awaiting-reply');
     // applyReaderSettingsToDom 随后还会 toggle 这两个类：先按同样条件带上，免得每次翻页先删后加、整页样式失效。
     if (snapshot.mode !== 'embedded' && snapshot.readerSettings.toolbarDock !== 'float') rootClasses.push('igs-toolbar-top');
@@ -78193,6 +78203,10 @@ const FX_STYLE_TEXT = `
 #igs-stage-motion[data-igs-fx-presentation="1"] #igs-status-hud,
 #igs-stage-motion[data-igs-fx-presentation="1"] #igs-sprite,
 #igs-stage-motion[data-igs-fx-presentation="1"] #igs-dialog-layer{display:none!important;pointer-events:none!important;}
+/* 场景单独成页：整页只留背景和标题卡，点一下才进入原来盖在下面的正文。 */
+#igs-overlay.igs-scene-page #igs-dialog-layer,
+#igs-overlay.igs-scene-page #igs-sprite,
+#igs-overlay.igs-scene-page #igs-cast{display:none!important;pointer-events:none!important;}
 /* 区间氛围：只改展示层。关灯压暗挂在 #igs-fx-stage 自身背景上（立绘之上、对话层之下），压过时段调色；看电影用 ::before 屏幕光；撑伞用 ::after 伞面剪影。 */
 #igs-stage-motion[data-igs-fx-lightsoff] #igs-fx-stage{background:linear-gradient(180deg,rgba(6,12,34,.62),rgba(4,8,22,.78));}
 #igs-stage-motion[data-igs-fx-movie] #igs-fx-stage::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 50% 0%,rgba(150,190,255,.28),rgba(0,0,0,.62) 70%);animation:igs-fx-movie-flicker 2.6s ease-in-out infinite;}
@@ -78585,6 +78599,7 @@ const FX_STYLE_TEXT = `
 #igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-flash{animation-name:igs-fx-flash-snap;animation-timing-function:steps(1,end);}
 #igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-heartbeat{animation-timing-function:steps(1,end);}
 #igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-title-card,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-favor,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-notify,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-delivery,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-call-end{animation-timing-function:steps(3,end);}
+.igs-fx-title-card.is-static,#igs-stage-motion[data-igs-fx-motion="snappy"] .igs-fx-title-card.is-static{animation:none;opacity:1;}
 @media (prefers-reduced-motion: reduce){
 .igs-fx-layer *,.igs-fx-layer *::before,.igs-fx-layer *::after{animation:none!important;transition:none!important;}
 .igs-fx-layer .igs-fx-call-timer::after{animation:${CALL_TIMER_ANIMATION}!important;animation-delay:var(--igs-fx-call-delay,0s)!important;}
@@ -85070,7 +85085,6 @@ const FX_LIFETIME_MS = Object.freeze({
     symbol: 1000, speedLines: 700, heartbeat: 2400, flash: 1500,
     favor: 2400, notify: 3300, delivery: 3300, eye: 1600, call: 2400, 'call-end': 1800, nickname: 3400, voicemail: 4200, contact: 3000, cutin: 1400, promise: 3200, 'promise-due': 3600,
 });
-const TITLE_CARD_LIFETIME_MS = Object.freeze({ fast: 1800, medium: 2700, slow: 4200 });
 const SEEN_LIMIT = 256;
 const FAVOR_LIMIT = 256;
 const MIN_FAVOR_DELTA = 1;
@@ -85180,15 +85194,13 @@ function resetFavorBaseline() {
 function planTitle(content, settings, memory, effects) {
     const location = text(content.sceneLocation);
     const time = text(content.sceneTime);
-    const locationChanged = Boolean(location) && location !== memory.lastLocation;
-    const timeChanged = Boolean(time) && time !== memory.lastTime;
     if (location) memory.lastLocation = location;
     if (time) memory.lastTime = time;
-    if (!settings.enabled) return;
+    if (!settings.enabled || content.scenePage !== true) return;
     let card = null;
-    if (settings.onLocation && locationChanged) card = { type: 'title', main: location, sub: time };
-    else if (settings.onTime && timeChanged) card = { type: 'title', main: '', sub: `—— ${time}` };
-    if (card && markOnce(memory, `title:${content.messageId}:${location}:${time}`)) effects.push(card);
+    if (settings.onLocation && location) card = { type: 'title', main: location, sub: time };
+    else if (settings.onTime && time) card = { type: 'title', main: '', sub: `—— ${time}` };
+    if (card) effects.push(card);
 }
 
 // 纯规划：根据快照与记忆决定本次渲染要播放的瞬时演出和需要保持的区间状态。
@@ -85261,7 +85273,6 @@ function planPageFx(snapshot, memory, baseline = favorBaseline, normalized = nul
         atmos,
         callEnd: fx.instants.find((item) => item.kind === 'call-end') || null,
         eyeHold,
-        titleSpeed: settings.titleCard.speed,
         sound: settings.fxSound,
         style: settings.fxStyle,
     };
@@ -85660,9 +85671,7 @@ function pulseSpriteBeat(root, tone, reduced) {
 
 function playEffect(effect, ctx) {
     const { state, layers, doc, snapshot, options, reduced, plan, root } = ctx;
-    const base = effect.type === 'title'
-        ? (TITLE_CARD_LIFETIME_MS[plan.titleSpeed] || TITLE_CARD_LIFETIME_MS.medium)
-        : (FX_LIFETIME_MS[effect.type] || 1000);
+    const base = FX_LIFETIME_MS[effect.type] || 1000;
     const life = HOLDABLE.has(effect.type) ? Math.round(base * (FX_HOLD_SCALE[plan.style.hold] || 1)) : base;
     const busy = BUSY_EFFECTS.has(effect.type);
     if (effect.type === 'symbol') {
@@ -85682,12 +85691,18 @@ function playEffect(effect, ctx) {
         sound(state, 'tinnitus', plan.sound, options);
         duckBgm(plan.sound, 0.3, life);
     } else if (effect.type === 'title') {
-        // 古代背景是一条宣纸竖幅：地点、时间竖排，末尾朱印；竖排里不要「——」引线。
-        const el = node(doc, (ctx.ancient ? 'igs-fx-title-card is-ancient' : 'igs-fx-title-card') + (ctx.worldSkin || '') + (ctx.xianxiaInk || ''));
+        // 场景页上的地点和时间一直停着，翻页才收起；不走淡出计时，也不挡住地点栏。
+        const signature = `${effect.main || ''}\0${effect.sub || ''}`;
+        const existing = layers.front.querySelector('.igs-fx-title-card');
+        if (existing && existing.classList.contains('is-static') && existing.getAttribute('data-igs-title') === signature) return;
+        if (existing) existing.remove();
+        const el = node(doc, (ctx.ancient ? 'igs-fx-title-card is-ancient is-static' : 'igs-fx-title-card is-static') + (ctx.worldSkin || '') + (ctx.xianxiaInk || ''));
         const sub = ctx.ancient && effect.sub ? effect.sub.replace(/^——\s*/, '') : effect.sub;
         if (effect.main) el.appendChild(node(doc, 'igs-fx-title-main', effect.main));
         if (sub) el.appendChild(node(doc, 'igs-fx-title-sub', sub));
-        spawn(state, layers.front, el, life, false, true);
+        el.classList.add('igs-fx-transient');
+        el.setAttribute('data-igs-title', signature);
+        layers.front.appendChild(el);
     } else if (effect.type === 'favor') {
         const up = effect.delta > 0;
         const el = node(doc, 'igs-fx-favor', `${effect.character} ${effect.label} ${up ? '↑' : '↓'} ${up ? '+' : ''}${effect.delta}`);
@@ -86189,7 +86204,6 @@ __igsDefine(exports, "renderDeliveryCard", () => renderDeliveryCard);
 __igsDefine(exports, "applyFxToDom", () => applyFxToDom);
 __igsDefine(exports, "cancelFxEffects", () => cancelFxEffects);
 __igsDefine(exports, "FX_LIFETIME_MS", () => FX_LIFETIME_MS);
-__igsDefine(exports, "TITLE_CARD_LIFETIME_MS", () => TITLE_CARD_LIFETIME_MS);
 __igsDefine(exports, "CUTIN_RATIO", () => CUTIN_RATIO);
 });
 __igsRegister("src/visual/igs-ui/dlc-fx-runtime.js", function(module, exports, require) {
@@ -110472,17 +110486,125 @@ const NARRATION_MOOD_HINTS = Object.freeze({ 怒火: '愤怒', 恼怒: '愤怒',
 const normalizeFingerprint = (s) => stripBilingualTranslation(s)
     .replace(/\*（[^）]*）\*/g, '').replace(/[\[\]\*（）]/g, '').replace(/\s+/g, '').trim();
 
+function titleBroadcastSettings(readerSettings) {
+    const src = readerSettings && readerSettings.titleCard && typeof readerSettings.titleCard === 'object'
+        ? readerSettings.titleCard : {};
+    return {
+        enabled: src.enabled === true,
+        onLocation: src.onLocation !== false,
+        onTime: src.onTime !== false,
+    };
+}
+
+function sceneShouldBroadcast(scene, previous, settings) {
+    if (!settings.enabled) return false;
+    const location = String(scene && scene.scene || '').trim();
+    const time = String(scene && scene.time || '').trim();
+    const locationChanged = Boolean(location) && location !== String(previous.scene || '').trim();
+    const timeChanged = Boolean(time) && time !== String(previous.time || '').trim();
+    return (settings.onLocation && locationChanged) || (settings.onTime && timeChanged);
+}
+
+function sceneTagEnd(source, scene) {
+    const from = Math.max(0, Number(scene && scene.offset) || 0);
+    const end = String(source || '').indexOf(']', from);
+    return end >= 0 ? end + 1 : from + 1;
+}
+
+// 只在标题卡会报幕时插入场景页：总开关开着，且地点或时间相对上一场景变了，并命中对应开关。
+// 天气、NSFW 变化不占页。返回 null 表示分页不变。
+function expandScenePages(source, segments, offsets, locatedOffsets, scenes, inherited, readerSettings) {
+    const inserts = [];
+    const settings = titleBroadcastSettings(readerSettings);
+    let previous = {
+        scene: String(inherited && inherited.scene || '').trim(),
+        time: String(inherited && inherited.time || '').trim(),
+    };
+    const located = offsets.some((offset) => offset >= 0);
+    for (const scene of scenes) {
+        const location = String(scene.scene || '').trim();
+        const time = String(scene.time || '').trim();
+        if (!location && !time) continue;
+        const announce = sceneShouldBroadcast(scene, previous, settings);
+        if (location) previous = { ...previous, scene: location };
+        if (time) previous = { ...previous, time };
+        if (!announce) continue;
+        let at = offsets.findIndex((offset) => offset > scene.offset);
+        if (at < 0) at = located ? offsets.length : 0;
+        inserts.push({ at, offset: sceneTagEnd(source, scene), scene });
+    }
+    if (!inserts.length) return null;
+    let baseSegments = segments;
+    let baseOffsets = offsets;
+    let baseLocated = locatedOffsets;
+    const blankOnly = segments.length === 1 && !String(segments[0] || '').trim();
+    if (blankOnly) {
+        for (const insert of inserts) insert.at = 0;
+        baseSegments = [];
+        baseOffsets = [];
+        baseLocated = [];
+    }
+    const nextSegments = [];
+    const nextOffsets = [];
+    const nextLocated = [];
+    const sourceSegments = [];
+    const sceneFlags = [];
+    let cursor = 0;
+    const pushText = (index) => {
+        nextSegments.push(baseSegments[index]);
+        nextOffsets.push(baseOffsets[index]);
+        nextLocated.push(baseLocated[index]);
+        sourceSegments.push(index);
+        sceneFlags.push(false);
+    };
+    for (const insert of inserts) {
+        const at = Math.min(insert.at, baseSegments.length);
+        while (cursor < at) pushText(cursor++);
+        nextSegments.push('');
+        nextOffsets.push(insert.offset);
+        nextLocated.push(-1);
+        sourceSegments.push(-1);
+        sceneFlags.push(true);
+    }
+    while (cursor < baseSegments.length) pushText(cursor++);
+    return { segments: nextSegments, offsets: nextOffsets, locatedOffsets: nextLocated, sourceSegments, sceneFlags, inserts };
+}
+
+function shiftDirectivesForScenePages(directives, inserts) {
+    const scenePageAt = new Map();
+    inserts.forEach((insert, index) => {
+        let page = insert.at;
+        for (let earlier = 0; earlier < index; earlier += 1) {
+            if (inserts[earlier].at <= insert.at) page += 1;
+        }
+        scenePageAt.set(insert.scene.offset, page);
+    });
+    return directives.map((directive) => {
+        const copy = { ...directive };
+        if (directive.type === 'scene' && scenePageAt.has(directive.offset)) {
+            copy.segmentIndex = scenePageAt.get(directive.offset);
+            return copy;
+        }
+        const index = Number(directive.segmentIndex);
+        if (!Number.isInteger(index)) return copy;
+        let extra = 0;
+        for (const insert of inserts) if (insert.at <= index) extra += 1;
+        copy.segmentIndex = index + extra;
+        return copy;
+    });
+}
+
 // 只准备可复用的正文数据和资源身份；不在这里读取或永久保存 blob URL。
 function prepareReaderFloor({ text, segments, extracted, payload, scene, readerSettings, userName = '' }) {
     const sceneAssets = readerSettings._sceneAssets || null;
-    const sceneDirectives = Array.isArray(extracted.sceneDirectives) ? extracted.sceneDirectives
+    let sceneDirectives = Array.isArray(extracted.sceneDirectives) ? extracted.sceneDirectives
         : Array.isArray(payload.sceneDirectives) ? payload.sceneDirectives : [];
     const hasIgsDirectives = sceneDirectives.length > 0;
     const source = String(extracted.markerLayoutSource || payload.raw || text || '');
     const locator = createFloorSourceLocator(source);
     let held = -1;
-    const locatedOffsets = [];
-    const offsets = segments.map((segment) => {
+    let locatedOffsets = [];
+    let offsets = segments.map((segment) => {
         const found = locator.segment(segment, held < 0 ? 0 : held + 1);
         locatedOffsets.push(found);
         if (found >= 0) held = found;
@@ -110492,6 +110614,19 @@ function prepareReaderFloor({ text, segments, extracted, payload, scene, readerS
         ? { ...payload.inheritedSceneState, lastDirectiveType: 'scene' } : null;
     const outfitDirectives = extractSceneDirectives(source, { outfitResolver: createOutfitResolver(sceneAssets) }).directives;
     const scenes = outfitDirectives.filter(d => d.type === 'scene');
+    let sourceSegments = segments.map((_, index) => index);
+    let sceneFlags = segments.map(() => false);
+    if (sceneAssets?.enabled) {
+        const expanded = expandScenePages(source, segments, offsets, locatedOffsets, scenes, inheritedSceneState, readerSettings);
+        if (expanded) {
+            segments = expanded.segments;
+            offsets = expanded.offsets;
+            locatedOffsets = expanded.locatedOffsets;
+            sourceSegments = expanded.sourceSegments;
+            sceneFlags = expanded.sceneFlags;
+            sceneDirectives = shiftDirectivesForScenePages(sceneDirectives, expanded.inserts);
+        }
+    }
     const sceneAt = (offset) => {
         const own = offset >= 0 ? lastBefore(scenes, offset, false) : null;
         return own && own.scene ? { ...own, character: '', mood: '', lastDirectiveType: 'scene' } : inheritedSceneState;
@@ -110605,7 +110740,8 @@ function prepareReaderFloor({ text, segments, extracted, payload, scene, readerS
             else {
                 const first = sceneFirstPage.has(d) ? sceneFirstPage.get(d) : segments.length;
                 const ahead = [];
-                for (let j = first; j < segments.length && j < first + SCENE_AHEAD_PAGES && sceneOfPage[j] === d; j++) {
+                for (let j = first; j < segments.length && ahead.length < SCENE_AHEAD_PAGES && sceneOfPage[j] === d; j++) {
+                    if (sceneFlags[j]) continue;
                     const speaker = segmentSpeaker(segments[j]);
                     ahead.push({ text: segments[j], by: !speaker ? '' : castKeyOf(speaker) === key ? 'own' : 'other' });
                 }
@@ -110666,6 +110802,13 @@ function prepareReaderFloor({ text, segments, extracted, payload, scene, readerS
             speechFloor = normalizedIndex;
             narrationTracker = null;
             namer.cross(key => carriesAt(sceneHere, key));
+        }
+        if (sceneFlags[normalizedIndex]) {
+            pages.push({ textType: 'scene', scenePage: true, bubbleSpeaker: '', bubbleMood: '', segmentBody: '',
+                spriteChar: '', spriteMood: '', systemSpeaker: '', narrationDropped: false, narrationDroppedKey: '',
+                spriteLeft: false, currentOffset: offsets[normalizedIndex], sourceSegment: -1, sceneStateForBg,
+                sceneDread: (lastBefore(dread, offsets[normalizedIndex] < 0 ? source.length : offsets[normalizedIndex], false)?.value) ?? payload.inheritedDread ?? null });
+            continue;
         }
         let textType = 'narration', bubbleSpeaker = '', bubbleMood = '', segmentBody = currentText;
         let spriteMood = '', systemSpeaker = '', spriteLeft = false;
@@ -110807,7 +110950,9 @@ function prepareReaderFloor({ text, segments, extracted, payload, scene, readerS
             if (!narrationTracker || narrationTracker.key !== key || narrationTracker.anchor !== inheritFrom || narrationTracker.index !== normalizedIndex - 1) {
                 narrationTracker = { key, anchor: inheritFrom, index: inheritFrom,
                     push: createNarrationSpriteTracker({ name: spriteChar, aliases: [key, ...(castAliases[key] || [])], others: othersFor(key), pov, gender: genderOf(key), hold: inheritHold }) };
-                for (let i = inheritFrom + 1; i < normalizedIndex; i++) narrationTracker.push(segments[i]);
+                for (let i = inheritFrom + 1; i < normalizedIndex; i++) {
+                    if (!sceneFlags[i]) narrationTracker.push(segments[i]);
+                }
             }
             const keep = narrationTracker.push(currentText);
             narrationTracker.index = normalizedIndex;
@@ -110828,7 +110973,8 @@ function prepareReaderFloor({ text, segments, extracted, payload, scene, readerS
         if (classified && classified.speaker) lastBubble = { ...classified, index: normalizedIndex };
         if (spriteChar && spriteMood) lastMoodByKey.set(castKeyOf(spriteChar), spriteMood);
         pages.push({ textType, bubbleSpeaker, bubbleMood, segmentBody, systemSpeaker, spriteChar, spriteMood,
-            narrationDropped, narrationDroppedKey, spriteLeft, currentOffset: offsets[normalizedIndex], sceneStateForBg,
+            narrationDropped, narrationDroppedKey, spriteLeft, currentOffset: offsets[normalizedIndex],
+            sourceSegment: sourceSegments[normalizedIndex], sceneStateForBg,
             sceneDread: (lastBefore(dread, offsets[normalizedIndex] < 0 ? source.length : offsets[normalizedIndex], false)?.value) ?? payload.inheritedDread ?? null });
     }
     const flags = sceneStates.map(s => Boolean(s && s.nsfw));
@@ -111472,6 +111618,13 @@ function prepareStageIndex(floor, settings) {
     let tempOrder = TEMP_SEAT_ORDER, sceneMark;
     for (let i = 0; i < floor.pages.length; i++) {
         const page = floor.pages[i];
+        if (page.scenePage) {
+            page.outfitOffset = page.currentOffset >= 0 ? page.currentOffset : -1;
+            page.reactMoodOf = () => '';
+            page.cast = [];
+            page.focusTemp = false;
+            continue;
+        }
         const anchor = floor.latestSpeechByPage[i];
         page.outfitOffset = page.currentOffset >= 0 ? page.currentOffset
             : anchor ? floor.locator.locate(anchor.thought || anchor.dialogue) : -1;

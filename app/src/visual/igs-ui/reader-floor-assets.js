@@ -140,6 +140,13 @@ function prepareStageIndex(floor, settings) {
     let tempOrder = TEMP_SEAT_ORDER, sceneMark;
     for (let i = 0; i < floor.pages.length; i++) {
         const page = floor.pages[i];
+        if (page.scenePage) {
+            page.outfitOffset = page.currentOffset >= 0 ? page.currentOffset : -1;
+            page.reactMoodOf = () => '';
+            page.cast = [];
+            page.focusTemp = false;
+            continue;
+        }
         const anchor = floor.latestSpeechByPage[i];
         page.outfitOffset = page.currentOffset >= 0 ? page.currentOffset
             : anchor ? floor.locator.locate(anchor.thought || anchor.dialogue) : -1;

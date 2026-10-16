@@ -83,7 +83,7 @@ export function buildPageDiagnostic(snapshot, { version = '', worldview = '', pr
     const c = snapshot.content;
     const rs = snapshot.readerSettings || {};
     const segments = Array.isArray(c.segments) ? c.segments.length : 0;
-    const kind = c.chatPage ? '聊天页' : c.htmlCardPage ? '卡片页' : `正文(${c.textType || '?'})`;
+    const kind = c.scenePage ? '场景页' : c.chatPage ? '聊天页' : c.htmlCardPage ? '卡片页' : `正文(${c.textType || '?'})`;
     const cast = Array.isArray(c.castSprites) ? c.castSprites.map((m) => m && m.character).filter(Boolean) : [];
     const notes = [...(c.warnings || []), ...(c.errors || [])].map((w) => (w && w.code) || '').filter(Boolean);
     const lines = [

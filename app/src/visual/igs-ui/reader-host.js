@@ -3453,12 +3453,15 @@ export function createIgsReaderHost(options = {}) {
         const { text, segments } = prepared;
         if (!segments.length) return { content: { segments: [] } };
         const normalizedIndex = Math.max(0, Math.min(segments.length - 1, Number(index) || 0));
+        const page = prepared.pages[normalizedIndex];
+        const scenePage = page.scenePage === true;
+        const slotIndex = scenePage ? -1 : (Number.isInteger(page.sourceSegment) ? page.sourceSegment : normalizedIndex);
         const segmentImageSlots = Array.isArray(payload.segmentImageSlots) && payload.segmentImageSlots.length
             ? payload.segmentImageSlots
             : extracted.segmentImageSlots;
         const imageState = normalizeSnapshotImageState(
             payload.imageState,
-            resolveSegmentImageIndex({ imageState: payload.imageState, segmentImageSlots }, normalizedIndex),
+            resolveSegmentImageIndex({ imageState: payload.imageState, segmentImageSlots }, slotIndex >= 0 ? slotIndex : normalizedIndex),
         );
         const displayImageState = applyImageCountOverride(imageState, readerSettings.imageCountOverride);
         // 分段缺失时给空串：绝不用整篇 text 兜底，否则会凭空多出一页「全文」。
@@ -3509,7 +3512,6 @@ export function createIgsReaderHost(options = {}) {
             isUnavailableImage: unavailableImageProbe(generatedAssets),
         };
         const floorAssets = prepareReaderFloorAssets(prepared, { payload, readerSettings, assetMatchCtx, tableData });
-        const page = prepared.pages[normalizedIndex];
         let finalBackgroundImage = backgroundImage;
         let finalBackgroundTimed = false;
         const hideSpriteOnNsfw = !normalizeStatusHudSettings(readerSettings && readerSettings.statusHud).showSpriteOnNsfw;
@@ -3529,7 +3531,7 @@ export function createIgsReaderHost(options = {}) {
         let spriteMatch = null;
         let backgroundMatch = null;
         const extractedSegmentImageSlots = Array.isArray(extracted.segmentImageSlots) ? extracted.segmentImageSlots : [];
-        const rawSegmentSlotValue = extractedSegmentImageSlots[normalizedIndex];
+        const rawSegmentSlotValue = slotIndex >= 0 ? extractedSegmentImageSlots[slotIndex] : undefined;
         const segmentHasBoundSlot = rawSegmentSlotValue != null
             && Number.isFinite(Number(rawSegmentSlotValue))
             && Number(rawSegmentSlotValue) >= 0;
@@ -3564,7 +3566,7 @@ export function createIgsReaderHost(options = {}) {
             pageFx.foeImage = resolveGenerated(floorAssets.sprite(battleFoe, '').url) || '';
         }
         // NSFW 页整楼挂图；SFW 页只在事件那几页显示，之后回到背景和立绘。
-        const illustrationHit = prepared.illustrations[normalizedIndex];
+        const illustrationHit = scenePage ? null : prepared.illustrations[normalizedIndex];
         const floorIdentity = state.activeReader && Number(state.activeReader.payload.messageId) === Number(payload.messageId)
             ? state.activeReader.illustrationIdentity
             : readIllustrationIdentity(payload.messageId);
@@ -3582,7 +3584,7 @@ export function createIgsReaderHost(options = {}) {
             ? resolveBoundSlotImageUrl(displayImageState, illustrationHit.slot)
             : '';
         // CG 库：本页没有生成 / 插件 CG 时，按关键词或 [igs-cg:名字] 显示作者预置的那张，停留同 CG 停留页数。
-        const eventCg = !illustrationHit && !slotBoundUrl && sceneAssets && sceneAssets.enabled && sceneAssets.eventCgs
+        const eventCg = !scenePage && !illustrationHit && !slotBoundUrl && sceneAssets && sceneAssets.enabled && sceneAssets.eventCgs
             ? prepared.eventCgs[normalizedIndex]
             : null;
         const eventCgUrl = eventCg ? String(resolveGenerated(eventCg.url) || '') : '';
@@ -3754,13 +3756,22 @@ export function createIgsReaderHost(options = {}) {
             pendingCastRefs = [];
             speakerCastOrder = null;
         }
+        if (scenePage) {
+            textType = 'scene';
+            resolvedSpeaker = '';
+            bubbleMood = '';
+            spriteImage = null;
+            castSprites = [];
+            pendingCastRefs = [];
+            speakerCastOrder = null;
+        }
         const statusSceneInfo = {
             location: firstDefined(sceneStateForBg && sceneStateForBg.scene, scene.location, ''),
             time: firstDefined(sceneStateForBg && sceneStateForBg.time, scene.time, ''),
             weather: firstDefined(sceneStateForBg && sceneStateForBg.weather, scene.weather, ''),
         };
         const isDialogueText = textType === 'dialogue' || textType === 'system' || (!sceneAssetsEnabled && Boolean(scene.speaker) && Boolean(currentText));
-        const displayText = htmlCardIndex >= 0 || chatPage ? '' : systemOnlyChat ? chatBlock.messages.map((m) => m.text).filter(Boolean).join('\n') : chatBlock ? formatChatBlockAsText(chatBlock) : (!sceneAssetsEnabled && scene.speaker && currentText)
+        const displayText = scenePage || htmlCardIndex >= 0 || chatPage ? '' : systemOnlyChat ? chatBlock.messages.map((m) => m.text).filter(Boolean).join('\n') : chatBlock ? formatChatBlockAsText(chatBlock) : (!sceneAssetsEnabled && scene.speaker && currentText)
             ? `${scene.speaker}: ${stripWrappingQuotes(currentText)}`
             : (sceneAssetsEnabled
                 ? (isDialogueText ? stripWrappingQuotes(segmentBody) : segmentBody)
@@ -3808,11 +3819,12 @@ export function createIgsReaderHost(options = {}) {
                 spriteBackArt,
                 statusEmotion: bubbleMood,
                 textType,
-                text: currentText,
+                text: scenePage ? '' : currentText,
                 fullText: text,
                 displayText,
                 htmlCard,
                 htmlCardPage: htmlCardIndex >= 0,
+                scenePage,
                 chatPage,
                 chat,
                 fx: pageFx,
@@ -3859,7 +3871,7 @@ export function createIgsReaderHost(options = {}) {
                 nsfwCgPortrait,
                 illustrationSlot: illustrationHit ? illustrationHit.slot : null,
                 illustrationUrl,
-                statusHud: buildStatusHudForSnapshot(readerSettings, sceneStateForBg && sceneStateForBg.nsfw ? '' : resolvedSpeaker, sceneStateForBg && sceneStateForBg.nsfw ? '' : bubbleMood, statusSceneInfo, textType === 'narration' || textType === 'thought' || textType === 'chat' || textType === 'system' || Boolean(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw), { character: spriteCharacter, outfit: spriteOutfit }),
+                statusHud: buildStatusHudForSnapshot(readerSettings, sceneStateForBg && sceneStateForBg.nsfw ? '' : resolvedSpeaker, sceneStateForBg && sceneStateForBg.nsfw ? '' : bubbleMood, statusSceneInfo, textType === 'scene' || textType === 'narration' || textType === 'thought' || textType === 'chat' || textType === 'system' || Boolean(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw), { character: spriteCharacter, outfit: spriteOutfit }),
             },
             // _sceneAssets 是整份有效素材库，只读不改；跟着整份深拷贝会让翻页随素材库变大而变慢。
             readerSettings: sceneDialogSkin(cloneReaderSettingsShallowAssets(readerSettings), statusSceneInfo.location),

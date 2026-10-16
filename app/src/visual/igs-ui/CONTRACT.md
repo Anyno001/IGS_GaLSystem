@@ -14,6 +14,10 @@
 - 声画节拍按下一次心跳、呼吸、节律或钟声的时间提前排程，不以固定 50ms 轮询。没有真实声音也没有动态画面时不保留时钟；面板遮挡时有意继续播放的音频仍按节拍排程。
 - 相同 CSS 变量值不重复写入。关闭或舞台节点移除后取消帧、计时器和订阅，迟到回调不能重启旧演出。`onStageIdleChange` 只在合并的暂停/遮挡状态发生变化时通知。
 
+## 场景页
+
+- 标题卡总开关开着，且地点变化命中「切换地点时显示」或时间变化命中「时间变化时显示」时，`[igs-scene]` 在整楼准备时插入场景页，插在随后正文之前。场景页不显示对白、立绘和同台人物；地点和时间作为静态标题留在这一页，翻页才收起，不淡出。地点栏照常显示当前地点。只改天气、只切换 NSFW，或重复的相同地点和时间不插入。正文页不再叠标题卡。正文页的说话人、换装、CG 与旁白沿用按插入后的页序计算。
+
 ## 整楼准备（v0.36.62）
 
 - `reader-source-cache` 同时持有解析与准备结果，最多八楼，同步失效/淘汰；配置修订不变时按实际准备依赖判断，世界观重绘创建的新对象不代表正文变化。
@@ -129,7 +133,7 @@
 - 震动演出读取当前角色指令保留的原始 `content.statusEmotion`，默认关闭、强度默认中档；用户可编辑中文触发词，显式空词表保持为空，不扫描台词正文、不匹配英文、不依赖 `moodGroups` 或 `spriteMood`。
 - 震动只作用于 `#igs-stage-motion` 内部舞台包装层，支持弱/中/强三档；同一消息同一页同一情绪的重绘不重复播放，关闭阅读器和减少动态效果模式必须清理或跳过演出。
 - 演出增强（`fx-*.js`）包含标题卡、漫画情绪符号/集中线、心跳、闪白、数值提示与 igs-fx 标签演出，各自由 `readerSettings.titleCard / mangaFx / heartbeatFx / flashFx / favorToast / fxTags` 控制、默认关闭，音效由 `fxSound` 统一控制。情绪类演出与震动同源：只读原始 `content.statusEmotion` 做中文精确匹配，NSFW、聊天页与卡片页不触发，显式空词表保持为空；漫画情绪符号只在当前说话人有立绘 URL 时生成，无立绘时不播放且不消费该页的符号重播机会，集中线、心跳与闪白不受此限制。
-- 过场标题卡（换地点 / 时间变化的报幕）跟随对话框皮肤：`fx-title-themes.js` 的 `getDialogThemeTitleCardStyleText(skin)` 由 `dialog-skin-style.js` 拼入，配色、字体与卡片取 `fx-battle-themes.js` 的 `getBattleTheme(skin)`，作用域 `#igs-overlay[data-igs-dialog-skin] .igs-fx-title-card:not(.is-ancient)`；古代竖幅不受皮肤影响，无主题的皮肤沿用世界观换皮。
+- 场景页上的静态标题卡跟随对话框皮肤：`fx-title-themes.js` 的 `getDialogThemeTitleCardStyleText(skin)` 由 `dialog-skin-style.js` 拼入，配色、字体与卡片取 `fx-battle-themes.js` 的 `getBattleTheme(skin)`，作用域 `#igs-overlay[data-igs-dialog-skin] .igs-fx-title-card:not(.is-ancient)`；古代竖幅不受皮肤影响，无主题的皮肤沿用世界观换皮。
 - 对话框皮肤的显示名只登记在 `dialog-skin-catalog.js` 的 `DIALOG_SKIN_CHOICES`（顺序即设置页下拉顺序）；新增皮肤须同时补齐对话框框体与窄屏、选项、状态栏、字体墨色（`dialog-theme-typography.js`）、战斗与主界面主题（`fx-battle-themes.js`）、过场标题卡、物品卡、手机聊天配色、句末等待符号、文字强调色与界面音色族，由 `tests/dialog-theme-scifi-wasteland.test.js` 一类契约测试逐表核对。全息投影（`scifi-holo`，`dialog-theme-scifi.js`）与废土锈铁（`wasteland-rust`，`dialog-theme-wasteland.js`）为纯 CSS 主题，不引用外置素材、对话框不开毛玻璃。
 - 第 0 层主界面（`title-screen.js`）：`readerSettings.titleScreen`（默认开）开启时，第 0 层第一页先盖主界面，盖着时不渲染正文、不放演出、翻页与阅读器动作（设置 / 关闭除外）被拦；从末尾打开、`skipTitle`、其他楼层不出。世界观 → 推荐皮肤只登记在 `worldview-skins.js` 的 `WORLDVIEW_DIALOG_SKINS`（首个为默认，现代以 `default` 打头）；选定后写进当前角色卡 `sceneAssets.cards[card:名]` 的 `worldview` 与 `dialogSkin`，阅读器快照经 `effectiveDialogSkin` 以卡上的盖过全局，不写回全局 `readerSettings.dialogSkin`；设置页「对话框风格」下方提示本卡皮肤，可用 `card-dialog-skin-clear` 清除。
 - 语音通话画面 `fxTags.callSprite`：`split`（默认）为斜切分屏，对方格从右侧横向滑入，`data-active` 为说话方（remote / local），说话方格子变大、另一方压暗收窄，舞台挂 `data-igs-fx-call-split`；对方格显示对方最近一次说话时的立绘，未开口时显示大头像；挂断时替身 `.igs-fx-call-split-out` 向右滑出。`avatar` 为右上角头像小窗；视频通话不受此项影响。
@@ -206,7 +210,7 @@
   - 颜色走 `--igs-item-bg` / `--igs-item-ink` / `--igs-item-accent`；强调色取 `pickFxAccent(theme)`；对话框皮肤换装由 `dialog-theme-hud.js` 的 `getDialogThemeItemFxStyleText(skin)` 复用各主题 HUD 面板、墨色与占位底生成，经 `dialog-skin-style.js` 只注入当前皮肤。
 - 背包格位图标（`inventory-slot-image.js`，`bridge.itemImages.inventoryIcon`）是用户显示选择：「生图」显示本聊天物品图（未生成时 SVG 占位），「SVG」始终用内置图标且不读取物品图；与是否生成物品图（`bridge.itemImages.enabled`）相互独立。物品图到达后背包页局部重绘并保留滚动位置，搜索框输入中不重绘。
 - CG 库（`cg-gallery-panel.js`，工具栏 `cg-gallery`；设置页「生图 › CG 库」同样用 `cg-library-view.js`）：只列 IGS 自动插图已出图的 CG 与相册照片。打开先读轻目录立刻出列表，再后台对账；每页 24 张、新的在前，只给本页读缩略图（同时最多 3 张），缩略图到了只换那一格、状态行只改文字，不整页重画；网格只放缩略图，原图只在看大图时读，读失败写明原因，格子点一下重试。翻页、筛选、关闭不排队；筛选只看收藏 / 显示已隐藏 / 只看当前聊天；「隐藏」「收藏」只写 `igs-cg-gallery`；「删除」二次确认后走 `clearIllustration`，楼层 CG 同时消失；跳到楼层只限当前聊天；焦点在面板内时空格 / 回车 / 方向键不冒泡到翻页。工具栏 `fill-item-images` 手动补全物品图。
-- 漫画演出通用风格 `readerSettings.fxStyle`：`motion` 为 `smooth`（渐变演出，默认）或 `snappy`（灵动演出，在 `#igs-stage-motion` 写 `data-igs-fx-motion="snappy"`，CSS 以 `steps()` 逐关键帧定格）；`hold` 为 `short / medium / long`（默认中），只按 `FX_HOLD_SCALE` 缩放符号、集中线、标题卡、数值提示、通知与通话结束的寿命并写入 `--igs-fx-life`，心跳、闪白、睁眼与来电跟音效节奏绑定不缩放；拟声标签 `[igs-fx:sfx|拟声词]` 只发声不显示文字，`fx-sfx.js` 的 `resolveOnomatopoeia` 按首个命中字归入重击 / 脆响 / 铃响 / 风声，未命中按「！」或字数退化为重击 / 闷响；`replay`（默认关）开启后离开再翻回已看页会重播该页瞬时演出，同一次停留内的重绘始终不重播；标题卡按地点/时间变化触发，不参与重播。
+- 漫画演出通用风格 `readerSettings.fxStyle`：`motion` 为 `smooth`（渐变演出，默认）或 `snappy`（灵动演出，在 `#igs-stage-motion` 写 `data-igs-fx-motion="snappy"`，CSS 以 `steps()` 逐关键帧定格）；`hold` 为 `short / medium / long`（默认中），只按 `FX_HOLD_SCALE` 缩放符号、集中线、数值提示、通知与通话结束的寿命并写入 `--igs-fx-life`，心跳、闪白、睁眼与来电跟音效节奏绑定不缩放；拟声标签 `[igs-fx:sfx|拟声词]` 只发声不显示文字，`fx-sfx.js` 的 `resolveOnomatopoeia` 按首个命中字归入重击 / 脆响 / 铃响 / 风声，未命中按「！」或字数退化为重击 / 闷响；`replay`（默认关）开启后离开再翻回已看页会重播该页瞬时演出，同一次停留内的重绘始终不重播。场景页标题不参与停留时间和重播，翻回该页仍显示。
 - 头部标定：「调整立绘」编辑条的「标定头部」进入 `sprite-head-edit.js` 标定层（拖动 / 轻点定位圆圈、滚轮 / 双指调大小，实时预览青筋与 !? 落点），保存写入 `readerSettings.spriteHeads`，键为 `角色` 或 `角色::表情`（「仅当前表情」），值 `{ x, top, w, aspect }` 相对立绘原图（头部中心、头顶、头宽、原图高宽比），与阅读模式无关、全模式共用，调立绘缩放 / 位置后无需重标。按角色保存时同时删除当前表情的单独标定；「自动识别」删除当前键。查找顺序：表情标定 → 角色标定 → 透明通道自动识别。`spriteHeads` 随场景预设保存、切换、导入、导出。
 - 服装隔离 key（v0.30.0）：身份统一经 `scene/character-outfits.js` 的 `spriteIdentity(角色, 服装)` 拼出，无服装或「默认」时就是角色名（原有 key 不变），有服装时为 `角色|服装`。`spriteLayouts` 查找 `mode::角色|服装::槽` → `mode::角色|服装` → `mode::角色` → `mode` → 默认；`spriteHeads` 查找 `角色|服装::表情` → `角色|服装` → `角色` → 自动识别。服装未单独调整时沿用角色整体位置 / 标定，不借用原有立绘的单表情值。「调整立绘」保存与「应用到该角色所有情绪」只作用于当前服装。快照 `content.spriteOutfit` 只影响立绘层。
 - 位置与标定 key 迁移统一走 `sprite-key-migration.js` 的 `migrateSpriteKeys(readerSettings, from, to)`（按完整身份比对，「小林」不会误中「小林海斗」；目标 key 已有数据时保留目标、丢弃来源，不覆盖；`to=null` 删除且不留孤儿）。角色改名 / 删除、原有情绪槽改名（含按情绪组连带改名的其他角色）/ 删除、服装改名 / 删除、服装内槽改名 / 删除都必须调用它。
