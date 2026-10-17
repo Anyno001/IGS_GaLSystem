@@ -2459,6 +2459,11 @@ export async function handleSettingsAction(action, ctx) {
         const charName = decodeSeg(normalizedAction.slice('tts-preview:'.length));
         const assets = settingsState.draft.bridge.sceneAssets || {};
         const voice = charName ? resolveTtsVoice({ textType: 'dialogue', speaker: charName }, reader.tts, assets, listSystemVoices()) : null;
+        if (charName && (!voice.voice || voice.volume <= 0)) {
+            const error = '这个角色还没有朗读声音';
+            showGeneratedNotice(options.global || globalThis, `试听失败：${error}`);
+            return { ok: false, error };
+        }
         const result = await previewTts(reader.tts, voice ? { role: voice.role, voice: voice.voice } : {});
         // 试听失败的原因不走阅读器的报错通道，这里在设置页提示出来，免得点了像没反应。
         if (result && result.ok === false && result.error) showGeneratedNotice(options.global || globalThis, `试听失败：${result.error}`);

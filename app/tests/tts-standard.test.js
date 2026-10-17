@@ -71,22 +71,27 @@ test('gate: tts reads bilingual originals with a voice of that language', () => 
     assert.equal(detectTtsLang('Good morning!'), 'en');
     assert.equal(detectTtsLang('早上好'), 'zh');
     const line = { textType: 'dialogue', speaker: '艾莉', text: 'おはよう〖早上好〗' };
-    // 设了中文女声预设，读日文原文时不拿它念。
+    // 没给角色指定朗读声音时不念，即使声音设置里还留着旧的女声。
     const settings = { ...ON, system: { female: VOICES[0].name } };
-    const zh = decideTts({}, line, settings, { sceneAssets: assets(), voices: VOICES });
+    assert.equal(decideTts({}, line, settings, { sceneAssets: assets(), voices: VOICES }), null);
+    const voiced = assets({ 艾莉: { tts: VOICES[0].name } });
+    const zh = decideTts({}, line, ON, { sceneAssets: voiced, voices: VOICES });
     assert.equal(zh.text, '早上好');
     assert.equal(zh.voice, VOICES[0].name);
-    const ja = decideTts({}, line, { ...settings, bilingual: 'original' }, { sceneAssets: assets(), voices: VOICES });
+    const ja = decideTts({}, line, { ...ON, bilingual: 'original' }, { sceneAssets: voiced, voices: VOICES });
     assert.equal(ja.text, 'おはよう');
     assert.equal(ja.lang, 'ja');
-    assert.ok(ja.voice.includes('Japanese'));
+    assert.equal(ja.voice, VOICES[0].name);
 });
 
 test('gate: a character can be muted or turned down for tts only', () => {
     const line = { textType: 'dialogue', speaker: '艾莉', text: '你好。' };
+    const voice = 'Xiaoxiao';
+    assert.equal(decideTts({}, line, ON, { sceneAssets: assets() }), null);
     assert.equal(decideTts({}, line, ON, { sceneAssets: assets({ 艾莉: { ttsVolume: 0 } }) }), null);
-    const full = decideTts({}, line, ON, { sceneAssets: assets() });
-    const half = decideTts({}, line, ON, { sceneAssets: assets({ 艾莉: { ttsVolume: 0.5 } }) });
+    assert.equal(decideTts({}, line, ON, { sceneAssets: assets({ 艾莉: { tts: voice, ttsVolume: 0 } }) }), null);
+    const full = decideTts({}, line, ON, { sceneAssets: assets({ 艾莉: { tts: voice } }) });
+    const half = decideTts({}, line, ON, { sceneAssets: assets({ 艾莉: { tts: voice, ttsVolume: 0.5 } }) });
     assert.ok(Math.abs(half.volume - full.volume / 2) < 1e-9);
     // 存储：默认值不写，改过的才写；语气音的老数据原样不变。
     assert.deepEqual(normalizeCharacterVoices({ A: { ttsVolume: 0 }, B: { ttsVolume: 1 }, C: { pack: 'off' } }), {
@@ -162,7 +167,15 @@ test('gate: tts settings show sustain, pronunciation table, bilingual choice and
         const html = opened.html || controller.getSnapshot().html;
         assert.match(html, /data-switch="readerSettings\.tts\.sustain"/);
         assert.match(html, /data-path="readerSettings\.tts\.lexicon"/);
+        assert.match(html, /data-path="readerSettings\.tts\.system\.narrator"/);
+        assert.doesNotMatch(html, /readerSettings\.tts\.system\.female/);
+        assert.doesNotMatch(html, /readerSettings\.tts\.system\.male/);
         assert.doesNotMatch(html, /readerSettings\.tts\.bilingual/, 'bilingual choice hidden until bilingual lines are on');
+        controller.setValue('readerSettings.tts.provider', 'api');
+        const apiHtml = controller.getSnapshot().html;
+        assert.match(apiHtml, /data-path="readerSettings\.tts\.api\.narrator"/);
+        assert.doesNotMatch(apiHtml, /readerSettings\.tts\.api\.female/);
+        assert.doesNotMatch(apiHtml, /readerSettings\.tts\.api\.male/);
         controller.setValue('bridge.sceneAssets.characters', { 艾莉: { 默认: '' } });
         await controller.invoke(`scene-toggle-dna:${encodeURIComponent('艾莉')}`);
         await controller.invoke(`char-voice:ttsVolume:${encodeURIComponent('艾莉')}:0`);

@@ -48,7 +48,7 @@ import { dialogSkinLabel, getDialogSkinChoices } from './dialog-skin-catalog.js'
 import { DIALOG_SKIN_XIANXIA_INK } from './dialog-theme-xianxia.js';
 import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_HOUSES, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { VOICE_BARK_FREQUENCIES, normalizeVoiceBarkSettings } from './voice-bark.js';
-import { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_PROVIDERS, TTS_RATES, TTS_TRANSPORTS, normalizeTtsSettings, systemVoiceOptions, ttsApiVoiceList } from './tts.js';
+import { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_PROVIDERS, TTS_RATES, TTS_TRANSPORTS, normalizeTtsSettings, systemVoiceOptions } from './tts.js';
 import { normalizeBilingualSettings } from './bilingual-text.js';
 import { HORROR_DREAD_CAP_LABELS, HORROR_DREAD_LEVELS, normalizeHorrorDreadCap } from './horror-dread.js';
 import { DIALOG_SKIN_HORROR_GORE, DIALOG_SKIN_HORROR_PSYCH } from './dialog-theme-horror.js';
@@ -1025,7 +1025,7 @@ function renderVoiceRowConfig(reader, sceneAssets) {
     return normalizeVoiceBarkSettings(reader.voiceBark).enabled ? { sceneAssets } : null;
 }
 
-// 台词朗读的设置：来源、旁白、音量语速，系统语音选女声 / 男声 / 旁白，接口填地址与声音名。
+// 台词朗读的设置：来源、旁白、音量语速。角色声音只在角色设定里指定，这里不再放默认女声 / 男声。
 function renderTtsControls(tts, { bilingual = false } = {}) {
     const base = 'readerSettings.tts';
     const rates = TTS_RATES.map((v) => [v, v === 1 ? '正常' : `${v}×`]);
@@ -1034,20 +1034,17 @@ function renderTtsControls(tts, { bilingual = false } = {}) {
         checkbox(`${base}.narration`, tts.narration, '朗读旁白'),
         checkbox(`${base}.nsfw`, tts.nsfw, 'NSFW场景也朗读'),
         checkbox(`${base}.sustain`, tts.sustain, '翻页不打断（上一句念完再念下一句）'),
-        // 双语台词：读译文用中文声音；读原文时系统语音按原文语言换日文 / 英文声音。
+        // 双语台词：选择念译文还是原文。
         bilingual ? field(`${base}.bilingual`, '双语台词', segmentedInput(`${base}.bilingual`, tts.bilingual, TTS_BILINGUAL_MODES, '双语台词朗读')) : '',
         field(`${base}.volume`, '音量', rangeInput(`${base}.volume`, tts.volume, '朗读音量')),
         field(`${base}.rate`, '语速', selectInput(`${base}.rate`, tts.rate, rates)),
     ];
-    const roles = [['female', '女声'], ['male', '男声'], ['narrator', '旁白']];
     if (tts.provider === 'system') {
         const options = systemVoiceOptions();
-        for (const [key, label] of roles) {
-            const value = tts.system[key];
-            const items = [['', '自动']].concat(options);
-            if (value && !options.some(([id]) => id === value)) items.push([value, `${value}（本机没有）`]);
-            parts.push(field(`${base}.system.${key}`, label, selectInput(`${base}.system.${key}`, value, items)));
-        }
+        const value = tts.system.narrator;
+        const items = [['', '自动']].concat(options);
+        if (value && !options.some(([id]) => id === value)) items.push([value, `${value}（本机没有）`]);
+        parts.push(field(`${base}.system.narrator`, '旁白', selectInput(`${base}.system.narrator`, value, items)));
         parts.push(`<div class="igs-source-filter-note">${options.length ? '' : '没读到本机的中文声音。'}Windows 推荐用 Edge 浏览器打开酒馆：有晓晓、云希等自然声；Chrome 只有慧慧、康康等本地声音。系统语音不支持声像和听筒音色。</div>`);
     } else {
         const api = tts.api;
@@ -1057,10 +1054,10 @@ function renderTtsControls(tts, { bilingual = false } = {}) {
             field(`${base}.api.endpoint`, '接口地址', textInput(`${base}.api.endpoint`, api.endpoint, 'https://api.openai.com/v1、https://api.fish.audio 或 http://127.0.0.1:9880/v1')),
             field(`${base}.api.apiKey`, 'API Key', secretInput(`${base}.api.apiKey`, api.apiKey, '本地服务可留空')),
             field(`${base}.api.model`, '模型', textInput(`${base}.api.model`, api.model, '如tts-1、FunAudioLLM/CosyVoice2-0.5B、s1')),
+            field(`${base}.api.narrator`, '旁白声音', textInput(`${base}.api.narrator`, api.narrator, '旁白的声音 ID，留空则不朗读旁白')),
         );
-        for (const [key, label] of roles) parts.push(field(`${base}.api.${key}`, `${label}声音`, textInput(`${base}.api.${key}`, api[key], key === 'narrator' ? '留空用女声' : '接口里的声音名（Fish Audio 填声音模型 ID）')));
         parts.push(
-            field(`${base}.api.voices`, '可选声音', textInput(`${base}.api.voices`, api.voices, '逗号分隔，给角色单独指定时用')),
+            field(`${base}.api.voices`, '可选声音', textareaInput(`${base}.api.voices`, api.voices, '每行一条：别名=声音ID，如 晓晓=f08a。只写 ID 也可以')),
             checkbox(`${base}.api.prefetch`, api.prefetch, '提前生成下一页（停留1.5秒后才生成）'),
             '<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-clear-cache">清除朗读缓存</button>',
             '<div class="igs-source-filter-note">支持OpenAI兼容语音接口与Fish Audio。直连被拦时改用「酒馆 CORS 代理」（需在酒馆 config.yaml 打开 enableCorsProxy）；Fish Audio 不允许浏览器直连，必须用代理。</div>',
@@ -1068,6 +1065,6 @@ function renderTtsControls(tts, { bilingual = false } = {}) {
     }
     parts.push(field(`${base}.lexicon`, '读音替换', textareaInput(`${base}.lexicon`, tts.lexicon, '每行一条：原词=读法\n例：雫=shizuku\n例：Λ=兰姆达')));
     parts.push('<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-preview">试听</button>');
-    parts.push('<div class="igs-source-filter-note">开启后不再播放角色语气音。每个角色的朗读声音可在「角色 › 角色设定」单独指定。</div>');
+    parts.push('<div class="igs-source-filter-note">开启后不再播放角色语气音。只有在「角色 › 角色设定」里指定了朗读声音的角色才会被朗读。</div>');
     return parts.join('');
 }

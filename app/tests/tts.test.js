@@ -15,6 +15,7 @@ import {
     systemVoiceOptions,
     systemVoicePool,
     ttsApiVoiceList,
+    ttsApiVoiceOptions,
     ttsCacheKey,
     ttsErrorMessage,
     ttsPlainText,
@@ -54,6 +55,12 @@ test('gate: tts settings normalize with safe defaults', () => {
     assert.equal(odd.narration, false);
     assert.equal(odd.api.endpoint, 'http://a/v1');
     assert.deepEqual(ttsApiVoiceList({ api: { voices: 'alex, anna，alex\nbella' } }), ['alex', 'anna', 'bella']);
+    assert.deepEqual(ttsApiVoiceOptions({ api: { voices: '晓晓=f08a\n云希＝m12\n没声音=\n另一个=f08a\nalex, anna' } }), [
+        ['f08a', '晓晓'],
+        ['m12', '云希'],
+        ['alex', 'alex'],
+        ['anna', 'anna'],
+    ]);
 });
 
 test('gate: tts reads the translation of bilingual lines and drops markup', () => {
@@ -87,24 +94,20 @@ test('gate: system voices split by gender, prefer natural Mandarin, skip dialect
 
 test('gate: tts voice follows DNA gender, manual pick, and narrator setting', () => {
     const sa = assets({ 艾莉: GIRL, 雷恩: BOY });
-    const girl = resolveTtsVoice({ textType: 'dialogue', speaker: '艾莉' }, ON, sa, WIN_VOICES);
-    assert.equal(systemVoiceGender(girl.voice), 'female');
-    assert.ok(girl.voice.includes('Natural'));
-    const boy = resolveTtsVoice({ textType: 'dialogue', speaker: '雷恩' }, ON, sa, WIN_VOICES);
-    assert.equal(systemVoiceGender(boy.voice), 'male');
-    // 同一角色每次都是同一个声音。
-    assert.equal(resolveTtsVoice({ textType: 'dialogue', speaker: '雷恩' }, ON, sa, WIN_VOICES).voice, boy.voice);
-    // 角色单独指定优先。
+    // 没在角色设定里写朗读声音的人，不因默认女声 / 男声被念出来。
+    assert.equal(resolveTtsVoice({ textType: 'dialogue', speaker: '艾莉' }, ON, sa, WIN_VOICES).volume, 0);
+    assert.equal(resolveTtsVoice({ textType: 'dialogue', speaker: '雷恩' }, ON, sa, WIN_VOICES).volume, 0);
     const manual = assets({ 雷恩: BOY }, { 雷恩: { tts: WIN_VOICES[1].name } });
     assert.equal(resolveTtsVoice({ textType: 'dialogue', speaker: '雷恩' }, ON, manual, WIN_VOICES).voice, WIN_VOICES[1].name);
-    // 旁白用设置里选的旁白声音。
+    // 旁白用设置里选的旁白声音，不回退到女声。
     const narr = resolveTtsVoice({ textType: 'narration' }, { ...ON, system: { narrator: WIN_VOICES[0].name } }, sa, WIN_VOICES);
     assert.equal(narr.role, 'narrator');
     assert.equal(narr.voice, WIN_VOICES[0].name);
-    // 接口来源：按性别取对应声音名，旁白留空用女声。
-    const api = { ...ON, provider: 'api', api: { female: 'anna', male: 'alex' } };
-    assert.equal(resolveTtsVoice({ textType: 'dialogue', speaker: '雷恩' }, api, sa).voice, 'alex');
-    assert.equal(resolveTtsVoice({ textType: 'narration' }, api, sa).voice, 'anna');
+    const api = { ...ON, provider: 'api', api: { female: 'anna', male: 'alex', narrator: 'narr' } };
+    assert.equal(resolveTtsVoice({ textType: 'dialogue', speaker: '雷恩' }, api, sa).volume, 0);
+    assert.equal(resolveTtsVoice({ textType: 'dialogue', speaker: '雷恩' }, api, manual).voice, WIN_VOICES[1].name);
+    assert.equal(resolveTtsVoice({ textType: 'narration' }, api, sa).voice, 'narr');
+    assert.equal(resolveTtsVoice({ textType: 'narration' }, { ...api, api: { female: 'anna' } }, sa).volume, 0);
 });
 test('gate: api tts with all three voice boxes empty stays silent and never requests', async () => {
     const sa = assets({ 雷恩: BOY });
@@ -133,11 +136,14 @@ test('gate: api tts with all three voice boxes empty stays silent and never requ
 
 
 test('gate: tts decides per page, honours narration and NSFW switches, never replays the same page', () => {
-    const sa = assets({ 艾莉: GIRL });
+    const sa = assets({ 艾莉: GIRL }, { 艾莉: { tts: WIN_VOICES[2].name } });
     const state = {};
     const line = { key: 'm1:0', textType: 'dialogue', speaker: '艾莉', text: '你好呀。', mood: '愤怒' };
     const plan = decideTts(state, line, ON, { sceneAssets: sa, voices: WIN_VOICES });
     assert.equal(plan.text, '你好呀。');
+    assert.equal(plan.mood, '愤怒');
+    assert.equal(plan.whisper, false);
+    assert.equal(decideTts({}, { ...line, key: 'm1:6', mood: '生气' }, ON, { sceneAssets: sa, voices: WIN_VOICES }).mood, '生气');
     assert.ok(plan.rate > 1, 'angry lines speak a little faster');
     assert.deepEqual(decideTts(state, line, ON, { sceneAssets: sa, voices: WIN_VOICES }), { skip: true });
     const narration = { key: 'm1:1', textType: 'narration', text: '窗外下着雨。' };
@@ -176,8 +182,21 @@ test('gate: fish audio endpoints use the native /v1/tts format', () => {
     const req = ttsSpeechRequest(fish, { text: '你好', voice: 'f08a', rate: 1.2 });
     assert.equal(req.headers.Authorization, 'Bearer k');
     assert.equal(req.headers.model, 's2.1-pro-free');
-    assert.deepEqual(req.body, { text: '你好', format: 'mp3', reference_id: 'f08a', prosody: { speed: 1.2 } });
-    assert.deepEqual(ttsSpeechRequest(fish, { text: 'a', voice: '', rate: 1 }).body, { text: 'a', format: 'mp3' });
+    assert.deepEqual(req.body, { text: '[平和]你好', format: 'mp3', reference_id: 'f08a', prosody: { speed: 1.2 } });
+    assert.deepEqual(ttsSpeechRequest(fish, { text: 'a', voice: '', rate: 1 }).body, { text: '[平和]a', format: 'mp3' });
+    // 每一句都带本页原情绪，不归组、不翻译。耳语叠在后面。省略号本身不念，不加标签。
+    assert.equal(ttsSpeechRequest(fish, { text: '你好。再见！', mood: '愤怒' }).body.text, '[愤怒]你好。[愤怒]再见！');
+    assert.equal(ttsSpeechRequest(fish, { text: '你好。\n再见！', mood: '喜悦' }).body.text, '[喜悦]你好。\n[喜悦]再见！');
+    assert.equal(ttsSpeechRequest(fish, { text: '……过来。', mood: '害羞', whisper: true }).body.text, '……[害羞][耳语]过来。');
+    assert.equal(ttsSpeechRequest(fish, { text: '他来了。', mood: '生气' }).body.text, '[生气]他来了。');
+    assert.equal(
+        ttsCacheKey('u', fish, 'f08a', '「你好。」', { mood: '愤怒' }),
+        ttsCacheKey('u', fish, 'f08a', '你好。', { mood: '愤怒' }),
+    );
+    assert.notEqual(
+        ttsCacheKey('u', fish, 'f08a', '你好。', { mood: '愤怒' }),
+        ttsCacheKey('u', fish, 'f08a', '你好。', { mood: '悲伤' }),
+    );
 
     const openai = ttsSpeechRequest({ endpoint: 'https://api.openai.com/v1', model: '' }, { text: 'a', voice: '', rate: 1 });
     assert.equal(openai.headers.Authorization, undefined);
@@ -207,7 +226,7 @@ test('gate: tts preview failure shows a notice on the settings page', async () =
         controller.toggle('readerSettings.tts.enabled');
         controller.setValue('readerSettings.tts.provider', 'api');
         controller.setValue('readerSettings.tts.api.endpoint', 'https://api.fish.audio/v1/tts');
-        controller.setValue('readerSettings.tts.api.female', 'f08a');
+        controller.setValue('readerSettings.tts.api.narrator', 'f08a');
         const result = await controller.invoke('tts-preview');
         assert.equal(result.ok, false);
         // Node 里没有 Web Audio，会在请求前失败；这里只确认失败原因被带回来（401 的文案由上面的用例覆盖）。
@@ -234,7 +253,7 @@ test('gate: settings keep tts and voice barks mutually exclusive, and save a per
         assert.equal(reader().tts.enabled, false);
         controller.toggle('readerSettings.tts.enabled');
         controller.setValue('readerSettings.tts.provider', 'api');
-        controller.setValue('readerSettings.tts.api.voices', 'alex, anna');
+        controller.setValue('readerSettings.tts.api.voices', '小雷=alex\n安娜=anna');
         controller.setValue('bridge.sceneAssets.characters', { 雷恩: { 默认: '' } });
         await controller.invoke(`scene-toggle-dna:${encodeURIComponent('雷恩')}`);
         const name = encodeURIComponent('雷恩');
@@ -243,7 +262,7 @@ test('gate: settings keep tts and voice barks mutually exclusive, and save a per
         controller.switchTab('scene');
         const html = controller.switchSceneSubTab('characters').html || controller.getSnapshot().html;
         assert.match(html, /data-char-voice-tts=/);
-        assert.match(html, /value="alex" selected/);
+        assert.match(html, /value="alex" selected>小雷/);
         controller.close();
     } finally {
         vn.destroy();
@@ -267,8 +286,8 @@ test('gate: tts prefetches the next page once over the api and reuses it', async
         return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
     };
     try {
-        const settings = { enabled: true, provider: 'api', api: { endpoint: 'https://tts.test/v1', model: 'm', female: 'anna', male: 'alex' } };
-        const sa = assets({ 艾莉: GIRL });
+        const settings = { enabled: true, provider: 'api', api: { endpoint: 'https://tts.test/v1', model: 'm', narrator: 'narr' } };
+        const sa = assets({ 艾莉: GIRL }, { 艾莉: { tts: 'anna' } });
         const next = '[艾莉]：「明天见。」';
         const [a, b] = await Promise.all([prefetchTts(next, settings, sa), prefetchTts(next, settings, sa)]);
         assert.equal(calls.length, 1, 'same line in flight is requested once');
@@ -282,6 +301,7 @@ test('gate: tts prefetches the next page once over the api and reuses it', async
         // 系统语音、旁白关闭时的旁白页都不提前生成。
         assert.equal(prefetchTts(next, { ...settings, provider: 'system' }, sa), null);
         assert.equal(prefetchTts('窗外下着雨。', { ...settings, narration: false }, sa), null);
+        assert.equal(prefetchTts('[路人]：你好。', settings, sa), null);
     } finally {
         globalThis.fetch = realFetch;
     }
@@ -291,7 +311,7 @@ test('gate: tts never reads the speaker name prefix', () => {
     assert.equal(stripSpeakerPrefix('*[艾莉]：他怎么在这*'), '*他怎么在这*');
     assert.equal(stripSpeakerPrefix('艾莉: 你好', '艾莉'), '你好');
     assert.equal(stripSpeakerPrefix('艾莉今天来了', '艾莉'), '艾莉今天来了');
-    const plan = decideTts({}, { textType: 'thought', speaker: '艾莉', text: '*[艾莉]：他怎么在这*' }, { enabled: true }, { sceneAssets: assets({ 艾莉: GIRL }) });
+    const plan = decideTts({}, { textType: 'thought', speaker: '艾莉', text: '*[艾莉]：他怎么在这*' }, { enabled: true }, { sceneAssets: assets({ 艾莉: GIRL }, { 艾莉: { tts: 'v' } }) });
     assert.equal(plan.text, '他怎么在这');
 });
 
@@ -317,7 +337,7 @@ test('gate: tts prefetch waits for the reader to dwell, skips fast clicks, and o
     };
     try {
         await clearTtsCache();
-        const settings = { enabled: true, provider: 'api', api: { endpoint: 'https://tts.test/v1', female: 'anna' } };
+        const settings = { enabled: true, provider: 'api', api: { endpoint: 'https://tts.test/v1', narrator: 'anna' } };
         const sa = assets({ 艾莉: GIRL });
         const root = {};
         const page = (i, next) => applyTts(root, { key: `m:${i}`, textType: 'narration', text: `第${i}页。`, next }, settings, sa, { now: () => clock, timers });

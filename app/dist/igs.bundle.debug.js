@@ -50502,7 +50502,7 @@ const { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderRevi
 const { MAGIC_HOUSES, normalizeMagicHouse } = require("src/visual/igs-ui/dialog-theme-css-skins.js");
 const { resolveCharacterMagicHouse } = require("src/visual/igs-ui/magic-house.js");
 const { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } = require("src/visual/igs-ui/voice-bark.js");
-const { TTS_CHARACTER_VOLUMES, listSystemVoices, resolveTtsVoice, systemVoiceOptions, ttsApiVoiceList } = require("src/visual/igs-ui/tts.js");
+const { TTS_CHARACTER_VOLUMES, listSystemVoices, systemVoiceOptions, ttsApiVoiceOptions } = require("src/visual/igs-ui/tts.js");
 const { resolveSpriteBaseScale } = require("src/visual/igs-ui/sprite-height.js");
 const { hasCharacterSpriteLayout } = require("src/visual/igs-ui/sprite-key-migration.js");
 const encSeg = (value) => encodeURIComponent(String(value == null ? '' : value));
@@ -51052,14 +51052,12 @@ function voiceTuneOptions(manual) {
     return { pitchOpts, speedOpts };
 }
 
-// 台词朗读开着时：这个角色的朗读声音（自动按 DNA 性别分配，或单独指定），外加音高、语速与试听。
+// 台词朗读开着时：这个角色的朗读声音。留空就是不朗读，避免路人被默认声音念出来。
 function renderCharacterTtsRow(charName, { sceneAssets, tts }) {
     const voices = sceneAssets && typeof sceneAssets.characterVoices === 'object' ? sceneAssets.characterVoices || {} : {};
     const manual = normalizeCharacterVoice(Object.prototype.hasOwnProperty.call(voices, charName) ? voices[charName] : null);
     const systemVoices = tts.provider === 'system' ? listSystemVoices() : [];
-    const auto = resolveTtsVoice({ textType: 'dialogue', speaker: charName }, tts, { ...sceneAssets, characterVoices: {} }, systemVoices);
-    const autoName = auto.voice ? auto.voice.replace(/^Microsoft\s+/i, '') : '默认声音';
-    const items = tts.provider === 'system' ? systemVoiceOptions(systemVoices) : ttsApiVoiceList(tts).map((v) => [v, v]);
+    const items = tts.provider === 'system' ? systemVoiceOptions(systemVoices) : ttsApiVoiceOptions(tts);
     if (manual.tts && !items.some(([id]) => id === manual.tts)) items.push([manual.tts, `${manual.tts}（不可用）`]);
     const option = (id, label) => `<option value="${esc(id)}"${id === manual.tts ? ' selected' : ''}>${esc(label)}</option>`;
     const { pitchOpts, speedOpts } = voiceTuneOptions(manual);
@@ -51067,7 +51065,7 @@ function renderCharacterTtsRow(charName, { sceneAssets, tts }) {
     // 接口来源不支持调音高，只给语速。
     const pitchSelect = tts.provider === 'system' ? `<select class="igs-asset-move" data-char-voice-pitch="${esc(charName)}" aria-label="朗读音高" title="音高（半音）">${pitchOpts}</select>` : '';
     return `<div class="igs-char-info-row igs-char-voice-row"><span class="igs-char-info-label">朗读</span>`
-        + `<select class="igs-asset-move" data-char-voice-tts="${esc(charName)}" aria-label="朗读声音">${option('', `自动（${autoName}）`)}${items.map(([id, label]) => option(id, label)).join('')}</select>`
+        + `<select class="igs-asset-move" data-char-voice-tts="${esc(charName)}" aria-label="朗读声音">${option('', '不朗读')}${items.map(([id, label]) => option(id, label)).join('')}</select>`
         + pitchSelect
         + `<select class="igs-asset-move" data-char-voice-speed="${esc(charName)}" aria-label="朗读语速" title="语速">${speedOpts}</select>`
         + `<select class="igs-asset-move" data-char-voice-ttsVolume="${esc(charName)}" aria-label="朗读音量" title="这个角色的朗读音量">${volumeOpts}</select>`
@@ -53253,6 +53251,8 @@ const FLIP_DEFER_MS = 400;
 const RATE_TOLERANCE = 0.15;
 const MAX_FIELD = 300;
 const LEXICON_MAX = 4000;
+const VOICES_MAX = 4000;
+const VOICE_LIST_MAX = 100;
 // 系统语音偶尔漏发 onend：按估算时长的 2 倍再加 5 秒兜底收尾，免得自动播放和「翻页不打断」一直等。
 const SYSTEM_WATCHDOG_PAD_S = 5;
 // 同一条错误提示 30 秒内只弹一次。
@@ -53260,6 +53260,7 @@ const ERROR_REPEAT_MS = 30000;
 const LANG_TAGS = Object.freeze({ zh: 'zh-CN', ja: 'ja-JP', en: 'en-US' });
 
 // 情绪对语速、音高的微调（系统语音两项都用，接口只用语速）。
+// Fish Audio 的句首标签直接用本页原情绪词，不改写成别的语言。
 const MOOD_PROSODY = Object.freeze({
     愤怒: { rate: 1.08, pitch: 1.04 }, 惊讶: { rate: 1.06, pitch: 1.08 }, 大笑: { rate: 1.05, pitch: 1.06 },
     喜悦: { rate: 1.03, pitch: 1.04 }, 得意: { rate: 1.02, pitch: 1.02 },
@@ -53299,16 +53300,41 @@ function normalizeTtsSettings(value) {
             endpoint: field(api.endpoint),
             apiKey: field(api.apiKey),
             model: field(api.model),
-            // 可选声音：逗号或换行分隔，给角色单独指定时做下拉。
-            voices: field(api.voices),
+            // 可选声音：每行「别名=声音ID」，也认旧的逗号分隔 ID。给角色单独指定时做下拉。
+            voices: String(api.voices ?? '').slice(0, VOICES_MAX),
             // 提前生成下一页：在一页停够 PREFETCH_DWELL_MS 才生成，快速点过的页不花钱。
             prefetch: api.prefetch !== false,
             ...roles(api),
         },
     };
 }
+
+// 可选声音 → [声音ID, 显示名]。有别名时下拉显示别名，请求仍用 ID。没写别名的旧列表照旧。
+function ttsApiVoiceOptions(settings) {
+    const text = String(normalizeTtsSettings(settings).api.voices || '');
+    const seen = new Set();
+    const out = [];
+    for (const line of text.split(/\n/)) {
+        const raw = line.trim();
+        if (!raw) continue;
+        const named = raw.match(/^(.+?)\s*(?:=|＝)\s*(.*)$/);
+        const pairs = named
+            ? [[named[2].trim(), named[1].trim()]]
+            : raw.split(/[,，]/).map((item) => {
+                const id = item.trim();
+                return [id, id];
+            });
+        for (const [id, alias] of pairs) {
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            out.push([id.slice(0, MAX_FIELD), (alias || id).slice(0, MAX_FIELD)]);
+            if (out.length >= VOICE_LIST_MAX) return out;
+        }
+    }
+    return out;
+}
 function ttsApiVoiceList(settings) {
-    return Array.from(new Set(String(normalizeTtsSettings(settings).api.voices).split(/[,，\n]/).map((v) => v.trim()).filter(Boolean)));
+    return ttsApiVoiceOptions(settings).map(([id]) => id);
 }
 
 // 页面文字 → 要念的纯文本。双语「原文〖译文〗」默认念译文，original 为真时念原文；去掉字效与心里话星号，
@@ -53366,9 +53392,39 @@ function stripSpeakerPrefix(text, speaker = '') {
     return value;
 }
 
+// 句末按中文标点（及 ! ? …）切开；换行不进句子，和切段共用。
+const TTS_SENTENCE_RE = /[^。！？!?…\n]+[。！？!?…」』”’）)]*|[。！？!?…]+/g;
+
+// Fish Audio：句首方括号标签管到本句结束，所以每一句都要写。词用本页原文，没有情绪时用「平和」。
+// 耳语是说法，叠在情绪后面，同样不翻译。
+function fishEmotionCue(mood, { whisper = false } = {}) {
+    const label = String(mood || '').replace(/[\[\]]/g, '').trim() || '平和';
+    const cue = `[${label}]`;
+    return whisper && label !== '耳语' ? `${cue}[耳语]` : cue;
+}
+function applyFishEmotionTags(text, cue) {
+    const source = String(text || '');
+    if (!cue) return source;
+    const re = new RegExp(TTS_SENTENCE_RE.source, 'g');
+    let out = '';
+    let last = 0;
+    let hit = false;
+    for (const match of source.matchAll(re)) {
+        hit = true;
+        out += source.slice(last, match.index);
+        const sentence = match[0];
+        const lead = sentence.match(/^\s*/)[0];
+        const body = sentence.slice(lead.length);
+        out += (!body || !/[\p{L}\p{N}]/u.test(body) || body.startsWith(cue)) ? sentence : `${lead}${cue}${body}`;
+        last = match.index + sentence.length;
+    }
+    if (!hit) return /[\p{L}\p{N}]/u.test(source) ? `${cue}${source}` : source;
+    return out + source.slice(last);
+}
+
 // 按句切段，每段不超过 max 字；单句过长时硬切。
 function splitTtsChunks(text, max = CHUNK_MAX) {
-    const sentences = String(text || '').match(/[^。！？!?…\n]+[。！？!?…」』”’）)]*|[。！？!?…]+/g) || [];
+    const sentences = String(text || '').match(TTS_SENTENCE_RE) || [];
     const chunks = [];
     let buf = '';
     for (const sentence of sentences) {
@@ -53431,8 +53487,9 @@ function hashName(name) {
 }
 
 // 这一页由谁念、用什么声音（纯函数，便于测试）。voices 是系统声音列表（接口来源时不用）。
-// line.lang：这一页文字的语言（zh / ja / en），系统声音按它挑；接口来源不管语言。
-// 返回 { voice, role, gender, pitch, rate, volume }；voice 为 '' 表示系统默认声音，volume 为 0 表示这个角色不朗读。
+// 台词和心里话只念「角色设定」里写了朗读声音的人，没写的路人保持沉默。
+// 旁白只用声音设置里的「旁白」，不回退到女声或男声。系统旁白留空时仍按语言自动挑一个本机声音。
+// 返回 { voice, role, gender, pitch, rate, volume }；volume 为 0 表示这一页不朗读。
 function resolveTtsVoice(line, settings, sceneAssets, voices = []) {
     const config = normalizeTtsSettings(settings);
     const assets = plainObject(sceneAssets) || {};
@@ -53442,29 +53499,25 @@ function resolveTtsVoice(line, settings, sceneAssets, voices = []) {
     const manual = name ? normalizeCharacterVoice(hasOwn(manualMap, name) ? manualMap[name] : null) : normalizeCharacterVoice(null);
     const gender = name ? characterDnaGender(assets, name) : '';
     const role = narrator ? 'narrator' : (gender || 'female');
-    // 角色在「角色设定」里调的音高、语速，朗读也跟着用。
-    let pitch = 2 ** (manual.pitch / 12);
-    const rate = manual.speed;
-    const volume = manual.ttsVolume;
+    if (!narrator) {
+        // 角色设定里的音高、语速跟着这条声音走。没填声音、或音量是「不朗读」时直接跳过。
+        if (!manual.tts || manual.ttsVolume <= 0) return { voice: '', role, gender, pitch: 1, rate: manual.speed, volume: 0 };
+        const pitch = config.provider === 'api' ? 1 : 2 ** (manual.pitch / 12);
+        return { voice: manual.tts, role, gender, pitch, rate: manual.speed, volume: manual.ttsVolume };
+    }
     if (config.provider === 'api') {
-        const api = config.api;
-        const voice = manual.tts || api[role] || (narrator ? api.female : '') || api.female || api.male || '';
-        // 三个声音框都留空、角色也没单独指定时就是「不添加声音」：volume 0 让 decideTts 直接返回 null，不发合成请求。
-        return { voice, role, gender, pitch: 1, rate, volume: voice ? volume : 0 };
+        const voice = config.api.narrator;
+        return { voice, role, gender, pitch: 1, rate: 1, volume: voice ? 1 : 0 };
     }
     const lang = line.lang || 'zh';
     const byName = new Map(voices.map((v) => [v.name, v]));
-    const fits = (voiceName) => byName.has(voiceName) && String(byName.get(voiceName).lang || '').toLowerCase().startsWith(lang);
-    // 角色单独指定的声音照用；旁白 / 女声 / 男声的预设只在语言对得上时用（读日文原文时不拿中文声音念）。
-    if (manual.tts && byName.has(manual.tts)) return { voice: manual.tts, role, gender, pitch, rate, volume };
-    const preset = config.system[role];
-    if (preset && fits(preset)) return { voice: preset, role, gender, pitch, rate, volume };
-    const pool = systemVoicePool(voices, narrator ? '' : gender, lang);
-    if (!pool.length) return { voice: '', role, gender, pitch, rate, volume };
-    const key = narrator ? '旁白' : name;
-    // 同性别只有一个声音时，按名字给一点音高差，几个角色不至于完全同一个声音。
-    if (!narrator && pool.length < 2 && !manual.pitch) pitch *= 1 + ((hashName(key) % 5) - 2) * 0.04;
-    return { voice: pool[hashName(key) % pool.length].name, role, gender, pitch, rate, volume };
+    const preset = config.system.narrator;
+    const fits = preset && byName.has(preset) && String(byName.get(preset).lang || '').toLowerCase().startsWith(lang);
+    if (fits) return { voice: preset, role, gender, pitch: 1, rate: 1, volume: 1 };
+    const pool = systemVoicePool(voices, '', lang);
+    // 列表是空的就交给浏览器默认声音，旁白开关开着仍然要念。
+    if (!pool.length) return { voice: '', role, gender, pitch: 1, rate: 1, volume: 1 };
+    return { voice: pool[hashName('旁白') % pool.length].name, role, gender, pitch: 1, rate: 1, volume: 1 };
 }
 
 // 这一页要不要念、怎么念（纯函数）。state 跨页记忆上一页的 key，同一页重绘不重念。
@@ -53499,6 +53552,9 @@ function decideTts(state, line, settings, { sceneAssets, voices = [] } = {}) {
         rate: clamp(config.rate * voice.rate * (prosody.rate || 1), 0.5, 2),
         pitch: clamp(voice.pitch * (prosody.pitch || 1), 0.5, 2),
         pan: shape.pan, close: shape.close, phone: shape.phone,
+        // 本页原情绪词，Fish Audio 原样放进句首标签；语速仍用上面归组后的 mood。
+        mood: String(line.mood || '').trim(),
+        whisper: spoken && line.whisper === true,
     };
 }
 
@@ -53648,12 +53704,13 @@ function ttsSpeechUrl(endpoint, transport = 'direct', format = 'auto') {
 }
 
 // 请求头与请求体：Fish Audio 用 text / reference_id / format / prosody.speed，模型放在请求头 model 里。
-function ttsSpeechRequest(api, { text, voice, rate }) {
+// 发给 Fish 的正文每句句首都有情绪标签；系统语音和 OpenAI 兼容接口保持原文。
+function ttsSpeechRequest(api, { text, voice, rate, mood = '', whisper = false }) {
     const headers = { 'Content-Type': 'application/json' };
     if (api.apiKey) headers.Authorization = `Bearer ${api.apiKey}`;
     if (resolveTtsApiFormat(api.endpoint, api.format) === 'fish') {
         if (api.model) headers.model = api.model;
-        const body = { text, format: 'mp3' };
+        const body = { text: applyFishEmotionTags(text, fishEmotionCue(mood, { whisper })), format: 'mp3' };
         if (voice) body.reference_id = voice;
         if (Number.isFinite(rate) && rate !== 1) body.prosody = { speed: rate };
         return { headers, body };
@@ -53694,8 +53751,12 @@ async function postSpeech(url, api, plan) {
 }
 
 // 缓存键不含语速与首尾引号：提前生成时还不知道下一页的情绪，语速差在 RATE_TOLERANCE 内就算同一条。
-function ttsCacheKey(url, api, voice, text) {
-    const body = String(text || '').replace(/^[\s「『“"'‘]+|[\s」』”"'’]+$/g, '').replace(/\s+/g, ' ');
+// Fish Audio 的情绪写进正文，不同情绪不能共用一条缓存。
+function ttsCacheKey(url, api, voice, text, { mood = '', whisper = false } = {}) {
+    let body = String(text || '').replace(/^[\s「『“"'‘]+|[\s」』”"'’]+$/g, '').replace(/\s+/g, ' ');
+    if (resolveTtsApiFormat(api && api.endpoint, api && api.format) === 'fish') {
+        body = applyFishEmotionTags(body, fishEmotionCue(mood, { whisper }));
+    }
     return [url, api.model, voice, body].join('|');
 }
 
@@ -53746,7 +53807,7 @@ function remember(key, bytes, rate) {
 function requestSpeech(api, plan) {
     const url = ttsSpeechUrl(api.endpoint, api.transport, api.format);
     if (!url) return Promise.reject(new Error('还没有填写接口地址'));
-    const key = ttsCacheKey(url, api, plan.voice, plan.text);
+    const key = ttsCacheKey(url, api, plan.voice, plan.text, { mood: plan.mood, whisper: plan.whisper });
     const hit = apiCache.get(key);
     if (hit && closeRate(hit.rate, plan.rate)) {
         apiCache.delete(key);
@@ -53916,14 +53977,14 @@ function prefetchTts(segment, settings, sceneAssets, { nsfw = false } = {}) {
 }
 
 // 设置里的试听：按当前来源念一句。接口来源会等结果，失败时返回原因。
-function previewTts(settings, { role = 'female', voice = '' } = {}) {
+function previewTts(settings, { role = 'narrator', voice = '' } = {}) {
     const config = normalizeTtsSettings(settings);
     const voices = listSystemVoices();
     const picked = voice || (config.provider === 'api'
-        ? config.api[role] || config.api.female
-        : config.system[role] || (systemVoicePool(voices, role === 'narrator' ? '' : role)[0] || {}).name || '');
-    // 接口来源三个框全空时不发请求，直接说明原因，免得服务端拿默认音色念。
-    if (config.provider === 'api' && !picked) return Promise.resolve({ ok: false, error: '三个声音都留空了，填一个声音 ID 再试听' });
+        ? config.api.narrator
+        : config.system.narrator || (systemVoicePool(voices, '')[0] || {}).name || '');
+    // 接口来源没有旁白声音时不发请求，免得服务端拿默认音色念。
+    if (config.provider === 'api' && !picked) return Promise.resolve({ ok: false, error: '还没有填写旁白声音，填一个声音 ID 再试听' });
     const plan = {
         provider: config.provider, text: '你好，这是台词朗读的试听。今天也请多指教。', voice: picked, role, lang: 'zh',
         volume: config.volume, rate: config.rate, pitch: 1, pan: 0, close: false, phone: false, preview: true,
@@ -53941,12 +54002,15 @@ function previewTts(settings, { role = 'female', voice = '' } = {}) {
 }
 
 __igsDefine(exports, "normalizeTtsSettings", () => normalizeTtsSettings);
+__igsDefine(exports, "ttsApiVoiceOptions", () => ttsApiVoiceOptions);
 __igsDefine(exports, "ttsApiVoiceList", () => ttsApiVoiceList);
 __igsDefine(exports, "ttsPlainText", () => ttsPlainText);
 __igsDefine(exports, "parseTtsLexicon", () => parseTtsLexicon);
 __igsDefine(exports, "applyTtsLexicon", () => applyTtsLexicon);
 __igsDefine(exports, "detectTtsLang", () => detectTtsLang);
 __igsDefine(exports, "stripSpeakerPrefix", () => stripSpeakerPrefix);
+__igsDefine(exports, "fishEmotionCue", () => fishEmotionCue);
+__igsDefine(exports, "applyFishEmotionTags", () => applyFishEmotionTags);
 __igsDefine(exports, "splitTtsChunks", () => splitTtsChunks);
 __igsDefine(exports, "systemVoiceGender", () => systemVoiceGender);
 __igsDefine(exports, "listSystemVoices", () => listSystemVoices);
@@ -65551,6 +65615,11 @@ async function handleSettingsAction(action, ctx) {
         const charName = decodeSeg(normalizedAction.slice('tts-preview:'.length));
         const assets = settingsState.draft.bridge.sceneAssets || {};
         const voice = charName ? resolveTtsVoice({ textType: 'dialogue', speaker: charName }, reader.tts, assets, listSystemVoices()) : null;
+        if (charName && (!voice.voice || voice.volume <= 0)) {
+            const error = '这个角色还没有朗读声音';
+            showGeneratedNotice(options.global || globalThis, `试听失败：${error}`);
+            return { ok: false, error };
+        }
         const result = await previewTts(reader.tts, voice ? { role: voice.role, voice: voice.voice } : {});
         // 试听失败的原因不走阅读器的报错通道，这里在设置页提示出来，免得点了像没反应。
         if (result && result.ok === false && result.error) showGeneratedNotice(options.global || globalThis, `试听失败：${result.error}`);
@@ -106345,7 +106414,7 @@ const { dialogSkinLabel, getDialogSkinChoices } = require("src/visual/igs-ui/dia
 const { DIALOG_SKIN_XIANXIA_INK } = require("src/visual/igs-ui/dialog-theme-xianxia.js");
 const { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_HOUSES, normalizeMagicAccent, normalizeMagicHouse } = require("src/visual/igs-ui/dialog-theme-css-skins.js");
 const { VOICE_BARK_FREQUENCIES, normalizeVoiceBarkSettings } = require("src/visual/igs-ui/voice-bark.js");
-const { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_PROVIDERS, TTS_RATES, TTS_TRANSPORTS, normalizeTtsSettings, systemVoiceOptions, ttsApiVoiceList } = require("src/visual/igs-ui/tts.js");
+const { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_PROVIDERS, TTS_RATES, TTS_TRANSPORTS, normalizeTtsSettings, systemVoiceOptions } = require("src/visual/igs-ui/tts.js");
 const { normalizeBilingualSettings } = require("src/visual/igs-ui/bilingual-text.js");
 const { HORROR_DREAD_CAP_LABELS, HORROR_DREAD_LEVELS, normalizeHorrorDreadCap } = require("src/visual/igs-ui/horror-dread.js");
 const { DIALOG_SKIN_HORROR_GORE, DIALOG_SKIN_HORROR_PSYCH } = require("src/visual/igs-ui/dialog-theme-horror.js");
@@ -107320,7 +107389,7 @@ function renderVoiceRowConfig(reader, sceneAssets) {
     return normalizeVoiceBarkSettings(reader.voiceBark).enabled ? { sceneAssets } : null;
 }
 
-// 台词朗读的设置：来源、旁白、音量语速，系统语音选女声 / 男声 / 旁白，接口填地址与声音名。
+// 台词朗读的设置：来源、旁白、音量语速。角色声音只在角色设定里指定，这里不再放默认女声 / 男声。
 function renderTtsControls(tts, { bilingual = false } = {}) {
     const base = 'readerSettings.tts';
     const rates = TTS_RATES.map((v) => [v, v === 1 ? '正常' : `${v}×`]);
@@ -107329,20 +107398,17 @@ function renderTtsControls(tts, { bilingual = false } = {}) {
         checkbox(`${base}.narration`, tts.narration, '朗读旁白'),
         checkbox(`${base}.nsfw`, tts.nsfw, 'NSFW场景也朗读'),
         checkbox(`${base}.sustain`, tts.sustain, '翻页不打断（上一句念完再念下一句）'),
-        // 双语台词：读译文用中文声音；读原文时系统语音按原文语言换日文 / 英文声音。
+        // 双语台词：选择念译文还是原文。
         bilingual ? field(`${base}.bilingual`, '双语台词', segmentedInput(`${base}.bilingual`, tts.bilingual, TTS_BILINGUAL_MODES, '双语台词朗读')) : '',
         field(`${base}.volume`, '音量', rangeInput(`${base}.volume`, tts.volume, '朗读音量')),
         field(`${base}.rate`, '语速', selectInput(`${base}.rate`, tts.rate, rates)),
     ];
-    const roles = [['female', '女声'], ['male', '男声'], ['narrator', '旁白']];
     if (tts.provider === 'system') {
         const options = systemVoiceOptions();
-        for (const [key, label] of roles) {
-            const value = tts.system[key];
-            const items = [['', '自动']].concat(options);
-            if (value && !options.some(([id]) => id === value)) items.push([value, `${value}（本机没有）`]);
-            parts.push(field(`${base}.system.${key}`, label, selectInput(`${base}.system.${key}`, value, items)));
-        }
+        const value = tts.system.narrator;
+        const items = [['', '自动']].concat(options);
+        if (value && !options.some(([id]) => id === value)) items.push([value, `${value}（本机没有）`]);
+        parts.push(field(`${base}.system.narrator`, '旁白', selectInput(`${base}.system.narrator`, value, items)));
         parts.push(`<div class="igs-source-filter-note">${options.length ? '' : '没读到本机的中文声音。'}Windows 推荐用 Edge 浏览器打开酒馆：有晓晓、云希等自然声；Chrome 只有慧慧、康康等本地声音。系统语音不支持声像和听筒音色。</div>`);
     } else {
         const api = tts.api;
@@ -107352,10 +107418,10 @@ function renderTtsControls(tts, { bilingual = false } = {}) {
             field(`${base}.api.endpoint`, '接口地址', textInput(`${base}.api.endpoint`, api.endpoint, 'https://api.openai.com/v1、https://api.fish.audio 或 http://127.0.0.1:9880/v1')),
             field(`${base}.api.apiKey`, 'API Key', secretInput(`${base}.api.apiKey`, api.apiKey, '本地服务可留空')),
             field(`${base}.api.model`, '模型', textInput(`${base}.api.model`, api.model, '如tts-1、FunAudioLLM/CosyVoice2-0.5B、s1')),
+            field(`${base}.api.narrator`, '旁白声音', textInput(`${base}.api.narrator`, api.narrator, '旁白的声音 ID，留空则不朗读旁白')),
         );
-        for (const [key, label] of roles) parts.push(field(`${base}.api.${key}`, `${label}声音`, textInput(`${base}.api.${key}`, api[key], key === 'narrator' ? '留空用女声' : '接口里的声音名（Fish Audio 填声音模型 ID）')));
         parts.push(
-            field(`${base}.api.voices`, '可选声音', textInput(`${base}.api.voices`, api.voices, '逗号分隔，给角色单独指定时用')),
+            field(`${base}.api.voices`, '可选声音', textareaInput(`${base}.api.voices`, api.voices, '每行一条：别名=声音ID，如 晓晓=f08a。只写 ID 也可以')),
             checkbox(`${base}.api.prefetch`, api.prefetch, '提前生成下一页（停留1.5秒后才生成）'),
             '<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-clear-cache">清除朗读缓存</button>',
             '<div class="igs-source-filter-note">支持OpenAI兼容语音接口与Fish Audio。直连被拦时改用「酒馆 CORS 代理」（需在酒馆 config.yaml 打开 enableCorsProxy）；Fish Audio 不允许浏览器直连，必须用代理。</div>',
@@ -107363,7 +107429,7 @@ function renderTtsControls(tts, { bilingual = false } = {}) {
     }
     parts.push(field(`${base}.lexicon`, '读音替换', textareaInput(`${base}.lexicon`, tts.lexicon, '每行一条：原词=读法\n例：雫=shizuku\n例：Λ=兰姆达')));
     parts.push('<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-preview">试听</button>');
-    parts.push('<div class="igs-source-filter-note">开启后不再播放角色语气音。每个角色的朗读声音可在「角色 › 角色设定」单独指定。</div>');
+    parts.push('<div class="igs-source-filter-note">开启后不再播放角色语气音。只有在「角色 › 角色设定」里指定了朗读声音的角色才会被朗读。</div>');
     return parts.join('');
 }
 
