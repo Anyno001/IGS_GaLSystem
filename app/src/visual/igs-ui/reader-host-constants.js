@@ -436,6 +436,7 @@ export const TOOLBAR_ACTIONS = Object.freeze([
     ['save', '保存图片'],
     ['hide', '隐藏对话框'],
     ['sprite-edit', '调整立绘'],
+    ['live2d-settings', 'Live2D 角色绑定'],
     ['rescan', '重新加载'],
     ['settings', '设置'],
 ]);

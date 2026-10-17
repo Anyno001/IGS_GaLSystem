@@ -8,7 +8,9 @@
     "build": "node scripts/build.js",
     "build:fonts": "node scripts/split-fonts.js",
     "build:loader": "node scripts/build-loader.js",
-    "package:loader": "npm run build && npm run build:loader"
+    "package:loader": "npm run build && npm run build:loader",
+    "build:standalone": "node scripts/build-standalone.js",
+    "package:standalone": "npm run build && npm run build:loader -- --release v0.36.75 && npm run build:standalone"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
@@ -19,5 +21,8 @@
     "onlyBuiltDependencies": [
       "cn-font-split"
     ]
+  },
+  "dependencies": {
+    "fflate": "0.8.2"
   }
 }

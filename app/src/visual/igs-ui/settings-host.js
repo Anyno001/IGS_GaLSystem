@@ -43,7 +43,7 @@ export function createSettingsHost(deps) {
     const {
         flushDeferredImageRefresh, normalizeUnifiedSettings, onboarding, openCgGallery, options, pageModal,
         playReaderUiSfx, rerenderActiveReader, resolveBridgeConfigSnapshot, scheduleMoodAutoClassify, sourceCache,
-        state, takeReaderStaleBehindSettings, invalidateFloorAssetPlan,
+        state, takeReaderStaleBehindSettings, invalidateFloorAssetPlan, openLive2dManager,
     } = deps;
     const settingsDialogs = createSettingsDialogs({
         getContainer: () => (state.activeSettings && state.activeSettings.dom ? state.activeSettings.dom.root : null),
@@ -162,6 +162,7 @@ export function createSettingsHost(deps) {
             syncActiveModeFromSettings: current.initialOpenMode !== current.draft.bridge.openMode,
         });
         if (saved.ok === false) return saved;
+        state.live2dEditor?.close(true);
         settingsDialogs.cancel();
         if (current.dom && typeof current.dom.dispose === 'function') {
             current.dom.dispose();
@@ -426,6 +427,7 @@ export function createSettingsHost(deps) {
     }
 
     async function handleSettingsAction(action) {
+        if (String(action).startsWith('live2d-edit:')) return openLive2dManager?.(decodeURIComponent(String(action).slice('live2d-edit:'.length)));
         const onboardingResult = onboarding.handleAction(action);
         if (onboardingResult) return onboardingResult;
         return runSettingsAction(action, {

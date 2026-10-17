@@ -1,5 +1,6 @@
 import { createNarrationSpriteTracker, otherNamesOf, sceneCarryOf, NARRATION_HOLD_PAGES, SCENE_AHEAD_PAGES } from '../../scene/narration-sprite.js';
 import { createNarrationNamer } from '../../scene/narration-focus.js';
+import { resolveCharacterLive2dBinding } from './live2d-config.js';
 import { extractSceneDirectives, resolveCharacterKey, narrativeRanges, prepareIllustrationPages } from '../../scene/scene-directives.js';
 import { DEFAULT_MOOD_GROUPS } from '../../scene/mood-groups.js';
 import { createOutfitResolver } from '../../scene/character-outfits.js';
@@ -153,6 +154,11 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
             if (Array.isArray(list)) castAliases[key] = [...(castAliases[key] || []), ...list];
         }
     }
+    // 只有模型、没有静态图的角色也参加新版旁白点名与场景继承。仅扩展本楼名单，不写静态素材库。
+    if (readerSettings._live2d?.enabled) for (const name of Object.keys(readerSettings._live2d.bindings || {})) {
+        const key = resolveCharacterKey(castCharacters, castAliases, name) || name;
+        if (!Object.hasOwn(castCharacters, key)) castCharacters[key] = {};
+    }
     const castKeyMemo = new Map();
     const castKeyOf = name => {
         if (!castKeyMemo.has(name)) castKeyMemo.set(name, resolveCharacterKey(castCharacters, castAliases, name) || name);
@@ -176,7 +182,7 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         if (!genderMemo.has(key)) genderMemo.set(key, detectVoiceGender(characterDnaText(sceneAssets, key)));
         return genderMemo.get(key);
     };
-    const hasSprites = key => Object.keys(castCharacters[key] || {}).length > 0;
+    const hasSprites = key => Boolean(resolveCharacterLive2dBinding(readerSettings._live2d, sceneAssets, key)) || Object.keys(castCharacters[key] || {}).length > 0;
     // 旁白点名：主角要有素材才上；其他人要在名单里且本楼或前 3 个 AI 楼露过面（宿主没给前楼名单时不拦）。
     const namer = createNarrationNamer({ characters: castCharacters, aliases: castAliases, userKey, userNames: selfNames, genderOf,
         allow: key => key === userKey ? hasSprites(key) : Object.hasOwn(castCharacters, key) && (castNearby === null || castNearby.has(key)) });
