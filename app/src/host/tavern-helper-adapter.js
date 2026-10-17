@@ -175,7 +175,7 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
     };
 }
 
-function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false) {
+function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false, { focus = true } = {}) {
     const value = String(text == null ? '' : text);
     for (const doc of getCandidateDocuments(globalObject)) {
         const textarea = safeQuery(doc, '#send_textarea');
@@ -186,7 +186,8 @@ function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false) {
             if (setter) setter.call(textarea, value);
             else textarea.value = value;
             dispatchInputEvents(textarea, doc);
-            if (typeof textarea.focus === 'function') textarea.focus();
+            // 只填不发时才聚焦。发送时聚焦会把同一次 Enter 交给酒馆，宿主再发一条相同请求。
+            if (focus && typeof textarea.focus === 'function') textarea.focus();
             return { ok: true, reason: 'host-dom-fill', doc };
         } catch (error) {
             return { ok: false, reason: 'host-dom-fill-failed' };
@@ -195,15 +196,59 @@ function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false) {
     return { ok: false, reason: 'missing-host-input' };
 }
 
+const HOST_SEND_LOCK = '__igsHostSendLock';
+const HOST_SEND_LOCK_MS = 800;
+
+function hostSendRoot(globalObject) {
+    try {
+        if (globalObject && globalObject.top) return globalObject.top;
+    } catch (error) {
+        // 跨域 top 不可写，锁留在当前窗口。
+    }
+    return globalObject;
+}
+
+function claimHostSend(globalObject, text) {
+    const root = hostSendRoot(globalObject);
+    const now = Date.now();
+    try {
+        const lock = root && root[HOST_SEND_LOCK];
+        if (lock && lock.text === text && now - lock.at < HOST_SEND_LOCK_MS) return false;
+        if (root) root[HOST_SEND_LOCK] = { text, at: now };
+    } catch (error) {
+        // 锁写不进去就照常发送，不把一次正常发送变成失败。
+    }
+    return true;
+}
+
+function releaseHostSend(globalObject, text) {
+    const root = hostSendRoot(globalObject);
+    try {
+        const lock = root && root[HOST_SEND_LOCK];
+        if (lock && lock.text === text) root[HOST_SEND_LOCK] = null;
+    } catch (error) {
+        // 释放失败只影响紧接着的重复点击，下一次不同正文仍会发送。
+    }
+}
+
 function sendViaHostDom(globalObject, text) {
-    const filled = setInputTextViaHostDom(globalObject, text);
-    if (!filled.ok) return { ok: false, reason: 'missing-host-dom-send' };
+    const value = String(text == null ? '' : text);
+    if (!claimHostSend(globalObject, value)) return { ok: true, reason: 'host-dom-send-deduped' };
+    const filled = setInputTextViaHostDom(globalObject, text, false, { focus: false });
+    if (!filled.ok) {
+        releaseHostSend(globalObject, value);
+        return { ok: false, reason: 'missing-host-dom-send' };
+    }
     const button = safeQuery(filled.doc, '#send_but');
-    if (!button || typeof button.click !== 'function') return { ok: false, reason: 'missing-host-dom-send' };
+    if (!button || typeof button.click !== 'function') {
+        releaseHostSend(globalObject, value);
+        return { ok: false, reason: 'missing-host-dom-send' };
+    }
     try {
         button.click();
         return { ok: true, reason: 'host-dom-send' };
     } catch (error) {
+        releaseHostSend(globalObject, value);
         return { ok: false, reason: 'host-dom-send-failed' };
     }
 }

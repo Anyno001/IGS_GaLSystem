@@ -3100,6 +3100,39 @@ test('gate:simulation:igs-ui-enter-sends-and-shift-enter-does-not', async () => 
     vn.destroy();
 });
 
+test('gate:simulation:reader-send-ignores-a-second-submit-while-the-first-is-in-flight', async () => {
+    const latestMessage = readJson('fixtures/tavern/standard-message.json');
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const sent = [];
+    const vn = bootstrapIGS({
+        global: {},
+        hostAdapter: {
+            getCurrentMessage: async () => latestMessage,
+            typeAndSend: async (text) => {
+                sent.push(text);
+                await gate;
+                return { ok: true };
+            },
+        },
+    });
+    try {
+        const opened = await vn.openLatestAvailable('pc');
+        const controller = opened.reader.controller;
+        controller.setInputValue('同一句');
+        const first = controller.keydown({ key: 'Enter', shiftKey: false, value: '同一句' });
+        const second = controller.submit('同一句');
+        release();
+        const [sentResult, skipped] = await Promise.all([first, second]);
+        assert.equal(sentResult.sent, true);
+        assert.notEqual(skipped.sent, true);
+        assert.equal(skipped.ok, false);
+        assert.deepEqual(sent, ['同一句']);
+    } finally {
+        vn.destroy();
+    }
+});
+
 test('gate:simulation:igs-ui-background-left-half-pages-back-right-half-forward-dialog-still-pages', async () => {
     const document = createFakeDocument();
     const latestMessage = {

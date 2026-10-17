@@ -1509,6 +1509,9 @@ export function createIgsReaderHost(options = {}) {
                 if (event.shiftKey) {
                     return { ok: true, sent: false, reason: 'shift-enter-kept' };
                 }
+                if (event.isComposing) {
+                    return { ok: true, sent: false, reason: 'ime-composing' };
+                }
                 return submitReaderInput(firstDefined(event.value, state.activeReader && state.activeReader.inputValue, ''));
             },
             toggleHidden() {
@@ -1555,6 +1558,20 @@ export function createIgsReaderHost(options = {}) {
     }
 
     async function submitReaderInput(text) {
+        const reader = state.activeReader;
+        if (!reader) return { ok: false, reason: 'reader-not-open' };
+        if (reader.streamPhase === 'streaming') return { ok: false, reason: 'reply-pending' };
+        // 同一次 Enter 会先走到这里，焦点挪走后宿主还可能再投递一次。进行中的发送直接丢掉第二次。
+        if (reader.sendInFlight) return { ok: false, sent: false, reason: 'send-in-flight' };
+        reader.sendInFlight = true;
+        try {
+            return await deliverReaderInput(text);
+        } finally {
+            reader.sendInFlight = false;
+        }
+    }
+
+    async function deliverReaderInput(text) {
         if (!state.activeReader) return { ok: false, reason: 'reader-not-open' };
         if (state.activeReader.streamPhase === 'streaming') return { ok: false, reason: 'reply-pending' };
         // 停在旧楼时发送：剧情会接在最新楼后面，先确认，免得以为是在旧楼的语境里接着写。
@@ -3986,9 +4003,15 @@ export function createIgsReaderHost(options = {}) {
         });
         root.addEventListener('keydown', async (event) => {
             if (event.target && event.target.id === 'igs-input') {
+                // 同步拦住 Enter，不能等发送完成再拦：否则同一次按键会冒泡到酒馆，聚焦输入框后再发一条。
+                if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                    event.preventDefault();
+                    if (typeof event.stopPropagation === 'function') event.stopPropagation();
+                }
                 const result = await controller.keydown({
                     key: event.key,
                     shiftKey: event.shiftKey,
+                    isComposing: event.isComposing,
                     value: event.target.value,
                 });
                 if (result.sent) {

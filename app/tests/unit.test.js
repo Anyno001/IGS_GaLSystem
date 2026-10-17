@@ -3702,7 +3702,37 @@ test('gate:host:tavern-helper-adapter-type-and-send-falls-back-to-host-dom', asy
     assert.equal(result.ok, true);
     assert.equal(result.reason, 'host-dom-send');
     assert.equal(sentValue, '选择：继续调查');
+    assert.equal(textarea.focused, undefined);
     assert.ok(events.includes('input'));
+});
+
+test('gate:host:type-and-send-does-not-click-twice-for-the-same-text', async () => {
+    let clicks = 0;
+    const textarea = {
+        tagName: 'TEXTAREA',
+        value: '',
+        focus() { this.focused = true; },
+        dispatchEvent() { return true; },
+    };
+    const doc = {
+        querySelector(selector) {
+            if (selector === '#send_textarea') return textarea;
+            if (selector === '#send_but') return { click() { clicks += 1; } };
+            return null;
+        },
+        querySelectorAll: () => [],
+    };
+    const global = { TavernHelper: { triggerSlash() {} }, document: doc };
+    const first = createTavernHelperAdapter(global);
+    const second = createTavernHelperAdapter(global);
+
+    const sent = await first.typeAndSend('同一句');
+    const skipped = await second.typeAndSend('同一句');
+
+    assert.equal(sent.reason, 'host-dom-send');
+    assert.equal(skipped.reason, 'host-dom-send-deduped');
+    assert.equal(clicks, 1);
+    assert.equal(textarea.focused, undefined);
 });
 
 function readJson(relativePath) {

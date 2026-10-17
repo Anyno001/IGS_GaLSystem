@@ -2641,7 +2641,7 @@ function createTavernHelperAdapter(globalObject = globalThis.window || globalThi
     };
 }
 
-function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false) {
+function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false, { focus = true } = {}) {
     const value = String(text == null ? '' : text);
     for (const doc of getCandidateDocuments(globalObject)) {
         const textarea = safeQuery(doc, '#send_textarea');
@@ -2652,7 +2652,8 @@ function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false) {
             if (setter) setter.call(textarea, value);
             else textarea.value = value;
             dispatchInputEvents(textarea, doc);
-            if (typeof textarea.focus === 'function') textarea.focus();
+            // 只填不发时才聚焦。发送时聚焦会把同一次 Enter 交给酒馆，宿主再发一条相同请求。
+            if (focus && typeof textarea.focus === 'function') textarea.focus();
             return { ok: true, reason: 'host-dom-fill', doc };
         } catch (error) {
             return { ok: false, reason: 'host-dom-fill-failed' };
@@ -2661,15 +2662,59 @@ function setInputTextViaHostDom(globalObject, text, onlyIfEmpty = false) {
     return { ok: false, reason: 'missing-host-input' };
 }
 
+const HOST_SEND_LOCK = '__igsHostSendLock';
+const HOST_SEND_LOCK_MS = 800;
+
+function hostSendRoot(globalObject) {
+    try {
+        if (globalObject && globalObject.top) return globalObject.top;
+    } catch (error) {
+        // 跨域 top 不可写，锁留在当前窗口。
+    }
+    return globalObject;
+}
+
+function claimHostSend(globalObject, text) {
+    const root = hostSendRoot(globalObject);
+    const now = Date.now();
+    try {
+        const lock = root && root[HOST_SEND_LOCK];
+        if (lock && lock.text === text && now - lock.at < HOST_SEND_LOCK_MS) return false;
+        if (root) root[HOST_SEND_LOCK] = { text, at: now };
+    } catch (error) {
+        // 锁写不进去就照常发送，不把一次正常发送变成失败。
+    }
+    return true;
+}
+
+function releaseHostSend(globalObject, text) {
+    const root = hostSendRoot(globalObject);
+    try {
+        const lock = root && root[HOST_SEND_LOCK];
+        if (lock && lock.text === text) root[HOST_SEND_LOCK] = null;
+    } catch (error) {
+        // 释放失败只影响紧接着的重复点击，下一次不同正文仍会发送。
+    }
+}
+
 function sendViaHostDom(globalObject, text) {
-    const filled = setInputTextViaHostDom(globalObject, text);
-    if (!filled.ok) return { ok: false, reason: 'missing-host-dom-send' };
+    const value = String(text == null ? '' : text);
+    if (!claimHostSend(globalObject, value)) return { ok: true, reason: 'host-dom-send-deduped' };
+    const filled = setInputTextViaHostDom(globalObject, text, false, { focus: false });
+    if (!filled.ok) {
+        releaseHostSend(globalObject, value);
+        return { ok: false, reason: 'missing-host-dom-send' };
+    }
     const button = safeQuery(filled.doc, '#send_but');
-    if (!button || typeof button.click !== 'function') return { ok: false, reason: 'missing-host-dom-send' };
+    if (!button || typeof button.click !== 'function') {
+        releaseHostSend(globalObject, value);
+        return { ok: false, reason: 'missing-host-dom-send' };
+    }
     try {
         button.click();
         return { ok: true, reason: 'host-dom-send' };
     } catch (error) {
+        releaseHostSend(globalObject, value);
         return { ok: false, reason: 'host-dom-send-failed' };
     }
 }
@@ -34851,6 +34896,9 @@ function createIgsReaderHost(options = {}) {
                 if (event.shiftKey) {
                     return { ok: true, sent: false, reason: 'shift-enter-kept' };
                 }
+                if (event.isComposing) {
+                    return { ok: true, sent: false, reason: 'ime-composing' };
+                }
                 return submitReaderInput(firstDefined(event.value, state.activeReader && state.activeReader.inputValue, ''));
             },
             toggleHidden() {
@@ -34897,6 +34945,20 @@ function createIgsReaderHost(options = {}) {
     }
 
     async function submitReaderInput(text) {
+        const reader = state.activeReader;
+        if (!reader) return { ok: false, reason: 'reader-not-open' };
+        if (reader.streamPhase === 'streaming') return { ok: false, reason: 'reply-pending' };
+        // 同一次 Enter 会先走到这里，焦点挪走后宿主还可能再投递一次。进行中的发送直接丢掉第二次。
+        if (reader.sendInFlight) return { ok: false, sent: false, reason: 'send-in-flight' };
+        reader.sendInFlight = true;
+        try {
+            return await deliverReaderInput(text);
+        } finally {
+            reader.sendInFlight = false;
+        }
+    }
+
+    async function deliverReaderInput(text) {
         if (!state.activeReader) return { ok: false, reason: 'reader-not-open' };
         if (state.activeReader.streamPhase === 'streaming') return { ok: false, reason: 'reply-pending' };
         // 停在旧楼时发送：剧情会接在最新楼后面，先确认，免得以为是在旧楼的语境里接着写。
@@ -37328,9 +37390,15 @@ function createIgsReaderHost(options = {}) {
         });
         root.addEventListener('keydown', async (event) => {
             if (event.target && event.target.id === 'igs-input') {
+                // 同步拦住 Enter，不能等发送完成再拦：否则同一次按键会冒泡到酒馆，聚焦输入框后再发一条。
+                if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                    event.preventDefault();
+                    if (typeof event.stopPropagation === 'function') event.stopPropagation();
+                }
                 const result = await controller.keydown({
                     key: event.key,
                     shiftKey: event.shiftKey,
+                    isComposing: event.isComposing,
                     value: event.target.value,
                 });
                 if (result.sent) {
