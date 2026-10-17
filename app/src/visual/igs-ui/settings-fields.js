@@ -1,3 +1,4 @@
+import { resolveCharacterLive2dBinding } from './live2d-config.js';
 import { esc } from './reader-value-utils.js';
 import { normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
@@ -531,7 +532,8 @@ export function renderCharacterAssetList(characters, options = {}) {
         const openKey = `char-open:${charName}`;
         const open = isOpen(openKey);
         const toggle = `ui-toggle-open:${encSeg(openKey)}`;
-        const meta = aliases.join('、');
+        const live2dOn = Boolean(resolveCharacterLive2dBinding(options.live2dConfig, options.sceneAssets || { characters, characterAliases: aliasesByCharacter }, charName));
+        const meta = [aliases.join('、'), live2dOn ? 'Live2D 已启用 · 静态差分暂停' : ''].filter(Boolean).join(' · ');
         const head = `<div class="igs-char-head"><button type="button" class="igs-char-avatar" data-action="status-avatar-pick:${encSeg(charName)}" title="上传状态栏头像">${avatarPreview}</button>`
             + `<button type="button" class="igs-char-title" data-action="${toggle}" aria-expanded="${open}"><b class="igs-char-name">${esc(charName)}</b><span class="igs-char-aliases">${esc(meta)}</span></button>`
             + `${scopeTag(options, 'characters', charName)}`
