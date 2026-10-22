@@ -1,5 +1,10 @@
 # 发布说明与核验边界
 
+## v0.36.116
+
+- 修复 Live2D 管理器打不开：`reader-host.js` 漏导入 `draftEffectiveAssets`，点开即报 ReferenceError。只改这一处与版本号，启动器未变，无需重新导入。
+- 验证：live2d、loader-version 定向测试通过，bundle 构建通过；真实酒馆与手机未验收。只推送 main，不创建标签。
+
 ## v0.36.111
 
 - 以内测 v0.36.111（`374728bc`，已提交版本）为准同步运行源码、测试、素材与 fixtures 及 `loader/igs-loader.js`，内测仓库地址统一替换为 `Anyno001/IGS_GaLSystem`；发布版独有的过期测试按内测删除。不带入内测计划、过程文档与截图，保留正式 README、许可证与下载历史。
