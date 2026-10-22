@@ -1,3 +1,4 @@
+import { prepareAncientPanel } from './ancient-panel-layout.js';
 // 戏剧节拍的构建器：每个返回 { layer, life, sounds, node }，不满足条件时返回 null。
 // 读立绘一律走 stage-snapshot（读当前 DOM，跟随服装表情）。减少动态效果时返回静态节点，寿命乘 env.hold。
 import { esc } from './reader-value-utils.js';
@@ -117,14 +118,18 @@ export const BEATS_BUILDERS = {
         return { layer: 'front', life: life('reveal', env, Array.from(item.text).length * 110), sounds: ['bt-slam'], node };
     },
 
-    // 系统 / 公告面板：按世界观换皮的面板，上方一枚类型标签，行逐条浮现；突破额外带金色升腾光点。
+    // 系统 / 公告面板：复用小弹窗皮肤，类型标签收在卡内；行逐条浮现，突破额外带光点。
     panel(item, env) {
         const doc = env.doc;
         const tone = panelToneOf(env);
         const kind = PANEL_TYPE_LABELS[item.kind] ? item.kind : 'system';
         const wrap = make(doc, `igs-bt-panel-wrap is-${kind} is-tone-${tone}`);
-        wrap.appendChild(part(doc, 'igs-bt-panel-chip', PANEL_TYPE_LABELS[kind]));
-        wrap.appendChild(buildPanel(doc, { title: item.title, rows: item.rows.map(rowOf), env, skin: env.panelSkin, tone }));
+        const panel = buildPanel(doc, { title: item.title, rows: item.rows.map(rowOf), env, tone });
+        panel.insertBefore(part(doc, 'igs-bt-panel-chip', PANEL_TYPE_LABELS[kind]), panel.firstChild);
+        if (env.ancient) prepareAncientPanel(panel);
+        panel.setAttribute('role', 'status');
+        panel.setAttribute('aria-label', `${PANEL_TYPE_LABELS[kind]}：${item.title}`);
+        wrap.appendChild(panel);
         if (kind === 'breakthrough') wrap.appendChild(make(doc, 'igs-bt-panel-motes', [8, 22, 36, 50, 64, 78, 90].map((x, i) => `<i style="left:${x}%;animation-delay:${i * 210}ms"></i>`).join('')));
         const node = make(doc, classOf('panel', env));
         node.appendChild(wrap);
@@ -139,6 +144,8 @@ export const BEATS_BUILDERS = {
         const fmt = numberFormat(from, to);
         const dir = to > from ? 'up' : to < from ? 'down' : 'flat';
         const card = make(doc, `igs-bt-count-card is-${dir}`);
+        card.setAttribute('role', 'status');
+        card.setAttribute('aria-label', `${item.label || ''} ${fmt(to)}${item.unit || ''}`.trim());
         if (item.label) card.appendChild(part(doc, 'igs-bt-count-label', item.label));
         const row = make(doc, 'igs-bt-count-row');
         const num = part(doc, 'igs-bt-count-num', fmt(from));
@@ -149,6 +156,7 @@ export const BEATS_BUILDERS = {
         rollNumber(num, from, to, COUNT_ROLL_MS, { reduced: env.reduced, format: fmt });
         const node = make(doc, classOf('count', env));
         node.appendChild(card);
+        if (env.ancient) prepareAncientPanel(card);
         return { layer: 'front', life: life('count', env), sounds: ['bt-tick'], node };
     },
 

@@ -1,3 +1,4 @@
+import { traySvg } from './fx-selected-svg.js';
 // 后宫妃子包的构建器。朱红、金、宣纸，装饰一律实色；古代专属，所以不再按 env.ancient 分支。
 // 每个构建器：入场 -> 停留 -> 退场（退场由 igs-dfx-fade 统一收），减少动态效果时直接给终态；停留乘 env.hold。
 import { esc } from './reader-value-utils.js';
@@ -167,14 +168,9 @@ export const HAREM_BUILDERS = {
 
     // 赐死托盘：黑漆盘静静托着一件物事，背后压暗；只有一声低鸣。
     hmtray(item, env) {
-        const thing = {
-            silk: '<path d="M30 40 Q60 12 90 40 Q60 60 30 40 Z"/><path d="M52 40 Q56 54 48 66"/>',
-            wine: '<path d="M44 20 L44 30 Q34 36 34 50 L34 60 L56 60 L56 50 Q56 36 46 30 L46 20 Z"/><path d="M70 42 L96 42 Q94 58 83 58 Q72 58 70 42 Z"/>',
-            dagger: '<path d="M26 42 L78 42 L92 48 L78 54 L26 54 Z"/><path d="M18 36 L18 60 M18 48 L26 48"/>',
-        }[item.mode];
         const label = { silk: '白绫三尺', wine: '鸩酒一杯', dagger: '匕首一柄' }[item.mode];
-        const html = `<div class="hm-dim"></div><div class="hm-trayfull"><div class="hm-trayfull-plate"><svg viewBox="0 0 120 84" aria-hidden="true"><ellipse class="hm-rim" cx="60" cy="48" rx="56" ry="26"/><ellipse class="hm-rim is-in" cx="60" cy="48" rx="50" ry="22"/>${thing}</svg></div><div class="hm-trayfull-label">${esc(label)}</div>${item.who ? `<div class="hm-trayfull-who">赐 ${nameOf(item.who)}</div>` : ''}</div>`;
-        return { layer: 'front', life: life('hmtray', env), sounds: ['hm-tray'], node: card(env, 'tray', '', html) };
+        const html = `<div class="hm-dim"></div><div class="hm-trayfull"><div class="hm-trayfull-plate">${traySvg(item.mode)}</div><div class="hm-trayfull-label">${esc(label)}</div>${item.who ? `<div class="hm-trayfull-who">赐 ${nameOf(item.who)}</div>` : ''}</div>`;
+        return { layer: 'front', life: life('hmtray', env), sounds: ['hm-tray'], node: card(env, 'tray', item.mode === 'silk' ? 'is-silk' : '', html) };
     },
 
     // 悬丝诊脉：一根红丝从帘后牵到手腕，旁边一条脉象线缓缓起伏。

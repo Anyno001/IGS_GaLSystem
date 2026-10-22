@@ -33,7 +33,7 @@ export function fillExpressionNotes(notes, fromFile) {
     return changed;
 }
 
-export function createExpressionNotesFile(globalObject, { debounceMs = 2000 } = {}) {
+export function createExpressionNotesFile(globalObject, { debounceMs = 2000, onUploaded } = {}) {
     let timer = null;
     let lastUploaded = '';
     let pending = null;
@@ -56,6 +56,9 @@ export function createExpressionNotesFile(globalObject, { debounceMs = 2000 } = 
         } catch { return null; }
     }
 
+    const notifyUploaded = body => { if (typeof onUploaded === 'function')
+        void Promise.resolve().then(() => onUploaded(body)).catch(() => {}); };
+
     async function upload() {
         timer = null;
         const h = headers();
@@ -66,7 +69,7 @@ export function createExpressionNotesFile(globalObject, { debounceMs = 2000 } = 
             const res = await globalObject.fetch('/api/files/upload', {
                 method: 'POST', headers: h, body: JSON.stringify({ name: EXPRESSION_NOTES_FILE_NAME, data: utf8Base64(text) }),
             });
-            if (res && res.ok) lastUploaded = body;
+            if (res && res.ok) { lastUploaded = body; notifyUploaded(body); }
         } catch { /* 下次保存再试 */ }
     }
 
@@ -75,7 +78,7 @@ export function createExpressionNotesFile(globalObject, { debounceMs = 2000 } = 
         const src = plain(notes);
         if (!src || !loaded) return;
         pending = JSON.stringify(src);
-        if (pending === lastUploaded) return;
+        if (pending === lastUploaded) { notifyUploaded(pending); return; }
         clearTimeout(timer);
         timer = setTimeout(() => { void upload(); }, debounceMs);
     }

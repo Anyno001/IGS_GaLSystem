@@ -1,4 +1,5 @@
 import { mapImageRepositoryFor } from '../../media/tavern-map-images.js';
+import { recoverMediaOperation } from '../../media/tavern-media-http.js';
 import { isImagePath } from '../../media/image-identity.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { createMediaLeaseScope } from '../../media/media-lease-scope.js';
@@ -35,6 +36,7 @@ const CLOSE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 export function createMapPanelController(doc, global, fillDraft, options = {}) {
     let root = null;
     let client = null;
+    let tableReadController = null;
     let previousFocus = null;
     let model = { status: 'no-tables', tables: [] };
     let activeUid = '';
@@ -79,6 +81,8 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     const ownedLoading = new Map();
     const ownedLeases = createMediaLeaseScope(mediaCache);
     let disposed = false, cacheGeneration = 0, customIntent = 0;
+    const controller = new AbortController();
+    const recover = (execute, options = {}) => recoverMediaOperation(global || globalThis, execute, { ...options, signal: controller.signal });
     const writeCustom = (url, key = customKey()) => mapImages.set(key, url);
     const clearCustom = () => { customIntent += 1; return mapImages.remove(customKey()); };
     const offClear = mediaCache.onClear(() => {
@@ -89,7 +93,12 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     const saltKey = () => GEN_SALT_KEY + (getChatId() || 'default');
     const readSalt = () => { try { return Number(storage()?.getItem(saltKey())) || 0; } catch (_) { return 0; } };
     const readPalette = () => { try { return storage()?.getItem(GEN_PALETTE_KEY) === 'classic' ? 'classic' : 'bright'; } catch (_) { return 'bright'; } };
-    const writeStored = (key, value) => { try { storage()?.setItem(key, String(value)); } catch (_) { /* 隐私模式下仅本次会话生效 */ } };
+    const writeStored = (key, value) => recover(() => {
+        const store = storage();
+        if (!store) throw new Error('map-storage-unavailable');
+        store.setItem(key, String(value));
+        return store.getItem(key) === String(value);
+    });
     const callback = () => { if (root) reload(); };
     const activeTable = () => model.tables.find(table => table.uid === activeUid) || null;
     const selected = () => activeTable()?.locations.find(loc => loc.id === selectedId) || null;
@@ -101,8 +110,25 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     };
 
     function reload() {
-        try { model = readMapModel(client.readTables()); }
-        catch (error) { model = { status: 'read-error', reason: String(error?.message || '读取地图失败'), tables: [] }; }
+        tableReadController?.abort();
+        const read = () => {
+            const next = readMapModel(client.readTables());
+            if (next.status === 'read-error') throw new Error(next.reason);
+            return next;
+        };
+        try { applyModel(read()); }
+        catch (error) {
+            if (model.status !== 'ready') model = { status: 'read-error', reason: String(error?.message || '读取地图失败'), tables: [] };
+            message = '正在恢复地图读取'; render();
+            const target = root, controller = tableReadController = new AbortController();
+            void recoverMediaOperation(global || globalThis, read, { signal: controller.signal, isActive: () => Boolean(root) && root === target,
+                observe: async () => ({ completed: true, value: await read() }) })
+                .then(next => { if (!next?.cancelled && root === target) { message = ''; applyModel(next); } });
+        }
+    }
+
+    function applyModel(next) {
+        model = next;
         if (model.status !== 'ready') {
             activeUid = ''; parentId = null; selectedId = null; currentId = null;
         }
@@ -161,6 +187,7 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
     }
 
     function close() {
+        tableReadController?.abort(); tableReadController = null;
         customIntent += 1; cacheGeneration += 1; ownedLeases.releaseAll(); ownedLoading.clear();
         if (!root) return { ok: true, reason: 'not-open' };
         basemapToken++;
@@ -227,31 +254,33 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
         if (action === 'zoom-in') zoomViewport(1.4);
         if (action === 'zoom-out') zoomViewport(1 / 1.4);
         if (action === 'reset-view') { camera = null; applyCamera(); }
-        if (action === 'reroll') writeStored(saltKey(), readSalt() + 1);
-        if (action === 'reroll-back') writeStored(saltKey(), Math.max(0, readSalt() - 1));
+        if (action === 'reroll') await writeStored(saltKey(), readSalt() + 1);
+        if (action === 'reroll-back') await writeStored(saltKey(), Math.max(0, readSalt() - 1));
         if (action === 'basemap-source' && (id === 'auto' || id === 'builtin' || id === 'custom') && id !== basemapSource()) {
-            writeStored(BASEMAP_SOURCE_KEY, id === 'auto' ? 'auto' : id === 'custom' ? 'custom' : `builtin:${builtinStyle().id}`);
+            await writeStored(BASEMAP_SOURCE_KEY, id === 'auto' ? 'auto' : id === 'custom' ? 'custom' : `builtin:${builtinStyle().id}`);
             camera = null;
         }
         if (action === 'custom-upload') return uploadCustomBasemap();
         if (action === 'custom-url') return promptCustomBasemap();
         if (action === 'custom-clear') {
-            try { await clearCustom(); message = '已清除自定义底图'; } catch { message = '清除失败，请重试'; }
+            const result = await clearCustom();
+            if (!result?.ok) return;
+            message = '已清除自定义底图';
             camera = null; render(); return;
         }
-        if (action === 'basemap-style' && MAP_BUILTIN_BASEMAPS.some(style => style.id === id)) writeStored(BASEMAP_SOURCE_KEY, `builtin:${id}`);
-        if (action === 'gen-palette' && (id === 'bright' || id === 'classic')) writeStored(GEN_PALETTE_KEY, id);
+        if (action === 'basemap-style' && MAP_BUILTIN_BASEMAPS.some(style => style.id === id)) await writeStored(BASEMAP_SOURCE_KEY, `builtin:${id}`);
+        if (action === 'gen-palette' && (id === 'bright' || id === 'classic')) await writeStored(GEN_PALETTE_KEY, id);
         render();
     }
 
     async function travel() {
         const loc = selected();
         if (!loc?.name || !loc.rowId || loc.issues.includes('地点ID重复')) { message = '地点信息不完整，无法填入草稿'; render(); return; }
-        try {
-            const result = await fillDraft(`前往${loc.name}地点`);
-            message = result?.ok ? '已填入草稿，尚未发送' : result?.reason === 'draft-not-empty'
-                ? '输入框已有草稿，未覆盖' : `填入失败：${result?.reason || '输入框不可用'}`;
-        } catch (error) { message = '填入失败：输入框不可用'; }
+        const target = root, key = customKey();
+        message = '正在填入草稿'; render();
+        const result = await recover(() => fillDraft(`前往${loc.name}地点`), { isActive: () => root === target && key === customKey() });
+        if (result?.cancelled) return;
+        message = '已填入草稿，尚未发送';
         render();
     }
 
@@ -593,8 +622,7 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
         return entry.status === 'ready' ? entry.result.lightsUrl : '';
     }
 
-    // 上传本地图片作本层底图：优先传进酒馆 user/images 存路径（换设备、清缓存后还在），
-    // 没连上酒馆时退回存浏览器 data URL（仅本机、可能超配额）。
+    // 文件只选择一次；读取和持久化在原步骤恢复。
     async function uploadCustomBasemap() {
         const key = customKey(), intent = ++customIntent;
         const picked = await pickBasemapImage();
@@ -609,7 +637,8 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
         if (!sanitizeMapBasemapUrl(picked.dataUrl)) { message = '图片过大或格式不受支持'; render(); return; }
         const saved = await writeCustom(picked.dataUrl, key);
         if (!root || key !== customKey() || intent !== customIntent || disposed) return;
-        message = saved.ok ? (/^data:/i.test(saved.url) ? '已存到本浏览器（未连酒馆，换设备不保留）' : '已设为自定义底图') : '图片保存失败，原底图已保留';
+        if (!saved?.ok) return;
+        message = /^data:/i.test(saved.url) ? '已存到本浏览器（未连酒馆，换设备不保留）' : '已设为自定义底图';
         camera = null;
         render();
     }
@@ -626,7 +655,8 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
         if (!url || !/^https?:\/\//i.test(url)) { message = '网址无效，需以 http:// 或 https:// 开头'; render(); return; }
         const saved = await writeCustom(url, key);
         if (!root || key !== customKey() || intent !== customIntent || disposed) return;
-        message = saved.ok ? '已设为自定义底图' : '保存失败';
+        if (!saved?.ok) return;
+        message = '已设为自定义底图';
         camera = null;
         render();
     }
@@ -638,8 +668,7 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
             input.type = 'file';
             input.accept = 'image/png,image/jpeg,image/webp';
             let done = false;
-            let timeoutId = null;
-            const finish = result => { if (done) return; done = true; if (timeoutId !== null) clearTimeout(timeoutId); resolve(result); };
+            const finish = result => { if (done) return; done = true; resolve(result); };
             input.onchange = () => {
                 const file = input.files && input.files[0];
                 if (!file) return finish(null);
@@ -647,23 +676,24 @@ export function createMapPanelController(doc, global, fillDraft, options = {}) {
                 if (!Number.isFinite(file.size) || file.size > MAP_UPLOAD_MAX_BYTES || file.size <= 0) return finish({ ok: false, reason: 'too-large' });
                 const Reader = (doc.defaultView || global || globalThis).FileReader || globalThis.FileReader;
                 if (typeof Reader !== 'function') return finish({ ok: false, reason: 'read-failed' });
-                const reader = new Reader();
-                reader.onload = event => {
-                    const dataUrl = String((event && event.target && event.target.result) || '');
-                    if (!/^data:image\/(?:png|jpeg|webp);base64,/i.test(dataUrl)) return finish({ ok: false, reason: 'not-image' });
-                    finish({ ok: true, dataUrl });
-                };
-                reader.onerror = () => finish({ ok: false, reason: 'read-failed' });
-                try { reader.readAsDataURL(file); } catch (_) { finish({ ok: false, reason: 'read-failed' }); }
+                void recover(() => new Promise((resolveRead, rejectRead) => {
+                    const reader = new Reader();
+                    reader.onload = event => {
+                        const dataUrl = String((event && event.target && event.target.result) || '');
+                        if (!/^data:image\/(?:png|jpeg|webp);base64,/i.test(dataUrl)) return resolveRead({ ok: false, reason: 'not-image' });
+                        resolveRead({ ok: true, dataUrl });
+                    };
+                    reader.onerror = () => rejectRead(new Error('map-file-read-failed'));
+                    try { reader.readAsDataURL(file); } catch (error) { rejectRead(error); }
+                }), { shouldRecover: result => result?.reason !== 'not-image' }).then(finish);
             };
             input.oncancel = () => finish(null);
-            timeoutId = setTimeout(() => finish(null), 300000);
             try { input.click(); } catch (_) { finish(null); }
         });
     }
 
     function dispose() {
-        disposed = true; offClear();
+        disposed = true; controller.abort(); offClear();
         close();
         generator?.dispose();
         generator = null;

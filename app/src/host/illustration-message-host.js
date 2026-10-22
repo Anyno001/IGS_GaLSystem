@@ -1,5 +1,6 @@
 import { getTavernHelper, getSillyTavernContext } from './tavern-helper-adapter.js';
 import { IGS_IMG_MARKER_SOURCE, stripIllustrationMarkers } from '../scene/scene-directives.js';
+import { isBackgroundGenerationActive } from './background-generation.js';
 
 const REGEX_ID_DISPLAY = 'igs-illustration-marker-display';
 const REGEX_ID_PROMPT = 'igs-illustration-marker-prompt';
@@ -7,6 +8,12 @@ const REGEX_ID_PROMPT = 'igs-illustration-marker-prompt';
 export function createIllustrationMessageHost(globalObject = globalThis) {
     const cleanups = [];
     const context = () => getSillyTavernContext(globalObject);
+    const pendingBindings = new Set();
+    let bindingTimer = null, bindingDelay = 100, destroyed = false;
+    const clearBindingTimer = () => {
+        if (bindingTimer !== null) (globalObject.clearTimeout || clearTimeout)(bindingTimer);
+        bindingTimer = null;
+    };
 
     function getChatId() {
         const ctx = context();
@@ -43,19 +50,16 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
         return ctx && typeof ctx.name1 === 'string' ? ctx.name1 : '';
     }
 
-    // 立绘写词的外貌参考：用户角色读人设描述，角色卡读描述，世界书只取关键词或标题含该名字的条目。
-    // 只在角色没登记 DNA 时调用，每人限字，不整本塞进副 LLM。
-    async function readCharacterLore(names = [], limits = {}) {
+    // 用户人设与角色卡参考；内置写词通过 includeWorldInfo:false 将世界书交给原生触发扫描。
+    // 只收集本轮角色的完整参考，不按字符数丢弃角色或截断设定。
+    async function readCharacterLore(names = [], options = {}) {
         const ctx = context();
         if (!ctx) return [];
-        const perName = Number(limits.perName) || 600;
-        const total = Number(limits.total) || 1800;
         const flat = (text) => String(text || '').replace(/\s+/g, ' ').trim();
         const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
-        const entries = await readWorldInfoEntries(ctx, characters);
+        const entries = options.includeWorldInfo === false ? [] : await readWorldInfoEntries(ctx, characters);
         const out = [];
-        let used = 0;
-        for (const name of names.map((n) => String(n || '').trim()).filter(Boolean)) {
+        for (const name of new Set(names.map((n) => String(n || '').trim()).filter(Boolean))) {
             const parts = [];
             if (name === ctx.name1) {
                 const persona = flat(ctx.powerUserSettings && ctx.powerUserSettings.persona_description);
@@ -66,13 +70,10 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
             if (description) parts.push(`角色卡：${description}`);
             for (const entry of entries) {
                 if (entryMentions(entry, name)) parts.push(`世界书：${flat(entry.content)}`);
-                if (parts.join(' ').length >= perName) break;
             }
-            const text = parts.join('\n').slice(0, Math.min(perName, total - used));
+            const text = [...new Set(parts)].join('\n');
             if (!text) continue;
-            used += text.length;
             out.push({ name, text });
-            if (used >= total) break;
         }
         return out;
     }
@@ -152,19 +153,116 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
         return { ok: true };
     }
 
+    function reportListenerFailure(eventKey) {
+        try { globalObject.console?.warn?.('[IGS] 宿主事件的内部处理失败', { eventKey }); }
+        catch { /* 诊断失败不影响宿主派发。 */ }
+    }
+
+    function invokeListener(eventKey, handler, args) {
+        try {
+            const result = handler(...args);
+            if (result && typeof result.then === 'function') {
+                void Promise.resolve(result).catch(() => reportListenerFailure(eventKey));
+            }
+        } catch { reportListenerFailure(eventKey); }
+    }
+
+    // 只在宿主事件端口尚未出现时探测绑定；就绪后停表，不扫描正文或补跑历史楼层。
+    function scheduleBindings() {
+        if (destroyed || bindingTimer !== null || !pendingBindings.size) return;
+        bindingTimer = (globalObject.setTimeout || setTimeout)(() => {
+            bindingTimer = null;
+            for (const bind of [...pendingBindings]) bind();
+            bindingDelay = Math.min(2000, bindingDelay * 2);
+            scheduleBindings();
+        }, bindingDelay);
+        bindingTimer?.unref?.();
+    }
+
     function on(eventKey, handler) {
-        const ctx = context();
-        const source = ctx && ctx.eventSource;
-        const types = ctx && (ctx.event_types || ctx.eventTypes);
-        const name = types && types[eventKey];
-        if (!source || !name || typeof source.on !== 'function') return () => {};
-        source.on(name, handler);
-        const off = () => {
-            if (typeof source.removeListener === 'function') source.removeListener(name, handler);
-            else if (typeof source.off === 'function') source.off(name, handler);
+        if (destroyed) return () => {};
+        let source = null, name = '', alive = true;
+        // 直接接收并返回；内部 Promise 和异常不进入宿主派发链。
+        const listener = (...args) => {
+            if (alive && !destroyed) invokeListener(eventKey, handler, args);
         };
+        const bind = () => {
+            if (!alive || destroyed || source) return;
+            const ctx = context();
+            const nextSource = ctx?.eventSource;
+            const types = ctx && (ctx.event_types || ctx.eventTypes);
+            if (!nextSource || typeof nextSource.on !== 'function' || !types) return;
+            // 已就绪但未提供的可选事件不持续重试。
+            const nextName = types[eventKey];
+            if (nextName) {
+                nextSource.on(nextName, listener);
+                source = nextSource;
+                name = nextName;
+            }
+            pendingBindings.delete(bind);
+            if (!pendingBindings.size) { clearBindingTimer(); bindingDelay = 100; }
+        };
+        const off = () => {
+            if (!alive) return;
+            alive = false;
+            pendingBindings.delete(bind);
+            if (!pendingBindings.size) clearBindingTimer();
+            if (typeof source?.removeListener === 'function') source.removeListener(name, listener);
+            else if (typeof source?.off === 'function') source.off(name, listener);
+        };
+        pendingBindings.add(bind);
+        bind();
+        scheduleBindings();
         cleanups.push(off);
         return off;
+    }
+
+    // 渲染可能发生在流式正文尚未落定时；主生成结束后补发本轮实际 AI 楼。
+    // 只跟随正常主生成，不把后台 quiet 写词结束当成新的生图请求。
+    function onImageFloorReady(handler) {
+        let active = false, blocked = false, turnChat = '', epoch = 0, ignoredDepth = 0, pending = new Set(), alive = true;
+        const deliver = (id, eventKey = 'CHARACTER_MESSAGE_RENDERED') => {
+            const floor = readFloor(id);
+            if (alive && !blocked && floor?.isAi && floor.isLatest && floor.chatId === turnChat)
+                invokeListener(eventKey, handler, [Number(id)]);
+        };
+        const offs = [
+            on('GENERATION_STARTED', (type, params, dryRun) => {
+                if (dryRun === true) return;
+                if ((type === 'quiet' && !params?.quietToLoud) || type === 'impersonate' || isBackgroundGenerationActive()) {
+                    ignoredDepth++;
+                    return;
+                }
+                epoch++; blocked = false;
+                active = true; turnChat = getChatId(); pending.clear();
+            }),
+            on('CHARACTER_MESSAGE_RENDERED', id => {
+                const number = Number(id);
+                if (id == null || blocked || ignoredDepth || !Number.isSafeInteger(number) || number < 0) return;
+                if (active) pending.add(number);
+                else { turnChat = getChatId(); deliver(number); }
+            }),
+            on('GENERATION_ENDED', id => {
+                if (ignoredDepth) { ignoredDepth--; return; }
+                if (!active) return;
+                active = false;
+                if (getChatId() !== turnChat) { pending.clear(); return; }
+                const number = Number(id);
+                if (id != null && Number.isSafeInteger(number) && number >= 0) pending.add(number);
+                const chat = context()?.chat || [];
+                for (let i = chat.length - 1; i >= 0; i--) {
+                    if (chat[i]?.is_user) break;
+                    if (chat[i] && !chat[i].is_system) { pending.add(i); break; }
+                }
+                const ready = [...pending]; pending.clear();
+                const endedEpoch = epoch;
+                queueMicrotask(() => { if (alive && !active && epoch === endedEpoch)
+                    ready.forEach(id => deliver(id, 'GENERATION_ENDED')); });
+            }),
+            on('GENERATION_STOPPED', () => { epoch++; active = false; blocked = true; ignoredDepth = 0; pending.clear(); }),
+            on('CHAT_CHANGED', () => { epoch++; active = false; blocked = true; ignoredDepth = 0; pending.clear(); turnChat = ''; }),
+        ];
+        return () => { alive = false; pending.clear(); offs.forEach(off => off()); };
     }
 
     function attachPromptStrip() {
@@ -208,7 +306,11 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
     }
 
     return {
-        getChatId, getUserName, readCharacterLore, readFloor, readPreviousAiTexts, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
-        destroy() { while (cleanups.length) cleanups.pop()(); },
+        getChatId, getUserName, readCharacterLore, readFloor, readPreviousAiTexts, writeFloor, on, onImageFloorReady, attachPromptStrip, ensureMarkerRegexes,
+        destroy() {
+            destroyed = true;
+            clearBindingTimer();
+            while (cleanups.length) cleanups.pop()();
+        },
     };
 }

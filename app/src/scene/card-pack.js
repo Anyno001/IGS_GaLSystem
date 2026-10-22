@@ -1,6 +1,7 @@
 // 一张角色卡的场景素材包：库、立绘像素、提示词、立绘位置。按角色卡名字认，不认酒馆内部 id。
 
-const PIXEL_FIELDS = ['dataUrl', 'originalDataUrl', 'workingDataUrl', 'alphaMaskDataUrl'];
+import { IMAGE_FIELDS } from '../media/image-identity.js';
+const PIXEL_FIELDS = IMAGE_FIELDS;
 const FORMAT = 'igs-character-card';
 
 function crc32(bytes) {

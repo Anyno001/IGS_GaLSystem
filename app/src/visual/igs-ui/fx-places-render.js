@@ -1,3 +1,4 @@
+import { prepareAncientPanel } from './ancient-panel-layout.js';
 // 地点与场景包的演出构建器。每个返回 { layer, life, sounds, node }；reduced 时基础态即终态（样式里动画只负责入场）。
 import { esc } from './reader-value-utils.js';
 import { noteGlyph } from './fx-glyphs.js';
@@ -147,7 +148,9 @@ export const PLACES_BUILDERS = {
         const mark = state === 'done' ? '<svg class="igs-pl-q-check" viewBox="0 0 40 40" aria-hidden="true"><path pathLength="1" d="M7 21l9 9L33 9"/></svg>'
             : (state === 'fail' ? '<svg class="igs-pl-q-cross" viewBox="0 0 40 40" aria-hidden="true"><path pathLength="1" d="M8 8l24 24"/><path pathLength="1" d="M32 8L8 32"/></svg>' : '');
         const html = `<div class="igs-pl-q ${kind} is-${state}"><div class="igs-pl-q-paper"><div class="igs-pl-q-head">${head}</div><div class="igs-pl-q-title">${title}</div>${reward}${mark}<div class="igs-pl-stamp is-${state}">${STATE_NAMES[state]}</div></div></div>`;
-        return { layer: 'front', life: scaled(PLACES_LIFE_MS.quest, env), sounds: [`pl-quest-${state}`], node: shell(env, 'quest', html) };
+        const node = shell(env, 'quest', html);
+        if (env.ancient) prepareAncientPanel(node);
+        return { layer: 'front', life: scaled(PLACES_LIFE_MS.quest, env), sounds: [`pl-quest-${state}`], node };
     },
     route(item, env) {
         const stops = (item.stops || []).slice(0, 6);

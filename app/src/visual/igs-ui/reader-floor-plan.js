@@ -1,8 +1,9 @@
 import { createNarrationSpriteTracker, otherNamesOf, sceneCarryOf, NARRATION_HOLD_PAGES, SCENE_AHEAD_PAGES } from '../../scene/narration-sprite.js';
 import { createNarrationNamer } from '../../scene/narration-focus.js';
+import { resolveCharacterLive2dBinding } from './live2d-config.js';
 import { extractSceneDirectives, resolveCharacterKey, narrativeRanges, prepareIllustrationPages } from '../../scene/scene-directives.js';
 import { DEFAULT_MOOD_GROUPS } from '../../scene/mood-groups.js';
-import { createOutfitResolver } from '../../scene/character-outfits.js';
+import { createOutfitResolver, outfitsOfCharacter } from '../../scene/character-outfits.js';
 import { extractFxDirectives, createFxPageResolver } from '../../scene/fx-directives.js';
 import { applyDiceToHits } from '../../scene/battle-context.js';
 import { parseChatMarker } from '../../scene/chat-blocks.js';
@@ -81,6 +82,11 @@ export function createFloorSourceLocator(source) {
 
 // 旁白里常见、情绪词库没收的说法，换成默认情绪组名。
 const NARRATION_MOOD_HINTS = Object.freeze({ 怒火: '愤怒', 恼怒: '愤怒', 气得: '愤怒', 动怒: '愤怒', 怒气: '愤怒', 恼火: '愤怒', 怒意: '愤怒' });
+// 旁白里的情绪词只认神态写法（委屈地、一脸委屈、有些委屈、小雪委屈）；「那些委屈」「见惯试探」是名词，不换表情。
+const MOOD_NEGATE_RE = /(?:不|没|没有|并不|毫不|毫无|从不|别)$/;
+const MOOD_FORM_AFTER_RE = /^(?:地|得|着|起来|极了|不已)/;
+const MOOD_FORM_BEFORE_RE = /(?:一脸|满脸|满面|写满了?|露出|透着|感到|觉得|显得|变得|几分|有些|有点儿?|很|十分|非常|越发|愈发|更加|格外|一阵)$/;
+const MOOD_SUBJECT_TAIL = '(?:微微|轻轻|忍不住|不禁|顿时|立刻|突然|忽然|瞬间|终于|又|也|还)?$';
 
 const normalizeFingerprint = (s) => stripBilingualTranslation(s)
     .replace(/\*（[^）]*）\*/g, '').replace(/[\[\]\*（）]/g, '').replace(/\s+/g, '').trim();
@@ -148,10 +154,21 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
     const generatedLib = sceneAssets?.generated && typeof sceneAssets.generated === 'object' ? sceneAssets.generated : {};
     const castCharacters = { ...(generatedLib.characters || {}), ...(sceneAssets?.characters || {}) };
     const castAliases = {};
+    // 手动指定的 USER 立绘角色（须在名单里）：酒馆用户名在本次解析中归到它名下，只改这份新拼的别名表，不碰存储。
+    const userCharacter = String(sceneAssets?.userCharacter || '').trim();
+    // 名单含默认槽或衣柜里有图都算：换装后的立绘只登记在衣柜，不影响「你」开头的旁白换成主角。
+    const userCharKey = userCharacter && (Object.hasOwn(castCharacters, userCharacter)
+        || Object.keys(outfitsOfCharacter(sceneAssets?.characterOutfits, sceneAssets?.characterAliases, userCharacter).outfits).length > 0) ? userCharacter : '';
     for (const map of [generatedLib.characterAliases, sceneAssets?.characterAliases]) {
         for (const [key, list] of Object.entries(map && typeof map === 'object' ? map : {})) {
             if (Array.isArray(list)) castAliases[key] = [...(castAliases[key] || []), ...list];
         }
+    }
+    if (userCharKey && userName && !castAliases[userCharKey]?.includes(userName)) castAliases[userCharKey] = [...(castAliases[userCharKey] || []), userName];
+    // 只有模型、没有静态图的角色也参加新版旁白点名与场景继承。仅扩展本楼名单，不写静态素材库。
+    if (readerSettings._live2d?.enabled) for (const name of Object.keys(readerSettings._live2d.bindings || {})) {
+        const key = resolveCharacterKey(castCharacters, castAliases, name) || name;
+        if (!Object.hasOwn(castCharacters, key)) castCharacters[key] = {};
     }
     const castKeyMemo = new Map();
     const castKeyOf = name => {
@@ -169,20 +186,36 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         if (!othersMemo.has(key)) othersMemo.set(key, otherNamesOf(castCharacters, castAliases, key, [userName]));
         return othersMemo.get(key);
     };
-    const userKey = userName ? castKeyOf(userName) : '';
-    const selfNames = userName ? [userName, ...(castAliases[userKey] || [])] : [];
+    const userKey = userCharKey || (userName ? castKeyOf(userName) : '');
+    const selfNames = userKey ? [...new Set([userName, ...(castAliases[userKey] || [])].filter(Boolean))] : [];
+    // 换场景判断同行 / 留下时的「主角」：酒馆用户名（没对应角色时也算）加上 User 立绘的别名。
+    const selfAll = [...new Set([userName, ...selfNames].filter(Boolean))];
     const genderMemo = new Map();
     const genderOf = key => {
         if (!genderMemo.has(key)) genderMemo.set(key, detectVoiceGender(characterDnaText(sceneAssets, key)));
         return genderMemo.get(key);
     };
-    const hasSprites = key => Object.keys(castCharacters[key] || {}).length > 0;
-    // 旁白点名：主角要有素材才上；其他人要在名单里且本楼或前 3 个 AI 楼露过面（宿主没给前楼名单时不拦）。
-    const namer = createNarrationNamer({ characters: castCharacters, aliases: castAliases, userKey, userNames: selfNames, genderOf,
-        allow: key => key === userKey ? hasSprites(key) : Object.hasOwn(castCharacters, key) && (castNearby === null || castNearby.has(key)) });
+    // 绑定了 Live2D、默认槽有图、或图只在衣柜里（换装后的立绘），都算有素材。
+    const hasSprites = key => Boolean(resolveCharacterLive2dBinding(readerSettings._live2d, sceneAssets, key))
+        || Object.keys(castCharacters[key] || {}).length > 0
+        || Object.keys(outfitsOfCharacter(sceneAssets?.characterOutfits, sceneAssets?.characterAliases, key).outfits).length > 0;
+    // 旁白点名：主角要有素材才上；其他人要在名单里。句首主语 / 感知者 / 被看见的人算本楼露面；只是句中顺口提到的，须本楼或前 3 个 AI 楼露过面（宿主没给前楼名单时不拦）。
+    // 指定了 User 立绘时，「你」开头的旁白页也换成主角（第二人称故事）。
+    // 已离场、还没被写回来的人：旁白再提他的名字也不上立绘（开口，或这一页正文写他回来了才解除）。
+    const goneKeys = new Set();
+    let pageText = '';
+    // 这一页正文有没有把他写回来。
+    const wroteBack = key => {
+        const probe = createNarrationSpriteTracker({ name: key, aliases: castAliases[key] || [], others: othersFor(key), gender: genderOf(key), gone: true });
+        probe(pageText);
+        return !probe.gone;
+    };
+    const namer = createNarrationNamer({ characters: castCharacters, aliases: castAliases, userKey, userNames: selfNames, genderOf, youLead: Boolean(userCharKey),
+        allow: (key, { mention = false } = {}) => (!goneKeys.has(key) || wroteBack(key)) && (key === userKey ? hasSprites(key) : Object.hasOwn(castCharacters, key) && (castNearby === null || castNearby.has(key) || !mention)) });
     // 换场景时谁跟过来（见 carriesAcrossScene）：每个场景标签、每个人只判一次，主立绘与同屏陪衬共用结果。
     const carryMode = ['strict', 'smart', 'loose'].includes(sceneAssets?.sceneCarryMode) ? sceneAssets.sceneCarryMode : 'smart';
-    const sceneOfPage = offsets.map(offset => offset >= 0 ? lastBefore(scenes, offset, false) : null);
+    // 段落以场景标签开头（「[igs-scene:…]你听着……」）时，标签和这一页同处一个偏移，这一页已属新场景。
+    const sceneOfPage = offsets.map(offset => offset >= 0 ? lastBefore(scenes, offset, true) : null);
     const sceneFirstPage = new Map();
     sceneOfPage.forEach((d, i) => { if (d && !sceneFirstPage.has(d)) sceneFirstPage.set(d, i); });
     const sceneLeads = new Map();
@@ -222,7 +255,7 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
                     const speaker = segmentSpeaker(segments[j]);
                     ahead.push({ text: segments[j], by: !speaker ? '' : castKeyOf(speaker) === key ? 'own' : 'other' });
                 }
-                keep = sceneCarryOf({ name: key, aliases: castAliases[key] || [], others: othersFor(key), self: selfNames,
+                keep = sceneCarryOf({ name: key, aliases: castAliases[key] || [], others: othersFor(key), self: selfAll,
                     lead: sceneLeads.get(d.offset) === key, gender: genderOf(key), ...edgeOf(d), ahead, mode: carryMode });
             }
             carryMemo.set(memoKey, keep);
@@ -230,7 +263,7 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         return carryMemo.get(memoKey);
     };
     const carriesAt = (d, key) => Boolean(carryOf(d, key));
-    // 旁白点名后的情绪：旁白里出现的情绪词（情绪组 + 该角色自己的表情槽名，两字起）取最靠前的一个。
+    // 旁白点名后的情绪：旁白里以神态写法出现的情绪词（情绪组 + 该角色自己的表情槽名，两字起）取最靠前的一个；没有就沿用上一句。
     let groupMoodWords = null;
     const narrationMood = (text, name) => {
         if (!groupMoodWords) {
@@ -240,11 +273,19 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         }
         const slots = Object.keys(castCharacters[castKeyOf(name)] || {});
         const body = String(text || '');
+        const own = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const subjectRe = new RegExp(`(?:${own ? `${own}|` : ''}[她他你])${MOOD_SUBJECT_TAIL}`);
+        const isForm = (at, end) => {
+            const before = body.slice(Math.max(0, at - 8), at);
+            if (MOOD_NEGATE_RE.test(before)) return false;
+            return MOOD_FORM_AFTER_RE.test(body.slice(end)) || MOOD_FORM_BEFORE_RE.test(before) || subjectRe.test(before);
+        };
         let best = '', bestAt = Infinity;
         for (const raw of [...slots, ...groupMoodWords]) {
             const word = String(raw || '').trim();
             if (Array.from(word).length < 2 || word === '默认') continue;
-            const at = body.indexOf(word);
+            let at = body.indexOf(word);
+            while (at >= 0 && at <= bestAt && !isForm(at, at + word.length)) at = body.indexOf(word, at + 1);
             if (at >= 0 && (at < bestAt || (at === bestAt && word.length > best.length))) { best = word; bestAt = at; }
         }
         return NARRATION_MOOD_HINTS[best] || best;
@@ -278,6 +319,7 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
             } else lastBubble = null;
             speechFloor = normalizedIndex;
             narrationTracker = null;
+            goneKeys.clear();
             namer.cross(key => carriesAt(sceneHere, key));
         }
         let textType = 'narration', bubbleSpeaker = '', bubbleMood = '', segmentBody = currentText;
@@ -382,9 +424,15 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         // 点名页自己也做离场判断（「小雪转身离开」当页就收），后面的旁白接着沿用。
         // 情绪：旁白里的情绪词 → 这个人本楼上次的情绪 → 默认。
         let inheritFrom = null, inheritHold = NARRATION_HOLD_PAGES;
+        if (textType === 'narration') {
+            // 已离场的人这一页正文写他回来了（名字不在句首也算），先解除，再走旁白点名。
+            pageText = currentText;
+            for (const key of [...goneKeys]) if (wroteBack(key)) goneKeys.delete(key);
+        }
         if (textType === 'narration' && !spriteChar && sceneAssets.narrationNameSwitch !== false) {
             const focus = normalizedIndex > 0 && pages[normalizedIndex - 1].spriteChar ? castKeyOf(pages[normalizedIndex - 1].spriteChar) : '';
-            const named = namer.read(currentText, { focus });
+            // 上一页台上没人（楼首页、人都走了）：名字不在开头也认，免得开场旁白空立绘。
+            const named = namer.read(currentText, { focus, loose: !focus });
             if (named) {
                 spriteChar = named;
                 spriteMood = narrationMood(currentText, named) || lastMoodByKey.get(named) || '';
@@ -392,7 +440,7 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
                 inheritFrom = lastBubble.index;
                 inheritHold = lastBubble.hold;
             }
-        } else if (bubbleSpeaker) namer.note(castKeyOf(bubbleSpeaker));
+        } else if (bubbleSpeaker) { namer.note(castKeyOf(bubbleSpeaker)); goneKeys.delete(castKeyOf(bubbleSpeaker)); }
         // 旁白直接继承已准备的最近说话页，不再回扫前面的所有页。
         if (!spriteChar && lastBubble) {
             spriteChar = lastBubble.speaker;
@@ -415,21 +463,23 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         let narrationDroppedKey = '';
         if (spriteChar && inheritFrom !== null) {
             const key = keyOf(spriteChar);
-            const pov = (userName && userKey === key)
+            const pov = (userKey && userKey === key)
                 || thoughtCharacters.has(key);
             if (!narrationTracker || narrationTracker.key !== key || narrationTracker.anchor !== inheritFrom || narrationTracker.index !== normalizedIndex - 1) {
                 narrationTracker = { key, anchor: inheritFrom, index: inheritFrom,
-                    push: createNarrationSpriteTracker({ name: spriteChar, aliases: [key, ...(castAliases[key] || [])], others: othersFor(key), pov, gender: genderOf(key), hold: inheritHold }) };
-                for (let i = inheritFrom + 1; i < normalizedIndex; i++) narrationTracker.push(segments[i]);
+                    push: createNarrationSpriteTracker({ name: spriteChar, aliases: [key, ...(castAliases[key] || [])], others: othersFor(key), pov, gender: genderOf(key), hold: inheritHold, self: selfAll }) };
+                for (let i = inheritFrom + 1; i < normalizedIndex; i++) narrationTracker.push(segments[i], segments[i + 1]);
             }
-            const keep = narrationTracker.push(currentText);
+            const keep = narrationTracker.push(currentText, segments[normalizedIndex + 1]);
+            // 真离场记下来；沿用到期只是不再显示，不算离场。
+            if (narrationTracker.push.gone) goneKeys.add(key); else goneKeys.delete(key);
             narrationTracker.index = normalizedIndex;
             if (!keep) {
                 spriteChar = '';
                 spriteMood = '';
                 narrationDropped = true;
                 spriteLeft = true;
-                narrationDroppedKey = key;
+                if (narrationTracker.push.gone || narrationTracker.push.soft) narrationDroppedKey = key;
             }
         }
         if (!spriteChar && !narrationDropped && sceneStateForBg && sceneStateForBg.character) {
@@ -495,6 +545,6 @@ export function prepareReaderFloor({ text, segments, extracted, payload, scene, 
         return itemTargets.get(name);
     };
     return { text, segments, source, sceneDirectives, outfitDirectives, inheritedSceneState, pages, offsets,
-        sceneAt, locator, keyOf, castCharacters, castAliases, carriesAcross: carriesAt, carryOf, sceneOfPage, sceneLeads, presentOf, genderOf, userName, sceneSpeaker: scene.speaker, latestSpeechByPage, fxDirectives, illustrations, eventCgs,
+        sceneAt, locator, keyOf, castCharacters, castAliases, selfNames: selfAll, carriesAcross: carriesAt, carryOf, sceneOfPage, sceneLeads, presentOf, genderOf, userName, userKey, userSource: userCharKey ? 'manual' : userKey ? 'name' : '', sceneSpeaker: scene.speaker, latestSpeechByPage, fxDirectives, illustrations, eventCgs,
         tagItems, tagNames: new Set(tagItems.map(item => normalizeItemName(item.name))), itemPageFor, assets: null, tablesRevision: -1 };
 }

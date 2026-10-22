@@ -1,13 +1,15 @@
 import { requireMediaCache } from './media-cache-owner.js';
+import { recoverMediaOperation } from './tavern-media-http.js';
+import { cgEntryStamp } from './image-identity.js';
+export { cgEntryStamp } from './image-identity.js';
 // CG 库服务。三层数据各管各的：
 // 1. 目录（igs-cg-index entries）：每张楼层 CG / 照片一条轻记录，打开 CG 库只读这里。
 // 2. 缩略图（igs-cg-index thumbs）：网格只放缩略图，第一次看到某张时由原图生成后留下。
 // 3. 原图（igs-illustrations / igs-photo-album 记录 + 酒馆文件）：只在生成缩略图和看大图时读。
 // 目录靠两条路保持准确：插图写入 / 删除时 withCgIndexSync 顺手更新；每次打开 syncIndex 拿两个库的主键对账，
-// 补登新增、删掉消失的、复查还没出图的。每一步都有期限，超时按失败落地并给出是哪一步，不会无限等待。
+// 补登新增、删掉消失的、复查还没出图的。暂时失败在原步骤恢复，媒体关闭结束等待。
 import { parseFloorKey } from './illustration-store.js';
 import { composePhoto, PHOTO_ALBUM_LIMIT } from './photo-album.js';
-import { withDeadline } from './idb-connection.js';
 
 export const CG_PAGE_SIZE = 24;
 export const CG_LIBRARY_TIMEOUTS = { index: 8000, keys: 15000, batch: 20000, full: 45000, thumb: 20000, write: 15000 };
@@ -68,6 +70,7 @@ export function cgEntryFromSlot(key, rec, mark) {
         slot: parsed.slot,
         photoId: '',
         updatedAt: String((rec && rec.updatedAt) || ''),
+        ...(rec?.revisionToken && { revisionToken: rec.revisionToken }),
         ready: Boolean(rec && rec.status === 'done' && rec.dataUrl),
         hidden: Boolean((mark || rec)?.hidden),
         favorite: Boolean((mark || rec)?.favorite),
@@ -129,22 +132,45 @@ export function cgPageSlice(items, page, size = CG_PAGE_SIZE) {
     return { page: index, pages, total: list.length, items: list.slice(start, start + pageSize) };
 }
 
-const sameEntry = (a, b) => Boolean(a && b) && a.ready === b.ready && a.updatedAt === b.updatedAt && a.hidden === b.hidden && a.favorite === b.favorite;
+const sameEntry = (a, b) => Boolean(a && b) && a.ready === b.ready && cgEntryStamp(a) === cgEntryStamp(b) && a.hidden === b.hidden && a.favorite === b.favorite;
 
 // 插图库写入 / 删除槽位时同步目录；目录写失败不影响插图本身，下次打开对账补上。
-export function withCgIndexSync(store, indexStore) {
+export function withCgIndexSync(store, indexStore, globalObject = globalThis) {
     if (!store || !indexStore) return store;
+    const pending = new Map();
+    const syncEntry = async (entry) => {
+        if (!entry) return;
+        const stamp = cgEntryStamp(entry);
+        pending.set(entry.key, stamp);
+        await recoverMediaOperation(globalObject, () => indexStore.upsert([entry]));
+        if (pending.get(entry.key) === stamp) pending.delete(entry.key);
+    };
     return {
         ...store,
+        getCgIndexPendingKeys: () => [...pending.keys()],
+        confirmCgIndexSynced(entries) {
+            for (const entry of entries || []) {
+                if (pending.get(entry.key) === cgEntryStamp(entry)) pending.delete(entry.key);
+            }
+        },
         async putSlot(floorKey, value) {
             const result = await store.putSlot(floorKey, value);
-            const entry = cgEntryFromSlot(`${floorKey}|${value && value.slot}`, value, null);
-            if (entry) Promise.resolve().then(() => indexStore.upsert([entry])).catch(() => {});
+            const entry = cgEntryFromSlot(`${floorKey}|${value && value.slot}`, result, null);
+            await syncEntry(entry);
+            return result;
+        },
+        async updateSlot(floorKey, slot, expectedRevision, patch, options = {}) {
+            if (typeof store.updateSlot !== 'function') return { ok: false, reason: 'update-unavailable' };
+            const result = await store.updateSlot(floorKey, slot, expectedRevision, patch, options);
+            if (!result?.ok) return result;
+            const entry = cgEntryFromSlot(`${floorKey}|${slot}`, result.record, null);
+            await syncEntry(entry);
             return result;
         },
         async deleteSlot(floorKey, slot) {
             const result = await store.deleteSlot(floorKey, slot);
-            Promise.resolve().then(() => indexStore.removeMany([`${floorKey}|${slot}`])).catch(() => {});
+            await recoverMediaOperation(globalObject, () => indexStore.removeMany([`${floorKey}|${slot}`]));
+            pending.delete(`${floorKey}|${slot}`);
             return result;
         },
     };
@@ -152,15 +178,17 @@ export function withCgIndexSync(store, indexStore) {
 
 export function createCgLibrary(deps = {}) {
     const { illustrationStore, photoStore, marksStore, indexStore, clearIllustration } = deps;
+    const recover = (execute, options) => recoverMediaOperation(deps.globalObject || globalThis, execute, options);
     const mediaCache = requireMediaCache(deps.mediaCache || deps.indexStore?.mediaCache, 'cg-library', deps.indexStore?.mediaCache);
-    const thumbKey = entry => `thumb:cg:${entry.key}:${String(entry.updatedAt || '')}`;
+    const thumbKey = entry => `thumb:cg:${entry.key}:${cgEntryStamp(entry)}`;
     const timeouts = { ...CG_LIBRARY_TIMEOUTS, ...(deps.timeouts || {}) };
     const now = typeof deps.now === 'function' ? deps.now : () => new Date().toISOString();
     const makeId = typeof deps.makeId === 'function' ? deps.makeId : () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
     const compose = typeof deps.compose === 'function' ? deps.compose : composePhoto;
     const getDocument = typeof deps.getDocument === 'function' ? deps.getDocument : () => globalThis.document;
     const makeThumbnail = typeof deps.makeThumbnail === 'function' ? deps.makeThumbnail : null;
-    const step = (promise, ms, reason) => withDeadline(promise, ms, reason);
+    // 存储和文件读取各自持有生命周期；本地计时不能丢弃同一次操作的迟到结果。
+    const step = promise => Promise.resolve(promise);
     const hasPhotos = Boolean(photoStore && typeof photoStore.listIds === 'function');
 
     async function readIndex() {
@@ -193,7 +221,8 @@ export function createCgLibrary(deps = {}) {
         const drop = [];
         if (slotKeys.ok) {
             const want = new Set((slotKeys.value || []).map(String));
-            for (const key of want) { const e = byKey.get(key); if (!e || !e.ready) cgToRead.push(key); }
+            const pending = new Set(illustrationStore.getCgIndexPendingKeys?.() || []);
+            for (const key of want) { const e = byKey.get(key); if (!e || !e.ready || pending.has(key)) cgToRead.push(key); }
             for (const e of byKey.values()) if (e.kind !== 'photo' && !want.has(e.key)) drop.push(e.key);
         }
         if (photoIds.ok) {
@@ -209,6 +238,7 @@ export function createCgLibrary(deps = {}) {
             if (!persist || !rows.length) return;
             const saved = await settle(step(indexStore.putMany(rows), timeouts.write, 'write-timeout'), 'write-timeout');
             if (!saved.ok) problems.push(saved.reason);
+            else illustrationStore.confirmCgIndexSynced?.(rows);
         };
         if (total) tell({ phase: 'index', done, total });
         for (let i = 0; i < cgToRead.length; i += SYNC_BATCH) {
@@ -222,7 +252,8 @@ export function createCgLibrary(deps = {}) {
                 if (!rec) { if (old) drop.push(key); return; }
                 const entry = cgEntryFromSlot(key, rec, markOf.get(key) || old);
                 if (!entry) return;
-                if (!sameEntry(entry, old)) { rows.push(entry); changed = true; }
+                if (!sameEntry(entry, old)) changed = true;
+                if (!sameEntry(entry, old) || (illustrationStore.getCgIndexPendingKeys?.() || []).includes(key)) rows.push(entry);
                 byKey.set(key, entry);
             });
             await save(rows);
@@ -257,13 +288,47 @@ export function createCgLibrary(deps = {}) {
         return { ok: problems.length === 0, reason: problems[0] || '', entries: Array.from(byKey.values()), changed };
     }
 
+    // 更新通知只是定位依据；从同一权威槽位重读，不把阅读器内存图另存成图库副本。
+    async function refreshEntry(key) {
+        if (!parseCgSlotKey(key) || !illustrationStore) return { ok: false, reason: 'missing' };
+        try {
+            const [rec, indexed, mark] = await Promise.all([
+                step(illustrationStore.getSlotRecord(key), timeouts.batch, 'batch-timeout'),
+                readIndex(),
+                marksStore ? step(marksStore.get(key), timeouts.index, 'marks-timeout') : null,
+            ]);
+            if (!indexed.ok) return { ok: false, reason: indexed.reason };
+            if (!rec) {
+                await step(indexStore.removeMany([key]), timeouts.write, 'write-timeout');
+                return { ok: true, entry: null };
+            }
+            const old = indexed.entries.find((e) => e.key === key);
+            const entry = cgEntryFromSlot(key, rec, mark || old);
+            const saved = await recover(() => step(indexStore.putMany([entry]), timeouts.write, 'write-timeout'));
+            if (saved?.cancelled) return saved;
+            illustrationStore.confirmCgIndexSynced?.([entry]);
+            return { ok: true, entry };
+        } catch (error) {
+            return { ok: false, reason: reasonOf(error, 'batch-error') };
+        }
+    }
+
     function forget(entry) {
         if (indexStore && entry) Promise.resolve().then(() => indexStore.patch(entry.key, { ready: false })).catch(() => {});
         return { ok: false, reason: 'missing' };
     }
 
     // 原图：楼层 CG 先取记录，路径再经酒馆文件层（本地缓存 → 下载）还原；照片同理。
-    async function readFull(entry) {
+    function readFull(entry, options = {}) {
+        const read = () => readFullOnce(entry);
+        return recover(read, { ...options, shouldRecover: result => result?.reason !== 'missing',
+            observe: async () => {
+                const value = await read();
+                return { completed: value?.ok === true, value };
+            } });
+    }
+
+    async function readFullOnce(entry) {
         if (!entry) return { ok: false, reason: 'missing' };
         try {
             if (entry.kind === 'photo') {
@@ -298,7 +363,7 @@ export function createCgLibrary(deps = {}) {
         if (!got.ok || !got.value) return out;
         for (const e of list) {
             const t = got.value.get(e.key);
-            if (t && mediaCache.token(thumbKey(e)) === stamps.get(e.key) && DISPLAY_URL_RE.test(t.dataUrl) && t.stamp === String(e.updatedAt || '')) out.set(e.key, mediaCache.remember(thumbKey(e), t.dataUrl));
+            if (t && mediaCache.token(thumbKey(e)) === stamps.get(e.key) && DISPLAY_URL_RE.test(t.dataUrl) && t.stamp === cgEntryStamp(e)) out.set(e.key, mediaCache.remember(thumbKey(e), t.dataUrl));
         }
         return out;
     }
@@ -321,7 +386,7 @@ export function createCgLibrary(deps = {}) {
 
     async function setFlag(entry, field, value) {
         if (!entry) return { ok: false, reason: 'missing' };
-        try {
+        const saved = await recover(async () => {
             if (entry.kind === 'photo') {
                 if (!photoStore) return { ok: false, reason: 'store-unavailable' };
                 let result;
@@ -342,10 +407,13 @@ export function createCgLibrary(deps = {}) {
                 const result = await step(marksStore.put({ ...current, [field]: value, key: entry.key, updatedAt: now() }), timeouts.write, 'write-timeout');
                 if (!result || !result.ok) return result || { ok: false, reason: 'write-timeout' };
             }
-        } catch (error) {
-            return { ok: false, reason: reasonOf(error, 'write-timeout') };
+            return { ok: true };
+        }, { shouldRecover: result => result?.reason !== 'missing' });
+        if (!saved?.ok) return saved;
+        if (indexStore) {
+            const indexed = await recover(() => step(indexStore.patch(entry.key, { [field]: value }), timeouts.write, 'write-timeout'));
+            if (indexed?.cancelled) return indexed;
         }
-        if (indexStore) await settle(step(indexStore.patch(entry.key, { [field]: value }), timeouts.write, 'write-timeout'));
         return { ok: true };
     }
 
@@ -353,15 +421,21 @@ export function createCgLibrary(deps = {}) {
         if (!entry) return { ok: false, reason: 'missing' };
         if (entry.kind === 'photo') {
             if (!photoStore || typeof photoStore.remove !== 'function') return { ok: false, reason: 'delete-unavailable' };
-            const result = await settle(photoStore.remove(entry.photoId), 'delete-failed');
-            if (!result.ok || !result.value || !result.value.ok) return { ok: false, reason: 'delete-failed' };
+            const result = await recover(() => photoStore.remove(entry.photoId));
+            if (!result?.ok) return result;
         } else {
             if (typeof clearIllustration !== 'function') return { ok: false, reason: 'delete-unavailable' };
-            const result = await settle(clearIllustration({ chatId: entry.chatId, messageId: entry.messageId, swipeId: entry.swipeId, slot: entry.slot }), 'delete-failed');
-            if (!result.ok || !result.value || !result.value.ok) return { ok: false, reason: (result.value && result.value.reason) || 'delete-failed' };
-            if (marksStore) await settle(marksStore.remove(entry.key));
+            const result = await recover(() => clearIllustration({ chatId: entry.chatId, messageId: entry.messageId, swipeId: entry.swipeId, slot: entry.slot }));
+            if (!result?.ok) return result;
+            if (marksStore) {
+                const marked = await recover(() => marksStore.remove(entry.key));
+                if (marked?.cancelled) return marked;
+            }
         }
-        if (indexStore) await settle(step(indexStore.removeMany([entry.key]), timeouts.write, 'write-timeout'));
+        if (indexStore) {
+            const indexed = await recover(() => step(indexStore.removeMany([entry.key]), timeouts.write, 'write-timeout'));
+            if (indexed?.cancelled) return indexed;
+        }
         return { ok: true };
     }
 
@@ -384,18 +458,27 @@ export function createCgLibrary(deps = {}) {
 
     async function capturePhoto(shot = {}) {
         if (!photoStore) return { ok: false, reason: 'store-unavailable' };
-        const dataUrl = await compose(getDocument(), shot);
-        if (!dataUrl) return { ok: false, reason: 'compose-failed' };
-        const result = await photoStore.put({ id: makeId(), chatId: shot.chatId, messageId: shot.messageId, caption: shot.caption, dataUrl, createdAt: now() });
+        const dataUrl = await recover(async () => (await compose(getDocument(), shot)) || { ok: false, reason: 'compose-failed' });
+        if (dataUrl?.cancelled) return dataUrl;
+        const photo = { id: makeId(), chatId: shot.chatId, messageId: shot.messageId, caption: shot.caption, dataUrl, createdAt: now() };
+        const result = await recover(() => photoStore.put(photo));
         if (result && result.ok) {
             const entry = cgEntryFromPhoto(result.photo);
-            if (indexStore && entry) await settle(indexStore.putMany([entry]));
-            try {
-                const photos = await photoStore.list({ deferImages: true });
-                const extra = photos.slice(PHOTO_ALBUM_LIMIT).filter((p) => !p.favorite);
-                for (const old of extra) await photoStore.remove(old.id);
-                if (indexStore && extra.length) await settle(indexStore.removeMany(extra.map((p) => `${PHOTO_KEY_PREFIX}${p.id}`)));
-            } catch { /* 清理失败下次再清 */ }
+            if (indexStore && entry) {
+                const indexed = await recover(() => indexStore.putMany([entry]));
+                if (indexed?.cancelled) return indexed;
+            }
+            const photos = await recover(() => photoStore.list({ deferImages: true }));
+            if (photos?.cancelled) return photos;
+            const extra = photos.slice(PHOTO_ALBUM_LIMIT).filter((p) => !p.favorite);
+            for (const old of extra) {
+                const removed = await recover(() => photoStore.remove(old.id));
+                if (removed?.cancelled) return removed;
+            }
+            if (indexStore && extra.length) {
+                const indexed = await recover(() => indexStore.removeMany(extra.map((p) => `${PHOTO_KEY_PREFIX}${p.id}`)));
+                if (indexed?.cancelled) return indexed;
+            }
         }
         return result;
     }
@@ -403,6 +486,8 @@ export function createCgLibrary(deps = {}) {
     return {
         readIndex,
         syncIndex,
+        refreshEntry,
+        onChanged: (handler) => deps.onIllustrationUpdated?.(handler) || (() => {}),
         readThumbs,
         makeThumb,
         mediaCache,

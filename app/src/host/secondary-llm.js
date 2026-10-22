@@ -1,5 +1,8 @@
 import { getTavernHelper, getSillyTavernContext } from './tavern-helper-adapter.js';
 import { runBackgroundGeneration } from './background-generation.js';
+import { secondaryLlmMessages } from './secondary-llm-messages.js';
+import { requestCustomLlm } from './secondary-llm-custom.js';
+import { secondaryLlmHttpError, secondaryLlmText } from './secondary-llm-result.js';
 
 function apiBaseUrl(endpoint) {
     const base = String(endpoint || '').trim().replace(/\/+$/, '');
@@ -69,6 +72,7 @@ export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
                 body: JSON.stringify(body),
             });
         } catch {
+            if (route === 'generate') throw secondaryLlmHttpError(null, 'st-backend');
             throw new Error(`${label}：无法连接酒馆后端，请检查酒馆连接`);
         }
         let text = '', data = null;
@@ -77,6 +81,11 @@ export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
             try { data = JSON.parse(text); } catch { /* 下方兼容 SSE 或报告无效响应 */ }
         } else data = await response.json();
         if (!response.ok || data?.error) {
+            if (route === 'generate') {
+                const rejected = secondaryLlmHttpError(response.ok ? null : response.status, 'st-backend', data);
+                if (response.ok) rejected.diagnostic.rejected = true;
+                throw rejected;
+            }
             const detail = safeDetail(data?.error?.message || (typeof data?.error === 'string' ? data.error : '')
                 || data?.message || (!response.ok ? text : '酒馆未返回可用结果，请核对接口地址和密钥'), llm.apiKey);
             throw new Error(`${label}${!response.ok ? `（HTTP ${response.status}）` : ''}${detail ? `：${detail}` : ''}`);
@@ -88,30 +97,36 @@ export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
         return data;
     }
 
-    async function viaTavern(system, user) {
+    async function viaTavern(messages) {
         const helper = getTavernHelper(globalObject);
         if (helper && typeof helper.generateRaw === 'function') {
             // should_silence：后台请求不显示停止按钮、不广播生成事件，避免被当成正文流式。
             return String(await helper.generateRaw({
                 should_stream: false,
                 should_silence: true,
-                ordered_prompts: [{ role: 'system', content: system }, { role: 'user', content: user }],
+                ordered_prompts: messages,
             }) || '');
         }
         const ctx = getSillyTavernContext(globalObject);
         if (ctx && typeof ctx.generateRaw === 'function') {
-            return String(await ctx.generateRaw({ systemPrompt: system, prompt: user }) || '');
+            if (messages.length !== 2 || messages[0].role !== 'system' || messages[1].role !== 'user') {
+                const error = new Error('当前酒馆接口不支持有序多角色提示词，请启用酒馆助手或改用独立 API');
+                error.reason = 'ordered-messages-unsupported';
+                throw error;
+            }
+            return String(await ctx.generateRaw({ systemPrompt: messages[0].content, prompt: messages[1].content }) || '');
         }
         throw new Error('当前酒馆不支持 generateRaw，请在设置中改用独立 API');
     }
 
-    async function viaOpenAi(system, user, llm, signal) {
-        const data = await postToTavern('generate', {
-            ...customConnection(llm),
-            model: llm.model, stream: false, temperature: 0.7, use_sysprompt: true,
-            messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-        }, llm, signal, '副 LLM 请求失败');
-        return String(data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '');
+    async function viaOpenAi(messages, llm) {
+        const base = apiBaseUrl(llm.endpoint);
+        const Service = getSillyTavernContext(globalObject)?.ChatCompletionService;
+        if (typeof Service?.sendRequest === 'function') return requestCustomLlm(Service, messages, llm, `${base}/chat/completions`);
+        const data = await postToTavern('generate', { ...customConnection(llm),
+            model: llm.model, stream: false, use_sysprompt: true, messages,
+        }, llm, llm.signal, '副 LLM 请求失败');
+        return secondaryLlmText(data?.choices?.[0]?.message?.content);
     }
 
     async function fetchModels(llm = {}) {
@@ -129,17 +144,30 @@ export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
 
     return {
         fetchModels,
-        async request({ system, user }, llm = {}) {
+        async request(request, llm = {}) {
             const timeoutMs = Number(llm.timeoutMs) || 90000;
-            const head = String(llm.jailbreakHead || '').trim();
-            const tail = String(llm.jailbreakTail || '').trim();
-            const finalSystem = head ? `${head}\n\n${system}` : system;
-            const finalUser = tail ? `${user}\n\n${tail}` : user;
-            const controller = llm.source === 'openai' ? createAbort() : null;
-            const job = controller
-                ? viaOpenAi(finalSystem, finalUser, llm, controller.signal)
-                : runBackgroundGeneration(() => viaTavern(finalSystem, finalUser));
-            return withTimeout(job, timeoutMs, () => controller?.abort());
+            const messages = secondaryLlmMessages(request, llm);
+            const controller = new AbortController();
+            const cancelled = () => Object.assign(new Error('副 LLM 任务已取消；上游可能仍在执行'), { reason: 'request-stale' });
+            let rejectStop, timer;
+            const stopped = new Promise((_, reject) => { rejectStop = reject; });
+            const abort = () => { controller.abort(); rejectStop(cancelled()); };
+            llm.signal?.addEventListener('abort', abort, { once: true });
+            try {
+                if (llm.signal?.aborted) throw cancelled();
+                timer = setTimeout(() => {
+                    try { llm.onSlow?.(); } catch { /* 原请求继续接收同一回复。 */ }
+                }, timeoutMs);
+                const job = llm.source === 'openai'
+                    ? viaOpenAi(messages, { ...llm, signal: controller.signal })
+                    : runBackgroundGeneration(() => {
+                        if (controller.signal.aborted) throw cancelled();
+                        return viaTavern(messages);
+                    });
+                const result = await Promise.race([job, stopped]);
+                if (controller.signal.aborted) throw cancelled();
+                return result;
+            } finally { clearTimeout(timer); llm.signal?.removeEventListener('abort', abort); }
         },
     };
 }

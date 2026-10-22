@@ -29,11 +29,11 @@ export const WAIT_STAGE_FALLBACK_LINES = Object.freeze([
 ]);
 
 export const WAIT_STAGE_FAILURES = Object.freeze({
-    empty: { title: '这次没有写出正文', text: '请求已经结束，但没有收到可阅读的回复。请返回酒馆重新生成。' },
-    failed: { title: '这次回复失败了', text: '没有收到完整回复。请返回酒馆检查连接或模型报错，再重新生成。' },
+    empty: { title: '正在恢复故事回复', text: '正在继续取得可阅读的正文，原输入已保留。' },
+    failed: { title: '正在恢复故事回复', text: '正在续接本次回复，已取得的正文和原输入已保留。' },
     stopped: { title: '回复已停止', text: '这次生成被中止了，尚未切换到下一楼。' },
-    read: { title: '回复没能打开', text: '读取或显示回复时出错了。当前楼仍保留，请稍后重新打开最新一楼。' },
-    send: { title: '消息没有发出去', text: '发送失败了，输入内容已保留。请返回当前楼后重试。' },
+    read: { title: '正在恢复回复读取', text: '正在继续读取本次回复，当前楼和已有正文已保留。' },
+    send: { title: '正在恢复消息发送', text: '正在续接原消息，输入内容已保留。' },
 });
 
 export const WAIT_STAGE_GAME_LINES = Object.freeze({

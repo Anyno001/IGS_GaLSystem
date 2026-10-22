@@ -139,10 +139,10 @@ const RAW = `
 
 @@.hm-dim{position:absolute;inset:0;background:#120c0a;opacity:.42;animation:hm-veil 1s ease both;}
 @@.hm-trayfull{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;}
-@@.hm-trayfull-plate{width:min(240px,64vw);animation:hm-rise .9s ease-out both;}
-@@.hm-trayfull-plate svg{display:block;width:100%;fill:none;stroke:#cfc6ae;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round;}
-@@.hm-trayfull-plate .hm-rim{stroke:#c9a961;stroke-width:1;}
-@@.hm-trayfull-plate .hm-rim.is-in{stroke-opacity:.35;}
+@@.hm-trayfull-plate{position:relative;width:min(240px,64vw);aspect-ratio:120/84;animation:hm-rise .9s ease-out both;}
+@@.hm-trayfull-plate svg{display:block;width:100%;height:auto;overflow:visible;}
+/* The silk SVG extends below its 120:84 plate; keep labels in the original slots. */
+@@.hm-tray.is-silk .hm-trayfull-plate svg{position:absolute;left:0;top:0;}
 @@.hm-trayfull-label{font-size:1.5em;letter-spacing:.4em;padding-left:.4em;color:#ece2c8;text-shadow:0 1px 8px rgba(0,0,0,.6);animation:hm-rise .6s ease-out .7s both;}
 @@.hm-trayfull-who{color:#a99d82;letter-spacing:.3em;animation:hm-rise .6s ease-out 1s both;}
 

@@ -3,7 +3,7 @@ import { createMediaRecordJournal } from './media-record-journal.js';
 import { mediaFileGcFor } from './media-file-gc.js';
 import { generatedImageReferences, generatedImageAudit } from './image-references.js';
 import { IMAGE_FIELDS } from './image-identity.js';
-import { applyGeneratedImageUpdate } from './generated-asset-store.js';
+import { applyGeneratedImageUpdate, applyGeneratedPromptUpdate } from './generated-asset-store.js';
 import { retryInlineMedia } from './media-migration.js';
 
 export function withTavernGeneratedAssetFiles(store, globalObject = globalThis) {
@@ -29,9 +29,9 @@ export function withTavernGeneratedAssetFiles(store, globalObject = globalThis) 
         try { await journal.restore(); } catch (error) { const local = await store.getImage(id); if (local) return local; throw error; }
         return store.getImage(id);
     }
-    async function saveImage(value, expected = null) {
+    async function saveImage(value, expected = null, options = {}) {
         await journal.restore().catch(() => {});
-        const old = await store.getImage(value.id), next = await files.offload(value, value.id, old);
+        const old = await store.getImage(value.id), next = await files.offload(value, value.id, old, options);
         try {
             await journal.write(`image:${value.id}`, next, async () => {
                 if (!files.sameRecord(expected || old, await store.getImage(value.id))) throw new Error('image-write-stale');
@@ -47,6 +47,8 @@ export function withTavernGeneratedAssetFiles(store, globalObject = globalThis) 
         restore: journal.restore,
         hydrateImage: files.hydrate,
         getImageRecord: raw,
+        // 只读本机记录、不等恢复：给阅读器先显示用，没有时由调用方回到 getImageRecord。
+        peekImageRecord: id => store.getImage(id),
         async listImages() { await journal.restore(); return store.listImages(); },
         async listAssets() { await journal.restore(); return store.listAssets(); },
         async listFloors() { await journal.restore(); return store.listFloors(); },
@@ -62,11 +64,28 @@ export function withTavernGeneratedAssetFiles(store, globalObject = globalThis) 
             });
             return files.hydrate(record, options);
         },
-        putImage: saveImage,
-        async deleteImage(id) {
+        putImage: (value, options) => saveImage(value, null, options),
+        async readImage(id, options = {}) {
+            const record = await raw(id);
+            if (!record) return null;
+            try { return await files.hydrate(record, { ...options, fields: ['dataUrl'], strictRead: true }); }
+            catch (error) { if ([404, 410].includes(error.status)) return null; throw error; }
+        },
+        async updateImagePrompt(id, expectedRevision, prompt, updatedAt) {
+            await raw(id);
+            try {
+                return await journal.write(`image:${id}`, async () => {
+                    const result = applyGeneratedPromptUpdate(await store.getImage(id), expectedRevision, prompt, updatedAt);
+                    if (!result.ok) throw Object.assign(new Error(result.reason), { result });
+                    return result.record;
+                }, () => store.updateImagePrompt(id, expectedRevision, prompt, updatedAt));
+            } catch (error) { if (error.result) return error.result; throw error; }
+        },
+        async deleteImage(id, options = {}) {
             const old = await raw(id);
             try {
                 await journal.write(`image:${id}`, async () => {
+                    if (options.beforeDelete && !await options.beforeDelete()) throw Object.assign(new Error('image-referenced'), { retained: true });
                     const references = await generatedImageReferences(store, globalObject, referenceRoot());
                     if (references.ids.has(id)) throw Object.assign(new Error('image-referenced'), { retained: true });
                     return null;

@@ -1,8 +1,9 @@
-import { namesOf, QUOTE_RE, ABSENT_RE, MEDIA_RE, MEDIA_AFTER_RE } from './narration-sprite.js';
+import { namesOf, QUOTE_RE, ABSENT_RE, MEDIA_RE, MEDIA_AFTER_RE, mentionIsAbsent } from './narration-sprite.js';
 
 // 旁白页立绘给谁（每楼一个，按页序调用）：
 // - 感知句「你听见小雪在哭」「严尚义盯着白墨看」给被感知的人（宾语）；「白墨被严尚义看到」给被字前的主语；
-// - 否则看开头三个字内（标点不算）的名字；
+// - 否则看开头三个字内（标点不算）的名字；youLead 时「你」开头给主角（「你的」「你身后」等修饰不算）；
+// - 开头小句没写到人（穿过门口，你……）时取逗号后的名字或「你」；
 // - 否则开头的她 / 他：先归话题主语（topic，最近一句旁白的施事者），性别冲突再归画面上的人或上一句宾语，都对不上不猜。
 // 名字含别名与三四字名的后两字；同一位置取最长的（尚义嬷嬷 先于 尚义），都换回主名。
 // read 返回主名，'' 表示这一页不点名（沿用照旧）。allow(key) 决定能不能上立绘（主角须有素材、其他人须近期露面）。
@@ -17,10 +18,16 @@ const SENTENCE_RE = /[。！？!?…\n]/;
 // 宾语前可跳过的修饰（不远处的、站在门口的）最多几个字。
 const OBJECT_REACH = 8;
 const LEAD_REACH = 3;
+const CLAUSE_LEAD_RE = /^([^，,、；;]{1,10})[，,、]\s*/;
+// 「接着你」「然后白墨」：句首连接词不占开头的位置。
+const CONNECTIVE_RE = /^(?:紧接着|接着|然后|随后|于是|这时候?|此时|突然|忽然|同时|只见|而|但|可是?|不过)/;
+// 名字是常用词的子串（下小雨了、小雨点、小雨过后）：前后文像天气 / 量词时不当人名。
+const NAME_BEFORE_RE = /(?:下|场|阵|细|飘|毛毛)$/;
+const NAME_AFTER_RE = /^(?:点(?![头了点着击开亮燃])|滴|天|过(?![来去头身])|后(?![退仰撤背来方面排])|季)/;
 
 const probeOf = (name) => String(name || '').replace(/[\s\p{P}\p{S}]/gu, '');
 
-export function createNarrationNamer({ characters = {}, aliases = {}, userKey = '', userNames = [], allow = () => true, genderOf = () => '' } = {}) {
+export function createNarrationNamer({ characters = {}, aliases = {}, userKey = '', userNames = [], allow = () => true, genderOf = () => '', youLead = false } = {}) {
     const aliasMap = aliases && typeof aliases === 'object' ? aliases : {};
     const keys = Object.keys(characters && typeof characters === 'object' ? characters : {});
     if (userKey && !keys.includes(userKey)) keys.push(userKey);
@@ -62,6 +69,13 @@ export function createNarrationNamer({ characters = {}, aliases = {}, userKey = 
         return last;
     }
 
+    // 句首主语：开头三个字内的第一个人。
+    function leadToken(text) {
+        const lead = String(text || '').trimStart();
+        for (let k = 0; k < Math.min(LEAD_REACH, lead.length); k++) { const t = tokenAt(lead, k); if (t) return t; }
+        return null;
+    }
+
     // 一句里第一个有效感知：seen 被感知者，by 感知者，passive 被动句；不在场 / 否定 / 媒介 / 找不到宾语的跳过。
     function perceive(sentence) {
         for (const m of sentence.matchAll(PERCEIVE_RE)) {
@@ -79,7 +93,8 @@ export function createNarrationNamer({ characters = {}, aliases = {}, userKey = 
             for (let k = 0; k <= Math.min(OBJECT_REACH, after.length - 1) && !seen; k++) seen = tokenAt(after, k);
             if (!seen) continue;
             if (seen.kind === 'name' && MEDIA_AFTER_RE.test(after.slice(seen.end))) continue;
-            return { seen, by: lastToken(clause), passive: false };
+            // 「嬷嬷立在床幔外，听见你……」：这个小句省略了主语，感知者往前取整句的主语。
+            return { seen, by: lastToken(clause) || leadToken(before), passive: false };
         }
         return null;
     }
@@ -99,33 +114,65 @@ export function createNarrationNamer({ characters = {}, aliases = {}, userKey = 
         : token.kind === 'name' ? token.key
             : token.kind === 'pronoun' ? resolvePronoun(token.word, focus) : '';
 
-    function read(text, { focus = '' } = {}) {
-        const body = String(text || '').replace(QUOTE_RE, '');
+    // loose：舞台上没人可沿用时（楼首页、人都走了），名字不在开头也认，取全页最早出现的那个。
+    function read(text, { focus = '', loose = false } = {}) {
+        // 场景标签和正文同页（「[igs-scene:…]你听着……」）时先剥掉，否则句首认不出人。
+        const body = String(text || '').replace(/\[igs-[^\]\n]*\]?/g, '').replace(QUOTE_RE, '');
         const sentences = body.split(SENTENCE_RE).filter((s) => s.trim());
-        let pick = null;
-        for (const s of sentences) {
-            const p = perceive(s);
+        let pick = null, mention = false;
+        // 每句只算一次感知，选人和推进话题共用。
+        const perceived = sentences.map((s) => perceive(s));
+        for (const p of perceived) {
             if (!p) continue;
             // 宾语是代词、泛指或反身时不猜，这一页不点名。
+            // 「嬷嬷听见你……」：第二人称里别人看 / 听你，镜头是你的眼睛，给感知者。
+            if (!p.passive && p.seen.kind === 'you' && p.by?.kind === 'name') { pick = p.by.key; break; }
             pick = p.seen.kind === 'name' || p.seen.kind === 'you' ? p.seen.key || '' : '';
             break;
         }
-        if (pick === null) {
-            const plain = probeOf(body);
-            let bestAt = LEAD_REACH;
+        const plain = probeOf(body);
+        const earliestName = (reach) => {
+            let found = null, bestAt = reach;
             for (const e of entries) {
                 const at = plain.indexOf(e.probe);
                 if (at < 0 || at >= bestAt || numbered(e.probe, plain.slice(at + e.probe.length))) continue;
-                pick = e.key; bestAt = at;
+                if (NAME_BEFORE_RE.test(plain.slice(Math.max(0, at - 2), at)) || NAME_AFTER_RE.test(plain.slice(at + e.probe.length))) continue;
+                // 「小雪的照片」「白墨还没来」「听说小雪……」：写到了，人不在眼前。
+                const sentence = sentences.find((s) => s.includes(e.name)) || '';
+                const written = sentence.indexOf(e.name);
+                if (written >= 0 && mentionIsAbsent(sentence, written, written + e.name.length)) continue;
+                found = e.key; bestAt = at;
             }
+            return found;
+        };
+        if (pick === null) pick = earliestName(LEAD_REACH + (plain.match(CONNECTIVE_RE)?.[0].length || 0));
+        if (pick === null && youLead && userKey) {
+            const lead = (sentences[0] || '').replace(/^[\s\p{P}\p{S}]+/u, '').replace(CONNECTIVE_RE, '').replace(/^[\s\p{P}\p{S}]+/u, '');
+            if (lead[0] === '你' && !YOU_MODIFIER_RE.test(lead)) pick = userKey;
+        }
+        if (pick === null) {
+            // 「穿过门口，你推开门」：开头小句省略主语、本身没写到人时，取逗号后的主语。
+            const first = (sentences[0] || '').trimStart();
+            const m = first.match(CLAUSE_LEAD_RE);
+            const t = m && !m[1].includes('我') && !lastToken(m[1]) ? tokenAt(first, m[0].length) : null;
+            if (t?.kind === 'you' && youLead && userKey) pick = userKey;
+            if (t?.kind === 'name' && !NAME_AFTER_RE.test(first.slice(t.end)) && !mentionIsAbsent(first, t.start, t.end)) pick = t.key;
         }
         if (pick === null) {
             const head = (sentences[0] || '').trimStart().match(PRONOUN_HEAD_RE);
             if (head) pick = resolvePronoun(head[0], focus);
         }
+        if (!pick && loose) {
+            // 台上没人：「你听见她……」宾语认不出时给感知者，再不行取全页最早的名字。
+            const by = perceived.find(Boolean)?.by;
+            const lead = (sentences[0] || '').replace(/^[\s\p{P}\p{S}]+/u, '').replace(CONNECTIVE_RE, '').replace(/^[\s\p{P}\p{S}]+/u, '');
+            if (by?.kind === 'you' || (lead[0] === '你' && !YOU_MODIFIER_RE.test(lead))) pick = youLead && userKey ? userKey : pick;
+            else if (by?.kind === 'name') pick = by.key;
+            if (!pick) { pick = earliestName(Infinity); mention = Boolean(pick); }
+        }
         // 话题主语按句推进：感知句记感知者与宾语（被动句的主语是被感知者），其余记句首的人；「你」打头不改话题。
-        for (const s of sentences) {
-            const p = perceive(s);
+        for (let n = 0; n < sentences.length; n++) {
+            const s = sentences[n], p = perceived[n];
             if (p) {
                 const [doer, done] = p.passive ? [p.seen, p.by] : [p.by, p.seen];
                 const doerKey = doer && doer.kind !== 'you' ? keyOf(doer, focus) : '';
@@ -139,7 +186,8 @@ export function createNarrationNamer({ characters = {}, aliases = {}, userKey = 
             const key = t && t.kind !== 'you' ? keyOf(t, focus) : '';
             if (key) { topic = key; object = ''; }
         }
-        return pick && allow(pick) ? pick : '';
+        // mention：只是句中顺口提到（不是句首主语 / 感知者 / 被看见的人），allow 可据此要求近期露过面。
+        return pick && allow(pick, { mention }) ? pick : '';
     }
     return {
         read,

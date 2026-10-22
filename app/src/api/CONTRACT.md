@@ -38,6 +38,8 @@ IGS.api.promptPresets.register(preset);
 
 `sceneRegexPresets`、`textFilterPresets`、`textFormatPresets` 必须走同一套 runtime `PresetRegistry`，不能在 UI 或 API 层各自维护第二份 current 状态。
 
+0.36.88 本地草稿：`IGS.api.promptPresets` 也接到同一 PresetRegistry，供生图预设管理使用；保存/激活、导入冲突、草稿 revision 与默认升级校验归 presets 层。管理和预览本身不触发写词/生图，不暴露内部租约、凭据或原图快照。兼容全局不存在顶层 `IGS.promptPresets` 别名。
+
 ## 稳定性要求
 
 公开 API 只增不破；破坏性变更必须进入主版本升级。

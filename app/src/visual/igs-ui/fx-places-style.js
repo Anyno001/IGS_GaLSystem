@@ -1,3 +1,4 @@
+import { ANCIENT_PAPER_TEXTURE } from './fx-ancient-paper-assets.js';
 // 地点与场景包的样式。一次性演出的动画只负责入场与退场，基础态即终态（reduced 与 low 直接落终态）；常驻地点层只用静态或慢动画。
 // 一次性演出统一用 --igs-dfx-life 做总时长，百分比关键帧分入场 / 停留 / 退场；装饰用实色，光晕类才用渐变透明。
 const L = 'var(--igs-dfx-life)';
@@ -170,14 +171,14 @@ ${O} .igs-pl-lv-reward{color:#e6e9ef;font-size:.95em;letter-spacing:.1em;animati
 ${O} .igs-pl-spark{position:absolute;left:var(--x);bottom:-4px;width:3px;height:3px;border-radius:50%;background:var(--pl-gold);box-shadow:0 0 6px 1px rgba(241,217,160,.7);animation:igs-pl-spark 1800ms ease-out var(--d) both;}
 @keyframes igs-pl-spark{0%{opacity:0;transform:translateY(0)}25%{opacity:1}100%{opacity:0;transform:translateY(-90px)}}
 ${O} .igs-pl.is-ancient .igs-pl-lv-title{color:#e8c987;}
-${O} .igs-pl-q{position:absolute;left:max(16px,5%);top:26%;width:min(34%,320px);animation:igs-pl-qin ${L} cubic-bezier(.2,.9,.3,1) both;--q:#a9cdf6;}
+${O} .igs-pl-q{position:absolute;left:max(16px,5%);top:clamp(48px,15%,96px);width:min(320px,90%);max-width:calc(100% - 32px);animation:igs-pl-qin ${L} cubic-bezier(.2,.9,.3,1) both;--q:#a9cdf6;}
 ${O} .igs-pl-q.is-scroll{--q:#e8c987;}
 @keyframes igs-pl-qin{0%{opacity:0;transform:translateY(12px)}12%{opacity:1;transform:none}86%{opacity:1}100%{opacity:0}}
-${O} .igs-pl-q-paper{position:relative;overflow:hidden;box-sizing:border-box;padding:12px 16px 14px;background:var(--pl-glass);color:#f2f4f8;border:1px solid rgba(255,255,255,.2);border-radius:3px;clip-path:inset(0 0 0 0);animation:igs-pl-unroll ${L} cubic-bezier(.3,.8,.3,1) both;}
+${O} .igs-pl-q-paper{position:relative;overflow:hidden;box-sizing:border-box;padding:14px 18px 46px;background:var(--pl-glass);color:#f2f4f8;border:1px solid rgba(255,255,255,.2);border-radius:3px;clip-path:inset(0 0 0 0);animation:igs-pl-unroll ${L} cubic-bezier(.3,.8,.3,1) both;}
 @keyframes igs-pl-unroll{0%{clip-path:inset(0 0 100% 0)}18%,86%{clip-path:inset(0 0 0 0)}100%{clip-path:inset(0 0 100% 0)}}
 ${O} .igs-pl-q-head{color:var(--q);font-size:.82em;letter-spacing:.34em;padding-bottom:6px;margin-bottom:8px;border-bottom:1px solid rgba(255,255,255,.18);}
-${O} .igs-pl-q-title{font-family:var(--pl-serif);font-size:1.15em;line-height:1.5;padding-right:40px;min-height:2.6em;letter-spacing:.06em;}
-${O} .igs-pl-q-reward{display:flex;gap:8px;align-items:baseline;margin-top:8px;padding-top:7px;border-top:1px solid rgba(255,255,255,.14);font-size:.9em;}
+${O} .igs-pl-q-title{font-family:var(--pl-serif);font-size:1.15em;line-height:1.5;overflow-wrap:anywhere;padding-right:24px;min-height:2.6em;letter-spacing:.06em;}
+${O} .igs-pl-q-reward{display:flex;gap:8px;align-items:baseline;overflow-wrap:anywhere;margin-top:8px;padding-top:7px;border-top:1px solid rgba(255,255,255,.14);font-size:.9em;}
 ${O} .igs-pl-q-reward small{flex:none;opacity:.7;letter-spacing:.2em}
 ${O} .igs-pl.is-ancient .igs-pl-q-paper{font-family:var(--pl-serif);}
 ${O} .igs-pl.is-ancient .igs-pl-q-head{letter-spacing:.5em;}
@@ -238,4 +239,8 @@ ${O} .igs-pl-ch-item,${O} .igs-pl-song{animation-name:igs-pl-fadeio;}
 @keyframes igs-pl-lampfx-c{0%{opacity:0}8%{opacity:1}80%{opacity:1}100%{opacity:0}}
 `;
 
-export const PLACES_STYLE_TEXT = `${AMBIENCE_CSS}${CARD_CSS}`;
+export const PLACES_STYLE_TEXT = `
+#igs-overlay .igs-pl.is-ancient .igs-pl-map.is-ancient-map{background:#eee3c9 url("${ANCIENT_PAPER_TEXTURE}") 60% 50% / 220% 220%;border:1px solid #b09b72;border-radius:1px;color:#59482c;}
+#igs-overlay .igs-pl.is-ancient .igs-pl-map.is-ancient-map .igs-pl-stop{color:#49391f;text-shadow:0 1px 1px #fff8;}
+#igs-overlay .igs-pl.is-ancient .igs-pl-map.is-ancient-map .igs-pl-path{stroke:#80623e;}
+#igs-overlay .igs-pl.is-ancient .igs-pl-map.is-ancient-map .igs-pl-pin{fill:#aa4c39;stroke:#eee3c9;}${AMBIENCE_CSS}${CARD_CSS}`;

@@ -57,6 +57,8 @@ const bundle = inlineTypewriterAudio(skinAssets.bundle);
 
 const roundedFontWeights = [300, 400, 500, 700];
 const dialogFontAssets = [
+    { family: 'IGS-MaShanZheng', file: 'MaShanZheng-Regular.woff2', weight: 400, style: 'normal', format: 'woff2' },
+    { family: 'IGS-ZhiMangXing', file: 'ZhiMangXing-Regular.woff2', weight: 400, style: 'normal', format: 'woff2' },
     { family: 'LXGW WenKai', file: 'LXGWWenKai-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
     { family: 'LXGW WenKai', file: 'LXGWWenKai-Light.ttf', weight: 300, style: 'normal', format: 'truetype' },
     { family: 'LXGW WenKai Lite', file: 'LXGWWenKaiLite-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
@@ -114,6 +116,7 @@ const manifest = {
 const fontSourceDir = path.join(srcRoot, 'visual', 'igs-ui', 'assets', 'fonts');
 const fontTargetDir = path.join(distRoot, 'fonts');
 const fontLicenseFiles = [
+    'MaShanZheng-OFL.txt', 'ZhiMangXing-OFL.txt',
     'OFL.txt', 'SourceHanSerifCN-LICENSE.txt', 'SourceHanSansCN-LICENSE.txt',
     'Cormorant-OFL.txt', 'Cormorant-OFL-FAQ.txt', 'LXGW-OFL.txt', 'Yozai-OFL.txt',
     'HuiwenMincho-CC0.txt', 'TsangerYuYangT-MIT.txt', 'SmileySans-OFL.txt',
@@ -207,6 +210,7 @@ for (const file of voiceAssets) {
     fs.copyFileSync(source, path.join(voiceTargetDir, file));
 }
 fs.copyFileSync(path.join(voiceSourceDir, 'CREDITS.md'), path.join(voiceTargetDir, 'CREDITS.md'));
+fs.copyFileSync(path.join(srcRoot, 'vendor', 'fflate.LICENSE.txt'), path.join(distRoot, 'fflate.LICENSE.txt'));
 fs.writeFileSync(path.join(distRoot, 'igs.bundle.debug.js'), bundle, 'utf8');
 fs.writeFileSync(path.join(distRoot, 'igs.bundle.js'), await minifyBundle(bundle), 'utf8');
 fs.writeFileSync(path.join(distRoot, 'igs.bundle.css'), css, 'utf8');

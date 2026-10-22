@@ -153,7 +153,10 @@ function buildShowcase(doc, card, ancient = false) {
     node.appendChild(el(doc, 'div', 'igs-fx-item-showcase-burst'));
     const plate = el(doc, 'div', 'igs-fx-item-showcase-plate');
     plate.appendChild(buildIcon(doc, card, 'igs-fx-item-showcase-icon'));
-    plate.appendChild(el(doc, 'span', 'igs-fx-item-showcase-label', `${card.actionLabel}了`));
+    const label = el(doc, 'span', 'igs-fx-item-showcase-label', `${card.actionLabel}了`);
+    // 动作原词另存一份，供不带「了」的皮肤（水墨武侠「获 得」）取用。
+    label.setAttribute('data-igs-item-act', card.actionLabel || '');
+    plate.appendChild(label);
     plate.appendChild(el(doc, 'span', 'igs-fx-item-showcase-name', card.name));
     if (card.description) plate.appendChild(el(doc, 'span', 'igs-fx-item-showcase-desc', card.description));
     if (ancient) plate.appendChild(buildSeal(doc, card, 'igs-fx-item-showcase-seal'));
@@ -548,6 +551,8 @@ export const ITEM_FX_STYLE_TEXT = `
 .igs-fx-item-showcase[data-igs-era="ancient"]:not(#igs-era-x) .igs-fx-item-showcase-label{color:#7a2a1a;letter-spacing:.4em;}
 .igs-fx-item-showcase[data-igs-era="ancient"]:not(#igs-era-x) .igs-fx-item-showcase-name{color:#2b1d12;font-size:26px;letter-spacing:.12em;}
 .igs-fx-item-showcase[data-igs-era="ancient"]:not(#igs-era-x) .igs-fx-item-showcase-desc{color:#6b5139;opacity:1;}
+/* 世界观换皮的中央面板：占位图标跟随面板前景色，免得深色皮肤的浅色图标落在浅纸面上（古风皮肤 + 西幻 / 大正）。古代自带朱砂色，不在此列 */
+.igs-fx-item-showcase[data-igs-era]:not([data-igs-era="ancient"]):not(#igs-era-x) .igs-fx-item-showcase-plate .igs-fx-item-icon[data-igs-item-placeholder]{color:inherit;}
 .igs-fx-item-showcase-seal{position:absolute;right:16px;bottom:18px;width:40px;height:40px;margin:0;font-size:26px;border-radius:4px;box-shadow:inset 0 0 0 2px #b8452f,inset 0 0 0 4px rgba(246,236,212,.85);animation:igs-fx-item-stamp .5s cubic-bezier(.3,1.4,.5,1) .7s both;}
 /* 世界观换皮（西幻羊皮纸 / 科幻全息面板 / 末日旧纸锈边）：只改配色字体，布局、印文与动画沿用现代。 */
 .igs-fx-item-stack[data-igs-era="fantasy"]:not(#igs-era-x),.igs-fx-item-showcase[data-igs-era="fantasy"]:not(#igs-era-x){--igs-item-accent-c:#b8862f;}

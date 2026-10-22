@@ -75,10 +75,14 @@ export function requestChatu8Image(host, prompt, options = {}) {
             if (settled) return;
             settled = true;
             if (timer != null) clearTimer(timer);
+            options.signal?.removeEventListener('abort', abort);
             detach(eventSource, handler);
             resolve(result);
         };
         const fail = (reason, error) => finish({ ok: false, reason, error });
+        const abort = () => finish({ ok: false, reason: 'request-stale', stopGeneration: true });
+        options.signal?.addEventListener('abort', abort, { once: true });
+        if (options.signal?.aborted) { abort(); return; }
 
         function handler(data) {
             if (!data || String(data.id) !== id) return;
@@ -95,7 +99,7 @@ export function requestChatu8Image(host, prompt, options = {}) {
             fail('chatu8-bind-failed', `无法监听智绘姬回执：${(error && error.message) || error}`);
             return;
         }
-        timer = setTimer(() => fail('chatu8-timeout', `智绘姬 ${Math.round(timeoutMs / 1000)} 秒内没有返回图片`), timeoutMs);
+        timer = setTimer(() => { try { options.onSlow?.(); } catch { /* 继续等待相同请求 ID 的回执。 */ } }, timeoutMs);
         // Node 下等待中的请求不应让进程常驻；浏览器返回数字句柄，没有 unref。
         if (timer && typeof timer.unref === 'function') timer.unref();
         try {

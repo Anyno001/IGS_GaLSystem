@@ -42,11 +42,22 @@ function spriteLine(c) {
     const m = c.spriteMatch;
     if (c.chatPage || c.htmlCardPage) return '本页是聊天 / 卡片页，不显示立绘';
     if (c.cgActive) return '挂着 CG，立绘让位';
+    if (c.spriteLive2d) return `角色「${c.spriteLive2d.character}」情绪「${c.spriteLive2d.mood || '默认'}」 → Live2D（静态差分已暂停）`;
     if (!m) return c.speaker ? `说话人「${c.speaker}」未进入立绘匹配（场景素材关闭或旁白 / 系统角色）` : '无说话人';
     const why = m.outfitOffset == null ? '' : `（来源 ${m.outfitSource || '无'}${m.outfitReason ? `/${m.outfitReason}` : ''} @${m.outfitOffset}）`;
-    const want = `角色「${m.character}」表情「${m.mood || '无'}」服装「${m.outfit || '无'}」${why}`;
-    if (c.spriteImage) return `${want} → ${label(m.source)}，槽位「${m.slot || '默认'}」${m.quality ? `，匹配度 ${m.quality}` : ''}`;
-    if (c.pendingSpriteRef) return `${want} → ${label(m.source)}，槽位「${m.slot || '默认'}」，原图读取中`;
+    const request = Object.hasOwn(m, 'requestedOutfit') ? `，要求「${m.requestedOutfit || '默认'}」` : '';
+    const reasons = {
+        'default-outfit-unset': '尚未指定默认衣装', 'default-outfit-invalid': '默认衣装记录无效',
+        'default-outfit-missing': '默认衣装已不存在', 'outfit-unregistered': '要求衣装未登记',
+        'outfit-image-empty': '整套衣装未设人物图', 'outfit-image-missing': '人物图片已丢失',
+        'outfit-image-read-error': '人物图片读取失败', 'outfit-image-decode-error': '人物图片加载或解码失败',
+        'outfit-image-pending': '人物图片加载中',
+    };
+    const detail = [...new Set([m.reason, m.fallbackReason].filter(Boolean))]
+        .map(reason => reasons[reason] || reason).join('；');
+    const diagnostic = detail ? `，${detail}` : '';
+    const want = `角色「${m.character}」表情「${m.mood || '无'}」服装「${m.outfit || '无'}」${request}${why}`;
+    if (c.spriteImage) return `${want} → ${label(m.source)}，槽位「${m.slot || '默认'}」${m.quality ? `，匹配度 ${m.quality}` : ''}${diagnostic}`;
     if (c.sceneNsfw) return `${want} → NSFW 场景隐藏立绘`;
     return `${want} → 未命中（${SPRITE_REASONS[m.reason] || label(m.source)}${m.quality ? `，匹配度 ${m.quality}` : ''}）`;
 }
@@ -78,7 +89,14 @@ function promptLines(report) {
     return [`提示词按需块（共展开 ${total} 字）`, ...blocks.map(([key, item]) => `  ${PROMPT_ENTRY_LABELS[key] || key} ${item.reason === 'off' ? '' : item.active ? '展开' : '收起'} ${describePromptTrigger(item)}${item.active && item.chars ? ` · ${item.chars} 字` : ''}${item.position ? ` · ${PROMPT_POSITION_LABELS[item.position] || item.position}${item.position === 'depth' ? ` @D${item.depth}` : ''}` : ''}`.replace(/ {2,}/g, ' ').replace(/^ /, '  '))];
 }
 
-export function buildPageDiagnostic(snapshot, { version = '', worldview = '', promptReport = null, mediaStats = null } = {}) {
+// 朗读这一页：没开 / 本页会念 / 本页没念的原因（原因只认这一页的）。
+function ttsLine(c, rs, snapshot, skip) {
+    if (!rs.tts || rs.tts.enabled !== true) return '未开启';
+    const page = `${c.messageId ?? snapshot.messageId}:${c.currentIndex}`;
+    return skip && skip.key === page && skip.reason ? `本页未朗读：${skip.reason}` : '本页会朗读（或还没轮到）';
+}
+
+export function buildPageDiagnostic(snapshot, { version = '', worldview = '', promptReport = null, mediaStats = null, ttsSkip = null } = {}) {
     if (!snapshot || !snapshot.content) return '';
     const c = snapshot.content;
     const rs = snapshot.readerSettings || {};
@@ -94,12 +112,14 @@ export function buildPageDiagnostic(snapshot, { version = '', worldview = '', pr
         `说话人 ${c.speaker || '-'} · 情绪 ${c.statusEmotion || '-'}`,
         `立绘 ${spriteLine(c)}`,
         `同台 ${cast.length ? cast.join('、') : '无'}`,
+        `User立绘：${c.userChar && c.userChar.key ? `${c.userChar.key}（${c.userChar.source === 'manual' ? '手动指定' : '按用户名'}）` : '无'}`,
         `背景 ${backgroundLine(c)}`,
         `CG ${c.cgActive ? `显示中（槽位 ${c.illustrationSlot ?? '?'}）` : c.cgWaiting ? `有标记（槽位 ${c.illustrationSlot}）但图片未就绪，保留场景与立绘` : c.illustrationSlot != null ? `有标记（槽位 ${c.illustrationSlot}）但没有图` : '无'} · 图片 期望${c.imageExpectedCount ?? 0}/绑定${c.imageBoundCount ?? 0}/未绑${c.imageUnboundCount ?? 0}/可用${c.imageAvailableCount ?? 0}${c.imageLoading ? ' · 出图中' : ''}`,
         `演出 ${summarizeFx(c.fx).join('、') || '无'}`,
     ];
     if (notes.length) lines.push(`提示 ${notes.join('、')}`);
     lines.push(`直播 ${liveLine(c, rs)}`);
+    lines.push(`朗读 ${ttsLine(c, rs, snapshot, ttsSkip)}`);
     lines.push(...promptLines(promptReport));
     if (mediaStats) lines.push(`图片资源 ${describeMediaUsage(mediaStats)}`);
     return lines.join('\n');

@@ -30,7 +30,8 @@ function scentBuilder(item, env) {
         tag.setAttribute('style', `left:${pct(head.x)}%;top:${pct(Math.max(4, head.y - head.d * 0.95))}%;--igs-abo-c:${color}`);
         node.appendChild(tag);
     }
-    return { layer: 'stage', life: life(LIFE.scent, env), sounds: ['abo-waft'], node };
+    // 走 under 层（背景之上、立绘之后），雾从身后漫出来，不糊在脸上
+    return { layer: 'under', life: life(LIFE.scent, env), sounds: ['abo-waft'], node };
 }
 
 function scentlinkBuilder(item, env) {
@@ -39,10 +40,11 @@ function scentlinkBuilder(item, env) {
     const a = resolveHeadAnchor(env, item.a);
     const b = resolveHeadAnchor(env, item.b);
     const node = box(env, 'igs-abo-link');
-    spawnMist(node, { x: a.x, y: a.y + a.d * 0.2, size: Math.max(26, a.d * 2.8), color: ca, drift: 3 }, { reduced: env.reduced });
-    spawnMist(node, { x: b.x, y: b.y + b.d * 0.2, size: Math.max(26, b.d * 2.8), color: cb, drift: 3 }, { reduced: env.reduced });
-    drawLinks(node, [{ from: { x: a.x, y: a.y + a.d * 0.2 }, to: { x: b.x, y: b.y + b.d * 0.2 }, tone: ca, style: 'mist' }, { from: { x: a.x, y: a.y + a.d * 0.3 }, to: { x: b.x, y: b.y + b.d * 0.3 }, tone: cb, style: 'mist' }], env, { reduced: env.reduced });
     const dir = a.x <= b.x ? 1 : -1;
+    // 雾团往各自外侧、颈肩处偏，避开两张脸；连线仍在两人之间
+    spawnMist(node, { x: a.x - dir * a.d * 1.1, y: a.y + a.d * 0.9, size: Math.max(26, a.d * 2.8), color: ca, drift: 3 }, { reduced: env.reduced });
+    spawnMist(node, { x: b.x + dir * b.d * 1.1, y: b.y + b.d * 0.9, size: Math.max(26, b.d * 2.8), color: cb, drift: 3 }, { reduced: env.reduced });
+    drawLinks(node, [{ from: { x: a.x, y: a.y + a.d * 0.2 }, to: { x: b.x, y: b.y + b.d * 0.2 }, tone: ca, style: 'mist' }, { from: { x: a.x, y: a.y + a.d * 0.3 }, to: { x: b.x, y: b.y + b.d * 0.3 }, tone: cb, style: 'mist' }], env, { reduced: env.reduced });
     const lean = (sign) => [at(0, 'translate(0,0) rotate(0deg)'), at(0.3, `translate(${sign * 0.8}%,0) rotate(${sign * 1.1}deg)`), at(0.75, `translate(${sign * 0.8}%,0) rotate(${sign * 1.1}deg)`), at(1, 'translate(0,0) rotate(0deg)')];
     const leanMs = Math.min(life(LIFE.scentlink, env) - 400, 3600);
     reactSprite(env, item.a, lean(dir), { duration: leanMs, delay: 300 });

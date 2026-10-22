@@ -11,6 +11,7 @@ import { fontOptionsWith, loadCustomFonts, registerCustomFonts } from '../../med
 import { normalizeSettingsTheme, renderSettingsThemeSwitch } from './settings-theme.js';
 import { applyTypewriterEffect, cancelTypewriter } from './typewriter-runtime.js';
 import { inventoryIconHtml } from './inventory-slot-image.js';
+import { recoverMediaOperation } from '../../media/tavern-media-http.js';
 
 const labels = Object.freeze({ diary: '日记', inventory: '物品', relationships: '人际关系', favor: '好感度' });
 const pageTitles = Object.freeze({ diary: '珍藏心事', inventory: '你的背包', relationships: '人际关系', favor: '好感总览' });
@@ -82,6 +83,7 @@ function newestFirst(list) {
 
 // Only names that appear in labels are ever rendered as SVG; sheet contents remain escaped text.
 export function createRecordPanelController(doc, global, fillDraft, options = {}) {
+    let tableReadController = null;
     let root = null;
     let theme = normalizeSettingsTheme('');
     let client = null;
@@ -108,7 +110,19 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
     const callback = () => { if (root) reload(); };
     const storage = () => { try { return (global || globalThis).localStorage || null; } catch (_) { return null; } };
     const loadJson = (key, fallback) => { try { const raw = storage()?.getItem?.(key); return raw ? JSON.parse(raw) : fallback; } catch (_) { return fallback; } };
-    const saveJson = (key, value) => { try { storage()?.setItem?.(key, JSON.stringify(value)); } catch (_) { /* Storage may be full or blocked. */ } };
+    const writes = new Map();
+    const saveJson = (key, value) => {
+        const text = JSON.stringify(value);
+        const pending = (writes.get(key) || Promise.resolve()).catch(() => {}).then(() => recoverMediaOperation(global || globalThis, () => {
+            const store = storage();
+            if (!store) throw new Error('record-storage-unavailable');
+            store.setItem(key, text);
+            return store.getItem(key) === text;
+        }));
+        writes.set(key, pending);
+        void pending.finally(() => { if (writes.get(key) === pending) writes.delete(key); }).catch(() => {});
+        return pending;
+    };
     let prefs = { ...DIARY_PREF_DEFAULTS };
     let font = RECORD_FONT_DEFAULT;
     const fontOptions = () => fontOptionsWith(DIALOG_FONT_OPTIONS, loadCustomFonts(global || globalThis));
@@ -221,6 +235,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
     }
 
     function close() {
+        tableReadController?.abort(); tableReadController = null;
         if (!root) return { ok: true, reason: 'not-open' };
         unwatchLayout?.();
         unwatchLayout = null;
@@ -245,17 +260,30 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
     }
 
     function reload() {
-        let readResult = null;
-        try {
-            readResult = client.readTables();
-            model = category === 'relationships' ? buildRelationshipModel(readResult)
+        tableReadController?.abort();
+        const read = () => {
+            const readResult = client.readTables();
+            const next = category === 'relationships' ? buildRelationshipModel(readResult)
                 : category === 'favor' ? buildFavorOverviewModel(readResult, settings?.statusHud?.tables)
                     : buildRecordModel(readResult, category);
-        } catch (error) {
-            model = category === 'relationships' || category === 'favor'
+            if (next.status === 'read-error') throw new Error(next.reason);
+            return { model: next, readResult };
+        };
+        try { applyModel(read()); }
+        catch (error) {
+            if (model?.status !== 'ready') model = category === 'relationships' || category === 'favor'
                 ? { status: 'read-error', reason: String(error?.message || '读取失败'), tables: [], people: [], edges: [] }
                 : { status: 'read-error', reason: String(error?.message || '读取失败'), tables: [], entries: [] };
+            message = '正在恢复资料读取'; render();
+            const target = root, controller = tableReadController = new AbortController();
+            void recoverMediaOperation(global || globalThis, read, { signal: controller.signal, isActive: () => Boolean(root) && root === target,
+                observe: async () => ({ completed: true, value: await read() }) })
+                .then(next => { if (!next?.cancelled && root === target) { message = ''; applyModel(next); } });
         }
+    }
+
+    function applyModel({ model: next, readResult }) {
+        model = next;
         if (!table()) activeUid = model.tables[0]?.uid || '';
         if (category === 'relationships') {
             try {
@@ -294,7 +322,7 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
     function applyTheme(value) {
         theme = normalizeSettingsTheme(value);
         root?.setAttribute('data-rp-theme', theme);
-        try { options.setTheme?.(theme); } catch (_) { /* Host save is optional. */ }
+        if (options.setTheme) void recoverMediaOperation(global || globalThis, () => options.setTheme(theme));
     }
 
     function savePrefs() { saveJson(DIARY_PREFS_KEY, { ...prefs, view: diaryView }); }
@@ -332,11 +360,12 @@ export function createRecordPanelController(doc, global, fillDraft, options = {}
     async function useItem() {
         const item = (model?.entries || []).find(entry => entry.id === selectedId);
         if (!item?.title || typeof fillDraft !== 'function') return;
-        try {
-            const result = await fillDraft(`使用${item.title}`);
-            message = result?.ok ? '已填入草稿，尚未发送' : result?.reason === 'draft-not-empty'
-                ? '输入框已有草稿，未覆盖' : `填入失败：${result?.reason || '输入框不可用'}`;
-        } catch (_) { message = '填入失败：输入框不可用'; }
+        const target = root;
+        message = '正在填入草稿'; render();
+        const result = await recoverMediaOperation(global || globalThis, () => fillDraft(`使用${item.title}`), {
+            signal: controller.signal, isActive: () => root === target });
+        if (result?.cancelled) return;
+        message = '已填入草稿，尚未发送';
         render();
     }
 

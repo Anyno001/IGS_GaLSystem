@@ -74,6 +74,8 @@ export function normalizeCharacterOutfits(value) {
                 words.push(word.trim());
             }
             outfits[name] = { words, moods: normalizeMoods(entry.moods) };
+            if (entry.default === true) outfits[name].default = true;
+            if (entry.legacyOriginal === 1) outfits[name].legacyOriginal = 1;
             const scenes = normalizeSceneList(entry.scenes);
             if (scenes.length) outfits[name].scenes = scenes;
             const avatar = typeof entry.avatar === 'string' ? entry.avatar.trim() : '';
@@ -104,6 +106,8 @@ export function normalizeWardrobe(raw) {
         const prompt = typeof source.prompt === 'string' ? source.prompt.replace(/\r\n?/g, '\n').trim() : '';
         const reference = typeof source.reference === 'string' ? source.reference.trim() : '';
         out[name] = { prompt };
+        if (typeof source.promptHalfBody === 'string')
+            out[name].promptHalfBody = source.promptHalfBody.replace(/\r\n?/g, '\n').trim();
         if (reference.startsWith('igs-gen:')) out[name].reference = reference;
         if (source.nsfwBoost === true) out[name].nsfwBoost = true;
         // 新建时填的具体要求，写提示词时带上；不进生图词。
@@ -118,8 +122,10 @@ export function resolveWardrobePrompt(wardrobe, outfitEntry, outfitName) {
     const linked = outfitEntry && typeof outfitEntry.wardrobe === 'string' ? outfitEntry.wardrobe.trim() : '';
     const key = linked || String(outfitName || '').trim();
     if (!key || !hasOwn(map, key)) return null;
-    const entry = map[key] || {};
+    const source = map[key];
+    const entry = typeof source === 'string' ? { prompt: source } : source || {};
     const resolved = { name: key, prompt: String(entry.prompt || '').trim() };
+    if (typeof entry.promptHalfBody === 'string') resolved.promptHalfBody = entry.promptHalfBody.trim();
     if (entry.nsfwBoost === true) resolved.nsfwBoost = true;
     return resolved;
 }
@@ -235,8 +241,9 @@ function outfitKeyOf(resolveKey, character) {
 export function collectLatestOutfits(directives, resolveKey) {
     const out = {};
     for (const d of Array.isArray(directives) ? directives : []) {
-        if (!d || (d.type !== 'char' && d.type !== 'thought') || !d.outfit || !d.character) continue;
-        out[outfitKeyOf(resolveKey, d.character)] = d.outfit;
+        if (!d || (d.type !== 'char' && d.type !== 'thought') || !d.character) continue;
+        const value = d.unknownOutfit || d.outfit;
+        if (value) out[outfitKeyOf(resolveKey, d.character)] = value;
     }
     return out;
 }
@@ -247,13 +254,13 @@ function latestTagAt(directives, character, offset, inheritedOutfits, resolveKey
     const limit = Number(offset);
     let best = null;
     for (const d of Array.isArray(directives) ? directives : []) {
-        if (!d || (d.type !== 'char' && d.type !== 'thought') || !d.outfit) continue;
+        if (!d || (d.type !== 'char' && d.type !== 'thought') || !(d.unknownOutfit || d.outfit)) continue;
         if (Number.isFinite(limit) && Number(d.offset) > limit) continue;
         if (outfitKeyOf(resolveKey, d.character) !== key) continue;
         if (!best || Number(d.offset) >= Number(best.offset)) best = d;
     }
     return best
-        ? { value: best.outfit, offset: Number(best.offset) }
+        ? { value: best.unknownOutfit || best.outfit, offset: Number(best.offset) }
         : { value: (plain(inheritedOutfits) || {})[key] || '', offset: Number.NaN };
 }
 
@@ -312,15 +319,15 @@ export function resolveOutfitAt(directives, character, offset, inheritedOutfits,
     return value === OUTFIT_RESET ? '' : value;
 }
 
-// 标签从未写服装时的兜底：② 角色表穿着打扮 → ③ 装备表正在穿戴 → ④ DNA 默认外观，均按服装名 / 词池匹配。
+// 穿戴线索优先；未升级且未手动选新默认时兼容旧 DNA 服装线索，新协议由默认映射选衣。
 // 只读匹配，不回写；clues 读取失败时跳过 ②③ 并带回原因，便于诊断。
-export function resolveFallbackOutfit(outfits, { clues, dnaAppearance } = {}) {
+export function resolveFallbackOutfit(outfits, { clues, dnaAppearance = '' } = {}) {
     const source = clues && typeof clues === 'object' ? clues : {};
     const reason = source.status === 'read-error' ? String(source.reason || 'read-error') : '';
     const steps = [
         ['profile', Array.isArray(source.profile) ? source.profile.join('\n') : ''],
         ['equipment', Array.isArray(source.worn) ? source.worn.join('\n') : ''],
-        ['dna', typeof dnaAppearance === 'string' ? dnaAppearance : ''],
+        ['dna', dnaAppearance],
     ];
     for (const [from, text] of steps) {
         const outfit = matchOutfitByText(text, outfits);
@@ -329,14 +336,13 @@ export function resolveFallbackOutfit(outfits, { clues, dnaAppearance } = {}) {
     return { outfit: '', source: '', reason };
 }
 
-// 立绘服装总入口：① 标签（本楼 → 跨楼继承，「默认」直接复位）→ ②③④ 兜底 → 原有立绘。
+// 只解析要求衣装：标签（含未知标签与跨楼继承）→ 穿戴线索；空串/复位交统一选图入口读取新默认。
 // readClues(names) 由宿主层注入（只读 shujuku），场景层不直接访问宿主。
 // 适用场景：最近一次场景切换之后本楼明确写出的服装照用；更早的或跨楼继承来的服装不适用当前场景时失效，
 // 兜底来源也只在适用当前场景的服装里匹配。scene 为当前场景（主名与原文写法），未知时不限制。
 export function resolveSpriteOutfit({ directives, character, offset, inheritedOutfits, sceneAssets, readClues, resolveDna, scene } = {}) {
     const assets = plain(sceneAssets) || {};
     const { key, outfits } = outfitsOfCharacter(assets.characterOutfits, assets.characterAliases, character);
-    if (!key || !Object.keys(outfits).length) return { outfit: '', source: '', reason: '' };
     const resolveKey = (name) => outfitsOfCharacter(assets.characterOutfits, assets.characterAliases, name).key || name;
     const tag = latestTagAt(directives, character, offset, inheritedOutfits, resolveKey);
     if (tag.value === OUTFIT_RESET) return { outfit: '', source: 'reset', reason: '' };
@@ -346,18 +352,21 @@ export function resolveSpriteOutfit({ directives, character, offset, inheritedOu
         if (freshAfterScene || outfitAllowsScene(outfits[tag.value], scene)) return { outfit: tag.value, source: 'tag', reason: '' };
         mismatch = 'scene-mismatch';
     } else if (tag.value) {
-        return { outfit: '', source: 'tag', reason: '' };
+        return { outfit: tag.value, source: 'tag', reason: 'outfit-unregistered' };
     }
     const allowed = filterOutfitsByScene(outfits, scene);
     if (!Object.keys(allowed).length) return { outfit: '', source: '', reason: mismatch };
     const aliases = plain(assets.characterAliases) || {};
-    const names = [key, ...(Array.isArray(aliases[key]) ? aliases[key] : [])];
+    const names = [key || character, ...(Array.isArray(aliases[key]) ? aliases[key] : [])];
     let clues = null;
     if (typeof readClues === 'function') {
         try { clues = readClues(names); } catch (error) { clues = { status: 'read-error', reason: String((error && error.message) || 'read-failed') }; }
     }
-    const dna = typeof resolveDna === 'function' ? resolveDna(key) : null;
-    const fallback = resolveFallbackOutfit(allowed, { clues, dnaAppearance: dna && dna.defaultAppearance });
+    const dna = assets.characterDna?.[key] || (typeof resolveDna === 'function' ? resolveDna(key) : null);
+    const selected = assets.characterDefaultOutfits?.[key];
+    const dnaAppearance = dna?.version !== 2 && (!selected || selected.migrated === true)
+        ? String(dna?.defaultAppearance || '') : '';
+    const fallback = resolveFallbackOutfit(allowed, { clues, dnaAppearance });
     return mismatch && !fallback.reason ? { ...fallback, reason: mismatch } : fallback;
 }
 

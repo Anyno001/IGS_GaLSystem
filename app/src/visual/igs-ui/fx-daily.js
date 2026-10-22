@@ -1,3 +1,4 @@
+import { incenseSvg, lanternSvg } from './fx-selected-svg.js';
 import { worldSkinOf } from '../../scene/worldview.js';
 import { STILL_PLACE_KINDS, VEHICLE_KINDS, isHorseDrawnWorld, resolvePlaceAmbience } from '../../scene/place-ambience.js';
 import { DATE_AMBIENCE_HTML, DATE_STILL_KINDS, resolveDateAmbience } from '../../scene/date-ambience.js';
@@ -14,6 +15,7 @@ import { headTopAnchor } from './meta-runtime.js';
 import { isLiveHostCovered } from './stage-pause.js';
 import { playDailySfx } from './fx-daily-sfx.js';
 import { chars, charSpans, later, make, removeNode, spawn } from './fx-daily-kit.js';
+import { makeAncientPaper } from './fx-ancient-paper.js';
 import { layerStyle, readStageBackground, spriteElOf, spritePosX } from './stage-snapshot.js';
 import { at, headPoint, reactSprite } from './fx-sprite-react.js';
 import { spawnMist } from './fx-mist.js';
@@ -251,7 +253,7 @@ const BUILDERS = {
         if (env.ancient) {
             return {
                 layer: 'front', life, sounds: ['drum'],
-                node: make(env.doc, 'igs-dfx igs-dfx-timeskip is-ancient', `<div class="igs-dfx-veil"></div><div class="igs-dfx-incense"><i class="igs-dfx-stick"><i class="igs-dfx-smoke"></i><i class="igs-dfx-smoke is-b"></i></i><i class="igs-dfx-censer"></i></div>${text}`),
+                node: make(env.doc, 'igs-dfx igs-dfx-timeskip is-ancient', `<div class="igs-dfx-veil"></div>${incenseSvg({ life, reduced: env.reduced })}${text}`),
             };
         }
         // 魔法世界：沙漏流沙 + 城堡钟声；星空底与字体由 is-magic 换皮提供。
@@ -282,6 +284,7 @@ const BUILDERS = {
     letter(item, env) {
         const n = chars(item.text).length;
         const life = DAILY_FX_LIFETIME_MS.letterBase + n * DAILY_FX_LIFETIME_MS.letterPerChar + Math.round(DAILY_FX_LIFETIME_MS.letterHold * env.hold);
+        if (env.ancient) return { layer: 'front', life, sounds: ['paper'], node: makeAncientPaper(item, env) };
         const sign = item.from ? `<div class="igs-dfx-letter-sign">${env.ancient ? '' : '—— '}${esc(item.from)}</div>` : '';
         return {
             layer: 'front', life, sounds: ['paper'],
@@ -292,7 +295,7 @@ const BUILDERS = {
         if (env.ancient) {
             return {
                 layer: 'front', life: Math.round(DAILY_FX_LIFETIME_MS.note * env.hold), sounds: ['paper'],
-                node: make(env.doc, 'igs-dfx igs-dfx-note is-ancient', `<div class="igs-dfx-scrap">${esc(item.text)}</div>`),
+                node: makeAncientPaper(item, env, { kind: 'note', stepMs: 0, startMs: 0 }),
             };
         }
         return {
@@ -447,6 +450,10 @@ const BUILDERS = {
     },
     // 古风独有：只在古代模式可用（fx-era 在现代模式拨掉）；音效复用既有预设，不新增音色。
     poem(item, env) {
+        if (env.ancient) return {
+            layer: 'front', life: Math.round(DAILY_RESULT_LIFE_MS.poem * env.hold), sounds: ['paper'],
+            node: makeAncientPaper(item, env, { kind: 'poem', stepMs: Math.min(55, 2400 / Math.max(1, chars(item.text).length)) }),
+        };
         const node = make(env.doc, 'igs-dfx igs-dfx-poem', `<div class="igs-dfx-poem-paper"><div class="igs-dfx-poem-text">${esc(item.text)}</div><div class="igs-dfx-poem-seal">印</div></div>`);
         return { layer: 'front', life: Math.round(DAILY_RESULT_LIFE_MS.poem * env.hold), sounds: ['paper'], node };
     },
@@ -467,11 +474,12 @@ const BUILDERS = {
     candle(item, env) {
         const style = item.style === 'lamp' || item.style === 'incense' ? item.style : 'candle';
         const x = spritePosX(readStageBackground(env.root).sprite);
-        const body = style === 'incense'
+        const life = Math.round(DAILY_RESULT_LIFE_MS.candle * env.hold);
+        const body = style === 'lamp' ? lanternSvg({ life, reduced: env.reduced }) : style === 'incense'
             ? '<i class="igs-dfx-candle-stick"></i><i class="igs-dfx-candle-ember"></i><i class="igs-dfx-candle-smoke"></i><i class="igs-dfx-candle-smoke is-2"></i>'
             : '<i class="igs-dfx-candle-body"></i><i class="igs-dfx-candle-flame"></i><i class="igs-dfx-candle-halo"></i><i class="igs-dfx-candle-glow"></i>';
         const node = make(env.doc, `igs-dfx igs-dfx-candle is-${style}`, `<div class="igs-dfx-candle-stage" style="left:${x}%">${body}</div>`);
-        return { layer: 'stage', life: Math.round(DAILY_RESULT_LIFE_MS.candle * env.hold), sounds: ['candle'], node };
+        return { layer: 'stage', life, sounds: ['candle'], node };
     },
     // 递接：物品名浮起，沿一道弧线从递出一侧飘向接物一侧，落点一圈微光；物品名必填。
     pass(item, env) {

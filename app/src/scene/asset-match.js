@@ -1,5 +1,9 @@
+import { isImageSeed } from '../generated-images/image-seed.js';
 import { lookupSceneBackground, lookupSceneAssetUrls, resolveCharacterKey, lookupAssetValue, sceneTimeSlot } from './scene-directives.js';
 import { BUILTIN_NUDE_OUTFIT, OUTFIT_RESET, isBuiltinNudeOutfit, outfitsOfCharacter } from './character-outfits.js';
+import { promptProvenance } from '../generated-images/generation-prompt.js';
+import { characterPromptRecovery } from '../generated-images/illustration/character-prompt-task.js';
+import { appearanceCharacterKey, resolveCharacterAppearance } from './character-appearance.js';
 
 export const GENERATED_ASSET_URL_PREFIX = 'igs-gen:';
 
@@ -33,7 +37,8 @@ function normalizeExpressionNotes(value) {
             const caption = item.caption && typeof item.caption === 'object' && !Array.isArray(item.caption)
                 ? item.caption : null;
             if (!String(mood || '').trim() || (!positive && !negative && !error && !caption)) continue;
-            bucket[String(mood).trim()] = { positive, negative, error, ...(caption ? { caption } : {}) };
+            bucket[String(mood).trim()] = { positive, negative, error, ...(caption ? { caption } : {}),
+                ...promptProvenance(item), ...characterPromptRecovery(item) };
         }
         if (Object.keys(bucket).length) out[name] = bucket;
     }
@@ -79,12 +84,13 @@ export function setGeneratedExpressionNote(library, name, mood, note = {}) {
             negative: typeof item.negative === 'string' ? item.negative : '',
             error: typeof item.error === 'string' ? item.error : '',
             ...(item.caption && typeof item.caption === 'object' ? { caption: item.caption } : {}),
+            ...promptProvenance(item), ...characterPromptRecovery(item),
         },
     };
     return { ok: true, library: next };
 }
 
-// 把一张生成立绘绑到角色立绘的「默认」。角色库没有这个名字就新建。已有的非生成默认图不覆盖。
+// 新生成的基础立绘写入「平和」。角色库没有这个名字就新建，旧默认图独立保留。
 export function bindGeneratedSprite(sceneAssets, assetName, imageUrl, { replace = false } = {}) {
     const requested = String(assetName || '').trim();
     const url = String(imageUrl || '').trim();
@@ -98,8 +104,8 @@ export function bindGeneratedSprite(sceneAssets, assetName, imageUrl, { replace 
     const created = !key;
     if (!key) key = requested;
     const current = { ...plainObject(characters[key]) };
-    const existing = String(current['默认'] || '').trim();
-    if (replace || !existing || isGeneratedAssetUrl(existing)) current['默认'] = url;
+    const existing = String(current['平和'] || '').trim();
+    if (replace || !existing || isGeneratedAssetUrl(existing)) current['平和'] = url;
     characters[key] = current;
     if (!Array.isArray(aliases[key])) aliases[key] = [];
     if (requested !== key && !aliases[key].includes(requested)) aliases[key].push(requested);
@@ -117,6 +123,7 @@ export function bindGeneratedBackground(sceneAssets, record, name) {
     // 时段差分入库到只在生成区的场景时，主图仍用差分的原图。
     const baseUrl = record.variantOf ? `${GENERATED_ASSET_URL_PREFIX}${record.variantOf}` : url;
     const entry = { ...plainObject(scenes[finalName]) };
+    if (!isImageSeed(entry.seed) && isImageSeed(record.seed)) entry.seed = record.seed;
     const words = Array.isArray(entry.words) ? entry.words.slice() : [];
     const original = String(record.name || '').trim();
     if (original && original !== finalName && !words.includes(original)) words.push(original);
@@ -138,13 +145,14 @@ export function addGeneratedAssetToLibrary(library, record, name) {
     const original = String(record.name || '').trim();
     if (record.type === 'background') {
         const entry = plainObject(next.scenes[finalName]);
+        if (!isImageSeed(entry.seed) && isImageSeed(record.seed)) entry.seed = record.seed;
         const words = Array.isArray(entry.words) ? entry.words : [];
         if (original && original !== finalName && !words.includes(original)) words.push(original);
         const times = plainObject(entry.times);
         if (record.time) times[record.time] = { ...plainObject(times[record.time]), url, weathers: plainObject(plainObject(times[record.time]).weathers) };
         next.scenes[finalName] = { ...entry, url: entry.url || url, words, times };
     } else {
-        next.characters[finalName] = { ...plainObject(next.characters[finalName]), 默认: url };
+        next.characters[finalName] = { ...plainObject(next.characters[finalName]), 平和: url };
         const aliases = Array.isArray(next.characterAliases[finalName]) ? next.characterAliases[finalName] : [];
         if (original && original !== finalName && !aliases.includes(original)) aliases.push(original);
         next.characterAliases[finalName] = aliases;
@@ -211,6 +219,7 @@ export function fileGeneratedHoldings(sceneAssets) {
     return sceneAssets;
 }
 
+
 function placeSpriteUrl(bucket, name, mood, url) {
     if (!name || !isGeneratedAssetUrl(url)) return false;
     const characters = { ...plainObject(bucket.characters) };
@@ -245,6 +254,7 @@ function fileGeneratedBucket(bucket) {
     if (!bucket || typeof bucket !== 'object' || !bucket.generated) return;
     const generated = normalizeGeneratedLibrary(bucket.generated);
     for (const [name, entry] of Object.entries({ ...generated.characters })) {
+        if (Object.hasOwn(bucket.characterDefaultOutfits || {}, name)) continue;
         const moods = plainObject(entry);
         let blocked = false;
         for (const [mood, url] of Object.entries(moods)) {
@@ -387,6 +397,32 @@ export function resolveSpriteAsset(character, mood, ctx = {}, outfit = '') {
     const name = String(character || '').trim();
     if (!name) return { url: '', slot: '', character: '', source: 'none', needsGeneration: false };
     const userAssets = ctx.sceneAssets || {};
+    const appearanceKey = appearanceCharacterKey(userAssets, name);
+    const legacySlots = [userAssets.characters?.[appearanceKey], userAssets.generated?.characters?.[appearanceKey]];
+    const hasLegacySprite = legacySlots.some(slots => Object.values(slots || {}).some(url => typeof url === 'string' && url.trim()));
+    if (appearanceKey && (Object.hasOwn(userAssets.characterDefaultOutfits || {}, appearanceKey)
+        || (!hasLegacySprite && Object.keys(userAssets.characterOutfits?.[appearanceKey] || {}).length))) {
+        const availability = url => {
+            if (lostImage(url, ctx)) return { status: 'missing' };
+            if (unavailableImage(url, ctx)) return { status: 'read-error' };
+            const state = typeof ctx.imageAvailability === 'function'
+                ? ctx.imageAvailability(url) : ctx.imageAvailability?.[url];
+            // 显示时保留正在加载的引用，让中央缓存完成读取；不改变一致性参考的核验规则。
+            return state === 'loading' ? 'unverified'
+                : state?.status === 'loading' ? { ...state, status: 'unverified' } : state;
+        };
+        const selected = resolveCharacterAppearance({ characterKey: appearanceKey, requestedOutfit: outfit,
+            mood, sceneAssets: userAssets, ownerScope: ctx.ownerScope || '', imageAvailability: availability });
+        if (!selected.ok) return { url: '', slot: '', character: appearanceKey, source: 'none', quality: 'none',
+            requestedOutfit: outfit, ...(selected.effectiveOutfit && { outfit: selected.effectiveOutfit }),
+            reason: selected.reason, fallbackReason: selected.fallbackReason || '',
+            needsGeneration: selected.reason === 'outfit-image-missing' };
+        return { url: selected.spriteImage.url, slot: selected.spriteImage.slot, character: appearanceKey,
+            requestedOutfit: selected.requestedOutfit, outfit: selected.effectiveOutfit,
+            source: selected.selectionSource === 'requested' ? 'user-outfit' : 'user-default-outfit',
+            selectionSource: selected.selectionSource, fallbackReason: selected.fallbackReason, reason: '',
+            quality: selected.spriteImage.quality, needsGeneration: false };
+    }
     const outfitName = String(outfit || '').trim();
     // 服装内按当条表情找（精确 → 情绪组 → 模糊 → 同方向另一档）→ 裸体底图 → 这一套的「平和」→ 这一套任意一张；
     // 整套一张图都没有才退回原装——换了衣服却闪回原装的衣服比表情不准更违和。
@@ -416,11 +452,11 @@ export function resolveSpriteAsset(character, mood, ctx = {}, outfit = '') {
     const user = lookupSpriteWithFallback({ character: name, mood }, liveUserAssets);
     if (user.spriteUrl && !unavailableImage(user.spriteUrl, ctx)) {
         // 兜住的图还在，但同一角色名下还有死链槽：照常显示兜底图，同时保留缺图标记让补图链重画那张。
-        const key = resolveCharacterKey(userAssets.characters, userAssets.characterAliases, name);
+        const key = resolveCharacterKey({ ...userAssets.characterDna, ...userAssets.characterOutfits, ...userAssets.characters }, userAssets.characterAliases, name);
         const dangling = key ? hasLostImage((userAssets.characters || {})[key], ctx) : false;
         return { url: user.spriteUrl, slot: user.spriteSlot, character: user.spriteCharacter || name, source: 'user', quality: user.spriteQuality, needsGeneration: dangling };
     }
-    const registeredKey = resolveCharacterKey(userAssets.characters, userAssets.characterAliases, name);
+    const registeredKey = resolveCharacterKey({ ...userAssets.characterDna, ...userAssets.characterOutfits, ...userAssets.characters }, userAssets.characterAliases, name);
     // 显示匹配只读图片引用，不整理全库的 expressionNotes。
     const library = plainObject(ctx.generatedAssets);
     const libraryAliases = { ...userAssets.characterAliases, ...library.characterAliases };
@@ -434,8 +470,11 @@ export function resolveSpriteAsset(character, mood, ctx = {}, outfit = '') {
     const temp = typeof ctx.tempSprite === 'function' ? ctx.tempSprite(name) || (registeredKey && registeredKey !== name ? ctx.tempSprite(registeredKey) : '') : '';
     if (temp && !unavailableImage(temp, ctx)) return { url: temp, slot: '默认', character: name, source: 'temp', needsGeneration: false };
     const missingRegistered = registeredKey && hasLostImage((userAssets.characters || {})[registeredKey], ctx);
+    // 副 API 先建档的新角色尚未有图；出图失败后，下次补全仍需处理，不能因刚保存 DNA 变成“已登记”而跳过。
+    const preparedOnly = registeredKey && userAssets.characterDna?.[registeredKey]?.identitySource === 'secondary-api'
+        && !userAssets.characters?.[registeredKey] && !userAssets.characterOutfits?.[registeredKey];
     const unavailableRegistered = registeredKey && Object.values((userAssets.characters || {})[registeredKey] || {}).some(url => unavailableImage(url, ctx));
-    return { url: '', slot: '', character: name, source: 'none', reason: unavailableRegistered ? 'original-unavailable' : registeredKey || generated.spriteCharacter ? 'original-empty' : 'character-unregistered', needsGeneration: Boolean(missingRegistered) || (!registeredKey && !isNonSpriteSpeaker(name) && !isKnownCharacterName(name, userAssets)) };
+    return { url: '', slot: '', character: name, source: 'none', reason: unavailableRegistered ? 'original-unavailable' : registeredKey || generated.spriteCharacter ? 'original-empty' : 'character-unregistered', needsGeneration: Boolean(missingRegistered || preparedOnly) || (!registeredKey && !isNonSpriteSpeaker(name) && !isKnownCharacterName(name, userAssets)) };
 }
 
 // NSFW 挂 CG 时的对话框头像：只在衣柜引用「裸体」的那几套里找（当条表情 → 裸体底图 → 这一套的「平和」），
@@ -474,7 +513,7 @@ export function isNonSpriteSpeaker(name) {
 }
 
 // 汇总本楼缺失的素材：场景按「场景名+时间」去重，角色按名字去重；按出现顺序截断到 limit。
-export function collectAssetNeeds({ scenes = [], characters = [] } = {}, ctx = {}, flags = {}) {
+export function collectAssetNeeds({ scenes = [], characters = [], characterTriggers = [] } = {}, ctx = {}, flags = {}) {
     const needs = [];
     const seen = new Set();
     const limit = Math.max(0, Number(flags.limit) || 0);
@@ -501,7 +540,15 @@ export function collectAssetNeeds({ scenes = [], characters = [] } = {}, ctx = {
             const key = `char|${character}`;
             if (seen.has(key)) continue;
             seen.add(key);
-            if (resolveSpriteAsset(character, '', ctx).needsGeneration) needs.push({ type: 'sprite', name: String(character).trim() });
+            const asset = resolveSpriteAsset(character, '', ctx);
+            if (!asset.needsGeneration) continue;
+            const name = String(character).trim();
+            // 待确认立绘仅抑制重复补全，不成为正式衣装或默认图源。
+            const temp = typeof ctx.tempSprite === 'function' ? ctx.tempSprite(name) : '';
+            if (temp && !lostImage(temp, ctx)) continue;
+            const trigger = characterTriggers.find(d => d.character === name);
+            const outfitName = trigger?.unknownOutfit || trigger?.outfit || asset.outfit || '';
+            needs.push({ type: 'sprite', name, ...(outfitName && { outfitName }) });
         }
     }
     return limit ? needs.slice(0, limit) : needs;

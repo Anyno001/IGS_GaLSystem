@@ -1,25 +1,4 @@
-import {
-    DIALOG_FONT_CAVEAT,
-    DIALOG_FONT_CHILL_ROUND,
-    DIALOG_FONT_CINZEL,
-    DIALOG_FONT_CORMORANT,
-    DIALOG_FONT_GREAT_VIBES,
-    DIALOG_FONT_HUIWEN,
-    DIALOG_FONT_IM_FELL,
-    DIALOG_FONT_NEO_XIHEI,
-    DIALOG_FONT_NEO_ZHISONG,
-    DIALOG_FONT_PINYON_SCRIPT,
-    DIALOG_FONT_QUICKSAND,
-    DIALOG_FONT_ROUNDED,
-    DIALOG_FONT_SERIF,
-    DIALOG_FONT_SMILEY,
-    DIALOG_FONT_SOURCE_HAN_SANS,
-    DIALOG_FONT_WENKAI,
-    DIALOG_FONT_WENKAI_LITE,
-    DIALOG_FONT_YOZAI,
-    DIALOG_FONT_YUYANG,
-    DIALOG_FONT_ZCOOL_KUAILE,
-} from './dialog-theme-typography.js';
+import { DIALOG_FONT_CAVEAT, DIALOG_FONT_CHILL_ROUND, DIALOG_FONT_CINZEL, DIALOG_FONT_CORMORANT, DIALOG_FONT_GREAT_VIBES, DIALOG_FONT_HUIWEN, DIALOG_FONT_IM_FELL, DIALOG_FONT_MASHANZHENG, DIALOG_FONT_NEO_XIHEI, DIALOG_FONT_NEO_ZHISONG, DIALOG_FONT_PINYON_SCRIPT, DIALOG_FONT_QUICKSAND, DIALOG_FONT_ROUNDED, DIALOG_FONT_SERIF, DIALOG_FONT_SMILEY, DIALOG_FONT_SOURCE_HAN_SANS, DIALOG_FONT_WENKAI, DIALOG_FONT_WENKAI_LITE, DIALOG_FONT_YOZAI, DIALOG_FONT_YUYANG, DIALOG_FONT_ZCOOL_KUAILE } from './dialog-theme-typography.js';
 
 export const DEFAULT_IMAGE_API = Object.freeze({
     mode: 'extension',
@@ -35,6 +14,8 @@ export const DEFAULT_IMAGE_API = Object.freeze({
     pollIntervalMs: 2000,
     pollAttempts: 60,
     dbgenSpriteTransparent: true,
+    naiSpriteTransparent: true,
+    externalSpriteDna: false,
     cgModel: '',
     spriteModel: '',
     backgroundModel: '',
@@ -111,6 +92,7 @@ export const DIALOG_FONT_OPTIONS = Object.freeze([
     [DIALOG_FONT_SOURCE_HAN_SANS, '思源黑体'],
     [DIALOG_FONT_SERIF, '思源宋体'],
     [DIALOG_FONT_HUIWEN, '汇文明朝体'],
+    [DIALOG_FONT_MASHANZHENG, '马善政楷书'],
     [DIALOG_FONT_YUYANG, '仓耳渔阳体'],
     [DIALOG_FONT_SMILEY, '得意黑'],
     [DIALOG_FONT_ZCOOL_KUAILE, '站酷快乐体'],
@@ -325,6 +307,8 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.imageApi.pollIntervalMs',
             'bridge.imageApi.pollAttempts',
             'bridge.imageApi.dbgenSpriteTransparent',
+            'bridge.imageApi.naiSpriteTransparent',
+            'bridge.imageApi.externalSpriteDna',
             'bridge.imageApi.cgModel',
             'bridge.imageApi.spriteModel',
             'bridge.imageApi.backgroundModel',
@@ -337,6 +321,7 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.autoIllustration.backfillOldFloors',
             'bridge.autoIllustration.assets.spriteEnabled',
             'bridge.autoIllustration.assets.backgroundEnabled',
+            'bridge.autoIllustration.assets.dayFirst',
             'bridge.autoIllustration.assets.maxPerFloor',
             'bridge.autoIllustration.assets.spriteSize',
             'bridge.itemImages.enabled',
@@ -399,6 +384,7 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
         label: '数据',
         requiredPaths: frozen([
             'bridge.imageCache.maxCount',
+            'bridge.imageCache.compressDisplay',
             'bridge.imageJobLog.retainDays',
             'bridge.imageJobLog.maxEntries',
         ]),
@@ -428,7 +414,8 @@ export const TOOLBAR_ACTIONS = Object.freeze([
     ['quick-load', '快速读档'],
     ['regen', '绘制CG'],
     ['reroll-cg', '重画这张'],
-    ['clear-cg', '清扫当前CG'],
+    ['consistency-cg', '角色一致性重绘'],
+    ['clear-cg', '清扫当前 CG'],
     ['clear-floor-cg', '清扫本楼'],
     ['generate-assets', '补全立绘与背景'],
     ['cg-gallery', 'CG库'],
@@ -436,12 +423,13 @@ export const TOOLBAR_ACTIONS = Object.freeze([
     ['save', '保存图片'],
     ['hide', '隐藏对话框'],
     ['sprite-edit', '调整立绘'],
+    ['live2d-settings', 'Live2D 角色绑定'],
     ['rescan', '重新加载'],
     ['settings', '设置'],
 ]);
 
 export const DEFAULT_PINNED_TOOLBAR_BUTTONS = Object.freeze([]);
-// 工具栏分两截：翻页和读档类默认放对话框底部的快捷栏，顶栏只留生图、素材、画面和系统。
+// 按钮分布「顶栏+对话框下」：翻页和读档类默认放对话框底部的快捷栏，顶栏只留生图、素材、画面和系统。
 export const TOOLBAR_SPLIT_MODES = Object.freeze(['split', 'top', 'dialog']);
 // 工具栏底板：off 完全无底板（默认）、blur 展开时羽化毛玻璃、solid 实色不糊。
 export const TOOLBAR_PLATE_MODES = Object.freeze(['blur', 'solid', 'off']);
@@ -450,12 +438,12 @@ export const DIALOG_BAR_ALIGNS = Object.freeze(['auto', 'left', 'center', 'right
 export const DEFAULT_DIALOG_BAR_BUTTONS = Object.freeze(['first-turn', 'prev-turn', 'prev', 'auto-play', 'next', 'next-turn', 'quick-save', 'quick-load']);
 // 只在对话框快捷栏出现的按钮：选「只用顶栏」时不挤进顶栏（目录 › 存档里也能存读）。
 export const DIALOG_ONLY_BUTTONS = Object.freeze(['quick-save', 'quick-load']);
-export const READER_SETTINGS_SCHEMA_VERSION = '0.5.6';
+export const READER_SETTINGS_SCHEMA_VERSION = '0.5.7';
 export const INITIAL_IMAGE_POLL_ATTEMPTS = 8;
 export const INITIAL_IMAGE_POLL_INTERVAL_MS = 250;
 
 // 通用规则（每行一条、| 分隔、不发明新标签等）由 tag-grammar 统一写在最前，这里只写场景与台词本身。
-export const DEFAULT_SCENE_PROMPT_RULE = `【场景与台词】
+export const LEGACY_DEFAULT_SCENE_PROMPT_RULE_V4 = `【场景与台词】
 [igs-scene:场景名|时间|天气]：本轮开头输出一次（即使与上轮相同），换场景时再输出；NSFW场景加第4栏大写NSFW，非NSFW场景第4栏留空；换场景时，可在第5段写上此刻在场的角色名，逗号分隔，可省略；非NSFW场景第4段留空（如 [igs-scene:场景名|时间|天气||角色A,角色B]）
 [igs-char:角色名|表情|服装|对白]：角色开口时使用
 [igs-thought:角色名|表情|服装|心里话]：角色内心独白
@@ -471,6 +459,8 @@ export const DEFAULT_SCENE_PROMPT_RULE = `【场景与台词】
 天气：只用天气类型词 晴天/多云/小雨/大雨/雷雨/小雪/大雪等
 {{weather_groups}}
 {{scene_groups}}`.trim();
+
+export const DEFAULT_SCENE_PROMPT_RULE = `${LEGACY_DEFAULT_SCENE_PROMPT_RULE_V4}\n{{previous_outfit_dna}}`;
 
 // 关闭精简注入时使用的长版原文。已保存的提示词不在这里被替换，要换新规则用「恢复默认提示词」。
 export const LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3 = `[igs标签语法]
@@ -518,19 +508,23 @@ export const LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3 = `[igs标签语法]
 [核心原则]
 igs标签是透明的元数据层。正文的文风、叙事密度、修辞手法、段落节奏完全由其他文风指令决定，不受标签存在的影响。标签插在段落之间，读者略去所有标签后，剩余正文应当是一篇完整的、符合当前文风要求的文章。其中，表情字段为角色可外在观察的神态表情，禁止理解成语气或说话方式。`.trim();
 
-// 只有没存过提示词时用当前默认。已存的内容保持原样，换新规则走「恢复默认提示词」。
+// 空值及逐字等于上一版默认的规则采用新默认；自定义原文保持不动。
 export function normalizeScenePromptRule(value) {
     const rule = String(value || '');
-    return rule ? rule : DEFAULT_SCENE_PROMPT_RULE;
+    return !rule || rule === LEGACY_DEFAULT_SCENE_PROMPT_RULE_V4 ? DEFAULT_SCENE_PROMPT_RULE : rule;
 }
 
 // 自定义规则缺服装占位符时 AI 不会写服装栏；只提示，不改写用户规则。
-export const PROMPT_RULE_OUTFIT_HINT = '自定义规则缺少服装栏说明；需要服装差分请恢复默认，或手动加上 {{outfit_groups}}。';
+export const PROMPT_RULE_OUTFIT_HINT = '自定义规则未包含服装栏，可恢复默认或添加{{outfit_groups}}。';
+export const PROMPT_RULE_OUTFIT_DNA_HINT = '可添加{{previous_outfit_dna}}，注入上一轮衣装的服装DNA。';
 
 export function scenePromptRuleOutfitHint(rule) {
-    return String(rule || '').includes('{{outfit_groups}}') ? '' : PROMPT_RULE_OUTFIT_HINT;
+    const text = String(rule || '');
+    return [text.includes('{{outfit_groups}}') ? '' : PROMPT_RULE_OUTFIT_HINT,
+        text.includes('{{previous_outfit_dna}}') ? '' : PROMPT_RULE_OUTFIT_DNA_HINT]
+        .filter(Boolean).join('\n');
 }
 
 // 规则原文里的 {{mood_groups}} 等占位符酒馆不认识，所以提醒用「复制到酒馆预设」拿词表已展开的版本，而不是直接复制输入框。
-export const PROMPT_RULE_PRESET_HINT = '也可点「复制到酒馆预设」贴进预设（词表已展开）；贴后请关闭上方开关，免得重复发送。';
-export const PROMPT_RULE_OFF_HINT = '已关闭自动注入，请把「复制到酒馆预设」的内容贴进预设，否则背景和立绘不会切换。';
+export const PROMPT_RULE_PRESET_HINT = '规则可复制到酒馆预设使用，复制后请关闭自动注入。';
+export const PROMPT_RULE_OFF_HINT = '自动注入已关闭，需将规则复制到酒馆预设，否则AI不会输出场景标签。';

@@ -1,5 +1,6 @@
 import { cloneData, esc } from './reader-value-utils.js';
 import { getPath, setPath } from './settings-normalize.js';
+import { ASSET_LIBRARY_MAP_FIELDS } from '../../scene/asset-scope.js';
 
 // 「重置本区」的分区表：只列面板上该分区真正展示的字段，重置时从 normalize 后的默认设置里逐项取回。
 // 场景素材、生图来源等含用户数据或密钥的分区不提供重置。
@@ -22,7 +23,7 @@ export const SETTINGS_SECTIONS = Object.freeze({
     },
     'reader-dialog-style': { label: '风格', paths: () => reader('dialogSkin', 'gradientVeil', 'magicHouse', 'magicAccent', 'showStatusLine', 'dblclickCgOnly', 'titleScreen', 'dialogAutoHeight', 'underwaterSkin', 'mermaidTone', 'mermaidAccent') },
     'reader-dialog-size': { label: '尺寸', paths: () => reader('dialogWidth', 'classicDialogWidthPercent', 'skinDialogScale', 'dialogHeight', 'inputScale') },
-    'reader-dialog-background': { label: '面板玻璃', paths: (draft) => [...reader('glassOpacity', 'glassBackdropFilter'), `${themePath(draft)}.bgOpacity`, `${themePath(draft)}.dialogBg`] },
+    'reader-dialog-background': { label: '面板透明度', paths: (draft) => [...reader('glassOpacity', 'glassBackdropFilter'), `${themePath(draft)}.bgOpacity`, `${themePath(draft)}.dialogBg`] },
     'reader-text-layout': { label: '排版', paths: () => reader('fontSize', 'dialogFontWeight', 'dialogTextEffect', 'dialogTextEffectColor', 'dialogTextEffectStrength', 'dialogTextEffectSize') },
     'reader-text-style': { label: '文字样式', paths: (draft) => [...THEME_STYLE_KEYS.map((key) => `${themePath(draft)}.${key}`), 'readerSettings.systemRole'] },
     'reader-interface-background': { label: '背景图', paths: () => reader('imgMode', 'imgBrightness') },
@@ -76,10 +77,7 @@ export function resetSettingsSection(draft, sectionId, defaults) {
 export const SETTINGS_EXPORT_FORMAT = 'igs-settings';
 const SECRET_KEY = /^(?:api[-_]?key|apikey|token|secret|password|authorization)$/i;
 // 素材内容：场景、角色、衣柜、生成图、各角色卡。全局配置不带走这些，导入也不覆盖本机已有的。
-const ASSET_CONTENT_KEYS = Object.freeze([
-    'scenes', 'characters', 'characterAliases', 'characterDna', 'characterOutfits',
-    'wardrobe', 'generated', 'statusAvatars', 'cards',
-]);
+const ASSET_CONTENT_KEYS = Object.freeze([...ASSET_LIBRARY_MAP_FIELDS, 'generated', 'cards']);
 const READER_CONTENT_KEYS = Object.freeze(['spriteLayouts', 'spriteHeads']);
 
 function isPlainObject(value) {

@@ -1,3 +1,4 @@
+import { recoverOperation, createOperationCheckpoint, checkpointService, linkRecoverySignals } from '../storage/automatic-recovery.js';
 import { getSillyTavernContext } from '../host/tavern-helper-adapter.js';
 import { imageFingerprint } from '../media/image-identity.js';
 import { collectProviderImages, listBuiltinImageProviders } from './provider-runtime.js';
@@ -26,9 +27,10 @@ export function createReaderImageService(options = {}) {
         const swipeId = context.swipeId ?? message?.swipeId ?? message?.raw?.swipe_id ?? host?.chat?.[context.messageId]?.swipe_id ?? 0;
         return { chatId, swipeId, revision: imageFingerprint(String(host?.chat?.[context.messageId]?.mes ?? message?.raw?.mes ?? message?.text ?? '')) };
     }
-    return {
+    const recoveryController = new AbortController();
+    const service = {
         clearCache() { cache.clear(); },
-        destroy() { cache.destroy?.(); },
+        destroy() { recoveryController.abort(); cache.destroy?.(); },
         registerProviders(registry) {
             if (!registry || typeof registry.register !== 'function') return;
             for (const provider of builtinProviders) {
@@ -147,6 +149,8 @@ export function createReaderImageService(options = {}) {
                         message,
                         unifiedSettings,
                         imageApi,
+                        ...(context.signal && { signal: context.signal }),
+                        ...(context.shouldStart && { shouldStart: context.shouldStart }),
                     });
                     // delegate：统一 NAI 没配 Key 时退回旧的 imageApi 通道（兼容旧设置与 OpenAI 兼容接口）。
                     if (!generated || !generated.delegate) return normalizeGeneratedResult(generated, request);
@@ -256,12 +260,14 @@ export function createReaderImageService(options = {}) {
             const imageIndex = resolvePreferredImageIndex(context, countImageSlots(context.imageState));
             const unifiedSettings = context.unifiedSettings || {};
             const imageApi = resolveImageApi(unifiedSettings);
-            const currentState = context.imageState || await this.collect({
+            const readBaseline = () => context.imageState || this.collect({
                 ...context,
                 currentIndex: imageIndex,
                 preferredImageIndex: imageIndex,
                 providers: context.providers,
             });
+            const currentState = context.recoveryCheckpoint
+                ? await context.recoveryCheckpoint.step('regenerate-baseline', readBaseline) : await readBaseline();
 
             if (imageApi.mode === 'nai' || imageApi.mode === 'dbgen' || imageApi.mode === 'baibai') {
                 const generated = await this.generate({
@@ -325,7 +331,9 @@ export function createReaderImageService(options = {}) {
                 return { ok: false, reason: 'regen-button-not-found', imageState: currentState };
             }
 
-            button.click();
+            const click = () => { button.click(); return { ok: true }; };
+            if (context.recoveryCheckpoint) await context.recoveryCheckpoint.step('regenerate-click', click);
+            else click();
             const pollIntervalMs = normalizePositiveInteger(imageApi.pollIntervalMs, 2000);
             const pollAttempts = normalizePositiveInteger(imageApi.pollAttempts, 60);
             const baselineSignature = String(currentState.signature || '');
@@ -394,6 +402,28 @@ export function createReaderImageService(options = {}) {
             };
         },
     };
+    for (const method of ['collect', 'generate', 'fetchModels', 'test', 'regenerate', 'save']) {
+        const execute = service[method];
+        service[method] = (context = {}) => {
+            const checkpoint = createOperationCheckpoint();
+            const receiver = checkpointService(service, checkpoint, `reader:${method}`);
+            const identity = cacheScope(context, context.message);
+            const linked = linkRecoverySignals([context.signal, recoveryController.signal]), signal = linked.signal;
+            return recoverOperation(() => execute.call(receiver, { ...context, signal, recoveryCheckpoint: checkpoint,
+                ...(!context.settings && options.getUnifiedSettings && { unifiedSettings: options.getUnifiedSettings() }) }), {
+                signal, global: globalObject,
+                retryUnchanged: !['generate', 'regenerate', 'test'].includes(method),
+                isActive: () => {
+                    const latest = cacheScope(context, context.message);
+                    return !recoveryController.signal.aborted && latest.chatId === identity.chatId
+                        && latest.swipeId === identity.swipeId && (!context.shouldStart || context.shouldStart());
+                },
+                shouldRecover: result => !['invalid-message-id', 'empty-input', 'no-image-to-save', 'unsupported-save-url'].includes(result?.reason),
+            }).finally(() => { checkpoint.clear(); linked.release(); });
+        };
+    }
+    return service;
+
 }
 
 function collectSceneImages(scene = {}, render = {}) {

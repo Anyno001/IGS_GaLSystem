@@ -4,7 +4,7 @@
 export const PROMPT_KINDS = Object.freeze([
     ['sprite', '立绘'],
     ['expression', '表情差分'],
-    ['avatar', 'Q 版头像'],
+    ['avatar', 'Q版头像'],
     ['wardrobe', '衣柜'],
     ['background', '背景'],
     ['item', '物品'],
@@ -14,6 +14,12 @@ export const PROMPT_KINDS = Object.freeze([
 const KIND_IDS = new Set(PROMPT_KINDS.map(([id]) => id));
 
 const text = (value) => (typeof value === 'string' ? value : '');
+
+// 显式画师负向与旧通用 UC 分离；定稿发送不追加通用负面词。
+export function globalArtist(settings = {}) {
+    return { positivePrompt: text(settings.artistPrefix),
+        negativePrompt: text(settings.artistNegativePrefix) };
+}
 
 export function normalizeArtistByKind(value) {
     const src = value && typeof value === 'object' ? value : {};

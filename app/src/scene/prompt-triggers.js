@@ -2,6 +2,7 @@ import { CAMPUS_FX_KINDS, COURTESY_FX_KINDS, DAILY_FX_KINDS, PLAY_FX_KINDS, WARD
 import { CAMPUS_TRIGGER_WORDS } from './campus-fx.js';
 import { FX_PACKS_ACTIVE, FX_PACK_TRIGGER_WORDS, isPackKind, packBlockKey } from './fx-packs.js';
 import { compileKeywordMatcher, joinPromptKeywords, normalizePromptEntries, parsePromptKeywords } from './prompt-entries.js';
+import { trimCacheEntries } from '../media/cache-eviction.js';
 
 // 按需展开的提示词块：最近几层出现过对应标签、用户输入或最近 AI 正文命中触发词、或对应成对标签未闭合时才发完整写法。
 export const DEFAULT_TRIGGER_LOOKBACK = 3;
@@ -195,9 +196,9 @@ function compileEntry(block, entry) {
     if (!primary) {
         const words = entry.keys ? parsePromptKeywords(entry.keys) : rule.words;
         primary = compileKeywordMatcher(words);
-        if (MATCHER_CACHE.size >= MATCHER_CACHE_MAX) MATCHER_CACHE.clear();
-        MATCHER_CACHE.set(cacheKey, primary);
     }
+    MATCHER_CACHE.delete(cacheKey); MATCHER_CACHE.set(cacheKey, primary);
+    trimCacheEntries(MATCHER_CACHE, MATCHER_CACHE_MAX);
     return { rule, primary };
 }
 

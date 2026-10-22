@@ -12,12 +12,16 @@ import { MIST_STYLE_TEXT } from './fx-mist.js';
 import { AMB_DETAIL_STYLE_TEXT } from './fx-daily-amb-style.js';
 import { FLAT_FX_STYLE_TEXT } from './fx-daily-flat-style.js';
 import { fxStateStyleText } from './fx-state-style.js';
+import { ANCIENT_PAPER_FONT_STYLE_TEXT } from './fx-ancient-font.js';
+import { ANCIENT_PAPER_STYLE_TEXT } from './fx-ancient-paper-style.js';
+import { SELECTED_SVG_STYLE_TEXT } from './fx-selected-svg-style.js';
 const RED = '#c8392b';
 export const DAILY_FX_STYLE_TEXT = `
 ${GAME_FX_STYLE_TEXT}
 ${CAMPUS_FX_STYLE_TEXT}
 ${XIANXIA_FX_STYLE_TEXT}
 ${RITES_FX_STYLE_TEXT}
+${SELECTED_SVG_STYLE_TEXT}
 ${CARE_FX_STYLE_TEXT}
 ${PANEL_STYLE_TEXT}
 ${TICKER_STYLE_TEXT}
@@ -1014,4 +1018,6 @@ ${FX_PACK_STYLE_TEXT}
 #igs-overlay .igs-dfx.is-reduced .igs-dfx-pass-trail,#igs-overlay .igs-dfx.is-reduced .igs-dfx-candle-flame{animation:none;opacity:.8;}
 #igs-overlay .igs-dfx.is-reduced .igs-dfx-liandan-smoke{display:none;}
 ${FLAT_FX_STYLE_TEXT}
+${ANCIENT_PAPER_FONT_STYLE_TEXT}
+${ANCIENT_PAPER_STYLE_TEXT}
 `;

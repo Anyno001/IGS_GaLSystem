@@ -1,3 +1,4 @@
+import { recoverSpriteMigration, prepareSpriteMigration, clearSpriteMigration } from './sprite-migration-journal.js';
 import { LEGACY_READER_MODE_KEYS } from '../schemas/reader-mode.js';
 
 export const LEGACY_VN_KEYS = Object.freeze({
@@ -22,6 +23,9 @@ export function readLegacyIgsSettings(storageLike, preferredMode) {
         return result;
     }
 
+    const recovered = recoverSpriteMigration(storageLike);
+    if (!recovered.ok) return recovered;
+
     const bridgeRecord = readJsonStorage(storageLike, LEGACY_VN_KEYS.bridge);
     if (!bridgeRecord.ok) return bridgeRecord;
     result.bridge = normalizeLegacyIgsSettings(bridgeRecord.value);
@@ -41,7 +45,7 @@ export function readLegacyIgsSettings(storageLike, preferredMode) {
     return result;
 }
 
-export function writeLegacyIgsSettings(storageLike, nextState = {}) {
+export function writeLegacyIgsSettings(storageLike, nextState = {}, options = {}) {
     if (!isStorageLike(storageLike)) {
         return {
             ok: false,
@@ -49,6 +53,8 @@ export function writeLegacyIgsSettings(storageLike, nextState = {}) {
         };
     }
 
+    const recovered = recoverSpriteMigration(storageLike);
+    if (!recovered.ok) return { ...recovered, reason: 'legacy-storage-write-failed' };
     const normalized = normalizeLegacySnapshot(nextState);
     const entries = [
         [LEGACY_VN_KEYS.bridge, JSON.stringify(slimBridgeForStorage(normalized.bridge))],
@@ -59,6 +65,7 @@ export function writeLegacyIgsSettings(storageLike, nextState = {}) {
         ]),
     ];
     const written = [];
+    let journaled = false;
     try {
         // Keep the old values for compensation: localStorage has no multi-key transaction.
         const changes = entries.map(([key, value]) => ({ key, value, previous: storageLike.getItem(key) }))
@@ -66,10 +73,17 @@ export function writeLegacyIgsSettings(storageLike, nextState = {}) {
         if (changes.some(({ previous }) => previous == null) && typeof storageLike.removeItem !== 'function') {
             return { ok: false, reason: 'legacy-storage-write-failed', message: 'Storage cannot restore newly created keys', legacy: normalized };
         }
+        if (options.migration && changes.length) {
+            if (typeof storageLike.removeItem !== 'function') throw new Error('Migration needs reversible storage');
+            journaled = true;
+            prepareSpriteMigration(storageLike, changes);
+        }
         for (const change of changes) {
             written.push(change);
             storageLike.setItem(change.key, change.value);
+            if (storageLike.getItem(change.key) !== change.value) throw new Error('Settings write was not retained');
         }
+        if (journaled) clearSpriteMigration(storageLike);
         return {
             ok: true,
             legacy: normalized,
@@ -80,9 +94,13 @@ export function writeLegacyIgsSettings(storageLike, nextState = {}) {
             try {
                 if (previous == null) storageLike.removeItem(key);
                 else storageLike.setItem(key, previous);
+                if (storageLike.getItem(key) !== previous) rollbackFailed = true;
             } catch (rollbackError) {
                 rollbackFailed = true;
             }
+        }
+        if (journaled && !rollbackFailed) {
+            try { clearSpriteMigration(storageLike); } catch { rollbackFailed = true; }
         }
         return {
             ok: false,
@@ -193,6 +211,7 @@ function slimBridgeForStorage(bridge) {
     if (!bridge || typeof bridge !== 'object') return bridge;
     const sa = bridge.sceneAssets;
     if (!sa || typeof sa !== 'object') return bridge;
+    if (sa.spriteMigrationNotesPending) return bridge;
     const gen = sa.generated;
     if (!gen || typeof gen !== 'object') return bridge;
     const { expressionNotes, ...slimGenerated } = gen;

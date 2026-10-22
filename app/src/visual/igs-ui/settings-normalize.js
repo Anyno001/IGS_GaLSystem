@@ -132,7 +132,8 @@ export function normalizeSettingsValue(path, value) {
     if (path === 'bridge.sceneAssets.promptAdaptive') return !(value === false || value === 'false' || value === 0 || value === '0');
     if (path === 'bridge.sceneAssets.wardrobeAutoFlow') return !(value === false || value === 'false' || value === 0 || value === '0');
     if (path === 'bridge.sceneAssets.promptRuleEnabled') return !(value === false || value === 'false' || value === 0 || value === '0');
-    if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|backfillOldFloors|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
+    if (path === 'bridge.autoIllustration.assets.dayFirst') return !(value === false || value === 'false' || value === 0 || value === '0');
+    if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|backfillOldFloors|assets\.(spriteEnabled|outfitAutoGenerate|backgroundEnabled|strictMatch))$/.test(path)) {
         return value === true || value === 'true' || value === 1 || value === '1';
     }
     if (/^bridge\.autoIllustration\.assets\.(spriteSize|backgroundSize|templates\.(background|backgroundNegative|sprite|spriteNegative|nsfwExtra))$/.test(path)) {
@@ -148,10 +149,12 @@ export function normalizeSettingsValue(path, value) {
         return Number(value);
     }
     if (/^bridge\.imageApi\.(sprite|background|item)Model$/.test(path)) return String(value || '').trim();
-    if (path === 'bridge.imageApi.dbgenSpriteTransparent') {
+    if (path === 'bridge.imageApi.dbgenSpriteTransparent' || path === 'bridge.imageApi.naiSpriteTransparent'
+        || path === 'bridge.imageApi.externalSpriteDna') {
         return !(value === false || value === 'false' || value === 0 || value === '0');
     }
     if (path === 'bridge.imageCache.maxCount') return normalizeImageCacheCount(value);
+    if (path === 'bridge.imageCache.compressDisplay') return !(value === false || value === 'false' || value === 0 || value === '0');
     return value;
 }
 

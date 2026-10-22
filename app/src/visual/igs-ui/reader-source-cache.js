@@ -1,5 +1,6 @@
 // 阅读源解析缓存：把与页码无关的正文解析结果按消息 + 输入签名缓存，
 // 让普通翻页不再重复执行整楼正文过滤、正则、标签解析、分页与图位映射。
+import { trimCacheEntries } from '../../media/cache-eviction.js';
 
 export const DEFAULT_SOURCE_CACHE_LIMIT = 8;
 
@@ -46,11 +47,7 @@ export function createReaderSourceCache(options = {}) {
         parseCount += 1;
         entries.delete(signature);
         entries.set(signature, { value, sceneAssets, prepared: null, dependencies: [] });
-        while (entries.size > limit) {
-            const oldest = entries.keys().next();
-            if (oldest.done) break;
-            entries.delete(oldest.value);
-        }
+        trimCacheEntries(entries, limit);
         return { value, hit: false };
     }
 
@@ -63,6 +60,7 @@ export function createReaderSourceCache(options = {}) {
     function prepare(signature, dependencies, build) {
         const entry = entries.get(signature);
         if (!entry) return build();
+        entries.delete(signature); entries.set(signature, entry);
         if (entry.prepared && dependencies.length === entry.dependencies.length
             && dependencies.every((value, i) => value === entry.dependencies[i])) return entry.prepared;
         entry.prepared = build();

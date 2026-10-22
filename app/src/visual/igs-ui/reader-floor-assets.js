@@ -1,12 +1,14 @@
+import { resolveCharacterLive2dBinding } from './live2d-config.js';
 import { resolveSpriteAsset, resolveBackgroundAsset, resolveNudeSpriteAsset, isNonSpriteSpeaker, tempAssetKeyOf } from '../../scene/asset-match.js';
-import { resolveSpriteOutfit, outfitsOfCharacter } from '../../scene/character-outfits.js';
+import { resolveSpriteOutfit, outfitsOfCharacter, outfitAllowsScene } from '../../scene/character-outfits.js';
 import { resolveCharacterDna } from '../../scene/character-dna.js';
 import { classifySceneKey } from '../../scene/scene-directives.js';
-import { narrationCastLeft, otherNamesOf, namesOf, NARRATION_HOLD_PAGES } from '../../scene/narration-sprite.js';
+import { createCastLeftTracker, otherNamesOf, namesOf, NARRATION_HOLD_PAGES } from '../../scene/narration-sprite.js';
 import { STAGE_CAST_SCAN_LIMIT } from '../../scene/stage-cast.js';
 import { normalizeStageCastSettings } from './stage-direction-settings.js';
 import { isSystemRole } from './system-role.js';
 import { lastBefore } from './reader-floor-plan.js';
+import { resolveReaderSpriteAsset } from './reader-sprite-asset.js';
 
 // 页计划里的只有引用和命中结果。图像字节及 blob 生命周期仍属于中央媒体缓存。
 function createAssetLookup(initialContext) {
@@ -15,6 +17,10 @@ function createAssetLookup(initialContext) {
     const dirty = new Map();
     const updated = new Map();
     function resolve(kind, args) {
+        // 整楼预处理也必须在匹配静态图前分流，而非等渲染时再隐藏。
+        if (kind === 'sprite' && resolveCharacterLive2dBinding(context.live2dConfig, context.sceneAssets, args[0], args[1])) {
+            return { url: '', source: 'live2d', character: args[0] };
+        }
         const key = JSON.stringify([kind, ...args]);
         const cached = entries.get(key);
         if (cached && (!cached.retryAt || Date.now() < cached.retryAt)) return cached.hit;
@@ -36,9 +42,10 @@ function createAssetLookup(initialContext) {
             isMissingImage: probe(context.isMissingImage, 30000),
             isUnavailableImage: probe(context.isUnavailableImage, 1500),
             tempSprite: temporary(context.tempSprite, 'sprite'),
+            tempSpriteForOutfit: temporary(context.tempSpriteForOutfit, 'sprite'),
             tempBackground: temporary(context.tempBackground, 'background'),
             tempSceneTime: temporary(context.tempSceneTime, 'background') };
-        const hit = kind === 'sprite' ? resolveSpriteAsset(args[0], args[1], ctx, args[2])
+        const hit = kind === 'sprite' ? resolveReaderSpriteAsset(args[0], args[1], ctx, args[2])
             : kind === 'nude' ? resolveNudeSpriteAsset(args[0], args[1], ctx)
                 : resolveBackgroundAsset(args[0], ctx);
         if (hit.url) dependencies.add(hit.url);
@@ -103,7 +110,7 @@ function prepareStageIndex(floor, settings) {
         const key = floor.keyOf(d.character);
         if (!speeches.has(key)) speeches.set(key, []);
         speeches.get(key).push(d);
-        if (d.outfit) {
+        if (d.outfit || d.unknownOutfit) {
             const outfitKey = outfitsOfCharacter(settings._sceneAssets?.characterOutfits, settings._sceneAssets?.characterAliases, d.character).key || d.character;
             if (!outfits.has(outfitKey)) outfits.set(outfitKey, []);
             outfits.get(outfitKey).push(d);
@@ -133,6 +140,22 @@ function prepareStageIndex(floor, settings) {
     const writes = (key, text) => {
         if (!namesMemo.has(key)) namesMemo.set(key, namesOf(key, castAliases[key]));
         return namesMemo.get(key).some(n => String(text || '').includes(n));
+    };
+    // 同屏陪衬是否已被正文写走：每人一个增量判断，每页只喂新增的原文（他开口、或页序回退时重来）。
+    const castLeft = new Map();
+    const leftSince = (character, speech, offset, next) => {
+        let state = castLeft.get(character);
+        if (!state || state.speech !== speech || offset < state.upto) {
+            const end = floor.source.indexOf('\n', speech.offset);
+            const from = end < 0 ? speech.offset : end;
+            // 她 / 他 离场交给旁白点名的指代消解（认领到的人记在 narrationDroppedKey），陪衬各自只认写了名字的离场。
+            state = { speech, upto: from, tracker: createCastLeftTracker({ name: character, aliases: castAliases[character] || [], pronoun: false, self: floor.selfNames || [],
+                others: otherNames.filter(n => n !== character) }) };
+            castLeft.set(character, state);
+        }
+        const chunk = floor.source.slice(state.upto, offset);
+        state.upto = Math.max(state.upto, offset);
+        return state.tracker.feed(chunk, next);
     };
     // 临时座位：旁白点名 / 感知上台、本场景还没开口的人，焦点移走后留在原座，按旁白沿用规则衰减（隔 2 页须再被写到），开口即转正。
     // soft 陪衬（同行 / 集体主语带过来的）同样衰减；宽松档不标 soft，不衰减。
@@ -169,6 +192,9 @@ function prepareStageIndex(floor, settings) {
         }
         sceneMark = sceneHere;
         const focus = page.spriteChar ? floor.keyOf(page.spriteChar) : '';
+        // 判断离场的原文读到本页末尾：本页的「你 / 我」走开也当页作用于同屏陪衬。
+        const nextAt = floor.offsets?.[i + 1];
+        const pageEnd = offset >= 0 && page.currentOffset >= 0 ? Math.max(offset, nextAt > offset ? nextAt : i + 1 >= floor.pages.length ? floor.source.length : offset) : offset;
         const staged = !(offset >= 0) || !cast.enabled ? [] : (lastBefore(stages, offset)?.members || []).filter(m => {
             if (m.character === page.narrationDroppedKey || (gone.has(m.character) && m.at < gone.get(m.character))) return false;
             if (m.soft) {
@@ -182,10 +208,7 @@ function prepareStageIndex(floor, settings) {
             if (m.character === focus) return true;
             const speech = lastBefore(speeches.get(m.character) || [], offset);
             if (!speech) return true;
-            const end = floor.source.indexOf('\n', speech.offset);
-            // 她 / 他 离场交给旁白点名的指代消解（认领到的人记在 narrationDroppedKey），陪衬各自只认写了名字的离场。
-            return !narrationCastLeft({ name: m.character, aliases: castAliases[m.character] || [], pronoun: false,
-                others: otherNames.filter(n => n !== m.character), text: floor.source.slice(end < 0 ? speech.offset : end, offset) });
+            return !leftSince(m.character, speech, pageEnd, floor.pages[i + 1]?.segmentBody);
         });
         const seated = new Set(staged.map(m => m.character));
         for (const [key, temp] of [...temps]) {
@@ -207,8 +230,9 @@ export function prepareReaderFloorAssets(floor, { payload, readerSettings, asset
     const stageSettings = JSON.stringify(readerSettings.stageCast);
     const hudSettings = JSON.stringify([readerSettings.statusHud?.enabled, readerSettings.statusHud?.tables]);
     const strict = assetMatchCtx.strict === true;
+    const live2dKey = JSON.stringify([readerSettings._live2d?.enabled, Object.keys(readerSettings._live2d?.bindings || {}), readerSettings._sceneAssets?.characterAliases]);
     if (floor.assets && floor.tablesRevision === tableData.revision && floor.stageSettings === stageSettings
-        && floor.hudSettings === hudSettings && floor.matchStrict === strict) {
+        && floor.hudSettings === hudSettings && floor.matchStrict === strict && floor.live2dKey === live2dKey) {
         floor.assets.updateContext(assetMatchCtx);
         return floor.assets;
     }
@@ -221,26 +245,55 @@ export function prepareReaderFloorAssets(floor, { payload, readerSettings, asset
         if (floor.sceneSpeaker) names.add(floor.keyOf(floor.sceneSpeaker));
         tableData.prepareCharacters(names, readerSettings.statusHud.tables, sceneAssets.characterAliases);
     }
-    const lookup = floor.assets || createAssetLookup(assetMatchCtx);
+    // 关闭/移除绑定后允许静态图恢复；开启时不能留下旧静态命中的预加载 URL。
+    const lookup = floor.live2dKey === live2dKey && floor.assets || createAssetLookup(assetMatchCtx);
+    floor.live2dKey = live2dKey;
     if (floor.matchStrict !== strict) lookup.invalidate();
     floor.matchStrict = strict;
     lookup.updateContext(assetMatchCtx);
     const outfitCache = new Map();
     const scenes = floor.outfitDirectives.filter(d => d.type === 'scene');
     const inheritedOutfits = payload.inheritedOutfits;
+    // 楼首换了场（地点或时段与上一楼不同）：本楼还没写到这人的衣服时，取同一场景里往后第一次写的；没换场沿用上一楼。
+    const headScene = scenes[0] || null;
+    const prevScene = floor.inheritedSceneState;
+    const headChanged = Boolean(headScene && (!prevScene
+        || String(headScene.scene || '').trim() !== String(prevScene.scene || '').trim()
+        || String(headScene.time || '').trim() !== String(prevScene.time || '').trim()));
+    const headSceneEnd = scenes[1] ? scenes[1].offset : Infinity;
+    const noDefaultSprite = new Map();
+    const defaultEmpty = name => {
+        if (!noDefaultSprite.has(name)) noDefaultSprite.set(name, !lookup.sprite(name).url);
+        return noDefaultSprite.get(name);
+    };
     function outfitFor(index, character) {
         const page = floor.pages[index];
-        const key = outfitsOfCharacter(sceneAssets.characterOutfits, sceneAssets.characterAliases, character).key || character;
-        const tag = lastBefore(floor.stageIndex.outfits.get(key) || [], page.outfitOffset);
+        const { key: found, outfits } = outfitsOfCharacter(sceneAssets.characterOutfits, sceneAssets.characterAliases, character);
+        const key = found || character;
+        const tags = floor.stageIndex.outfits.get(key) || [];
+        let tag = lastBefore(tags, page.outfitOffset);
         const scene = lastBefore(scenes, page.outfitOffset);
+        // 默认立绘是空的：楼首没换场也往后取同场景第一次写的衣服，免得落到空的原装上。
+        const ahead = !tag && scene === headScene && (headChanged || (found && defaultEmpty(character)))
+            ? tags.find(d => d.offset >= (headScene?.offset ?? 0) && d.offset < headSceneEnd) || null : null;
+        if (ahead) tag = ahead;
         const cacheKey = JSON.stringify([key, tag?.offset ?? -1, scene?.offset ?? -1]);
         if (!outfitCache.has(cacheKey)) {
             const rawScene = String(page.sceneStateForBg?.scene || '').trim();
-            outfitCache.set(cacheKey, resolveSpriteOutfit({ directives: [scene, tag].filter(Boolean), character,
-                offset: page.outfitOffset, inheritedOutfits, sceneAssets,
-                scene: [classifySceneKey(sceneAssets.scenes, rawScene).key || '', rawScene],
+            const sceneNames = [classifySceneKey(sceneAssets.scenes, rawScene).key || '', rawScene];
+            let resolved = resolveSpriteOutfit({ directives: [scene, tag].filter(Boolean), character,
+                offset: ahead ? ahead.offset : page.outfitOffset, inheritedOutfits, sceneAssets,
+                scene: sceneNames,
                 readClues: tableData.outfitClues,
-                resolveDna: name => resolveCharacterDna(sceneAssets.characterDna, name)?.dna || null }));
+                resolveDna: name => resolveCharacterDna(sceneAssets.characterDna, name)?.dna || null });
+            // 仍落空就从衣柜挑一套适用本场景的，有图的优先，没图的也照选。
+            if (!resolved.outfit && resolved.source !== 'reset' && found && defaultEmpty(character)) {
+                const names = Object.keys(outfits).filter(name => outfitAllowsScene(outfits[name], sceneNames));
+                const hasArt = name => Object.values(outfits[name]?.moods || {}).some(v => String(v || '').trim()) || String(outfits[name]?.base || '').trim();
+                const pick = names.find(hasArt) || names[0];
+                if (pick) resolved = { outfit: pick, source: 'wardrobe', reason: 'no-default-sprite' };
+            }
+            outfitCache.set(cacheKey, resolved);
         }
         return outfitCache.get(cacheKey);
     }

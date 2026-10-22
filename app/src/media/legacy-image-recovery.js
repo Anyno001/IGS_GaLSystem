@@ -1,4 +1,4 @@
-import { IMAGE_FIELDS } from './image-identity.js';
+import { IMAGE_FIELDS, IMAGE_RECOVERY_PIXELS } from './image-identity.js';
 import { decodeImage } from './image-decode.js';
 const HASH_NAME = /^[0-9a-f]{16}\.\w+$/;
 export function legacyImageHash(text) {
@@ -60,11 +60,12 @@ export function createLegacyImageRecovery(globalObject, { dir, listFiles, read, 
         }
         const hits = await scan(key);
         if (!hits.length) return null;
-        if (hits.length === 1) return { id: key, dataUrl: hits[0].path };
+        const recovered = record => Object.defineProperty(record, IMAGE_RECOVERY_PIXELS, { value: new Map(hits.map(hit => [hit.path, hit.dataUrl])) });
+        if (hits.length === 1) return recovered({ id: key, dataUrl: hits[0].path });
         let current = 0;
         while (current < hits.length && !await hasAlpha(hits[current].dataUrl)) current += 1;
         if (current >= hits.length) current = 1;
-        return { id: key, type: 'sprite', revision: 1, dataUrl: hits[current].path, originalDataUrl: hits[current > 0 ? 0 : current].path,
-            workingDataUrl: '', alphaMaskDataUrl: current < hits.length - 1 ? hits.at(-1).path : '' };
+        return recovered({ id: key, type: 'sprite', revision: 1, dataUrl: hits[current].path, originalDataUrl: hits[current > 0 ? 0 : current].path,
+            workingDataUrl: '', alphaMaskDataUrl: current < hits.length - 1 ? hits.at(-1).path : '' });
     };
 }

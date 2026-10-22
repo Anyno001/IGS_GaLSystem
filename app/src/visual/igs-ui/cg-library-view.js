@@ -1,3 +1,4 @@
+import { recoverOperation } from '../../storage/automatic-recovery.js';
 import { createMediaLeaseScope } from '../../media/media-lease-scope.js';
 import { requireMediaCache } from '../../media/media-cache-owner.js';
 import { metadataBytes } from '../../media/media-metadata-size.js';
@@ -5,7 +6,7 @@ import { metadataBytes } from '../../media/media-metadata-size.js';
 // 打开：先读目录（每张一条轻记录）马上出列表；随后后台对账，只有真有新图 / 删图时才动列表。
 // 翻页：只为当前页取缩略图，最多 3 张同时读；每张单独通知（onChange('thumb', key)），界面只换那一格。
 // 状态文字永远说清楚在做哪一步、做到第几张、哪张失败了为什么。
-import { CG_PAGE_SIZE, cgPageSlice, cgReasonText, filterCgEntries } from '../../media/cg-library.js';
+import { CG_PAGE_SIZE, cgPageSlice, cgReasonText, filterCgEntries, cgEntryStamp } from '../../media/cg-library.js';
 
 const THUMB_WORKERS = 3;
 const ORDER_KEY = 'igs:cg-order:v1';
@@ -43,7 +44,7 @@ export function createCgLibraryView(library, options = {}) {
         return { state: unavailState, open: () => Promise.resolve(), goto: () => {}, setFilters: () => {}, retry: () => {}, removeKeys: () => {}, patchEntry: () => {}, tileOf: () => ({ state: 'loading', url: '', reason: '' }), statusText: () => 'CG 库不可用', setNotice: () => {}, find: () => null, readFull: () => Promise.resolve(null), whenIdle: () => Promise.resolve(), dispose: () => {} };
     }
     const cache = requireMediaCache(rawCache, 'cg-view', library?.mediaCache);
-    const thumbKey = key => `thumb:cg:${key}:${String(state.all.find(entry => entry.key === key)?.updatedAt || '')}`;
+    const thumbKey = key => `thumb:cg:${key}:${cgEntryStamp(state.all.find(entry => entry.key === key))}`;
     const thumbs = { get: key => cache.peek(thumbKey(key)), has: key => Boolean(cache.peek(thumbKey(key))), set: (key, url) => cache.remember(thumbKey(key), url), delete: key => cache.forget(thumbKey(key)) };
     const leases = createMediaLeaseScope(cache);
     const failed = cache.auxiliary.createMap('cg-failures');
@@ -56,22 +57,26 @@ export function createCgLibraryView(library, options = {}) {
     let disposed = false;
     let opened = false;
     let waiters = [];
-    const resetThumbWork = () => { thumbGeneration += 1; failed.clear(); queue = []; batching.clear(); working.clear(); };
+    let workController = new AbortController();
+    const resetThumbWork = () => { workController.abort(); workController = new AbortController(); thumbGeneration += 1; failed.clear(); queue = []; batching.clear(); working.clear(); };
     const owner = cache.auxiliary.register('cg-catalogue', {
         clear() {
             openGen += 1; resetThumbWork(); opening = null;
             state.all = []; state.list = []; state.entries = []; state.phase = 'idle'; state.sync = null;
             leases.releaseAll(); wake();
         },
-        destroy() { disposed = true; onChange = () => {}; },
+        destroy() { disposed = true; workController.abort(); onChange = () => {}; },
         stats: () => ({ count: state.all.length, activeScopes: opened ? 1 : 0, pending: Number(Boolean(opening)) + batching.size + working.size + queue.length }),
     });
     const offClear = cache.onClear(() => { if (!disposed && opened) void open(); });
+    let offChanged = null;
+    const refreshing = new Set();
+    const refreshTokens = new Map();
 
     const emit = (type, key) => {
         try { onChange(type, key); } catch (error) { console.warn('[IGS] CG 库界面刷新失败', type, error); }
     };
-    const busy = () => Boolean(opening) || batching.size > 0 || working.size > 0 || queue.length > 0;
+    const busy = () => Boolean(opening) || refreshing.size > 0 || batching.size > 0 || working.size > 0 || queue.length > 0;
     const wake = () => {
         if (busy()) return;
         const list = waiters;
@@ -97,10 +102,26 @@ export function createCgLibraryView(library, options = {}) {
         return true;
     }
 
-    const pageKeys = () => state.entries.map((e) => e.key).join('\n');
+    const pageKeys = () => state.entries.map((e) => JSON.stringify([e.key, cgEntryStamp(e), e.hidden, e.favorite])).join('\n');
 
     const onPage = (key) => state.entries.some((e) => e.key === key);
     const pending = (key) => batching.has(key) || working.has(key) || queue.some((e) => e.key === key);
+    const currentEntry = (entry) => !disposed && state.all.some((e) => e.key === entry.key
+        && e.ready && cgEntryStamp(e) === cgEntryStamp(entry));
+
+    function replaceEntries(entries) {
+        const next = new Map(entries.map((e) => [e.key, e]));
+        for (const old of state.all) {
+            const entry = next.get(old.key);
+            if (!entry || !entry.ready || cgEntryStamp(entry) !== cgEntryStamp(old)) {
+                thumbs.delete(old.key);
+                failed.delete(old.key);
+            }
+        }
+        if (!recompute(entries)) return false;
+        queue = queue.filter(currentEntry);
+        return true;
+    }
 
     function remember(key, url) {
         thumbs.set(key, url);
@@ -130,10 +151,15 @@ export function createCgLibraryView(library, options = {}) {
             const gen = thumbGeneration;
             working.set(entry.key, gen);
             Promise.resolve()
-                .then(() => library.makeThumb(entry))
+                .then(() => recoverOperation(() => library.makeThumb(entry), {
+                    signal: workController.signal,
+                    isActive: () => !disposed && gen === thumbGeneration && onPage(entry.key),
+                    shouldRecover: result => result?.reason !== 'missing',
+                }))
                 .catch(() => ({ ok: false, reason: 'thumb-failed' }))
                 .then((result) => {
-                    if (disposed || gen !== thumbGeneration || String(entry.updatedAt || '') !== String(state.all.find(row => row.key === entry.key)?.updatedAt || '')) {
+                    if (result?.cancelled) { finish(entry.key, gen); return; }
+                    if (disposed || gen !== thumbGeneration || cgEntryStamp(entry) !== cgEntryStamp(state.all.find(row => row.key === entry.key))) {
                         finish(entry.key, gen); return;
                     }
                     if (result && result.ok) remember(entry.key, result.dataUrl);
@@ -162,13 +188,14 @@ export function createCgLibraryView(library, options = {}) {
         if (disposed) { wake(); return; }
         if (gen !== thumbGeneration) { void loadPageThumbs(); return; }
         for (const e of need) {
-            if (String(e.updatedAt || '') !== String(state.all.find(row => row.key === e.key)?.updatedAt || '')) continue;
+            if (!currentEntry(e)) continue;
             const url = cached.get(e.key);
             if (url) { remember(e.key, url); emit('thumb', e.key); }
             else if (onPage(e.key) && !pending(e.key) && !thumbs.has(e.key)) queue.push(state.entries.find((x) => x.key === e.key) || e);
         }
         pump();
         emit('status');
+        loadPageThumbs();
         wake();
     }
 
@@ -190,20 +217,23 @@ export function createCgLibraryView(library, options = {}) {
         }
         state.sync = { phase: 'keys', done: 0, total: 0, first: !fromIndex };
         emit('status');
-        const synced = await library.syncIndex((progress) => {
+        const synced = await recoverOperation(() => library.syncIndex((progress) => {
             if (gen !== openGen) return;
             state.sync = { ...state.sync, ...progress };
             emit('status');
-        });
+        }), { repeatable: 'save', isActive: () => !disposed && gen === openGen,
+            signal: workController.signal,
+            shouldRecover: result => !result?.entries?.length,
+            onRecover() { state.syncNote = '目录正在自动恢复'; emit('status'); } });
         if (gen !== openGen) return;
         state.sync = null;
         if (!synced.ok && !synced.entries.length && !fromIndex) {
             state.phase = 'error';
-            state.error = `CG 库读取失败：${cgReasonText(synced.reason)}。请点击「刷新」重试。`;
+            state.error = `CG 库读取失败：${cgReasonText(synced.reason)}`;
             emit('list');
             return;
         }
-        state.syncNote = synced.ok ? '' : `部分内容未能读取：${cgReasonText(synced.reason)}。已显示可读取的部分，请点击「刷新」重试。`;
+        state.syncNote = synced.ok ? '' : `部分内容未能读取：${cgReasonText(synced.reason)}`;
         const before = pageKeys();
         const total = state.list.length;
         if (!recompute(synced.entries)) return;
@@ -217,17 +247,67 @@ export function createCgLibraryView(library, options = {}) {
         }
     }
 
+    function onLibraryChanged(payload) {
+        if (disposed || !payload || typeof library?.refreshEntry !== 'function') return;
+        const { chatId, messageId, swipeId, slot } = payload;
+        if (typeof chatId !== 'string' || !chatId || !Number.isSafeInteger(messageId) || messageId < 0
+            || !Number.isSafeInteger(swipeId) || swipeId < 0 || !Number.isSafeInteger(slot) || slot < 1) return;
+        const key = `${chatId}|${messageId}|${swipeId}|${slot}`;
+        const token = {};
+        refreshTokens.set(key, token);
+        const job = Promise.resolve().then(async () => {
+            // 初次打开的目录快照先落地，再按通知重读当前槽位，避免旧列表覆盖新图。
+            if (opening) await opening;
+            if (disposed || refreshTokens.get(key) !== token) return;
+            const result = await recoverOperation(() => library.refreshEntry(key), {
+                repeatable: 'read',
+                signal: workController.signal,
+                isActive: () => !disposed && refreshTokens.get(key) === token,
+                onRecover() { state.notice = '正在自动恢复图片目录'; emit('status'); },
+            });
+            if (opening) await opening;
+            if (disposed || refreshTokens.get(key) !== token) return;
+            if (!result?.ok) {
+                state.notice = `CG 更新读取失败：${cgReasonText(result?.reason)}`;
+                emit('status');
+                return;
+            }
+            const entries = state.all.filter((e) => e.key !== key);
+            if (result.entry) entries.push(result.entry);
+            if (!replaceEntries(entries)) return;
+            state.notice = result.warning ? `图片已替换，目录保存需重试：${cgReasonText(result.warning)}` : '';
+            emit('list');
+            emit('entry', key);
+            loadPageThumbs();
+        }).catch(error => { if (!disposed) { state.notice = `CG 更新未完成：${cgReasonText(error?.message || 'read-failed')}`; emit('status'); } })
+            .finally(() => {
+                refreshing.delete(job);
+                if (refreshTokens.get(key) === token) refreshTokens.delete(key);
+                wake();
+            });
+        refreshing.add(job);
+    }
+
     function open(filters) {
         if (disposed) return Promise.resolve();
         opened = true;
+        if (!offChanged && typeof library?.onChanged === 'function') {
+            const off = library.onChanged(onLibraryChanged);
+            offChanged = typeof off === 'function' ? off : () => {};
+        }
         if (filters) state.filters = { ...state.filters, ...filters };
         const gen = ++openGen;
         resetThumbWork();
         state.notice = '';
-        const job = runOpen(gen).catch(() => {
+        const job = recoverOperation(async () => { await runOpen(gen); return { ok: true }; }, {
+            repeatable: 'read',
+            signal: workController.signal,
+            isActive: () => !disposed && gen === openGen,
+            onRecover() { state.syncNote = '图库正在自动恢复'; emit('status'); },
+        }).catch(error => {
             if (gen !== openGen) return;
             state.phase = 'error';
-            state.error = 'CG 库读取失败，请点击「刷新」重试。';
+            state.error = `CG 库未能打开：${cgReasonText(error?.message || 'read-failed')}`;
             emit('list');
         }).finally(() => {
             if (opening === job) opening = null;
@@ -300,7 +380,7 @@ export function createCgLibraryView(library, options = {}) {
         if (state.phase === 'ready' && state.entries.length) {
             const c = thumbCounts();
             if (c.loading) parts.push(`本页缩略图：已显示 ${c.ok} / ${state.entries.length}，正在读取 ${c.loading} 张${c.failed ? `，${c.failed} 张失败` : ''}`);
-            else if (c.failed) parts.push(`本页有 ${c.failed} 张读取失败，可点击对应格子重试`);
+            else if (c.failed) parts.push(`正在自动恢复本页 ${c.failed} 张图片`);
         }
         if (state.syncNote) parts.push(state.syncNote);
         if (state.notice) parts.push(state.notice);
@@ -326,10 +406,17 @@ export function createCgLibraryView(library, options = {}) {
         statusText,
         setNotice(text) { state.notice = String(text || ''); emit('status'); },
         find: (key) => state.entries.find((e) => e.key === key) || null,
-        readFull: (entry) => library.readFull(entry),
+        readFull: (entry, options) => library.readFull(entry, options),
         whenIdle: () => (busy() ? new Promise((resolve) => { waiters.push(resolve); }) : Promise.resolve()),
         dispose() {
             disposed = true; offClear(); owner.destroy(); failed.destroy();
+            openGen += 1;
+            disposed = true;
+            offChanged?.();
+            offChanged = null;
+            refreshTokens.clear();
+            queue = [];
+            onChange = () => {};
         },
     };
 }

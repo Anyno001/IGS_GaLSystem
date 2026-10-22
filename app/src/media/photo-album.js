@@ -127,11 +127,11 @@ export async function composePhoto(doc, shot) {
         ['bg', shot.bg],
         ...(Array.isArray(shot.cast) ? shot.cast.map((layer) => ['sprite', layer]) : []),
         ['sprite', shot.sprite],
-    ].filter(([, layer]) => layer);
+    ].filter(([, layer]) => layer && /^url\(/i.test(String(layer.image || '').trim()));
     const images = await Promise.all(layers.map(([, layer]) => loadImage(doc, layer.image)));
     for (const [index, [kind, layer]] of layers.entries()) {
         const img = images[index];
-        if (!img) continue;
+        if (!img) return '';
         const box = layoutLayer(kind, img, width, height, layer);
         if (box) ctx.drawImage(img, box.x, box.y, box.w, box.h);
     }

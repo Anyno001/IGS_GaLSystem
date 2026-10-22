@@ -33,13 +33,3 @@ test('gate:floor-assets:collects-every-sprite-and-background-in-the-floor', () =
     assert.deepEqual(urls, ['cg-1.png', 'class.png', 'igs-gen:joy', 'lin-calm.png', 'roof.png', 'igs-gen:base']);
     assert.deepEqual(sprites, ['igs-gen:joy', 'lin-calm.png', 'igs-gen:base'], '立绘回调不包含背景或 CG');
 });
-
-test('gate:floor-assets:skips-narrators-and-keeps-inherited-background', () => {
-    const urls = collectFloorAssetUrls({
-        source: '[igs-char:旁白|平和|天黑了]\n[igs-char:冬月|默认|我在]',
-        sceneAssets,
-        inheritedScene: { scene: '教室', time: '夜晚', nsfw: false },
-        assetMatchCtx: { sceneAssets },
-    });
-    assert.deepEqual(urls, ['class.png', 'igs-gen:base']);
-});

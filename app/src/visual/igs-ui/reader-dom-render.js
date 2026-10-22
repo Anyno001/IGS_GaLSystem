@@ -1,34 +1,17 @@
+import { syncLive2dStage } from './live2d-stage.js';
 import { magicHouseVars } from './dialog-theme-css-skins.js';
 import { mermaidToneVars } from './dialog-theme-mermaid.js';
 import { resolveSpeakerMagicHouse } from './magic-house.js';
 import { normalizeSkinDialogScale } from './dialog-skin-frame.js';
 import { RECORD_ICONS } from './record-icons.js';
-import {
-    ORIGINAL_READER_ICONS,
-    ORIGINAL_READER_TOOLBAR_BUTTONS,
-} from './original-reader-source.js';
+import { ORIGINAL_READER_ICONS, ORIGINAL_READER_TOOLBAR_BUTTONS } from './original-reader-source.js';
 import { DIALOG_ONLY_BUTTONS, TOOLBAR_ACTIONS } from './reader-host-constants.js';
-import { normalizeDialogBarAlign, normalizeDialogBarButtons, normalizeToolbarSplit } from './settings-normalize.js';
-import {
-    ensureImageLoadingSpinner,
-    ensureImageEmptyPlaceholder,
-    isImageRetryTap,
-    getOwnerWindow,
-    readElementHeight,
-    readElementWidth,
-    removeImageEmptyPlaceholder,
-    removeImageLoadingSpinner,
-} from './reader-dom-utils.js';
+import { normalizeDialogBarAlign, normalizeDialogBarButtons, normalizeToolbarSplit, applySpriteDisplayScale, renderDialogueHtml, resolveActiveTheme, resolveSpriteLayout, spriteHeightLayoutKey } from './settings-normalize.js';
+import { ensureImageLoadingSpinner, ensureImageEmptyPlaceholder, isImageRetryTap, getOwnerWindow, readElementHeight, readElementWidth, removeImageEmptyPlaceholder, removeImageLoadingSpinner } from './reader-dom-utils.js';
 import { applyTransparentGlassMaterial } from '../../styles/glass-material.js';
 import { resolveStatusHudScale, resolveStatusHudLocationScale, NSFW_VEIL_LEVEL_STYLE, normalizeStatusHudPosition, normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
 import { computeLineHeight, igsDebug } from './reader-value-utils.js';
-import {
-    applySpriteDisplayScale,
-    renderDialogueHtml,
-    resolveActiveTheme,
-    resolveSpriteLayout,
-    spriteHeightLayoutKey,
-} from './settings-normalize.js';
+
 import { applyReaderModeRuntime } from './reader-runtime.js';
 import { applyTypewriterEffect, cancelTypewriter } from './typewriter-runtime.js';
 import { applyVoiceBark } from './voice-bark.js';
@@ -81,14 +64,7 @@ import { applyMangaBack } from './manga-back.js';
 import { applyCrowdFx } from './crowd-fx.js';
 import { applyComicToDom, finishComicReveal, isComicGhostTarget, relayoutComic } from './comic-bubble.js';
 import { normalizeSystemRoleSettings } from './system-role.js';
-import {
-    applyDialogSkinAssets,
-    isClassicDialogSkin,
-    isGradientVeilDialogSkin,
-    isMaterialDialogSkin,
-    supportsDialogAutoHeight,
-    normalizeClassicDialogWidthPercent,
-} from './classic-dialog-skin.js';
+import { applyDialogSkinAssets, isClassicDialogSkin, isGradientVeilDialogSkin, isMaterialDialogSkin, supportsDialogAutoHeight, normalizeClassicDialogWidthPercent } from './classic-dialog-skin.js';
 import { syncDialogSkinStyle } from './dialog-skin-style.js';
 import { gradientVeilColorToRgba, normalizeGradientVeil } from './gradient-veil-dialog-skin.js';
 
@@ -506,7 +482,7 @@ export function applyToolbarState(root, current) {
     const pinned = root.querySelector('#igs-bar-pinned');
     const dialogBar = root.querySelector('#igs-dialog-bar');
     const readerSettings = current.snapshot && current.snapshot.readerSettings || {};
-    // 按钮分布：split 分两截（dialogBarBtns 放对话框底部快捷栏）/ top 只用顶栏 / dialog 除设置外全放对话框下。
+    // 按钮分布：split 顶栏+对话框下（dialogBarBtns 放对话框底部快捷栏）/ top 全在顶栏 / dialog 除设置外全放对话框下。
     const split = normalizeToolbarSplit(readerSettings.toolbarSplit);
     const dialogIds = new Set(normalizeDialogBarButtons(readerSettings.dialogBarBtns));
     // 用户固定在顶栏的按钮优先留在顶栏。
@@ -542,11 +518,16 @@ export function applyToolbarState(root, current) {
     }
     const currentCgShown = Boolean(contentForCg.illustrationActive && contentForCg.illustrationUrl);
     const currentCgSlot = Boolean(contentForCg.illustrationSlot);
-    for (const id of ['clear-cg', 'reroll-cg']) {
+    for (const id of ['clear-cg', 'reroll-cg', 'consistency-cg']) {
         const button = root.querySelector(`#igs-btn-${id}`);
         if (!button) continue;
         // 没画出来的 CG 点没有图，清扫仍不可用；重画只认挂载点，失败的那张也能点。
-        const enabled = id === 'reroll-cg' ? currentCgSlot : currentCgShown;
+        const enabled = id === 'reroll-cg' ? currentCgSlot
+            : id === 'consistency-cg' ? Boolean(current.consistencyTask) || currentCgSlot && currentCgShown && !current.illustrationPending : currentCgShown;
+        if (id === 'consistency-cg') {
+            button.title = current.consistencyTask ? '停止一致性重绘' : '角色一致性重绘';
+            button.setAttribute('aria-label', button.title);
+        }
         button.disabled = !enabled;
         button.setAttribute('aria-disabled', String(!enabled));
     }
@@ -1530,6 +1511,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const spriteAssetUrl = hideSpriteNsfw || snapshot.content.htmlCardPage === true
         ? null
         : resolveAssetUrl(snapshot.content.spriteImage);
+    const live2dBinding = hideSpriteNsfw || snapshot.content.htmlCardPage === true || current.spriteEditMode
+        ? null : snapshot.content.spriteLive2d;
     const spritePage = `${snapshot.messageId}:${snapshot.content.currentIndex}`;
     let spriteDecodePending = false;
     const castEnabled = isStageCastEnabled(snapshot);
@@ -1544,7 +1527,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         members: castOn && Array.isArray(snapshot.content.castSprites) ? snapshot.content.castSprites : [],
         pin: castRomancePin,
         speakerOrder: snapshot.content.speakerCastOrder,
-        hasSpeaker: Boolean(spriteAssetUrl),
+        hasSpeaker: Boolean(spriteAssetUrl || live2dBinding),
         capacity: resolveCastCapacity(snapshot.mode, {
             width: stageMotion.clientWidth || castView.innerWidth,
             height: stageMotion.clientHeight || castView.innerHeight,
@@ -1714,6 +1697,16 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             writeBackgroundImage(spriteEl, '');
             spriteEl.style.filter = '';
             spriteEl.style.setProperty('-webkit-filter', '');
+        }
+    }
+    if (spriteEl) {
+        const liveLayout = { ...presentSpriteLayout(castSpeakerKey, castSpeakerMood, castSpeakerOutfit) };
+        if (speakerSlotX != null) liveLayout.posX = speakerSlotX;
+        syncLive2dStage(root, spriteEl, current, live2dBinding, liveLayout);
+        if (live2dBinding) {
+            spriteEl.classList.toggle('igs-sprite-narration', ['narration', 'chat', 'system'].includes(snapshot.content.textType) && spriteSettings.dimSpriteOnNarration !== false);
+            // 图片专用的裁切/换装/头像探测不得处理 WebGL 模型；静态陪衬仍走原布局。
+            stageSprite = null; fxSprite = null;
         }
     }
     const castReduced = prefersReducedMotion();

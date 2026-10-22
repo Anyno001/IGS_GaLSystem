@@ -1,3 +1,5 @@
+import { ANCIENT_PANEL_TEXTURE_STYLE_TEXT } from './ancient-panel-frames.js';
+import { SELECTED_CALLIGRAPHY_STYLE_TEXT } from './fx-selected-calligraphy-style.js';
 import { EAT_FX_STYLE_TEXT } from './fx-eat-style.js';
 import { RANGE_FX_STYLE_TEXT } from './fx-range-style.js';
 import { EMERGENCY_FX_STYLE_TEXT } from './fx-emergency-style.js';
@@ -11,6 +13,8 @@ const HANDSET = `url("data:image/svg+xml,${encodeURIComponent(HANDSET_SVG)}")`;
 // 通话计时：注册成整数的自定义属性由动画逐秒步进，再经 counter 显示成 mm:ss，全程不需要脚本每秒改 DOM。
 const CALL_TIMER_ANIMATION = 'igs-fx-mm 3600s steps(60,end) infinite,igs-fx-ss 60s steps(60,end) infinite';
 export const FX_STYLE_TEXT = `
+${SELECTED_CALLIGRAPHY_STYLE_TEXT}
+${ANCIENT_PANEL_TEXTURE_STYLE_TEXT}
 @property --igs-fx-mm{syntax:"<integer>";inherits:false;initial-value:0;}
 @property --igs-fx-ss{syntax:"<integer>";inherits:false;initial-value:0;}
 /* 题材包共用的对话框避让：--igs-dialog-h 由阅读器写在 #igs-overlay 上（漫画模式固定 72px）；safe=底部被对话框占掉的高度，vis=对话框上方可视高度；直播全屏对话框收成字幕，只留 64px。 */

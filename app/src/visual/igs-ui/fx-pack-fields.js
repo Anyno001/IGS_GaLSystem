@@ -50,9 +50,9 @@ export function renderPackSoundField(reader, more) {
     return perfItem(more, 'pack-camera-sound', checkbox(`${P}.cameraPackFx.sound`, camera.sound, '脚步与心跳声'), { on: camera.sound, hint: '默认关，音量比环境音低', detail: rangeInput(`${P}.cameraPackFx.volume`, camera.volume, '脚步声音量') });
 }
 
-// 公告、榜单等演出面板是否跟随对话框皮肤，放在「画面」页。
+// 其他榜单类演出面板是否跟随对话框皮肤；系统/任务/结算/数值卡固定跟随。
 export function renderPanelSkinField(reader, more) {
     if (!FX_PACKS_ACTIVE.length) return '';
     const daily = normalizeDailyFxSettings(reader && reader.dailyFx);
-    return perfItem(more, 'pack-panel-skin', checkbox(`${P}.dailyFx.panelSkin`, daily.panelSkin, '面板卡片跟随对话框皮肤'), { hint: '公告、榜单等面板，默认按世界观换皮' });
+    return perfItem(more, 'pack-panel-skin', checkbox(`${P}.dailyFx.panelSkin`, daily.panelSkin, '其他面板跟随对话框皮肤'), { hint: '控制榜单、投票等其他面板；系统、任务、结算与数值卡始终跟随当前皮肤' });
 }

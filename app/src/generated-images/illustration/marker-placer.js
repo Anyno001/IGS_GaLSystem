@@ -1,7 +1,7 @@
 import { splitIgsDirectiveLines, stripOutfitFields } from '../../scene/directive-tags.js';
 import { imageMarkerBoundary, imageMarkerContentRanges, insertImageMarkerOnLine } from '../../scene/image-marker-layout.js';
 
-const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^|\]\n]*))?(?:\|[^\]\n]*)?\]/g;
+const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)(?:\|([^|\]\n]*))?(?:\|([^|\]\n]*))?(?:\|[^\]\n]*)?\]/g;
 const CHAR_RE = /\[igs-char:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
 const THOUGHT_RE = /\[igs-thought:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
 const IMG_RE = /(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi;

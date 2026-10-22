@@ -5,9 +5,9 @@ import { MEDIA_BACKUP_FILES, parseMediaBackup, flushMediaJournals } from './medi
 import { mediaRequest, tavernHeaders } from './tavern-media-http.js';
 import { localImageCacheFor } from './tavern-image-cache.js';
 import { withMediaLock } from './media-lock.js';
+import { RECOVERY_ATTEMPTS, trackRecovery } from '../storage/automatic-recovery.js';
 const collectors = new WeakMap();
 const WRITE_LEASE_MS = 120000;
-const MAX_AUTO_ATTEMPTS = 3;
 
 export function mediaFileGcFor(globalObject = globalThis) {
     if (collectors.has(globalObject)) return collectors.get(globalObject);
@@ -15,6 +15,24 @@ export function mediaFileGcFor(globalObject = globalThis) {
     const owner = globalThis.crypto?.randomUUID?.() || `${Date.now()}:${Math.random()}`;
     let draining = null, starting = null, timer = null, leaseTimer = null, lastError = '', stopped = false;
     let generation = 0;
+    const recoveryNotice = trackRecovery(globalObject);
+    const eligible = row => row.kind === 'gc' && !row.protected && !row.paused && (row.attempts || 0) < RECOVERY_ATTEMPTS;
+    async function reconnected() {
+        if (stopped) return;
+        const stamp = generation;
+        try {
+            let changed = false;
+            for (const task of (await state.all()).filter(row => row.kind === 'gc' && row.paused)) {
+                if (stopped || generation !== stamp) return;
+                await state.update(task.id, current => {
+                    if (!current?.paused) return current;
+                    changed = true;
+                    return { ...current, attempts: 0, paused: false, error: '' };
+                });
+            }
+            if (changed && !stopped && generation === stamp) { recoveryNotice.end(); schedule(); }
+        } catch (error) { lastError = error.message || String(error); }
+    }
     const leaseId = path => `lease:${owner}:${path}`;
     async function leaseRows() {
         for (const path of leases.keys()) await state.put({ id: leaseId(path), kind: 'lease', path, expiresAt: Date.now() + WRITE_LEASE_MS });
@@ -28,7 +46,7 @@ export function mediaFileGcFor(globalObject = globalThis) {
         for (const row of local) if (row.kind === 'lease' && row.expiresAt > Date.now()) writing.add(row.path);
         for (const fileName of MEDIA_BACKUP_FILES) {
             if (!tavernHeaders(globalObject)) throw new Error('media-offline');
-            const response = await mediaRequest(globalObject, `/user/files/${fileName}?t=${Date.now()}`, { cache: 'no-store' }, 8000);
+            const response = await mediaRequest(globalObject, `/user/files/${fileName}?t=${Date.now()}`, { cache: 'no-store', recover: false }, 8000);
             let records = {};
             if (response.status !== 404) {
                 if (!response.ok) throw new Error('media-reference-check-failed');
@@ -44,7 +62,7 @@ export function mediaFileGcFor(globalObject = globalThis) {
             }
         }
         // 全局配置/预设以图片 ID 间接引用原图；旧设备尚未同步删除时继续保护它们。
-        const response = await mediaRequest(globalObject, `/user/files/igs-settings.json?t=${Date.now()}`, { cache: 'no-store' }, 8000);
+        const response = await mediaRequest(globalObject, `/user/files/igs-settings.json?t=${Date.now()}`, { cache: 'no-store', recover: false }, 8000);
         if (response.status !== 404) {
             if (!response.ok) throw new Error('media-settings-reference-check-failed');
             const file = await response.json(), refs = { ids: new Set(), paths: new Set() };
@@ -66,7 +84,7 @@ export function mediaFileGcFor(globalObject = globalThis) {
     async function references() { const { live, writing } = await referenceState(); return new Set([...live, ...writing]); }
     function clearTimer() { (globalObject.clearTimeout || clearTimeout)(timer); timer = null; }
     function schedule(delay = 5000) {
-        if (stopped || timer || !tavernHeaders(globalObject)) return;
+        if (stopped || timer) return;
         timer = (globalObject.setTimeout || setTimeout)(() => { timer = null; void drain({ automatic: true }).catch(() => {}); }, delay);
         timer?.unref?.();
     }
@@ -77,15 +95,18 @@ export function mediaFileGcFor(globalObject = globalThis) {
         const stamp = generation;
         draining = (async () => {
             let tasks = (await state.all()).filter(row => row.kind === 'gc');
+            const paused = tasks.filter(row => row.paused || (row.attempts || 0) >= RECOVERY_ATTEMPTS).length;
             if (!automatic) for (const row of tasks) if (row.error || row.paused) await state.put({ ...row, attempts: 0, paused: false, error: '' });
-            tasks = tasks.filter(row => !automatic || (!row.protected && !row.paused));
-            if (!tasks.length) return { ok: true, pending: 0, protected: 0 };
+            if (!automatic) recoveryNotice.end();
+            tasks = tasks.filter(row => !automatic || eligible(row));
+            if (!tasks.length) return { ok: !paused, pending: paused, protected: 0,
+                ...(paused && { reason: 'media-gc-retry-exhausted' }) };
             // flush 自己持有 commit 锁，必须在最终引用检查锁之外执行。
             if (!(await flushMediaJournals(globalObject, { automatic, onlyPending: true })).ok) throw new Error('media-backup-pending');
             return withMediaLock(globalObject, 'commit', async () => {
                 if (stopped || generation !== stamp) throw new Error('media-stopped');
                 const { live, writing } = await referenceState();
-                const tasks = (await state.all()).filter(row => row.kind === 'gc' && (!automatic || (!row.protected && !row.paused)));
+                const tasks = (await state.all()).filter(row => row.kind === 'gc' && (!automatic || eligible(row)));
                 let protectedCount = 0, failed = 0;
                 for (const task of tasks) {
                     if (stopped || generation !== stamp) throw new Error('media-stopped');
@@ -102,22 +123,26 @@ export function mediaFileGcFor(globalObject = globalThis) {
                     } catch (error) {
                         failed += 1;
                         const attempts = (task.attempts || 0) + 1;
-                        await state.put({ ...task, protected: false, waitingForWrite: false, attempts, paused: attempts >= MAX_AUTO_ATTEMPTS, error: error.message });
+                        await state.put({ ...task, protected: false, waitingForWrite: false, attempts, paused: attempts >= RECOVERY_ATTEMPTS, error: error.message });
                     }
                 }
                 if (failed) throw Object.assign(new Error('media-file-delete-failed'), { recorded: true });
                 lastError = '';
-                if (!(await state.all()).some(row => row.kind === 'gc' && !row.protected && !row.paused)) clearTimer();
+                if (!(await state.all()).some(row => row.kind === 'gc' && row.paused)) recoveryNotice.end();
+                if (!(await state.all()).some(row => row.kind === 'gc' && !row.protected)) clearTimer();
                 return { ok: true, pending: protectedCount, protected: protectedCount };
             });
         })().catch(async error => {
             lastError = error.message || String(error);
             if (!stopped && generation === stamp) {
-                if (!error.recorded) for (const task of (await state.all()).filter(row => row.kind === 'gc' && !row.paused && (!automatic || !row.protected))) {
+                if (!error.recorded) for (const task of (await state.all()).filter(row => row.kind === 'gc' && (!automatic || eligible(row)))) {
                     const attempts = (task.attempts || 0) + 1;
-                    await state.put({ ...task, protected: false, attempts, paused: attempts >= MAX_AUTO_ATTEMPTS, error: lastError });
+                    await state.put({ ...task, protected: false, attempts, paused: attempts >= RECOVERY_ATTEMPTS, error: lastError });
                 }
-                const retryable = (await state.all()).filter(row => row.kind === 'gc' && !row.protected && !row.paused);
+                const rows = await state.all(), retryable = rows.filter(eligible);
+                if (rows.some(row => row.kind === 'gc' && row.paused)) recoveryNotice.update({ phase: 'failed',
+                    message: `服务端文件回收连续失败，已停止自动尝试：${lastError}。回收队列保留，现有图片继续保留。`,
+                    page: 'data', actionLabel: '打开备份与缓存' });
                 if (retryable.length) schedule(Math.min(60000, 5000 * 2 ** Math.max(...retryable.map(row => row.attempts || 0))));
                 else clearTimer();
             }
@@ -186,20 +211,25 @@ export function mediaFileGcFor(globalObject = globalThis) {
         },
         start() {
             stopped = false;
+            globalObject.addEventListener?.('online', reconnected);
             if (starting) return starting;
             const stamp = generation;
             starting = (async () => {
                 const rows = await state.all();
-                for (const task of rows.filter(row => row.kind === 'gc' && row.protected && !row.paused)) {
+                for (const task of rows.filter(row => row.kind === 'gc' && !row.paused && (row.attempts || 0) >= RECOVERY_ATTEMPTS)) {
+                    if (stopped || generation !== stamp) return;
+                    await state.put({ ...task, paused: true });
+                }
+                for (const task of rows.filter(row => row.kind === 'gc' && row.protected)) {
                     if (stopped || generation !== stamp) return;
                     if (task.waitingForWrite && rows.some(row => row.kind === 'lease' && row.path === task.path && row.expiresAt > Date.now())) continue;
                     await state.put({ ...task, protected: false, waitingForWrite: false });
                 }
-                if ((await state.all()).some(row => row.kind === 'gc' && !row.protected && !row.paused)) schedule();
+                if ((await state.all()).some(eligible)) schedule();
             })().catch(error => { lastError = error.message || String(error); }).finally(() => { starting = null; });
             return starting;
         },
-        stop() { stopped = true; generation += 1; sources.clear(); (globalObject.clearTimeout || clearTimeout)(timer); (globalObject.clearTimeout || clearTimeout)(leaseTimer); timer = null; leaseTimer = null; return Promise.allSettled([draining, starting].filter(Boolean)); },
+        stop() { stopped = true; globalObject.removeEventListener?.('online', reconnected); recoveryNotice.end(); generation += 1; sources.clear(); (globalObject.clearTimeout || clearTimeout)(timer); (globalObject.clearTimeout || clearTimeout)(leaseTimer); timer = null; leaseTimer = null; return Promise.allSettled([draining, starting].filter(Boolean)); },
     };
     collectors.set(globalObject, gc);
     return gc;

@@ -3,6 +3,7 @@ import { composeMattedPixels, readAlphaFromMaskPixels } from '../../media/matte-
 import { buildAlphaMaskPixels } from '../../media/alpha-matte.js';
 import { createMatteEditSession } from '../../media/matte-edit-session.js';
 import { describeMatteSaveError, resolveMatteEditorMode } from './sprite-matte-editor-state.js';
+import { recoverOperation } from '../../storage/automatic-recovery.js';
 
 function cropPixels(image, crop) {
     if (!crop) return image.data;
@@ -20,15 +21,26 @@ export async function loadMatteEditor(service, imageId, { decodeImage, encodePix
     if (!service || typeof service.getEditableImage !== 'function') {
         return { mode: 'missing', reason: 'no-service', message: '生成素材服务不可用。' };
     }
-    const loaded = await service.getEditableImage(imageId);
+    const controller = new AbortController();
+    const recover = (execute, options = {}) => recoverOperation(execute, { signal: controller.signal, ...options });
+    const recoverPixels = execute => recover(execute, { observe: async () => {
+        const value = await execute(); return { completed: value !== false && value?.ok !== false, value };
+    } });
+    const encode = image => recoverPixels(async () => (await encodePixels(image)) || false);
+    const loaded = await recoverOperation(() => service.getEditableImage(imageId), { signal: controller.signal,
+        observe: async () => {
+            const value = await service.getEditableImage(imageId);
+            return { completed: value?.ok === true || ['not-found', 'source-unavailable'].includes(value?.reason), value };
+        },
+        shouldRecover: result => !['not-found', 'source-unavailable'].includes(result?.reason) });
     const pre = resolveMatteEditorMode(loaded);
     if (pre.mode !== 'edit') return { ...pre, record: loaded && loaded.record };
     const record = loaded.record;
     let mask;
     let source;
     try {
-        mask = await decodeImage(record.alphaMaskDataUrl);
-        source = await decodeImage(record.workingDataUrl || record.originalDataUrl);
+        mask = await recoverPixels(async () => (await decodeImage(record.alphaMaskDataUrl)) || false);
+        source = await recoverPixels(async () => (await decodeImage(record.workingDataUrl || record.originalDataUrl)) || false);
     } catch (error) {
         return { mode: 'readonly', reason: 'decode-failed', message: '图片解码失败，无法编辑。', record };
     }
@@ -45,6 +57,7 @@ export async function loadMatteEditor(service, imageId, { decodeImage, encodePix
         record,
         session,
         preview,
+        dispose() { controller.abort(); inpaint?.cancel(); },
         get revision() { return revision; },
         aiAvailable: Boolean(inpaint),
         aiUnavailableReason: inpaint ? '' : String(aiUnavailableReason || ''),
@@ -61,7 +74,8 @@ export async function loadMatteEditor(service, imageId, { decodeImage, encodePix
                     maskData[k] = 255; maskData[k + 1] = 255; maskData[k + 2] = 255;
                 }
             }
-            const maskDataUrl = await encodePixels({ width: source.width, height: source.height, data: maskData });
+            const maskDataUrl = await encode({ width: source.width, height: source.height, data: maskData });
+            if (maskDataUrl?.cancelled) return maskDataUrl;
             return inpaint.preview(imageId, { maskDataUrl, width: source.width, height: source.height, prompt, dna });
         },
         async acceptAi() {
@@ -76,9 +90,11 @@ export async function loadMatteEditor(service, imageId, { decodeImage, encodePix
             if (saving) return saving;
             saving = (async () => {
                 const composed = preview();
-                const dataUrl = await encodePixels(composed);
-                const alphaMaskDataUrl = await encodePixels({ width: composed.width, height: composed.height, data: buildAlphaMaskPixels(composed.data) });
-                const result = await service.saveMatteEdit(imageId, revision, { dataUrl, alphaMaskDataUrl });
+                const dataUrl = await encode(composed);
+                if (dataUrl?.cancelled) return dataUrl;
+                const alphaMaskDataUrl = await encode({ width: composed.width, height: composed.height, data: buildAlphaMaskPixels(composed.data) });
+                if (alphaMaskDataUrl?.cancelled) return alphaMaskDataUrl;
+                const result = await recover(() => service.saveMatteEdit(imageId, revision, { dataUrl, alphaMaskDataUrl }, { signal: controller.signal }));
                 if (result && result.ok) {
                     revision = result.revision;
                     return result;

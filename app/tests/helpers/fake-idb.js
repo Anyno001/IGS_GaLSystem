@@ -13,11 +13,18 @@ export function createFakeIndexedDB() {
     return {
         controls, databases,
         deleteDatabase(name) { const request = {}; queueMicrotask(() => { databases.delete(name); request.onsuccess?.(); }); return request; },
-        open(name, version = 1) {
+        open(name, version) {
             const request = {};
             queueMicrotask(() => {
                 const record = database(name);
+                const requestedVersion = version === undefined ? record.version || 1 : version;
+                if (requestedVersion < record.version) {
+                    request.error = Object.assign(new Error(`The requested version (${requestedVersion}) is less than the existing version (${record.version}).`), { name: 'VersionError' });
+                    request.onerror?.();
+                    return;
+                }
                 const db = {
+                    get version() { return record.version; },
                     close() {},
                     objectStoreNames: { contains: store => record.stores.has(store) },
                     createObjectStore(store, { keyPath } = {}) {
@@ -82,6 +89,7 @@ export function createFakeIndexedDB() {
                                 if (!list.includes(storeName)) throw new Error('store-not-in-transaction');
                                 const definition = record.stores.get(storeName), rows = () => working.get(storeName);
                                 return {
+                                    keyPath: definition.keyPath,
                                     get: key => req(() => structuredClone(rows().get(key))),
                                     getAll: () => req(() => [...rows().values()].map(row => structuredClone(row))),
                                     getAllKeys: () => req(() => [...rows().keys()]),
@@ -108,9 +116,9 @@ export function createFakeIndexedDB() {
                     },
                 };
                 request.result = db;
-                if (record.version < version) {
+                if (record.version < requestedVersion) {
                     request.transaction = { objectStore: store => ({ clear() { record.stores.get(store).rows.clear(); } }) };
-                    request.onupgradeneeded?.({ oldVersion: record.version }); record.version = version;
+                    request.onupgradeneeded?.({ oldVersion: record.version }); record.version = requestedVersion;
                 }
                 request.onsuccess?.();
             });

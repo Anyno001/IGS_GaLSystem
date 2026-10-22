@@ -1,7 +1,7 @@
 // 用户上传的字体：本体存进酒馆 user/files/igs-font-*（/api/files/upload），元数据记在 localStorage。
 // 字体用 FontFace API 注册到宿主页面的 document 上，再把 font-family 栈写进对话框 / 记录页的字体设置，
 // 渲染链路不用改。
-import { getSillyTavernContext } from '../host/tavern-helper-adapter.js';
+import { mediaRequest, tavernHeaders, recoverMediaOperation } from './tavern-media-http.js';
 
 export const CUSTOM_FONT_STORE_KEY = 'igs-custom-fonts-v1';
 export const FONT_UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
@@ -76,7 +76,7 @@ export function saveCustomFonts(globalObject, fonts) {
     if (!storage || typeof storage.setItem !== 'function') return false;
     try {
         storage.setItem(CUSTOM_FONT_STORE_KEY, JSON.stringify(normalizeCustomFonts(fonts)));
-        return true;
+        return storage.getItem(CUSTOM_FONT_STORE_KEY) === JSON.stringify(normalizeCustomFonts(fonts));
     } catch (error) {
         return false;
     }
@@ -102,31 +102,31 @@ export function pickFontFile(doc) {
         const finish = (value) => {
             if (done) return;
             done = true;
-            clearTimeout(timer);
             resolve(value);
         };
         input.onchange = () => finish(input.files && input.files[0] ? input.files[0] : null);
-        const timer = setTimeout(() => finish(null), 300000);
+        input.oncancel = () => finish(null);
         input.click();
     });
 }
 
-// 返回 { ok, font } 或 { ok: false, reason }；reason 供设置页直接提示。
-export async function uploadFontFile(globalObject, file) {
+// 文件名及上传内容在恢复期间固定；输入格式问题仍作为选择校验返回。
+export async function uploadFontFile(globalObject, file, options = {}) {
     const ext = extensionOf(file);
     if (!ext) return { ok: false, reason: '只支持 ttf、otf、woff、woff2 字体文件。' };
     if (!(file.size > 0) || file.size > FONT_UPLOAD_MAX_BYTES) return { ok: false, reason: '字体文件需小于 32MB。' };
-    const ctx = getSillyTavernContext(globalObject);
-    const headers = ctx && typeof ctx.getRequestHeaders === 'function' ? ctx.getRequestHeaders() : null;
-    if (!headers || typeof globalObject.fetch !== 'function') return { ok: false, reason: '没连上酒馆，无法上传字体。' };
-    try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const stamp = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-        const name = `igs-font-${stamp}.${ext}`;
-        const res = await globalObject.fetch('/api/files/upload', {
+    const bytes = await recoverMediaOperation(globalObject, async () => new Uint8Array(await file.arrayBuffer()), options);
+    if (bytes?.cancelled) return bytes;
+    const stamp = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+    const name = `igs-font-${stamp}.${ext}`;
+    const body = JSON.stringify({ name, data: base64Of(bytes) });
+    return recoverMediaOperation(globalObject, async () => {
+        const headers = tavernHeaders(globalObject);
+        if (!headers) throw new Error('font-host-recovering');
+        const res = await mediaRequest(globalObject, '/api/files/upload', {
             method: 'POST',
             headers,
-            body: JSON.stringify({ name, data: base64Of(bytes) }),
+            body, signal: options.signal,
         });
         if (!res || !res.ok) return { ok: false, reason: '酒馆拒绝了这次上传。' };
         const path = String(((await res.json().catch(() => null)) || {}).path || '').replace(/\\/g, '/');
@@ -142,30 +142,26 @@ export async function uploadFontFile(globalObject, file) {
                 format: ext,
             },
         };
-    } catch (error) {
-        return { ok: false, reason: '上传失败，请稍后再试。' };
-    }
+    }, options);
 }
 
-export async function deleteTavernFont(globalObject, path) {
+export async function deleteTavernFont(globalObject, path, options = {}) {
     if (!isTavernFontPath(path)) return false;
-    const ctx = getSillyTavernContext(globalObject);
-    const headers = ctx && typeof ctx.getRequestHeaders === 'function' ? ctx.getRequestHeaders() : null;
-    if (!headers || typeof globalObject.fetch !== 'function') return false;
-    try {
-        const res = await globalObject.fetch('/api/files/delete', { method: 'POST', headers, body: JSON.stringify({ path: path.replace(/^\//, '') }) });
-        return Boolean(res && res.ok);
-    } catch (error) {
-        return false;
-    }
+    return recoverMediaOperation(globalObject, async () => {
+        const headers = tavernHeaders(globalObject);
+        if (!headers) throw new Error('font-host-recovering');
+        const res = await mediaRequest(globalObject, '/api/files/delete', { method: 'POST', headers, signal: options.signal,
+            body: JSON.stringify({ path: path.replace(/^\//, '') }) });
+        return Boolean(res && (res.ok || res.status === 404));
+    }, options);
 }
 
 const registered = new WeakMap();
 
-// 把上传的字体注册进宿主 document 的字体表；同一文档只注册一次，失败的下次渲染再试。
+// 同一文档只登记一次；失败后重新建立 FontFace 并自动加载，移除字体或关闭媒体时结束等待。
 export function registerCustomFonts(doc, fonts) {
     const list = normalizeCustomFonts(fonts);
-    if (!doc || !list.length) return [];
+    if (!doc) return [];
     const FontFaceCtor = (doc.defaultView && doc.defaultView.FontFace) || (typeof FontFace === 'function' ? FontFace : null);
     if (!FontFaceCtor || !doc.fonts || typeof doc.fonts.add !== 'function') return [];
     let done = registered.get(doc);
@@ -173,23 +169,22 @@ export function registerCustomFonts(doc, fonts) {
         done = new Set();
         registered.set(doc, done);
     }
+    const wanted = new Set(list.map(font => font.family));
+    for (const family of done) if (!wanted.has(family)) done.delete(family);
     for (const font of list) {
         if (done.has(font.family)) continue;
         // 加载中也算已登记，避免加载完成前的每次重绘都再建一份 FontFace。
         done.add(font.family);
-        try {
+        let loaded = false;
+        const read = async () => {
             const face = new FontFaceCtor(font.family, `url("${font.path}")`, { display: 'swap', style: 'normal' });
-            doc.fonts.add(face);
-            // 渲染不等加载；加载失败时撤掉登记，下一次渲染重新尝试。
-            if (typeof face.load === 'function') {
-                Promise.resolve().then(() => face.load()).catch(() => {
-                    done.delete(font.family);
-                    try { if (typeof doc.fonts.delete === 'function') doc.fonts.delete(face); } catch (error) { /* */ }
-                });
-            }
-        } catch (error) {
-            done.delete(font.family);
-        }
+            if (typeof face.load === 'function') await face.load();
+            return face;
+        };
+        void recoverMediaOperation(doc.defaultView || globalThis, read, { isActive: () => done.has(font.family),
+            observe: async () => ({ completed: true, value: await read() }) }).then(face => {
+            if (!face?.cancelled && done.has(font.family)) { doc.fonts.add(face); loaded = true; }
+        }).finally(() => { if (!loaded) done.delete(font.family); });
     }
     return list;
 }

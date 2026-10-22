@@ -2,6 +2,7 @@ import { withMediaLock } from './media-lock.js';
 import { mediaStateStoreFor } from './media-state-store.js';
 import { mediaRequest, tavernHeaders, utf8Base64 } from './tavern-media-http.js';
 import { IMAGE_FIELDS, isImageData, isImagePath, imagePaths } from './image-identity.js';
+import { RECOVERY_ATTEMPTS, trackRecovery } from '../storage/automatic-recovery.js';
 
 export const MEDIA_BACKUP_FILES = ['igs-cg-records.json', 'igs-asset-records.json', 'igs-photo-records.json', 'igs-map-records.json'];
 const journals = new WeakMap();
@@ -25,7 +26,6 @@ const sameValue = (a, b) => {
 };
 const sameRecord = (a, b) => Boolean(a && b) && versionOf(a) === versionOf(b) && Boolean(a.deleted) === Boolean(b.deleted)
     && sameValue(a.value, b.value) && sameValue(a.previousValue || null, b.previousValue || null);
-const MAX_AUTO_ATTEMPTS = 3;
 
 export function parseMediaBackup(file, legacyField) {
     if (!file || typeof file !== 'object') throw new Error('media-backup-invalid');
@@ -41,6 +41,7 @@ export function createMediaRecordJournal(globalObject, { fileName, legacyField =
     let logicalTime = 0;
     let retryDelay = 2000;
     let retryAttempts = 0;
+    const recoveryNotice = trackRecovery(globalObject);
     let migrationFailures = [];
     let remoteExists = null;
     const pending = new Set();
@@ -55,7 +56,8 @@ export function createMediaRecordJournal(globalObject, { fileName, legacyField =
     const localRows = async () => Object.fromEntries((await state.all()).filter(row => row.id.startsWith(prefix) && row.kind === 'record').map(row => [row.id.slice(prefix.length), row]));
     async function readRemote() {
         if (!tavernHeaders(globalObject)) return null;
-        const response = await mediaRequest(globalObject, `/user/files/${fileName}?t=${Date.now()}`, { cache: 'no-store' }, 8000);
+        // 同步器已有持久化队列和调度；单次失败交还队列，不能在锁内永久等待网络。
+        const response = await mediaRequest(globalObject, `/user/files/${fileName}?t=${Date.now()}`, { cache: 'no-store', recover: false }, 8000);
         if (response.status === 404) { remoteExists = false; return {}; }
         if (!response.ok) throw new Error('media-backup-read-failed');
         remoteExists = true;
@@ -76,7 +78,12 @@ export function createMediaRecordJournal(globalObject, { fileName, legacyField =
         }
     }
     function schedule() {
-        if (stopped || timer || retryAttempts >= MAX_AUTO_ATTEMPTS || !tavernHeaders(globalObject)) return;
+        if (stopped || timer) return;
+        if (retryAttempts >= RECOVERY_ATTEMPTS) {
+            recoveryNotice.update({ phase: 'failed', message: `媒体备份自动同步 ${retryAttempts} 次仍未完成：${lastError || '备份服务不可用'}。待同步数据已保留在本机。`,
+                page: 'data', actionLabel: '打开备份' });
+            return;
+        }
         timer = (globalObject.setTimeout || setTimeout)(() => {
             timer = null;
             const retry = () => { retryDelay = Math.min(60000, retryDelay * 2); schedule(); };
@@ -86,6 +93,7 @@ export function createMediaRecordJournal(globalObject, { fileName, legacyField =
     }
     function resetRetry() {
         retryAttempts = 0; retryDelay = 2000;
+        recoveryNotice.end();
         (globalObject.clearTimeout || clearTimeout)(timer); timer = null;
     }
     async function restore() {
@@ -112,7 +120,8 @@ export function createMediaRecordJournal(globalObject, { fileName, legacyField =
             }
             restored = true;
             if (Object.values(await localRows()).some(row => row.dirty)) schedule();
-        }).finally(() => { restoring = null; });
+        }).catch(error => { lastError = error.message || String(error); schedule(); throw error; })
+            .finally(() => { restoring = null; });
         return restoring;
     }
     async function write(key, value, action) {
@@ -154,14 +163,13 @@ export function createMediaRecordJournal(globalObject, { fileName, legacyField =
     }
     async function flush({ automatic = false, onlyPending = false } = {}) {
         if (stopped) throw new Error('media-stopped');
-        await restore();
-        if (onlyPending && !Object.values(await localRows()).some(row => row.dirty || row.localOnly)) return { ok: true, skipped: true };
-        if (automatic && retryAttempts >= MAX_AUTO_ATTEMPTS) return { ok: false, reason: 'media-backup-retry-paused' };
-        migrationFailures = await beforeFlush() || [];
         if (automatic) {
-            if (retryAttempts >= MAX_AUTO_ATTEMPTS) return { ok: false, reason: 'media-backup-retry-paused' };
+            if (retryAttempts >= RECOVERY_ATTEMPTS) return { ok: false, reason: 'media-backup-retry-exhausted', recoveryStopped: true };
             retryAttempts += 1;
         }
+        await restore();
+        if (onlyPending && !Object.values(await localRows()).some(row => row.dirty || row.localOnly)) { resetRetry(); return { ok: true, skipped: true }; }
+        migrationFailures = await beforeFlush() || [];
         const result = await serial(async () => {
             if (stopped) throw new Error('media-stopped');
             const headers = tavernHeaders(globalObject);
@@ -188,16 +196,18 @@ export function createMediaRecordJournal(globalObject, { fileName, legacyField =
             return { ok: !Object.values(local).some(row => row.localOnly), skipped: !changed, reason: Object.values(local).some(row => row.localOnly) ? 'media-pixels-pending-upload' : '' };
         });
         if (result.ok) resetRetry();
-        else if (!automatic) schedule();
+        else { lastError = result.reason || 'media-backup-failed'; if (!automatic) schedule(); }
         return result;
     }
     const journal = { restore: () => track(restore()), write: (...args) => track(write(...args)), flush: options => {
         if (!options?.automatic) resetRetry();
         return track(flush(options).catch(error => { lastError = error.message || String(error); if (!options?.automatic) schedule(); throw error; }));
     }, remoteExists: () => remoteExists, async deleted(key) { return Boolean((await state.get(prefix + key))?.deleted); },
-        async diagnostics() { const rows = await localRows(); return { fileName, records: Object.values(rows).filter(row => !row.deleted).length, tombstones: Object.values(rows).filter(row => row.deleted).length, dirty: Object.values(rows).filter(row => row.dirty).length, pendingPixelUploads: Object.values(rows).filter(row => row.localOnly).length, migrationFailures, lastError, retryPaused: retryAttempts >= MAX_AUTO_ATTEMPTS }; },
-        stop() { stopped = true; (globalObject.clearTimeout || clearTimeout)(timer); timer = null; return Promise.allSettled([...pending, queue]); },
+        async diagnostics() { const rows = await localRows(); return { fileName, records: Object.values(rows).filter(row => !row.deleted).length, tombstones: Object.values(rows).filter(row => row.deleted).length, dirty: Object.values(rows).filter(row => row.dirty).length, pendingPixelUploads: Object.values(rows).filter(row => row.localOnly).length, migrationFailures, lastError, retryAttempts, retryPaused: retryAttempts >= RECOVERY_ATTEMPTS }; },
+        stop() { stopped = true; globalObject.removeEventListener?.('online', reconnected); recoveryNotice.end(); (globalObject.clearTimeout || clearTimeout)(timer); timer = null; return Promise.allSettled([...pending, queue]); },
     };
+    const reconnected = () => { if (!stopped) { resetRetry(); schedule(); } };
+    globalObject.addEventListener?.('online', reconnected);
     let group = journals.get(globalObject);
     if (!group) { group = new Set(); journals.set(globalObject, group); }
     group.add(journal);

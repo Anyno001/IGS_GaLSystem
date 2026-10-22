@@ -1,4 +1,5 @@
 import { MEDIA_METADATA_BUDGET, metadataBytes } from './media-metadata-size.js';
+import { CACHE_LOW_WATER_RATIO, cacheLowWater } from './cache-eviction.js';
 // 可再生的元数据和任务索引统一登记；此层不导入业务模块，也不保存图片像素。
 export const MEDIA_CACHE_POLICIES = Object.freeze({
     messages: { purpose: '消息与图片的对应关系', maxEntries: 128 },
@@ -43,21 +44,23 @@ export function createMediaCacheRegistry({ now = () => Date.now(), memoryBudget 
         const handle = {
             policy,
             touch() { entry.accessedAt = ++access; },
-            reserve(bytes) {
+            get availableBytes() { return Math.min(policy.maxBytes, Math.max(0, budget - estimatedBytes + entry.estimatedBytes)); },
+            reserve(bytes, { report = true } = {}) {
                 if (disposed || destroyed) return false;
                 const next = Math.max(0, Number(bytes) || 0);
-                if (Number.isFinite(next) && next <= policy.maxBytes && next > entry.estimatedBytes) {
-                    // 总预算有压力时先淘汰其他最久未使用的可再生条目，让当前查询有驻留空间。
+                if (Number.isFinite(next) && next <= policy.maxBytes && next > entry.estimatedBytes
+                    && estimatedBytes - entry.estimatedBytes + next > budget) {
+                    const target = Math.max(next, Math.floor(budget * CACHE_LOW_WATER_RATIO));
                     const peers = [...owners.values()].filter(peer => peer !== entry && peer.evict).sort((a, b) => a.accessedAt - b.accessedAt);
                     for (const peer of peers) {
-                        while (estimatedBytes - entry.estimatedBytes + next > budget && peer.estimatedBytes > 0) {
-                            if (!peer.evict()) break;
-                        }
-                        if (estimatedBytes - entry.estimatedBytes + next <= budget) break;
+                        const needed = estimatedBytes - entry.estimatedBytes + next - target;
+                        if (needed <= 0) break;
+                        peer.evict(needed);
                     }
                 }
                 if (!Number.isFinite(next) || next > policy.maxBytes || estimatedBytes - entry.estimatedBytes + next > budget) {
-                    rejected += 1; lastError = `media-metadata-budget:${name}`; return false;
+                    if (report) { rejected += 1; lastError = `media-metadata-budget:${name}`; }
+                    return false;
                 }
                 estimatedBytes += next - entry.estimatedBytes; entry.estimatedBytes = next;
                 return true;
@@ -78,22 +81,38 @@ export function createMediaCacheRegistry({ now = () => Date.now(), memoryBudget 
         const clock = options.now || now;
         let generation = 0, disposed = false, bytes = 0, handle;
         const sizes = new Map();
-        function remove(key, reason) {
-            if (!records.has(key)) return false;
-            const value = records.get(key); records.delete(key); deadlines.delete(key);
-            bytes -= sizes.get(key) || 0; sizes.delete(key); handle?.reserve(bytes);
-            invoke(options.onRemove, value, key, reason);
-            return true;
+        function removeMany(keys, reason) {
+            const removed = [];
+            for (const key of keys) {
+                if (!records.has(key)) continue;
+                removed.push([key, records.get(key)]); records.delete(key); deadlines.delete(key);
+                bytes -= sizes.get(key) || 0; sizes.delete(key);
+            }
+            if (removed.length) handle?.reserve(bytes, { report: false });
+            for (const [key, value] of removed) invoke(options.onRemove, value, key, reason);
+            return removed.length;
+        }
+        const remove = (key, reason) => removeMany([key], reason) > 0;
+        function evictTo(maxBytes, maxEntries = Infinity, protect) {
+            const protectedEntry = arguments.length > 2;
+            const selected = []; let remaining = bytes, count = records.size;
+            for (const key of records.keys()) {
+                if (remaining <= maxBytes && count <= maxEntries) break;
+                if (protectedEntry && key === protect) continue;
+                selected.push(key); remaining -= sizes.get(key) || 0; count--;
+            }
+            return removeMany(selected, 'capacity');
         }
         const prune = () => {
-            for (const [key, expiresAt] of deadlines) if (expiresAt <= clock()) remove(key, 'expired');
+            const time = clock();
+            removeMany([...deadlines].filter(([, expiresAt]) => expiresAt <= time).map(([key]) => key), 'expired');
         };
         const clear = reason => {
             generation += 1;
-            for (const key of [...records.keys()]) remove(key, reason);
+            removeMany([...records.keys()], reason);
             invoke(options.onClear, reason);
         };
-        handle = register(name, { ...options, clear, evict: () => records.size > 0 && remove(records.keys().next().value, 'capacity'), destroy: () => { disposed = true; invoke(options.onDestroy); },
+        handle = register(name, { ...options, clear, evict: needed => evictTo(Math.max(0, bytes - needed)), destroy: () => { disposed = true; invoke(options.onDestroy); },
             stats: () => { prune(); return { count: records.size, pending: [...records.values()].filter(value => value?.status === 'pending').length, ...options.stats?.() }; } });
         const api = {
             get size() { prune(); return records.size; },
@@ -122,7 +141,14 @@ export function createMediaCacheRegistry({ now = () => Date.now(), memoryBudget 
                 bytes -= sizes.get(key) || 0;
                 sizes.set(key, size); bytes += size;
                 if (ttlMs > 0) deadlines.set(key, clock() + ttlMs); else deadlines.delete(key);
-                while (records.size && (records.size > policy.maxEntries || !handle.reserve(bytes))) remove(records.keys().next().value, 'capacity');
+                const targetCount = records.size > policy.maxEntries ? cacheLowWater(policy.maxEntries) : policy.maxEntries;
+                const targetBytes = bytes > policy.maxBytes ? Math.floor(policy.maxBytes * CACHE_LOW_WATER_RATIO) : policy.maxBytes;
+                evictTo(targetBytes, targetCount, key);
+                if (!handle.reserve(bytes, { report: false })) {
+                    const available = handle.availableBytes;
+                    if (size <= available) evictTo(Math.max(size, Math.floor(available * CACHE_LOW_WATER_RATIO)), Infinity, key);
+                    if (!handle.reserve(bytes)) remove(key, 'capacity');
+                }
                 return api;
             },
             delete: key => remove(key, 'delete'),
@@ -153,7 +179,7 @@ export function createMediaCacheRegistry({ now = () => Date.now(), memoryBudget 
                 try { measured = stats?.() || {}; } catch (error) { lastError = error.message || String(error); }
                 return { id, owner: name, ...descriptor, ...measured, estimatedBytes: owners.get(id)?.estimatedBytes || 0 };
             });
-            return { owners: rows, count: rows.length, entries: rows.reduce((sum, row) => sum + (row.count || 0), 0), estimatedBytes, memoryBudget: budget, rejected, lastError };
+            return { owners: rows, count: rows.length, entries: rows.reduce((sum, row) => sum + (row.count || 0), 0), estimatedBytes, memoryBudget: budget, lowWaterRatio: CACHE_LOW_WATER_RATIO, rejected, lastError };
         },
     };
 }

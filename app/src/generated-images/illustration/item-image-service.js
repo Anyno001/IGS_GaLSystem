@@ -1,3 +1,4 @@
+import { recoverOperation } from '../../storage/automatic-recovery.js';
 // 物品图服务：表格物品 + 本楼 [igs-fx:item] → 缺图物品按聊天隔离生成，存入 igs-generated-assets（type: item）。
 // 关闭时入口短路：不读表、不发请求。记录用独立状态 ready，不进入素材补全的审核弹窗与临时素材列表。
 import { requestWithSoftRetry } from './prompt-kit.js';
@@ -9,7 +10,8 @@ import { extractFxDirectives } from '../../scene/fx-directives.js';
 import { buildItemCatalog, normalizeItemName } from '../../data/shujuku/item-catalog.js';
 import { normalizeItemImageSettings } from './item-image-settings.js';
 import { createItemRecordCache } from './item-image-cache.js';
-import { ITEM_PLANNER_SYSTEM_PROMPT, ITEM_PLANNER_SOFT_SYSTEM_PROMPT, buildItemPlannerUserPrompt, parseItemPlan, buildFallbackItemPlan, buildItemSlot } from './item-prompt.js';
+import { ITEM_PLANNER_SYSTEM_PROMPT, ITEM_PLANNER_SOFT_SYSTEM_PROMPT, buildItemPlannerUserPrompt, parseItemPlan, buildItemSlot } from './item-prompt.js';
+import { inheritImageTaskLease, imageTaskState, bindImageTaskTarget } from '../image-task-runtime.js';
 
 export const ITEM_IMAGE_UPDATED_EVENT = 'igs:item-image-updated';
 export const ITEM_ASSET_TYPE = 'item';
@@ -60,16 +62,24 @@ export function createItemImageService(deps) {
     const newId = deps.newId || (() => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`);
     const emit = (detail) => { if (events && typeof events.emit === 'function') events.emit(ITEM_IMAGE_UPDATED_EVENT, detail); };
     const cache = createItemRecordCache({ store, type: ITEM_ASSET_TYPE, emit, mediaCache: deps.mediaCache,
-        onError: () => report('error', '物品记录读取失败，本次补图暂停；可在素材 → 待确认中重新读取。') });
+        onError: () => report('info', '正在自动恢复物品记录') });
     const floorLocks = new Map();
     const inflight = new Map();
     let queue = Promise.resolve();
-    let offRendered = null, retryTarget = null;
+    let offRendered = null, retryTarget = null, stopped = false;
+    let recoveryController = new AbortController();
+    const recover = (chatId, execute, floor, repeatable) => recoverOperation(execute, {
+        retryUnchanged: Boolean(repeatable), repeatable,
+        signal: recoveryController.signal, global: deps.global || llm?.recoveryGlobal || nai?.recoveryGlobal || globalThis,
+        isActive: () => !stopped && chatOf() === chatId
+            && (!floor || floorKeyOf(messageHost.readFloor(floor.messageId) || {}) === floorKeyOf(floor)),
+        onRecover: ({ attempt }) => { if (attempt === 1) report('info', '正在自动续接物品图任务'); },
+    });
 
-    const readSettings = () => {
-        const raw = getSettings ? getSettings() || {} : {};
+    const readSettings = signal => {
+        const raw = imageTaskState({ signal })?.config || (getSettings ? getSettings() || {} : {});
         const itemModel = String((raw.imageApi && raw.imageApi.itemModel) || '').trim();
-        return { items: normalizeItemImageSettings(raw.itemImages), auto: normalizeAutoIllustrationSettings(raw.autoIllustration), itemModel };
+        return { items: normalizeItemImageSettings(raw.itemImages), auto: normalizeAutoIllustrationSettings(raw.autoIllustration), itemModel, taskSignal: signal };
     };
 
     const chatOf = () => (messageHost.getChatId ? messageHost.getChatId() : '');
@@ -89,22 +99,41 @@ export function createItemImageService(deps) {
         return job;
     }
 
-    // 数据库生图插件自己写提示词；否则副 LLM 写 tag，缺项或整体失败时逐项本地兜底。
+    // 活动预设负责完整正文；旧独立调用保留内容词模板兼容。
     async function planItems(needs, text, s, backend) {
         if (backend.ownPrompts) return needs.map((need) => ({ need, tags: '' }));
+        const ordered = typeof llm?.prepareImagePrompt === 'function';
+        const final = backend.mode === 'nai' && ordered;
+        const transparent = supportsNaiTransparentBackground(s.itemModel || s.auto.nai.model);
+        const requirements = buildItemSlot('', { transparent, positiveContext: s.auto.nai.artistPrefix });
         let planned = [];
         try {
             const plan = await requestWithSoftRetry(llm, {
+                signal: s.taskSignal || recoveryController.signal,
+                shouldStart: () => !stopped,
                 system: ITEM_PLANNER_SYSTEM_PROMPT,
                 softSystem: ITEM_PLANNER_SOFT_SYSTEM_PROMPT,
                 user: buildItemPlannerUserPrompt(needs, text),
-                parse: (reply) => parseItemPlan(reply, needs),
+                imagePrompt: { task: 'item', input: { description: buildItemPlannerUserPrompt(needs, text),
+                    ...(final && { userPrompts: { positive: requirements.scene,
+                        negative: requirements.sceneUc },
+                        writingRequirements: { size: s.items.size, transparent } }),
+                    outputs: { format: 'asset-plan', items: needs.map((need, index) => ({ id: `ch${index + 1}`, type: 'item' })) } } },
+                parse: (reply) => parseItemPlan(reply, needs, { strict: ordered }),
             }, s.auto.llm);
+            if (plan?.stopGeneration) return plan;
+            if (ordered && !plan?.ok) return { ...plan, ok: false, stopGeneration: true };
             if (plan && plan.ok) planned = plan.items;
         } catch (error) {
-            report('warn', '物品图规划失败，改用本地兜底');
+            if (ordered) return { ok: false, reason: 'item-prompt-write-failed', stopGeneration: true,
+                error: '物品写词失败，未继续绘图' };
+            return { ok: false, reason: 'item-prompt-write-failed' };
         }
-        return needs.map((need) => planned.find((item) => item.need === need) || buildFallbackItemPlan(need));
+        if (final) return planned.map(item => inheritImageTaskLease(item,
+            { ...item, captionMode: 'final', transparent }));
+        if (needs.some(need => !planned.some(item => item.need === need && !item.error)))
+            return { ok: false, reason: 'item-plan-incomplete' };
+        return planned;
     }
 
 
@@ -121,18 +150,28 @@ export function createItemImageService(deps) {
         let record = null;
         if (!error) {
             // 智绘姬 / 柏宝绘出图不保证透明底：走它们时按非透明底出图，不信任 NAI 模型的原生透明能力。
-            const plannedVia = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
-            const transparent = plannedVia !== 'chatu8' && plannedVia !== 'baibai' && supportsNaiTransparentBackground(s.itemModel || s.auto.nai.model);
-            const slot = buildItemSlot(plan.tags, { transparent, uc: plan.uc, positiveContext: s.auto.nai.artistPrefix });
+            const plannedVia = nai && typeof nai.describe === 'function' ? nai.describe(undefined, { signal: s.taskSignal }).via : 'nai';
+            const final = plan.captionMode === 'final';
+            const transparent = final ? plan.transparent : plannedVia !== 'chatu8' && plannedVia !== 'baibai' && supportsNaiTransparentBackground(s.itemModel || s.auto.nai.model);
+            const slot = inheritImageTaskLease(plan, buildItemSlot(plan.tags, { transparent, uc: plan.uc,
+                positiveContext: s.auto.nai.artistPrefix, final }));
             const meta = { messageId: floor ? floor.messageId : undefined, size: s.items.size, imageKind: 'item',
-                description: `物品：${need.name}${need.description ? `，${need.description}` : ''}`, userPrompts: { positive: slot.scene, negative: slot.sceneUc } };
+                signal: s.taskSignal || recoveryController.signal,
+                shouldStart: () => !stopped && chatId === chatOf()
+                    && (!floor || floorKeyOf(messageHost.readFloor(floor.messageId) || {}) === floorKeyOf(floor)),
+                description: `物品：${need.name}${need.description ? `，${need.description}` : ''}`,
+                ...(!final && { userPrompts: { positive: slot.scene, negative: slot.sceneUc } }) };
             let result;
-            try { result = await nai.generate(slot, { ...s.auto.nai, size: s.items.size }, meta); }
+            try { result = await recover(chatId, async () => {
+                const generated = await nai.generate(slot, { ...s.auto.nai, size: s.items.size }, meta);
+                return generated?.ok && generated.dataUrl ? generated : { ...generated, ok: false };
+            }, floor); }
             catch (e) { result = { ok: false, error: `NAI 生成失败：${(e && e.message) || e}` }; }
             if (result && result.ok && result.dataUrl) {
-                const dataUrl = await matte(result.dataUrl, { alreadyTransparent: transparent });
+                const dataUrl = await recover(chatId, () => matte(result.dataUrl, { alreadyTransparent: transparent }), floor, 'read');
                 const imageId = newId();
-                await store.putImage({ id: imageId, dataUrl, type: ITEM_ASSET_TYPE, createdAt: base.createdAt });
+                const persisted = await recover(chatId, () => store.putImage({ id: imageId, dataUrl, type: ITEM_ASSET_TYPE, createdAt: base.createdAt }), floor, 'save');
+                if (persisted?.cancelled) return persisted;
                 cache.rememberImage(imageId, dataUrl);
                 record = { ...base, imageId, status: 'ready' };
             } else error = (result && result.error) || 'NAI 生成失败';
@@ -142,12 +181,10 @@ export function createItemImageService(deps) {
             if (previous && previous.status === 'ready') return { ok: false, error, record: previous };
             record = { ...base, imageId: '', status: 'failed', error };
         }
-        try { await store.putAsset(record); }
-        catch (error) {
-            if (record.status === 'ready' && record.imageId) await cache.dropImage(record.imageId);
-            throw error;
-        }
-        if (record.status === 'ready' && previous && previous.imageId && previous.imageId !== record.imageId) await cache.dropImage(previous.imageId);
+        if (chatId !== chatOf() || stopped) return { ok: true, cancelled: true };
+        const persisted = await recover(chatId, () => store.putAsset(record), floor, 'save');
+        if (persisted?.cancelled) return persisted;
+        if (record.status === 'ready' && previous && previous.imageId && previous.imageId !== record.imageId) await recover(chatId, () => cache.dropImage(previous.imageId), floor, 'save');
         cache.set(record);
         emit({ chatId, key, name: need.name, reason: record.status === 'ready' ? 'generated' : 'failed' });
         return { ok: record.status === 'ready', error, record };
@@ -164,14 +201,28 @@ export function createItemImageService(deps) {
         return needs;
     }
 
-    async function runBatch(chatId, needs, text, s, floor, force = false) {
-        const backend = nai && typeof nai.describe === 'function' ? nai.describe() : { ready: { ok: true } };
-        if (!backend.ready || !backend.ready.ok) {
-            const error = (backend.ready && backend.ready.error) || '生图后端未就绪';
-            report('error', `物品图未开始：${error}`);
-            return { ok: false, reason: 'backend-unavailable', error, count: 0 };
-        }
-        const plans = await planItems(needs, text, s, backend);
+    function runBatch(chatId, needs, text, s, floor, force = false) {
+        const target = bindImageTaskTarget({ signal: recoveryController.signal, subscribe: messageHost.on?.bind(messageHost),
+            isCurrent: () => !stopped && chatId === chatOf()
+                && (!floor || floorKeyOf(messageHost.readFloor(floor.messageId) || {}) === floorKeyOf(floor)) });
+        const input = { signal: target.signal, shouldStart: target.shouldStart };
+        const execute = async guarded => {
+            if (typeof nai?.waitUntilReady === 'function') {
+                const ready = await nai.waitUntilReady(guarded);
+                if (!ready?.ok) return ready;
+            }
+            return runBatchOnce(chatId, needs, text, { ...readSettings(guarded.signal), items: s.items }, floor, force);
+        };
+        return Promise.resolve(typeof llm?.runImageTask === 'function' ? llm.runImageTask(input, execute) : execute(input))
+            .finally(() => target.release());
+    }
+    async function runBatchOnce(chatId, needs, text, s, floor, force) {
+        const plans = await recover(chatId, async () => {
+            const backend = nai?.describe?.(undefined, { signal: s.taskSignal }) || { ready: { ok: true } };
+            if (!backend.ready?.ok) return { ok: false, reason: 'backend-unavailable' };
+            return planItems(needs, text, s, backend);
+        }, floor);
+        if (plans?.cancelled) return plans;
         const results = [];
         for (const plan of plans) {
             results.push(await enqueue(itemAssetKeyOf(chatId, plan.need.name), () => generateItem(chatId, plan, s, floor, force)));
@@ -194,13 +245,13 @@ export function createItemImageService(deps) {
         }
         const lockKey = floorKeyOf(floor);
         if (floorLocks.has(lockKey)) return floorLocks.get(lockKey);
-        const job = (async () => {
+        const job = recover(floor.chatId, async () => {
             await cache.ensure(floor.chatId);
             const candidates = mergeItemCandidates(collectTagItems(floor.text), readCatalog());
             const needs = await missingNeeds(floor.chatId, candidates, s.items.maxPerFloor);
             if (!needs.length) return { ok: true, reason: 'nothing-missing', count: 0 };
             return runBatch(floor.chatId, needs, itemContextOf(floor.text, needs), s, floor);
-        })().then(result => { if (result.ok && retryTarget?.chatId === floor.chatId && retryTarget?.messageId === Number(messageId)) retryTarget = null; return result; }).catch((error) => {
+        }, floor).then(result => { if (result.ok && retryTarget?.chatId === floor.chatId && retryTarget?.messageId === Number(messageId)) retryTarget = null; return result; }).catch((error) => {
             if (error.code === 'media-metadata-stale') return { ok: false, reason: 'stale-chat' };
             retryTarget = { chatId: floor.chatId, messageId: Number(messageId) };
             report('error', `物品图处理异常：${(error && error.message) || error}`);
@@ -246,7 +297,7 @@ export function createItemImageService(deps) {
         const record = await cache.read(chatId, itemAssetKeyOf(chatId, name));
         if (!record) return { ok: false, reason: 'not-found' };
         const next = { ...record, imageId: '', status: 'discarded', updatedAt: now() };
-        await store.putAsset(next);
+        await recover(chatId, () => store.putAsset(next), undefined, 'save');
         cache.set(next);
         await cache.dropImage(record.imageId);
         emit({ chatId, key: record.key, name: record.name, reason: 'discarded' });
@@ -272,11 +323,14 @@ export function createItemImageService(deps) {
             return retryTarget?.chatId === chatOf() ? processMessage(retryTarget.messageId) : { ok: true };
         },
         start() {
+            stopped = false;
+            if (recoveryController.signal.aborted) recoveryController = new AbortController();
             if (offRendered) return;
             offRendered = messageHost.on('CHARACTER_MESSAGE_RENDERED', (messageId) => { void processMessage(Number(messageId)); });
         },
         clearCache() { cache.clear(); },
         stop() {
+            stopped = true; recoveryController.abort();
             cache.clear();
             if (offRendered) { offRendered(); offRendered = null; }
         },
