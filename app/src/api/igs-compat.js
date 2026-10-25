@@ -318,7 +318,7 @@ async function resolvePromiseHistory(app, message, messageId) {
     return collectPromises(texts);
 }
 
-// 服装跨楼继承：同一 3 楼窗口内按角色取最近一次服装栏，较近楼层优先；无登记服装时不追溯。
+// 服装是角色状态，不随最近出场窗口过期；按当前聊天倒序查找，收齐已有衣装角色后停止。
 async function resolveInheritedOutfits(app, sceneAssets, messageId) {
     const outfits = normalizeCharacterOutfits(sceneAssets && sceneAssets.characterOutfits);
     if (!Object.keys(outfits).length) return {};
@@ -329,25 +329,52 @@ async function resolveInheritedOutfits(app, sceneAssets, messageId) {
     const outfitResolver = createOutfitResolver(assets);
     const resolveKey = (name) => outfitsOfCharacter(outfits, assets.characterAliases, name).key || name;
     const result = {};
+    const remaining = new Set(Object.keys(outfits));
     let cursor = normalizedId;
-    for (let depth = 0; depth < INHERITED_SCENE_MAX_FLOORS; depth += 1) {
+    while (cursor > 0 && remaining.size) {
         let previous = null;
         try {
             previous = await app.hostAdapter.getAdjacentMessage(cursor, -1);
         } catch (error) {
             return result;
         }
-        if (!previous || previous.id == null || Number(previous.id) === cursor) return result;
-        cursor = Number(previous.id);
+        const previousId = previous?.id == null ? NaN : Number(previous.id);
+        if (!Number.isSafeInteger(previousId) || previousId < 0 || previousId >= cursor) return result;
+        cursor = previousId;
         const latest = collectLatestOutfits(
             extractSceneDirectives(getMessagePrimaryText(previous), { outfitResolver }).directives,
             resolveKey,
         );
         for (const [key, value] of Object.entries(latest)) {
-            if (!Object.prototype.hasOwnProperty.call(result, key)) result[key] = value;
+            if (remaining.has(key)) {
+                result[key] = value;
+                remaining.delete(key);
+            }
         }
     }
     return result;
+}
+
+// 旁白点名跨楼判断：前 3 个 AI 楼里说过话 / 有心理活动的角色名。本楼没露面但在这里面的用默认，不在的视为久违提到、不出立绘。
+async function resolveRecentCast(app, messageId) {
+    if (!app || !app.hostAdapter || typeof app.hostAdapter.getAdjacentMessage !== 'function') return [];
+    const names = new Set();
+    let cursor = Number(messageId);
+    if (!Number.isFinite(cursor) || cursor < 0) return [];
+    for (let depth = 0; depth < INHERITED_SCENE_MAX_FLOORS; depth += 1) {
+        let previous = null;
+        try {
+            previous = await app.hostAdapter.getAdjacentMessage(cursor, -1);
+        } catch (error) {
+            break;
+        }
+        if (!previous || previous.id == null || Number(previous.id) === cursor) break;
+        cursor = Number(previous.id);
+        for (const d of extractSceneDirectives(getMessagePrimaryText(previous)).directives) {
+            if ((d.type === 'char' || d.type === 'thought') && d.character) names.add(String(d.character));
+        }
+    }
+    return [...names];
 }
 
 // 恐怖档位跨楼层延续：本楼没有 [igs-dread:N] 时，向前最多追溯 6 个楼层取最近的一个；都没有返回 null。
@@ -380,24 +407,28 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
             ? unifiedSettings.bridge
             : readAppConfig(app),
     );
+    const sceneAssets = sceneAssetsForContext(bridge.sceneAssets, getSillyTavernContext(app.global));
     const visualNovelText = buildIgsTextPayload(message, {
         sourceFilter: bridge.sourceFilter,
         virtualRegex: bridge.virtualRegex,
-        sceneAssets: bridge.sceneAssets,
+        sceneAssets,
         sentencePaging: bridge.sentencePaging,
         dialogueSentencePaging: bridge.dialogueSentencePaging,
     });
     // 跨楼层场景追溯只在场景素材模式启用时发生；本楼没有任何场景指令时
     // （AI 漏发 [igs-scene:]，正文照常输出）才向前最多追溯 3 个 AI 楼层。
-    const sceneAssetsEnabled = Boolean(bridge.sceneAssets && bridge.sceneAssets.enabled);
+    const sceneAssetsEnabled = Boolean(sceneAssets && sceneAssets.enabled);
     const inheritedSceneState = sceneAssetsEnabled
         ? await resolveInheritedSceneState(app, visualNovelText, messageId)
         : null;
     const inheritedOutfits = sceneAssetsEnabled
-        ? await resolveInheritedOutfits(app, bridge.sceneAssets, messageId)
+        ? await resolveInheritedOutfits(app, sceneAssets, messageId)
         : {};
+    const recentCast = sceneAssetsEnabled && sceneAssets.narrationNameSwitch !== false
+        ? await resolveRecentCast(app, messageId)
+        : [];
     // 只有恐怖世界观、且本楼没写档位时才向前追溯。
-    const inheritedDread = resolveWorldview(sceneAssetsForContext(bridge.sceneAssets, getSillyTavernContext())) === 'horror' && findLastDreadLevel(getMessagePrimaryText(message)) === null
+    const inheritedDread = resolveWorldview(sceneAssets) === 'horror' && findLastDreadLevel(getMessagePrimaryText(message)) === null
         ? await resolveInheritedDread(app, messageId)
         : null;
     const battleFxSettings = unifiedSettings && unifiedSettings.readerSettings && unifiedSettings.readerSettings.battleFx;
@@ -428,6 +459,7 @@ async function buildReaderPayload(app, message, messageId, readerMode) {
         ...visualNovelText,
         inheritedSceneState,
         inheritedOutfits,
+        recentCast,
         inheritedDread,
         battleContext,
         liveContext,

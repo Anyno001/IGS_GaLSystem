@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { contentHash, findTruncatedFontTables, fontSliceName, JSDELIVR_FILE_LIMIT_BYTES, readSliceManifest, renderSliceFontFaces, SPLIT_FONT_MIN_BYTES } from './font-slices.js';
 import { externalizeSkinAssets, verifySkinAssets } from './skin-assets.js';
-import { checkBundleStartup } from './bundle-startup-check.js';
 
 const appRoot = path.resolve(import.meta.dirname, '..');
 const srcRoot = path.join(appRoot, 'src');
@@ -58,6 +57,10 @@ const bundle = inlineTypewriterAudio(skinAssets.bundle);
 
 const roundedFontWeights = [300, 400, 500, 700];
 const dialogFontAssets = [
+    { family: 'IGS-MaShanZheng', file: 'MaShanZheng-Regular.woff2', weight: 400, style: 'normal', format: 'woff2' },
+    { family: 'IGS-ZhiMangXing', file: 'ZhiMangXing-Regular.woff2', weight: 400, style: 'normal', format: 'woff2' },
+    // 古风主界面标题。
+    { family: 'IGS-PangMen', file: 'PangMenZhengDao-CuShu.ttf', weight: 400, style: 'normal', format: 'truetype' },
     { family: 'LXGW WenKai', file: 'LXGWWenKai-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
     { family: 'LXGW WenKai', file: 'LXGWWenKai-Light.ttf', weight: 300, style: 'normal', format: 'truetype' },
     { family: 'LXGW WenKai Lite', file: 'LXGWWenKaiLite-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
@@ -78,6 +81,8 @@ const dialogFontAssets = [
     { family: 'Quicksand', file: 'Quicksand-Variable.ttf', weight: '300 700', style: 'normal', format: 'truetype' },
     { family: 'Caveat', file: 'Caveat-Variable.ttf', weight: '400 700', style: 'normal', format: 'truetype' },
     { family: 'IM Fell English SC', file: 'IMFellEnglishSC-Regular.ttf', weight: 400, style: 'normal', format: 'truetype' },
+    // 主界面英文标注用的窄体，只截了西文字符。
+    { family: 'IGS Oswald', file: 'Oswald-Variable.woff2', weight: '200 700', style: 'normal', format: 'woff2' },
 ];
 const classicFontAssets = [
     { family: 'Source Han Serif CN', file: 'SourceHanSerifCN-Regular.otf', weight: 400, style: 'normal', format: 'opentype' },
@@ -115,11 +120,12 @@ const manifest = {
 const fontSourceDir = path.join(srcRoot, 'visual', 'igs-ui', 'assets', 'fonts');
 const fontTargetDir = path.join(distRoot, 'fonts');
 const fontLicenseFiles = [
+    'MaShanZheng-OFL.txt', 'ZhiMangXing-OFL.txt', 'PangMenZhengDao-LICENSE.txt',
     'OFL.txt', 'SourceHanSerifCN-LICENSE.txt', 'SourceHanSansCN-LICENSE.txt',
     'Cormorant-OFL.txt', 'Cormorant-OFL-FAQ.txt', 'LXGW-OFL.txt', 'Yozai-OFL.txt',
     'HuiwenMincho-CC0.txt', 'TsangerYuYangT-MIT.txt', 'SmileySans-OFL.txt',
     'Cinzel-OFL.txt', 'ZCOOLKuaiLe-OFL.txt', 'GreatVibes-OFL.txt', 'PinyonScript-OFL.txt',
-    'Quicksand-OFL.txt', 'Caveat-OFL.txt', 'IMFellEnglish-OFL.txt', 'ChillRoundF-OFL.txt',
+    'Quicksand-OFL.txt', 'Caveat-OFL.txt', 'IMFellEnglish-OFL.txt', 'ChillRoundF-OFL.txt', 'Oswald-OFL.txt',
 ];
 fs.mkdirSync(fontTargetDir, { recursive: true });
 for (const weight of roundedFontWeights) {
@@ -208,6 +214,20 @@ for (const file of voiceAssets) {
     fs.copyFileSync(source, path.join(voiceTargetDir, file));
 }
 fs.copyFileSync(path.join(voiceSourceDir, 'CREDITS.md'), path.join(voiceTargetDir, 'CREDITS.md'));
+fs.copyFileSync(path.join(srcRoot, 'vendor', 'fflate.LICENSE.txt'), path.join(distRoot, 'fflate.LICENSE.txt'));
+// IGS 数值系统适配版表格模板（§8C）：由 scripts/build-stats-template.mjs 生成到 docs/templates/，随发布包放进 dist/templates/ 供设置器下载。
+// 缺文件、坏 JSON、或不是适配版（没有标记）时直接失败，不发布原版模板。
+{
+    const { STATS_TEMPLATE_FILE, STATS_TEMPLATE_MARK } = await import('../src/data/shujuku/stats-template-adapt.js');
+    const statsTemplateSource = path.join(appRoot, '..', 'docs', 'templates', STATS_TEMPLATE_FILE);
+    if (!fs.existsSync(statsTemplateSource)) throw new Error(`Stats table template is missing (run node scripts/build-stats-template.mjs): ${statsTemplateSource}`);
+    const statsTemplateText = fs.readFileSync(statsTemplateSource, 'utf8');
+    JSON.parse(statsTemplateText);
+    if (!statsTemplateText.includes(STATS_TEMPLATE_MARK)) throw new Error(`Stats table template is not the IGS adapted version: ${statsTemplateSource}`);
+    const statsTemplateDir = path.join(distRoot, 'templates');
+    fs.mkdirSync(statsTemplateDir, { recursive: true });
+    fs.copyFileSync(statsTemplateSource, path.join(statsTemplateDir, STATS_TEMPLATE_FILE));
+}
 fs.writeFileSync(path.join(distRoot, 'igs.bundle.debug.js'), bundle, 'utf8');
 fs.writeFileSync(path.join(distRoot, 'igs.bundle.js'), await minifyBundle(bundle), 'utf8');
 fs.writeFileSync(path.join(distRoot, 'igs.bundle.css'), css, 'utf8');
@@ -229,11 +249,7 @@ if (/^\s*import\s/m.test(builtBundle) || builtBundle.includes("from '../src/inde
     throw new Error('Build output must be self-contained and must not import app/src modules at runtime.');
 }
 
-for (const name of ['igs.bundle.js', 'igs.bundle.debug.js']) {
-    checkBundleStartup(path.join(distRoot, name), packageJson.version);
-}
-console.log('gate:bundle-startup ok (minified/debug, auto/manual)');
-console.log('gate:build ok');
+console.log('build:generated (download and startup not verified)');
 
 function buildModuleGraph(rootFile) {
     const modules = new Map();

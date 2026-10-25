@@ -1,7 +1,9 @@
+import { guqinSvg, teaSvg } from './fx-selected-svg.js';
 // 古风礼仪雅事演出：抚琴、对弈、圣旨、敬茶、行礼。
 // 由 fx-daily.js 并入 BUILDERS；样式见 fx-daily-rites-style.js，音效见 fx-daily-r3-sfx.js。
 import { esc } from './reader-value-utils.js';
 import { make } from './fx-daily-kit.js';
+import { makeAncientPaper } from './fx-ancient-paper.js';
 import { spawnMist } from './fx-mist.js';
 import { spriteElOf } from './stage-snapshot.js';
 import { bodyAnchor, castFigures, clamp, lifeOf, play, round1, safeAnimate, seeded, spec, visibleSprite } from './fx-daily-r3-kit.js';
@@ -11,7 +13,6 @@ const GO_SIZE = 8;
 const GO_VERDICT = Object.freeze({ win: '胜', lose: '败', draw: '和' });
 const NOTICE_RE = /^[【\[(（]?(告示|榜文|公告|布告)/;
 const BOW_SPEC = spec(1200, ['translate(0,0) rotate(0deg)', 'translate(0,3.8%) rotate(2.2deg)', 'translate(0,3.8%) rotate(2.2deg)', 'translate(0,0) rotate(0deg)'], 'cubic-bezier(.4,0,.3,1)');
-const PLUCKS = Object.freeze([[4, 350], [2, 670], [5, 970], [1, 1350]]);
 
 function goStones(seed, lastBlack) {
     const rnd = seeded(seed);
@@ -37,11 +38,7 @@ export const RITES_BUILDERS = {
         const b = bodyAnchor(env, '');
         const qx = round1(clamp(b.x, 32, 68));
         const qy = round1(clamp(b.waist, 48, 66));
-        const plucked = new Map(PLUCKS);
-        const strings = Array.from({ length: 7 }, (_, i) => (plucked.has(i + 1) ? `<i class="is-p" style="animation-delay:${plucked.get(i + 1)}ms"></i>` : '<i></i>')).join('');
-        const badges = Array.from({ length: 13 }, () => '<u></u>').join('');
-        const ripples = PLUCKS.map(([s, at], i) => `<b style="left:${14 + i * 20}%;top:${20 + (s % 3) * 14}%;animation-delay:${at}ms"></b>`).join('');
-        const qin = make(env.doc, 'igs-dfx-guqin-qin', `<div class="igs-dfx-guqin-body"><i class="igs-dfx-guqin-yue"></i><div class="igs-dfx-guqin-badges">${badges}</div><div class="igs-dfx-guqin-strings">${strings}</div><i class="igs-dfx-guqin-tail"></i></div>${ripples}`);
+        const qin = make(env.doc, 'igs-dfx-guqin-qin', guqinSvg());
         qin.setAttribute('style', `left:${qx}%;top:${qy}%`);
         const node = make(env.doc, 'igs-dfx igs-dfx-guqin');
         spawnMist(node, { x: qx, y: qy + 3, size: 70, color: '#e6efeb', drift: 4 }, { reduced: env.reduced });
@@ -73,6 +70,10 @@ export const RITES_BUILDERS = {
     edict(item, env) {
         const text = String(item.text || '');
         const notice = NOTICE_RE.test(text);
+        if (env.ancient) return {
+            layer: 'front', life: lifeOf('edict', env), sounds: ['edict-open'],
+            node: makeAncientPaper(item, env, { kind: notice ? 'notice' : 'edict', stepMs: 0, startMs: 0 }),
+        };
         const head = notice ? '' : '<div class="igs-dfx-edict-head">奉天承运　皇帝诏曰</div>';
         const seal = notice ? '<i class="igs-dfx-edict-seal is-small">官</i>' : '<i class="igs-dfx-edict-seal"><u>皇帝</u><u>之宝</u></i>';
         const node = make(env.doc, `igs-dfx igs-dfx-edict${notice ? ' is-notice' : ''}`,
@@ -89,12 +90,9 @@ export const RITES_BUILDERS = {
         const toX = round1(cast.length ? clamp(cast[0].x, 14, 86) : fromX < 50 ? fromX + 18 : fromX - 18);
         const y = round1(clamp(b.chest + 6, 46, 64));
         const k = round1((toX - fromX) / 14);
-        const set = make(env.doc, 'igs-dfx-tea-set', '<i class="igs-dfx-tea-saucer"></i><i class="igs-dfx-tea-bowl"></i>');
+        const set = make(env.doc, 'igs-dfx-tea-set', teaSvg());
         set.setAttribute('style', `left:${fromX - 7}%;top:${y}%;--igs-k:${k}`);
         const node = make(env.doc, 'igs-dfx igs-dfx-tea');
-        const steam = make(env.doc, 'igs-dfx-tea-steam');
-        spawnMist(steam, { x: toX, y: y - 9, size: 14, color: '#ffffff', drift: 3 }, { reduced: env.reduced });
-        node.appendChild(steam);
         node.appendChild(set);
         if (!env.reduced) {
             safeAnimate(env.root.querySelector('#igs-sprite'), [

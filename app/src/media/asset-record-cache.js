@@ -1,9 +1,15 @@
+import { recoverOperation, linkRecoverySignals } from '../storage/automatic-recovery.js';
+import { assetBindingMetadata } from './generated-asset-store.js';
 import { requireMediaCache } from './media-cache-owner.js';
 
 // variantOf 必须留着：时段差分入库时主图地址要回指原图（asset-match.bindGeneratedBackground）。
-const DISPLAY_FIELDS = ['chatId', 'floorKey', 'type', 'name', 'time', 'status', 'imageId', 'tags', 'variantOf'];
+const DISPLAY_FIELDS = ['chatId', 'floorKey', 'type', 'name', 'time', 'status', 'skipReason', 'imageId', 'tags', 'variantOf', 'characterKey', 'outfitName'];
 const QUERY_FIELDS = DISPLAY_FIELDS.filter(field => field !== 'tags');
-const project = record => record ? Object.fromEntries(['key', ...DISPLAY_FIELDS].filter(field => Object.hasOwn(record, field)).map(field => [field, record[field]])) : null;
+const project = record => {
+    if (!record) return null;
+    const value = { ...record, ...assetBindingMetadata(record) };
+    return Object.fromEntries(['key', ...DISPLAY_FIELDS].filter(field => Object.hasOwn(value, field)).map(field => [field, value[field]]));
+};
 const staleError = () => Object.assign(new Error('media-metadata-stale'), { code: 'media-metadata-stale' });
 
 // 缓存 miss 从不代表记录不存在。同步展示按需补载，生图/修改必须 fresh 查权威库。
@@ -11,15 +17,20 @@ const staleError = () => Object.assign(new Error('media-metadata-stale'), { code
 export function createAssetRecordCache({ store, mediaCache, owner, onChanged, onClear, onError, pendingCount = () => 0 }) {
     const media = requireMediaCache(mediaCache, owner);
     const pending = new Map();
+    const recoveryController = new AbortController();
+    let scopeController = new AbortController();
     let scope = '', generation = 0, revision = 0, disposed = false, error = '', failedKey = '';
     const entries = media.auxiliary.createMap(owner, {
         onClear() { generation += 1; revision += 1; scope = ''; error = ''; failedKey = ''; pending.clear(); onClear?.(); },
-        onDestroy() { disposed = true; },
+        onDestroy() { disposed = true; recoveryController.abort(); scopeController.abort(); },
         stats: () => ({ activeScopes: scope ? 1 : 0, pending: pending.size + pendingCount(), error }),
     });
     function use(chatId) {
         if (disposed) throw new Error('media-cache-disposed');
-        if (scope !== chatId) { entries.clear(); scope = chatId; }
+        if (scope !== chatId) {
+            scopeController.abort(); scopeController = new AbortController();
+            entries.clear(); scope = chatId;
+        }
     }
     function remember(record) {
         if (disposed || !record || record.chatId !== scope) return;
@@ -43,10 +54,13 @@ export function createAssetRecordCache({ store, mediaCache, owner, onChanged, on
     }
     async function load(key, loader, accept, { fresh = false } = {}) {
         if (disposed) throw new Error('media-cache-disposed');
-        if (!fresh && entries.get(`f:${key}`)?.kind === 'failure') throw Object.assign(new Error(error || 'asset-record-read-failed'), { code: 'asset-record-read-failed' });
-        const stamp = generation, version = revision, taskKey = `${version}:${key}`;
+        const activeScope = scope, taskKey = `${revision}:${key}`;
         if (pending.has(taskKey)) return pending.get(taskKey);
-        const job = Promise.resolve().then(loader).then(value => {
+        const linked = linkRecoverySignals([recoveryController.signal, scopeController.signal]);
+        const read = () => {
+            const stamp = generation, version = revision;
+            if (!scope) scope = activeScope;
+            return Promise.resolve().then(loader).then(value => {
             if (disposed || stamp !== generation) throw staleError();
             if (version !== revision) throw staleError();
             accept(value);
@@ -63,7 +77,14 @@ export function createAssetRecordCache({ store, mediaCache, owner, onChanged, on
             entries.set(`f:${key}`, { kind: 'failure' }, { ttlMs: 1000 });
             if (changed) { onError?.(failure); onChanged?.(scope); }
             throw failure;
-        }).finally(() => { if (pending.get(taskKey) === job) pending.delete(taskKey); });
+            });
+        };
+        const job = recoverOperation(read, { signal: linked.signal, isActive: () => !disposed && (!scope || scope === activeScope),
+            repair: (_result, cause) => ({ changed: cause?.code === 'media-metadata-stale' }),
+            observe: async () => ({ completed: true, value: await read() }),
+        })
+            .then(value => { if (disposed || scope !== activeScope) throw staleError(); return value; })
+            .finally(() => { linked.release(); if (pending.get(taskKey) === job) pending.delete(taskKey); });
         pending.set(taskKey, job);
         return job;
     }

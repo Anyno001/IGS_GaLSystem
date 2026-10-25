@@ -4,11 +4,21 @@ import { sceneTimeBucket } from './time-bucket.js';
 import { IGS_DIRECTIVE_START_RE, matchOutfitDirectiveAt, splitIgsDirectiveLines } from './directive-tags.js';
 
 // 指令可独占整行，也可紧跟在正文之后（同一行内混排），因此不做行首锚定。
-const SCENE_RE = /\[igs-scene:([^|\]]+)\|([^|\]]+)\|([^|\]]+)(?:\|([^\]]*))?\]/;
+// 天气栏可省略：AI 漏写成 [igs-scene:地点|时间] 也照样算换场景。
+const SCENE_RE = /\[igs-scene:([^|\]]+)\|([^|\]]+)(?:\|([^|\]]*))?(?:\|([^|\]]*))?(?:\|([^\]]*))?\]/;
+// 第 5 段（可选）：此刻在场的角色名，逗号/顿号/空格分隔；原样名字，由调用方解析成角色主名。
+export function parseScenePresentNames(raw) {
+    const out = [];
+    for (const part of String(raw || '').split(/[,，、;；\s]+/)) {
+        const name = part.trim();
+        if (name && !out.includes(name)) out.push(name);
+    }
+    return out;
+}
 const CHAR_RE = /\[igs-char:([^|\]]+)\|([^|\]]+)\|([^|\]]+)\]/;
 const THOUGHT_RE = /\[igs-thought:([^|\]]+)\|([^|\]]+)\|([^|\]]+)\]/;
 // 锚定在当前位置的版本：用于「紧贴当前位置」的指令识别。
-const SCENE_AT_RE = /^\[igs-scene:([^|\]]+)\|([^|\]]+)\|([^|\]]+)(?:\|([^\]]*))?\]/;
+const SCENE_AT_RE = /^\[igs-scene:([^|\]]+)\|([^|\]]+)(?:\|([^|\]]*))?(?:\|([^|\]]*))?(?:\|([^\]]*))?\]/;
 // 台词/心里话漏写 "]" 时以行尾收口，与正文格式化规则一致；表情栏可省略（两栏写法视为没写表情）。
 const CHAR_AT_RE = /^\[igs-char:([^|\]]+)\|(?:([^|\]]*)\|)?([^|\]]+)(?:\]|$)/;
 const THOUGHT_AT_RE = /^\[igs-thought:([^|\]]+)\|(?:([^|\]]*)\|)?([^|\]]+)(?:\]|$)/;
@@ -72,8 +82,9 @@ export function extractSceneDirectives(text, options = {}) {
                     type: 'scene',
                     scene: m[1].trim(),
                     time: m[2].trim(),
-                    weather: m[3].trim(),
+                    weather: String(m[3] || '').trim(),
                     nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw',
+                    present: parseScenePresentNames(m[5]),
                     segmentIndex: segmentCount,
                     lineIndex,
                     offset: cursor,
@@ -148,8 +159,9 @@ export function resolveSceneAtSourceOffset(source, position) {
     return {
         scene: m[1].trim(),
         time: m[2].trim(),
-        weather: m[3].trim(),
+        weather: String(m[3] || '').trim(),
         nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw',
+        present: parseScenePresentNames(m[5]),
         character: '', mood: '', dialogue: '', thought: '', lastDirectiveType: 'scene',
     };
 }
@@ -228,6 +240,46 @@ export function resolveHeldSourceOffsets(source, segments, locate) {
 
 const PAGE_SPEAKER_RE = /^\s*\*?\s*\[([^\]\n]+)\]\s*[:：]/;
 
+// 整楼一次建立 CG 页计划。标记、场景与出场角色不再在每次翻页时从头扫描。
+export function prepareIllustrationPages({ source, offsets = [], segments = [], holdPages = 4, inheritedNsfw = false, sceneAt } = {}) {
+    const src = String(source || '');
+    const markers = Array.from(src.matchAll(/\[igs-img:\s*(\d+)\s*\]|<IMG>\s*(\d+)\s*<\/IMG>/gi),
+        m => ({ slot: Number(m[1] || m[2]), offset: m.index })).filter(m => m.slot >= 1);
+    if (!markers.length) return offsets.map(() => null);
+    const stateAt = position => {
+        const state = typeof sceneAt === 'function' ? sceneAt(position) : resolveSceneAtSourceOffset(src, position);
+        return state?.scene ? state : { scene: '', time: '', nsfw: inheritedNsfw === true };
+    };
+    const starts = new Map();
+    for (const marker of markers) {
+        let lo = 0, hi = offsets.length;
+        while (lo < hi) { const mid = (lo + hi) >>> 1; if (offsets[mid] < marker.offset) lo = mid + 1; else hi = mid; }
+        let page = lo - 1;
+        // -1 是未定位，不能被当成标记前的正文页。
+        if (page < 0 || offsets[page] < 0) page = offsets.findIndex(at => at > marker.offset);
+        if (page >= 0) starts.set(page, marker);
+    }
+    const hold = Math.max(1, Number(holdPages) || 4);
+    const spoken = new Set();
+    let next = 0, current = null, start = -1, ended = false;
+    return offsets.map((offset, index) => {
+        if (starts.has(index)) { current = starts.get(index); start = index; spoken.clear(); ended = false; }
+        const speaker = String(segments[index] || '').match(PAGE_SPEAKER_RE)?.[1]?.trim() || '';
+        if (speaker && index - start >= hold && !spoken.has(speaker)) ended = true;
+        if (speaker) spoken.add(speaker);
+        if (offset < 0) return null;
+        while (next < markers.length && markers[next].offset < offset) next++;
+        const passed = next ? markers[next - 1] : null;
+        // NSFW 页只提前挂 NSFW 的下一张；下一张属于 SFW 场景时保持已翻过的那张。
+        if (stateAt(offset).nsfw) return markers[next] && stateAt(markers[next].offset).nsfw ? markers[next] : (passed || null);
+        // 新的 SFW 事件 CG 从锚句页起接管，不再沿用之前的 NSFW 图。
+        if (passed && stateAt(passed.offset).nsfw && !(current && current.offset > passed.offset)) return passed;
+        if (!current || ended || index - start >= hold * 2) return null;
+        const opening = stateAt(offsets[start]), here = stateAt(offset);
+        return here.scene === opening.scene && here.time === opening.time ? current : null;
+    });
+}
+
 /**
  * 当前页该显示哪张 CG。
  * NSFW 页沿用 resolveIllustrationAtSourceOffset：整楼有图就一直挂着，只被下一张替换；翻过的 NSFW 图转到 SFW 场景也不撤。
@@ -244,15 +296,16 @@ export function resolveIllustrationForPage({ source, offsets, segments, index, h
         const state = resolveSceneAtSourceOffset(src, position);
         return state.scene ? state : { ...state, nsfw: inheritedNsfw === true };
     };
-    if (sceneAt(pages[at]).nsfw) return resolveIllustrationAtSourceOffset(src, pages[at]);
     const markers = [];
     for (const match of src.matchAll(/\[igs-img:\s*(\d+)\s*\]|<IMG>\s*(\d+)\s*<\/IMG>/gi)) {
         const slot = Number(match[1] || match[2]);
         if (Number.isInteger(slot) && slot >= 1) markers.push({ slot, offset: match.index });
     }
-    // NSFW 图翻过后，即使转到 SFW 场景也保持到下一张。
-    const passed = markers.filter((marker) => marker.offset < pages[at]).pop();
-    if (passed && sceneAt(passed.offset).nsfw) return passed;
+    const passed = markers.filter((marker) => marker.offset < pages[at]).pop() || null;
+    if (sceneAt(pages[at]).nsfw) {
+        const ahead = resolveIllustrationAtSourceOffset(src, pages[at]);
+        return ahead && ahead.offset >= pages[at] && !sceneAt(ahead.offset).nsfw ? passed : ahead;
+    }
     let current = null;
     let start = -1;
     for (const marker of markers) {
@@ -266,6 +319,8 @@ export function resolveIllustrationForPage({ source, offsets, segments, index, h
             start = page;
         }
     }
+    // NSFW 图翻过后，即使转到 SFW 场景也保持到下一张；新的 SFW 事件 CG 从锚句页起接管。
+    if (passed && sceneAt(passed.offset).nsfw && !(current && current.offset > passed.offset)) return passed;
     if (!current) return null;
     const hold = Math.max(1, Number(holdPages) || 4);
     if (at - start >= hold * 2) return null;
@@ -362,7 +417,34 @@ export function resolveCharacterKey(characters, characterAliases, characterName)
         const values = Array.isArray(aliases[key]) ? aliases[key] : [];
         if (values.some((value) => String(value || '').trim() === target)) return key;
     }
-    return null;
+    return characterNameFallback ? fuzzyCharacterKey(characters, aliases, target) : null;
+}
+
+// 名字兜底（设置「名字兜底匹配」，默认开）：阅读器按设置拨这个开关。
+let characterNameFallback = true;
+export function setCharacterNameFallback(on) {
+    characterNameFallback = on !== false;
+}
+
+// 一方包含另一方且重合不少于 2 字才算；多出的部分只是编号（A / B / 2 / 甲乙）时不算，
+// 免得「路人A」认成「路人B」或「路人」。命中不止一个角色时视为有歧义，不匹配。
+const NAME_MARKER_RE = /^[\sA-Za-z0-9０-９Ａ-Ｚａ-ｚ甲乙丙丁戊己庚辛#＃_\-－·・.]+$/;
+function nameContains(a, b) {
+    const [long, short] = a.length >= b.length ? [a, b] : [b, a];
+    if (Array.from(short).length < 2 || long === short || !long.includes(short)) return false;
+    return !NAME_MARKER_RE.test(long.replace(short, ''));
+}
+
+function fuzzyCharacterKey(characters, aliases, target) {
+    if (Array.from(target).length < 2) return null;
+    let found = null;
+    for (const key of Object.keys(characters)) {
+        const names = [key, ...(Array.isArray(aliases[key]) ? aliases[key] : [])].map((v) => String(v || '').trim());
+        if (!names.some((name) => name && nameContains(target, name))) continue;
+        if (found) return null;
+        found = key;
+    }
+    return found;
 }
 
 // 场景别名沿用 scenes[名].words 存储；先精确命中主名称，再按别名归约。
@@ -463,7 +545,7 @@ function lookupSceneUrl(scenes, sceneName, time, weather, sceneAssets) {
     return lookupSceneBackground({ scene: sceneName, time, weather }, { ...sceneAssets, scenes }).url;
 }
 
-export function lookupSceneBackground(sceneState, sceneAssets) {
+export function lookupSceneBackground(sceneState, sceneAssets, options = {}) {
     const scenes = (sceneAssets && sceneAssets.scenes) || {};
     const state = sceneState || {};
     const match = classifySceneKey(scenes, state.scene);
@@ -472,31 +554,36 @@ export function lookupSceneBackground(sceneState, sceneAssets) {
     const quality = useDefault ? 'default' : match.quality;
     const key = match.key != null ? match.key : (useDefault ? '默认' : null);
     if (!raw) return { url: null, key, quality, timed: false };
-    const resolved = resolveSceneEntry(raw, state.time, state.weather, sceneAssets);
+    const resolved = resolveSceneEntry(raw, state.time, state.weather, sceneAssets, options);
     return { url: resolved.url || null, key, quality, timed: Boolean(resolved.url) && resolved.timed };
 }
 
 // timed：命中了素材自带的时段变体（times 层或内置示例图的时段替换），说明画面本身已有该时段光照，
 // 渲染层据此跳过时段调色，避免夜景素材再被压暗一次。
-function resolveSceneEntry(raw, time, weather, sceneAssets) {
+function resolveSceneEntry(raw, time, weather, sceneAssets, options) {
     const entry = typeof raw === 'string' ? { url: raw } : raw;
+    const usable = url => Boolean(url) && !options.isUnavailableImage?.(url);
     const timeGroups = sceneAssets && sceneAssets.timeGroups;
     const weatherGroups = sceneAssets && sceneAssets.weatherGroups;
     const timeKey = resolveLayerKey(entry.times, time, timeGroups) || sameBucketTimeKey(entry.times, time);
     if (timeKey != null) {
         const timeRaw = entry.times[timeKey];
-        const timeEntry = typeof timeRaw === 'string' ? { url: timeRaw } : timeRaw;
+        const timeEntry = (typeof timeRaw === 'string' ? { url: timeRaw } : timeRaw) || {};
         const weatherKey = resolveLayerKey(timeEntry.weathers, weather, weatherGroups);
         if (weatherKey != null) {
             const weatherRaw = timeEntry.weathers[weatherKey];
             const weatherEntry = typeof weatherRaw === 'string' ? { url: weatherRaw } : weatherRaw;
-            return { url: (weatherEntry && weatherEntry.url) || (typeof weatherRaw === 'string' ? weatherRaw : null) || null, timed: true };
+            const url = String(weatherEntry?.url || '').trim();
+            if (usable(url)) return { url, timed: true };
         }
-        return { url: resolveSceneTimeAsset(timeEntry.url || '', time), timed: true };
+        const url = String(timeEntry.url || '').trim();
+        const resolved = resolveSceneTimeAsset(url, time);
+        if (usable(resolved)) return { url: resolved, timed: true };
     }
-    const base = entry.url || '';
+    const base = String(entry.url || '').trim();
     const url = resolveSceneTimeAsset(base, time);
-    return { url, timed: Boolean(base) && url !== base };
+    const available = usable(url);
+    return { url: available ? url : '', timed: available && url !== base };
 }
 
 // quality：exact（槽位名）/ group（组词）/ fuzzy（模糊兜底，可能错配）/ default / none。

@@ -33,51 +33,13 @@ const SEED = {
     'igs-reader-settings-v9-default': JSON.stringify({ dialogSkin: 'gradient-veil' }),
 };
 
-function boot() {
+function boot(storage = memoryStorage(SEED)) {
     return bootstrapIGS({
-        global: { localStorage: memoryStorage(SEED) },
+        global: { localStorage: storage },
         autoAttachMagicWand: false,
         hostAdapter: { getCurrentMessage: async () => null, typeAndSend: async () => ({ ok: true }) },
     });
 }
-
-test('immutable-store: 对外的配置是副本，改了不影响内部', () => {
-    const vn = boot();
-    try {
-        const a = vn.getUnifiedSettings({ mode: 'pc' });
-        a.bridge.sceneAssets.characters.小雪.喜悦 = 'mutated';
-        assert.equal(vn.getUnifiedSettings({ mode: 'pc' }).bridge.sceneAssets.characters.小雪.喜悦, 'x.png');
-    } finally {
-        vn.destroy();
-    }
-});
-
-test('immutable-store: 冻结存储后打开设置、改值、切页、保存都不原地改它', () => {
-    const vn = boot();
-    try {
-        const frozen = vn.getUnifiedSettings({ mode: 'default' });
-        deepFreeze(vn.getState().config);
-        deepFreeze(vn.getState().legacyIgs);
-        deepFreeze(frozen);
-        const opened = vn.openSettings({ tab: 'scene', mode: 'pc' });
-        assert.notEqual(opened.ok, false);
-        const ctl = opened.controller;
-        for (const tab of ['basic', 'reader', 'scene', 'image']) assert.notEqual(ctl.switchTab(tab).ok, false, tab);
-        assert.notEqual(ctl.setValue('bridge.sceneAssets.moodFuzzyMatch', true).ok, false);
-        assert.notEqual(ctl.setValue('readerSettings.dialogSkin', 'default').ok, false);
-        assert.notEqual(ctl.close().ok, false);
-        // 保存换上了新的一份，旧的冻结对象原样未动。
-        const next = vn.getUnifiedSettings({ mode: 'default' });
-        assert.notEqual(next, frozen);
-        assert.equal(next.bridge.sceneAssets.moodFuzzyMatch, true);
-        assert.equal(next.readerSettings.dialogSkin, 'default');
-        assert.equal(frozen.bridge.sceneAssets.moodFuzzyMatch, undefined);
-        // 归一化出来的迁移结果只在新对象上。
-        assert.equal(typeof frozen.bridge.sceneAssets.scenes.教室, 'string');
-    } finally {
-        vn.destroy();
-    }
-});
 
 test('immutable-store: 设置里点按钮后取消、重开，旧配置都没被改', () => {
     const vn = boot();

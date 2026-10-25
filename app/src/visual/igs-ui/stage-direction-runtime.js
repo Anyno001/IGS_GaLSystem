@@ -1,4 +1,5 @@
 import { prefersReducedMotion } from './reduced-motion.js';
+import { trimCacheEntries } from '../../media/cache-eviction.js';
 import { CG_INTERLUDE_STYLES, STAGE_DIRECTION_NORMALIZERS, pickCloseUp, pickSpriteAction } from './stage-direction-settings.js';
 import { SPEAK_BOUNCE, SPRITE_ACTION_FRAMES, playSpriteSpec } from './sprite-actions.js';
 import { cancelCameraImpact, planCameraImpact, playCameraImpact, playCameraImpactSfx } from './camera-impact.js';
@@ -333,7 +334,8 @@ function setVar(el, name, value) {
 // 需要等待时返回 Promise（超时也会 resolve）；已解码或环境没有 Image 时返回 null，调用方可以同步写图。
 export function decodeSpriteImage(doc, url, { schedule = (fn, delay) => setTimeout(fn, delay), clear = (timer) => clearTimeout(timer) } = {}) {
     const Image = doc && doc.defaultView && doc.defaultView.Image;
-    if (!url || decoded.has(url) || typeof Image !== 'function') return null;
+    if (!url || typeof Image !== 'function') return null;
+    if (decoded.has(url)) { decoded.delete(url); decoded.add(url); return null; }
     return new Promise((resolve) => {
         let done = false;
         let timer = null;
@@ -342,7 +344,7 @@ export function decodeSpriteImage(doc, url, { schedule = (fn, delay) => setTimeo
             done = true;
             if (timer != null) clear(timer);
             decoded.add(url);
-            if (decoded.size > DECODED_LIMIT) decoded.delete(decoded.values().next().value);
+            trimCacheEntries(decoded, DECODED_LIMIT);
             resolve();
         };
         timer = schedule(finish, DECODE_TIMEOUT_MS);

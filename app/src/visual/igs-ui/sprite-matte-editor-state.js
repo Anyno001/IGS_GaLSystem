@@ -30,10 +30,10 @@ export function resolveMatteEditorMode(loaded, { maskSize = null, originalSize =
 
 // 用户可见的保存失败说明；不包含原图、密钥或请求内容。
 export function describeMatteSaveError(reason) {
-    if (reason === 'stale-revision') return '这张立绘已在别处被修改，本次修改未保存。请关闭后重新打开再编辑。';
+    if (reason === 'stale-revision') return '正在读取当前立绘记录并继续保存，修复内容已保留。';
     if (reason === 'source-unavailable') return '这张立绘没有保存原图，无法保存修复结果。';
     if (reason === 'not-found') return '这张立绘已被删除，本次修改未保存。';
     if (reason === 'update-unsupported') return '当前存储不支持修复保存。';
     if (reason === 'empty-result') return '修复结果为空，已放弃保存。';
-    return '保存失败，当前修改仍保留在编辑器中。';
+    return '正在恢复保存，当前修改已保留。';
 }

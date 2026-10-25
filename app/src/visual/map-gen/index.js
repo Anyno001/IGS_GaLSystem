@@ -5,6 +5,7 @@ import { classifyMapPlace, detectMapTheme, resolveMapScale } from './place-seman
 import { generateCitySteps } from './city.js';
 import { renderCitySteps, renderLightSteps } from './render-canvas.js';
 import { MAP_DEFAULT_VARIANT } from './themes.js';
+import { recoverOperation } from '../../storage/automatic-recovery.js';
 
 // 升级生成算法或画风时加一，旧缓存与旧种子序列随之失效。
 export const MAP_GEN_VERSION = 3;
@@ -66,6 +67,7 @@ export function createMapBasemapGenerator(options = {}) {
         if (entry?.key === activeKey) { leases.releaseAll(); activeKey = ''; }
         if (!entry) return;
         entry.cancelled = true;
+        entry.controller?.abort();
         for (const key of entry.resourceKeys || []) media.forget(key);
     };
     const cache = media.auxiliary.createMap('maps', {
@@ -80,7 +82,6 @@ export function createMapBasemapGenerator(options = {}) {
 
     // 按时间预算推进生成器：每片不超过 budget 毫秒，其余交回宿主事件循环。
     const drive = (iterator, cancelled) => new Promise((resolve, reject) => {
-        const started = now();
         const tick = () => {
             if (disposed || cancelled()) { reject(new Error('disposed')); return; }
             try {
@@ -88,7 +89,6 @@ export function createMapBasemapGenerator(options = {}) {
                 let step = iterator.next();
                 while (!step.done && now() - t0 < budget) step = iterator.next();
                 if (step.done) resolve(step.value);
-                else if (now() - started > timeout) reject(new Error('timeout'));
                 else schedule(tick);
             } catch (error) { reject(error); }
         };
@@ -143,11 +143,12 @@ export function createMapBasemapGenerator(options = {}) {
         leases.begin();
         leases.use(`map:${input.key}:base`); leases.use(`map:${input.key}:lights`); leases.end();
         if (existing) return existing;
-        const entry = { key: input.key, status: 'pending', result: null, error: '', cancelled: false, resourceKeys: [] };
+        const entry = { key: input.key, status: 'pending', result: null, error: '', cancelled: false,
+            controller: new AbortController(), resourceKeys: [] };
         const currentGeneration = generation;
         const imageKey = `map:${input.key}:base`, lightsKey = `map:${input.key}:lights`;
         const imageStamp = media.token(imageKey), lightsStamp = media.token(lightsKey);
-        entry.promise = drive(input.kind === 'lights' ? lightsJob(input) : cityJob(input), () => entry.cancelled || currentGeneration !== generation)
+        entry.promise = recoverOperation(() => drive(input.kind === 'lights' ? lightsJob(input) : cityJob(input), () => entry.cancelled || currentGeneration !== generation)
             .then(async ({ canvas, lights }) => {
                 if (entry.cancelled || currentGeneration !== generation) throw new Error('disposed');
                 entry.resourceKeys = [canvas && imageKey, lights && lightsKey].filter(Boolean);
@@ -159,6 +160,11 @@ export function createMapBasemapGenerator(options = {}) {
                 entry.status = 'ready';
                 if (cache.get(input.key) === entry) remember(input.key, entry);
                 return entry;
+            }), { repeatable: 'read', signal: entry.controller.signal,
+                isActive: () => !disposed && !entry.cancelled && currentGeneration === generation })
+            .then(result => {
+                if (result?.cancelled) { entry.status = 'failed'; entry.error = 'disposed'; return entry; }
+                return result;
             })
             .catch(error => {
                 if (cache.get(input.key) === entry) revoke(entry);

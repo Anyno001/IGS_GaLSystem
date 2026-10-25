@@ -7,6 +7,7 @@ import { applySenseToPlan } from './romance-senses.js';
 import { resolveCgPace } from './romance-cg-pan.js';
 import { setVoiceFilter } from './voice-filter.js';
 import { planBreathTypewriter } from './typewriter-breath.js';
+import { isStageIdle, onStageIdleChange } from './stage-pause.js';
 import {
     BG_SWAY,
     BREATH_PERIOD,
@@ -168,18 +169,19 @@ function setAttr(el, name, value) {
 
 function setVar(el, name, value) {
     if (!el || !el.style || typeof el.style.setProperty !== 'function') return;
-    if (value == null) el.style.removeProperty(name);
-    else el.style.setProperty(name, String(value));
+    const current = el.style.getPropertyValue?.(name);
+    if (value == null) { if (current !== '') el.style.removeProperty(name); }
+    else if (current !== String(value)) el.style.setProperty(name, String(value));
 }
 
 function stageOf(root) {
     return (root && typeof root.querySelector === 'function' && root.querySelector('#igs-stage-motion')) || null;
 }
 
-function makeState(stage) {
+function makeState(stage, root) {
     const view = stage.ownerDocument && stage.ownerDocument.defaultView;
     return {
-        stage,
+        stage, root,
         plan: null,
         voice: null,
         rng: Math.random,
@@ -297,6 +299,19 @@ function scheduleBeat(state, plan, beat) {
 }
 
 // 排程器：往前看 LOOKAHEAD_S 秒，把节拍、心跳、呼吸、钟声排进去；顶点静音期间什么都不排。
+function clockNeeds(state) {
+    const plan = state.plan;
+    const hidden = state.stage.ownerDocument?.hidden === true;
+    const visual = !hidden && !isStageIdle(state.root, { ignoreRest: true }) && !plan?.reduced && Boolean(state.requestFrame);
+    const voice = !hidden && state.voice;
+    return {
+        beat: Boolean(plan?.tempo && ((visual && plan.sway) || (voice && plan.creak))),
+        heart: Boolean(plan?.heartBpm && ((visual && (plan.vignette || plan.fringe)) || (voice && plan.heartAudio))),
+        breath: Boolean(voice && plan?.breath),
+        ticks: Boolean(voice && plan?.ticks),
+    };
+}
+
 function pump(state) {
     const plan = state.plan;
     if (!plan) return;
@@ -307,7 +322,8 @@ function pump(state) {
     if (t < state.hold) return;
     const horizon = t + LOOKAHEAD_S;
     const voice = state.voice;
-    const tempo = plan.tempo ? resolveIntimateTempo(plan.phase, state.span, t - state.phaseStart, plan.solo ? SOLO_TEMPO : PHASE_TEMPO) : null;
+    const needs = clockNeeds(state);
+    const tempo = needs.beat ? resolveIntimateTempo(plan.phase, state.span, t - state.phaseStart, plan.solo ? SOLO_TEMPO : PHASE_TEMPO) : null;
     if (tempo) {
         let last = state.beats[state.beats.length - 1];
         if (!last || last.t < t - 1) {
@@ -322,7 +338,7 @@ function pump(state) {
         }
         if (state.beats.length > 6) state.beats.splice(0, state.beats.length - 6);
     }
-    if (plan.heartBpm) {
+    if (needs.heart) {
         if (!(state.nextHeart > t - 1)) state.nextHeart = t + 0.1;
         while (state.nextHeart < horizon) {
             state.heartBpm = state.heartBpm > 0 ? state.heartBpm + (plan.heartBpm - state.heartBpm) * 0.25 : plan.heartBpm;
@@ -333,7 +349,7 @@ function pump(state) {
         }
         if (state.hearts.length > 4) state.hearts.splice(0, state.hearts.length - 4);
     }
-    if (voice && plan.breath) {
+    if (needs.breath) {
         if (!(state.nextBreath > t - 1)) state.nextBreath = t + 0.4;
         while (state.nextBreath < horizon) {
             const at = state.nextBreath;
@@ -349,13 +365,42 @@ function pump(state) {
             state.inhale = !state.inhale;
         }
     }
-    if (voice && plan.ticks) {
+    if (needs.ticks) {
         if (!(state.nextTick > t - 1)) state.nextTick = t + 0.6;
         while (state.nextTick < horizon) {
             voice.tick(state.nextTick, state.tock, 0.8);
             state.tock = !state.tock;
             state.nextTick += 1;
         }
+    }
+}
+
+// 下一拍到来前才补排，不用 50ms 轮询静止画面或没有声音的计划。
+function schedulePump(state) {
+    if (state.pump != null) clearTimeout(state.pump);
+    state.pump = null;
+    const needs = clockNeeds(state);
+    if (!Object.values(needs).some(Boolean)) return;
+    pump(state);
+    const t = schedNow(state);
+    const times = [];
+    if (needs.beat && state.beats.length) times.push(state.beats.at(-1).t);
+    if (needs.heart) times.push(state.nextHeart);
+    if (needs.breath) times.push(state.nextBreath);
+    if (needs.ticks) times.push(state.nextTick);
+    const delay = t < state.hold ? (state.hold - t) * 1000
+        : Math.max(PUMP_MS, (Math.min(...times) - t - LOOKAHEAD_S) * 1000);
+    state.pump = unref(setTimeout(() => { state.pump = null; schedulePump(state); }, delay));
+}
+
+function syncClocks(state) {
+    schedulePump(state);
+    if (!wantsFrame(state)) {
+        if (state.frame != null && state.cancelFrame) state.cancelFrame(state.frame);
+        state.frame = null;
+    } else if (state.frame == null) {
+        state.lastFrame = 0;
+        loop(state);
     }
 }
 
@@ -389,6 +434,7 @@ function part(state, name) {
 }
 
 function wantsFrame(state) {
+    if (state.stage.ownerDocument?.hidden || isStageIdle(state.root, { ignoreRest: true })) return false;
     const plan = state.plan;
     if (!plan || plan.reduced) return state.swayFade > 0.01;
     return Boolean(plan.sway || plan.fringe || (plan.vignette && plan.heartBpm) || state.swayFade > 0.01);
@@ -428,6 +474,12 @@ function timerFrames(state) {
 
 function loop(state) {
     state.frame = null;
+    if (state.stopped) return;
+    if (state.stage.isConnected === false) {
+        stopState(state, { hard: true });
+        states.delete(state.stage);
+        return;
+    }
     if (!wantsFrame(state) || !state.requestFrame) {
         if (!state.plan || !state.requestFrame) writeSway(state, null);
         return;
@@ -435,6 +487,7 @@ function loop(state) {
     let requesting = true;
     let ranInline = false;
     const id = state.requestFrame((ts) => {
+        if (state.stopped) return;
         if (requesting) {
             ranInline = true;
             return;
@@ -564,8 +617,13 @@ function runPeak(state, plan) {
 }
 
 function stopState(state, { hard = false } = {}) {
-    if (state.pump) clearInterval(state.pump);
+    state.stopped = true;
+    state.plan = null;
+    if (state.pump != null) clearTimeout(state.pump);
     state.pump = null;
+    state.offIdle?.();
+    state.offVisibility?.();
+    state.offIdle = state.offVisibility = null;
     if (state.frame != null && state.cancelFrame) state.cancelFrame(state.frame);
     state.frame = null;
     for (const id of state.timers) clearTimeout(id);
@@ -608,8 +666,13 @@ export function syncRomanceIntimate(root, info = {}) {
     }
     const plan = { ...base, reduced };
     if (!state) {
-        state = makeState(stage);
+        state = makeState(stage, root);
         states.set(stage, state);
+        state.offIdle = onStageIdleChange(root, () => syncClocks(state));
+        const doc = stage.ownerDocument;
+        const onVisibility = () => syncClocks(state);
+        doc?.addEventListener?.('visibilitychange', onVisibility);
+        state.offVisibility = () => doc?.removeEventListener?.('visibilitychange', onVisibility);
     }
     if (typeof info.rng === 'function') state.rng = info.rng;
     state.coarse = coarse;
@@ -667,14 +730,7 @@ export function syncRomanceIntimate(root, info = {}) {
     if ((turned || senseChanged) && plan.sense === 'touch' && plan.senseVisual && !plan.reduced) {
         replay(state, 'sense', 'data-igs-rm-ripple', '1', RIPPLE_MS);
     }
-    if (!state.pump && (plan.tempo || plan.heartBpm || plan.breath || plan.ticks)) {
-        state.pump = unref(setInterval(() => pump(state), PUMP_MS));
-    } else if (state.pump && !(plan.tempo || plan.heartBpm || plan.breath || plan.ticks)) {
-        clearInterval(state.pump);
-        state.pump = null;
-    }
-    pump(state);
-    if (state.frame == null) loop(state);
+    syncClocks(state);
     const typewriter = planBreathTypewriter({ enabled: settings.breathText === true, level: plan.level, phase: plan.phase, reduced, speed: info.speed });
     return { whisper: plan.whisper || (plan.sense === 'ear' && plan.volume > 0), plan, typewriter };
 }

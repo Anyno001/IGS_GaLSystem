@@ -1,3 +1,5 @@
+import { recoverOperation } from '../storage/automatic-recovery.js';
+import { appendInputDraft } from './input-channel.js';
 import {
     getMessagePrimaryText,
     getVisibleMessageTextFromElement,
@@ -110,6 +112,23 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
             return findMessageRegenerateButton(message, imageIndex, imageState);
         },
 
+        async resumeReply() {
+            const context = getSillyTavernContext(globalObject);
+            if (typeof context?.generate === 'function') {
+                const last = context.chat?.at(-1);
+                const kind = last && !last.is_user && !last.is_system
+                    ? (String(last.mes || '').trim() ? 'continue' : 'regenerate') : 'normal';
+                await context.generate(kind);
+                return { ok: true };
+            }
+            const helper = getTavernHelper(globalObject);
+            if (typeof helper?.triggerSlash === 'function') {
+                await helper.triggerSlash('/trigger');
+                return { ok: true };
+            }
+            return { ok: false, reason: 'reply-host-not-ready' };
+        },
+
         async ensureMessageImagePlaceholders(messageId, imageSlots = [], message = null) {
             const scopedMessage = message || await this.getMessageById(messageId);
             return ensureMessageImagePlaceholders(scopedMessage, imageSlots);
@@ -131,13 +150,14 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
             return { ok: false, reason: domResult.reason || 'missing-input-api' };
         },
 
-        async fillEmptyInputText(text) {
+        async fillEmptyInputText(text, { append = false } = {}) {
             // Do not invoke the unconditional setter until the actual draft is observable.
             const helper = getTavernHelper(globalObject);
             const input = getCandidateDocuments(globalObject)
                 .map(doc => safeQuery(doc, '#send_textarea')).find(Boolean);
             try {
                 if (input) {
+                    if (append) return setInputTextViaHostDom(globalObject, appendInputDraft(input.value, text));
                     if (String(input.value ?? '') !== '') return { ok: false, reason: 'draft-not-empty' };
                     // The DOM fallback checks again just before writing; helper reads may be stale.
                     return setInputTextViaHostDom(globalObject, text, true);
@@ -145,8 +165,8 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
                 if (helper && typeof helper.getInputText === 'function' && typeof helper.setInputText === 'function') {
                     const existing = await helper.getInputText();
                     if (existing == null) return { ok: false, reason: 'missing-readable-input' };
-                    if (String(existing) !== '') return { ok: false, reason: 'draft-not-empty' };
-                    const filled = await helper.setInputText(String(text ?? ''));
+                    if (!append && String(existing) !== '') return { ok: false, reason: 'draft-not-empty' };
+                    const filled = await helper.setInputText(append ? appendInputDraft(existing, text) : String(text ?? ''));
                     if (filled === false) return { ok: false, reason: 'input-fill-failed' };
                     return { ok: true, reason: 'tavern-helper-fill' };
                 }
@@ -157,20 +177,46 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
         },
 
         async typeAndSend(text) {
-            const helper = getTavernHelper(globalObject);
-            if (helper && typeof helper.typeAndSend === 'function') {
-                await helper.typeAndSend(text);
-                return { ok: true };
-            }
-            if (helper && typeof helper.setInputText === 'function' && typeof helper.send === 'function') {
-                await helper.setInputText(text);
-                await helper.send();
-                return { ok: true };
-            }
-            const domResult = sendViaHostDom(globalObject, text);
-            if (domResult.ok) return domResult;
-            if (!helper) return { ok: false, reason: 'missing-tavern-helper' };
-            return { ok: false, reason: domResult.reason || 'missing-send-api' };
+            const before = getChatMessageEntries(globalObject);
+            const afterId = before.reduce((last, entry) => Math.max(last, Number(entry.id)), -1);
+            const chat = getSillyTavernContext(globalObject);
+            const chatId = chat?.getCurrentChatId?.() ?? chat?.chatId;
+            let dispatched = false;
+            const receipt = () => getChatMessageEntries(globalObject).find(entry => Number(entry.id) > afterId
+                && (entry.message?.is_user || entry.message?.role === 'user')
+                && String(entry.message?.mes ?? entry.message?.text ?? '').trim() === String(text).trim());
+            const observed = () => {
+                const received = receipt();
+                if (received) return { completed: true, value: { ok: true, sent: true, messageId: received.id } };
+                if (dispatched) return false;
+                const helper = getTavernHelper(globalObject);
+                const available = typeof helper?.typeAndSend === 'function' || getCandidateDocuments(globalObject)
+                    .some(doc => safeQuery(doc, '#send_textarea') && !safeQuery(doc, '#send_textarea').disabled
+                        && typeof safeQuery(doc, '#send_but')?.click === 'function' && !safeQuery(doc, '#send_but').disabled);
+                return { changed: available };
+            };
+            return recoverOperation(async () => {
+                // 宿主已经收下原消息时直接续接，避免因返回过程异常再次发送正文。
+                const received = receipt();
+                if (received) return { ok: true, sent: true, messageId: received.id };
+                if (dispatched) return { ok: false, reason: 'host-send-awaiting-receipt' };
+                const helper = getTavernHelper(globalObject);
+                if (helper && typeof helper.typeAndSend === 'function') {
+                    dispatched = true;
+                    const result = await helper.typeAndSend(text);
+                    if (result?.sent === false) dispatched = false;
+                    if (result === false || result?.ok === false) return result || { ok: false, reason: 'host-send-pending' };
+                    return { ok: true, via: 'TavernHelper' };
+                }
+                const result = sendViaHostDom(globalObject, text);
+                dispatched = result.ok || result.reason === 'host-dom-send-failed';
+                return result;
+            }, { global: globalObject, initialDelayMs: 500, observe: observed, passiveObservation: true,
+                waitFor: () => ({ message: dispatched
+                    ? '消息已交给酒馆，正在读取原消息的发送回执；确认后自动继续，本条消息保持单次发送。'
+                    : '酒馆发送入口暂未就绪，正在读取输入框与发送按钮状态；就绪后自动发送已输入的内容。' }),
+                isActive: () => { const current = getSillyTavernContext(globalObject);
+                    return (current?.getCurrentChatId?.() ?? current?.chatId) === chatId; } });
         },
     };
 }

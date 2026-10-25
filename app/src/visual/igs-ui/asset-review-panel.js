@@ -11,6 +11,7 @@ export const ASSET_REVIEW_STYLE_TEXT = `
 .igs-asset-review-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;}
 .igs-asset-review-actions button{min-height:28px;padding:4px 8px;border-radius:6px;border:0;background:rgba(255,255,255,.1);color:inherit;cursor:pointer;font-size:12px;line-height:18px;text-align:center;}
 .igs-asset-review-actions button.is-primary{grid-column:1/-1;background:rgba(255,255,255,.2);font-weight:600;}
+.igs-asset-review-actions button.is-wide{grid-column:1/-1;}
 .igs-asset-review-actions button:hover{background:rgba(255,255,255,.26);}
 .igs-asset-review-actions button:focus-visible{outline:2px solid rgba(255,255,255,.6);outline-offset:1px;}
 `;
@@ -41,7 +42,25 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
     title.className = 'igs-asset-review-title';
     title.textContent = items.length ? `本层待确认素材 ${items.length}${handlers.hasMore ? '+' : ''} 项，是否入库？` : '正文出现了衣柜里没有的衣服';
     container.appendChild(title);
-    // 新衣服：下拉菜单选去向，确认后交给宿主；「稍后」留在素材页「待确认」里。
+    // 多件新衣服时一键全部稍后：逐件走与单行「稍后」相同的回调，全部留在「待确认」。
+    if (outfitAsks.length > 1) {
+        const bulk = doc.createElement('div');
+        bulk.className = 'igs-asset-review-actions';
+        const deferAll = doc.createElement('button');
+        deferAll.type = 'button';
+        deferAll.className = 'is-wide';
+        deferAll.textContent = '全部稍后';
+        deferAll.setAttribute('data-outfit-ask-act', 'later-all');
+        deferAll.addEventListener('click', (event) => {
+            event.stopPropagation();
+            if (deferAll.disabled || typeof handlers.onOutfit !== 'function') return;
+            deferAll.disabled = true;
+            for (const ask of outfitAsks) if (!ask.busy) handlers.onOutfit(ask, '');
+        });
+        bulk.appendChild(deferAll);
+        container.appendChild(bulk);
+    }
+    // 新衣服：「角色」穿了「衣服」+ 下拉菜单 + 加入/稍后；点过即从列表移除，不另显示状态。
     for (const ask of outfitAsks) {
         const row = doc.createElement('div');
         row.className = 'igs-asset-review-item';
@@ -60,14 +79,23 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
         }
         const actions = doc.createElement('div');
         actions.className = 'igs-asset-review-actions';
-        for (const [act, text] of [['ok', '加入'], ['later', '稍后']]) {
+        const acts = [['ok', '加入'], ['later', '稍后']];
+        select.disabled = !ask.id && Boolean(ask.busy);
+        let submitted = false;
+        for (const [act, text] of acts) {
             const button = doc.createElement('button');
             button.type = 'button';
             button.textContent = text;
             button.setAttribute('data-outfit-ask-act', act);
+            button.disabled = Boolean(ask.busy) && (!ask.id || act === 'retry');
             button.addEventListener('click', (event) => {
                 event.stopPropagation();
-                if (typeof handlers.onOutfit === 'function') handlers.onOutfit(ask, act === 'ok' ? select.value : '');
+                if (!submitted && !button.disabled && typeof handlers.onOutfit === 'function') {
+                    submitted = true;
+                    select.disabled = true;
+                    for (const control of actions.querySelectorAll('button')) control.disabled = true;
+                    handlers.onOutfit(ask, act === 'ok' ? select.value : act === 'retry' ? 'retry' : '');
+                }
             });
             actions.appendChild(button);
         }
@@ -95,8 +123,8 @@ export function renderAssetReviewPanel(container, items = [], handlers = {}) {
         if (activeKey && activeKey === item.key) focusTarget = input;
         const actions = doc.createElement('div');
         actions.className = 'igs-asset-review-actions';
-        // 立绘额外提供「入库并编辑 DNA」：先收入角色立绘，再把 tags 作为 DNA 候选交给设置页，由用户确认后才写入。
-        const acts = [['library', item.type === 'background' ? '存为背景' : '存为立绘'], ['chat', '仅本聊天'], ['discarded', '丢弃']];
+        // 立绘经统一采用入口核验并保存身份；「入库并编辑 DNA」打开采用后的景别资料。
+        const acts = [['library', item.type === 'background' ? '入库到场景' : '入库到角色'], ['chat', '仅本聊天'], ['discarded', '丢弃']];
         if (item.type === 'sprite') acts.splice(1, 0, ['library-dna', '入库并编辑 DNA']);
         for (const [act, text] of acts) {
             const button = doc.createElement('button');

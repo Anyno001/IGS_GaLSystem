@@ -6,6 +6,7 @@ import { safeItemImageUrl } from './fx-item.js';
 import { setStagePauseReason } from './stage-pause.js';
 import { createCgLibraryView } from './cg-library-view.js';
 import { cgReasonText } from '../../media/cg-library.js';
+import { recoverOperation } from '../../storage/automatic-recovery.js';
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
@@ -30,6 +31,7 @@ export function createCgGalleryPanel(doc, options = {}) {
     let previousFocus = null;
     let acting = Promise.resolve();
     let viewerJob = Promise.resolve();
+    let viewerController = null;
 
     const chatId = () => { try { return String(options.getChatId?.() || ''); } catch (_) { return ''; } };
     const query = (selector) => (root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null);
@@ -44,7 +46,7 @@ export function createCgGalleryPanel(doc, options = {}) {
         const tile = view.tileOf(entry.key);
         const src = safeItemImageUrl(tile.url);
         if (src) return `<button type="button" class="igs-cg-thumb" data-cg-act="view" data-cg-key="${escapeHtml(entry.key)}" aria-label="查看${escapeHtml(labelOf(entry))}"><img src="${escapeHtml(src)}" alt="" decoding="async"></button>`;
-        if (tile.state === 'failed') return `<button type="button" class="igs-cg-thumb is-failed" data-cg-act="retry" data-cg-key="${escapeHtml(entry.key)}" title="${escapeHtml(tile.reason)}"><span>读取失败，点这里重试</span></button>`;
+        if (tile.state === 'failed') return `<button type="button" class="igs-cg-thumb is-loading" data-cg-act="view" data-cg-key="${escapeHtml(entry.key)}" title="${escapeHtml(tile.reason)}"><span>正在恢复读取</span></button>`;
         return `<button type="button" class="igs-cg-thumb is-loading" data-cg-act="view" data-cg-key="${escapeHtml(entry.key)}" aria-label="查看${escapeHtml(labelOf(entry))}"><span>读取中</span></button>`;
     }
 
@@ -102,8 +104,14 @@ export function createCgGalleryPanel(doc, options = {}) {
 
     function onViewChange(type, key) {
         if (!root) return;
+        if (root.isConnected === false) { close(); return; }
         if (type === 'list') render();
         else if (type === 'thumb') patchTile(key);
+        else if (type === 'entry' && viewing === key) {
+            const entry = view.find(key);
+            if (entry?.ready) openViewer(entry);
+            else closeViewer();
+        }
         else patchStatus();
     }
 
@@ -116,6 +124,7 @@ export function createCgGalleryPanel(doc, options = {}) {
     }
 
     function closeViewer() {
+        viewerController?.abort(); viewerController = null;
         if (viewerEl) {
             viewerEl.removeEventListener('click', onViewerClick);
             viewerEl.removeEventListener('keydown', onKeydown);
@@ -133,7 +142,7 @@ export function createCgGalleryPanel(doc, options = {}) {
             + '<button type="button" class="igs-cg-viewer-close" aria-label="关闭大图">×</button>';
     }
 
-    // 先用缩略图铺上，原图读到再换；读不到就写清原因。
+    // 先铺缩略图，再换网页显示图。
     function openViewer(entry) {
         if (!host) return;
         closeViewer();
@@ -144,18 +153,23 @@ export function createCgGalleryPanel(doc, options = {}) {
         viewerEl.setAttribute('aria-modal', 'true');
         viewerEl.setAttribute('aria-label', 'CG 大图');
         viewerEl.setAttribute('tabindex', '-1');
-        viewerEl.innerHTML = viewerHtml(entry, safeItemImageUrl(view.tileOf(entry.key).url), '正在读取原图');
+        viewerEl.innerHTML = viewerHtml(entry, safeItemImageUrl(view.tileOf(entry.key).url), '正在加载图片');
         viewerEl.addEventListener('click', onViewerClick);
         viewerEl.addEventListener('keydown', onKeydown);
         host.appendChild(viewerEl);
         viewerEl.focus?.();
         const target = viewerEl;
-        viewerJob = Promise.resolve().then(() => view.readFull(entry)).catch(() => ({ ok: false, reason: 'read-error' })).then((result) => {
+        viewerController = new AbortController();
+        const signal = viewerController.signal;
+        viewerJob = recoverOperation(() => view.readFull(entry, { signal }), { signal,
+            shouldRecover: result => result?.reason !== 'missing',
+            onRecover() { if (viewerEl === target) target.innerHTML = viewerHtml(entry, safeItemImageUrl(view.tileOf(entry.key).url), '正在恢复图片读取'); },
+        }).then((result) => {
             if (viewerEl !== target) return;
             const src = result && result.ok ? safeItemImageUrl(result.dataUrl) : '';
             target.innerHTML = src
                 ? viewerHtml(entry, src, '')
-                : viewerHtml(entry, safeItemImageUrl(view.tileOf(entry.key).url), `原图读取失败：${cgReasonText(result && result.reason)}`);
+                : viewerHtml(entry, safeItemImageUrl(view.tileOf(entry.key).url), result?.reason === 'missing' ? '这张图片已删除' : `图片未能读取：${result?.error || result?.reason || '读取失败'}`);
         });
     }
 

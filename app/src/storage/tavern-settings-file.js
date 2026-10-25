@@ -1,5 +1,6 @@
 import { mediaRequest } from '../media/tavern-media-http.js';
 import { withMediaLock } from '../media/media-lock.js';
+import { RECOVERY_ATTEMPTS, trackRecovery } from './automatic-recovery.js';
 // 全局配置同步到酒馆本地 user/files/igs-settings.json（/api/files/upload），换设备、清浏览器缓存后配置还在。
 // 浏览器 localStorage 仍是运行时读写的地方，这里只做镜像：启动时文件比本机新就写回本机，本机改了就防抖上传。
 // 跟着同步的还有待确认情绪/服装词、物品账本、恋爱回忆去重——这些清缓存就丢、重建又烦。日志、引导进度仍留在本机。
@@ -85,13 +86,15 @@ export function resolveSyncAction(file, meta, hasLocal) {
     return 'none';
 }
 
-export function createTavernSettingsSync(globalObject, { storage, onRestored, debounceMs = 1500, now = () => Date.now() } = {}) {
+export function createTavernSettingsSync(globalObject, { storage, onRestored, onUploaded, debounceMs = 1500, now = () => Date.now() } = {}) {
     let timer = null;
     let stopped = false;
     let applying = false;
     let lastUploaded = '';
     let uploading = null;
     let unhook = null;
+    let uploadAttempts = 0, lastError = '';
+    const recoveryNotice = trackRecovery(globalObject);
     const listeners = [];
 
     const headers = () => {
@@ -104,7 +107,7 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
     const rawRemove = proto.removeItem;
 
     async function fetchFile() {
-        const res = await mediaRequest(globalObject, `${SETTINGS_FILE_URL}?t=${now()}`, { cache: 'no-store' }, 8000);
+        const res = await mediaRequest(globalObject, `${SETTINGS_FILE_URL}?t=${now()}`, { cache: 'no-store', recover: false }, 8000);
         if (res.status === 404) return null;
         if (!res.ok) throw new Error('settings-file-read-failed');
         const file = await res.json();
@@ -116,9 +119,12 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
         clearTimeout(timer);
         timer = null;
         const h = headers();
-        if (stopped || !h) return false;
+        if (stopped) return false;
+        if (uploadAttempts >= RECOVERY_ATTEMPTS) return false;
+        uploadAttempts++;
+        if (!h) { queueUpload('酒馆连接尚未就绪'); return false; }
         let file;
-        try { file = await fetchFile(); } catch { queueUpload(); return false; }
+        try { file = await fetchFile(); } catch (error) { queueUpload(error.message); return false; }
         if (stopped) return false;
         if (file) {
             const pending = readMeta(storage), changedKeys = new Set(pending.changedKeys);
@@ -132,7 +138,7 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
         const settings = collectGlobalSettings(storage);
         const body = JSON.stringify(settings);
         const before = readMeta(storage);
-        if (body === lastUploaded && !before.changedAt) return true;
+        if (body === lastUploaded && !before.changedAt) { uploadAttempts = 0; lastError = ''; recoveryNotice.end(); return true; }
         const savedAt = now();
         // 复用上面已序列化的 body 拼出外层，不再对整份配置序列化第二遍（格式与 JSON.stringify 一致）。
         const text = `{"version":2,"savedAt":${JSON.stringify(savedAt)},"settings":${body},"deletedKeys":${JSON.stringify(before.deletedKeys)}}`;
@@ -140,29 +146,40 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
             const res = await mediaRequest(globalObject, '/api/files/upload', {
                 method: 'POST', headers: h, body: JSON.stringify({ name: SETTINGS_FILE_NAME, data: utf8Base64(text) }),
             });
-            if (!res || !res.ok) { queueUpload(); return false; }
-        } catch { queueUpload(); return false; }
+            if (!res || !res.ok) { queueUpload(`配置上传失败${res?.status ? `（HTTP ${res.status}）` : ''}`); return false; }
+        } catch (error) { queueUpload(error.message); return false; }
         lastUploaded = body;
         // 上传途中本机又改了：保留 changedAt，等下一次防抖上传。
         const after = readMeta(storage);
         writeMeta({ ...after, syncedAt: savedAt, changedAt: after.changedAt > before.changedAt ? after.changedAt : 0, changedKeys: after.changedAt > before.changedAt ? after.changedKeys : [] });
+        uploadAttempts = 0; lastError = ''; recoveryNotice.end();
+        if (typeof onUploaded === 'function') onUploaded({ savedAt });
         return true;
     }
 
     function upload() {
-        if (!uploading) uploading = withMediaLock(globalObject, 'settings', uploadNow).finally(() => { uploading = null; });
+        if (!uploading) uploading = withMediaLock(globalObject, 'settings', uploadNow)
+            .catch(error => { queueUpload(error.message); return false; }).finally(() => { uploading = null; });
         return uploading;
     }
 
-    function queueUpload() {
+    function queueUpload(error) {
         if (stopped) return;
+        if (error) lastError = error;
         clearTimeout(timer);
+        timer = null;
+        if (uploadAttempts >= RECOVERY_ATTEMPTS) {
+            recoveryNotice.update({ phase: 'failed', message: `全局配置同步 ${uploadAttempts} 次仍未完成：${lastError}。本机配置已保留。`,
+                page: 'data', actionLabel: '打开备份' });
+            return;
+        }
         timer = setTimeout(() => { void upload(); }, debounceMs);
         timer?.unref?.();
     }
 
     function markChanged(key, removed = false) {
         if (applying || stopped) return;
+        uploadAttempts = 0; lastError = ''; recoveryNotice.end();
         const meta = readMeta(storage), changedKeys = new Set(meta.changedKeys), deletedKeys = new Set(meta.deletedKeys);
         changedKeys.add(String(key));
         if (removed) deletedKeys.add(String(key)); else deletedKeys.delete(String(key));
@@ -174,13 +191,15 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
     function hook() {
         if (!proto || proto === Object.prototype || typeof rawSet !== 'function' || typeof rawRemove !== 'function') return null;
         const setItem = function setItem(key, value) {
+            const previous = this.getItem(key);
             const result = rawSet.call(this, key, value);
-            if (this === storage && isGlobalSettingKey(key)) markChanged(key);
+            if (this === storage && isGlobalSettingKey(key) && previous !== this.getItem(key)) markChanged(key);
             return result;
         };
         const removeItem = function removeItem(key) {
+            const previous = this.getItem(key);
             const result = rawRemove.call(this, key);
-            if (this === storage && isGlobalSettingKey(key)) markChanged(key, true);
+            if (this === storage && isGlobalSettingKey(key) && previous !== null) markChanged(key, true);
             return result;
         };
         proto.setItem = setItem;
@@ -197,9 +216,13 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
         if (timer && (globalObject.document ? globalObject.document.visibilityState === 'hidden' : true)) void upload();
     }
 
+    function reconnected() { if (!stopped) { uploadAttempts = 0; recoveryNotice.end(); queueUpload(); } }
+
     async function start() {
         if (!headers() || typeof globalObject.fetch !== 'function') return { ok: false, reason: 'no-tavern' };
         if (globalObject.addEventListener) {
+            globalObject.addEventListener('online', reconnected);
+            listeners.push(() => globalObject.removeEventListener('online', reconnected));
             for (const type of ['pagehide', 'visibilitychange']) {
                 const target = type === 'visibilitychange' && globalObject.document ? globalObject.document : globalObject;
                 target.addEventListener(type, onHide);
@@ -209,7 +232,7 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
         // 先拉文件再挂写钩子：拉取期间启动流程写进来的默认配置不该被记成「本机未上传改动」，
         // 否则 changedAt 会盖过云端文件时间，把该 restore 的首启判成 upload，用默认值覆盖掉云端 DNA 等配置。
         let file;
-        try { file = await fetchFile(); } catch { if (!stopped) { unhook = hook(); queueUpload(); } return { ok: false, reason: 'settings-file-read-failed' }; }
+        try { file = await fetchFile(); } catch (error) { if (!stopped) { uploadAttempts = 1; unhook = hook(); queueUpload(error.message); } return { ok: false, reason: 'settings-file-read-failed' }; }
         if (stopped) return { ok: false, reason: 'stopped' };
         const meta = readMeta(storage);
         unhook = hook();
@@ -230,6 +253,7 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
 
     function stop() {
         stopped = true;
+        recoveryNotice.end();
         clearTimeout(timer);
         timer = null;
         if (unhook) unhook();
@@ -237,5 +261,10 @@ export function createTavernSettingsSync(globalObject, { storage, onRestored, de
         for (const off of listeners.splice(0)) off();
     }
 
-    return { start, stop, flush: () => (timer ? upload() : uploading || Promise.resolve(true)) };
+    return { start, stop, flush() {
+        if (uploading) return uploading;
+        if (!timer && !lastError && !readMeta(storage).changedAt) return Promise.resolve(true);
+        uploadAttempts = 0; recoveryNotice.end();
+        return upload();
+    }, diagnostics: () => ({ attempts: uploadAttempts, retryPaused: uploadAttempts >= RECOVERY_ATTEMPTS, lastError }) };
 }

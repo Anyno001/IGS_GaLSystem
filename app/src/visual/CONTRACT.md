@@ -1,5 +1,7 @@
 # visual 模块契约
 
+0.36.88 本地草稿：生图提示词编辑、画师库、显式 DNA 升级、剧情衣装审核和 CG 一致性候选均由 `igs-ui` 展示并调用对应服务；不在视图中拼 provider 请求或建立图片缓存。保留当前舞台、User 立绘与旁白行为，具体入口与兼容要求见 `igs-ui/CONTRACT.md`。
+
 ## 职责
 
 - 渲染 Immersive Galgame System 舞台。

@@ -1,4 +1,7 @@
 import { NAI_DEFAULT_SETTINGS, buildNaiV4Request, resolveNaiNativeEndpoint } from './request-builders/nai-v4-builder.js';
+import { readZipImage } from './image-response-zip.js';
+import { resetTavernProxyProbe, resolveTavernTransport, tavernProxyFailure, tavernProxyUrl,
+    TAVERN_BACKEND_UNREACHABLE_HINT, TAVERN_PROXY_DISABLED_HINT } from '../host/tavern-cors-proxy.js';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 const DEFAULT_POLL_INTERVAL_MS = 2000;
@@ -116,22 +119,25 @@ export async function parseImageResponse(response) {
     const contentType = response && response.headers && typeof response.headers.get === 'function'
         ? response.headers.get('content-type') || ''
         : '';
-    if (contentType.includes('image/')) {
-        return { url: await blobToDataUrl(await response.blob()), raw: null };
+    // 原始字节只读取一次；中转缺失或误标 Content-Type 时不能先经 UTF-8 往返。
+    let text;
+    if (typeof response.blob === 'function') {
+        const blob = await response.blob();
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (isImageBinary(bytes) || /zip|octet-stream/i.test(contentType)) {
+            return { url: await binaryBlobToImageDataUrl(blob, contentType), raw: null };
+        }
+        if (/image\//i.test(contentType)) return { url: await blobToDataUrl(blob), raw: null };
+        text = bytesToText(bytes);
+    } else {
+        // 兼容只提供 text() 的宿主／测试替身；真实 fetch 使用上面的二进制路径。
+        text = await response.text();
     }
-    if (/zip|octet-stream/i.test(contentType)) {
-        return { url: await binaryBlobToImageDataUrl(await response.blob(), contentType), raw: null };
-    }
-    const text = await response.text();
     if (!text) return { url: null, raw: null };
     try {
         const data = JSON.parse(text);
         return { url: normalizeImageResult(data), raw: data };
     } catch (error) {
-        const bytes = new TextEncoder().encode(text);
-        if (bytes.length > 8 && bytesToText(bytes.slice(0, 2)) === 'PK') {
-            return { url: await zipBlobToFirstImageDataUrl(new Blob([bytes])), raw: null };
-        }
         return { url: normalizeImageResult(text), raw: text };
     }
 }
@@ -251,8 +257,8 @@ async function generateNaiNativeImage(request, imageApi, endpoint, deps) {
         sampler: String(imageApi.sampler || '').trim() || NAI_DEFAULT_SETTINGS.sampler,
         artistPrefix: imageApi.promptPrefix || '',
     });
-    const proxied = imageApi.transport === 'st-proxy';
-    const url = proxied ? `/proxy/${endpoint}` : endpoint;
+    const proxied = await resolveTavernTransport(imageApi.transport, resolveFetchFunction(deps)) === 'st-proxy';
+    const url = proxied ? tavernProxyUrl(endpoint) : endpoint;
     let response;
     try {
         response = await fetchWithTimeout(url, {
@@ -267,11 +273,15 @@ async function generateNaiNativeImage(request, imageApi, endpoint, deps) {
     } catch (error) {
         const message = error && error.message ? error.message : String(error);
         throw new Error(proxied
-            ? `经酒馆代理请求 NAI 失败：请确认酒馆 config.yaml 中 enableCorsProxy 为 true（${message}）；地址：${endpoint}`
-            : `浏览器直连 NAI 失败（可能是跨域 CORS 或网络不通），可把传输方式改为「酒馆 CORS 代理」（${message}）；地址：${endpoint}`);
+            ? `经酒馆代理请求 NAI 失败：无法连接酒馆，请确认酒馆正在运行（${message}）；地址：${endpoint}`
+            : `浏览器直连 NAI 失败（可能是跨域 CORS 或网络不通），可在酒馆 config.yaml 中开启 enableCorsProxy，并把传输方式改为「酒馆 CORS 代理」或「自动」（${message}）；地址：${endpoint}`);
     }
     if (!response.ok) {
         const text = await response.text();
+        const proxyFailure = proxied ? tavernProxyFailure(response.status, text) : '';
+        if (proxyFailure === 'disabled') resetTavernProxyProbe();
+        if (proxyFailure) throw new Error(proxyFailure === 'disabled' ? TAVERN_PROXY_DISABLED_HINT
+            : `经酒馆代理请求 NAI 失败（HTTP 500）：${TAVERN_BACKEND_UNREACHABLE_HINT}；地址：${endpoint}`);
         throw new Error(`${NAI_STATUS_TEXT[response.status] || `NAI 返回 HTTP ${response.status}`}；地址：${endpoint}；响应：${text.slice(0, 180)}`);
     }
     const parsed = await parseImageResponse(response);
@@ -438,6 +448,15 @@ async function blobToDataUrl(blob) {
     throw new Error('当前环境无法把图片 Blob 转成 data URL');
 }
 
+function isImageBinary(bytes) {
+    return (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b)
+        || (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)
+        || (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+        || (bytes.length >= 12 && bytesToText(bytes.slice(0, 4)) === 'RIFF' && bytesToText(bytes.slice(8, 12)) === 'WEBP');
+}
+
+const imageDecodeError = (reason, message) => Object.assign(new Error(message), { reason });
+
 async function binaryBlobToImageDataUrl(blob, contentType) {
     const buffer = await blob.arrayBuffer();
     const bytes = new Uint8Array(buffer);
@@ -453,48 +472,11 @@ async function binaryBlobToImageDataUrl(blob, contentType) {
     if (bytes.length >= 12 && bytesToText(bytes.slice(0, 4)) === 'RIFF' && bytesToText(bytes.slice(8, 12)) === 'WEBP') {
         return blobToDataUrl(new Blob([buffer], { type: 'image/webp' }));
     }
-    throw new Error('图像 API 返回二进制数据，但不是可识别的图片或 ZIP');
+    throw imageDecodeError('image-response-unrecognized', '响应不是可识别的图片或 ZIP');
 }
 
 async function zipBlobToFirstImageDataUrl(blob) {
-    const buffer = await blob.arrayBuffer();
-    const view = new DataView(buffer);
-    const decoder = new TextDecoder();
-    let offset = 0;
-    while (offset + 30 < buffer.byteLength) {
-        const signature = view.getUint32(offset, true);
-        if (signature !== 0x04034b50) {
-            offset += 1;
-            continue;
-        }
-        const method = view.getUint16(offset + 8, true);
-        const compressedSize = view.getUint32(offset + 18, true);
-        const nameLength = view.getUint16(offset + 26, true);
-        const extraLength = view.getUint16(offset + 28, true);
-        const nameStart = offset + 30;
-        const dataStart = nameStart + nameLength + extraLength;
-        const dataEnd = dataStart + compressedSize;
-        if (dataEnd > buffer.byteLength) break;
-        const name = decoder.decode(new Uint8Array(buffer, nameStart, nameLength));
-        const isImage = /\.(png|jpe?g|webp)$/i.test(name) || !name;
-        if (isImage && compressedSize > 0) {
-            let bytes = new Uint8Array(buffer, dataStart, compressedSize);
-            if (method === 8) {
-                if (typeof DecompressionStream !== 'function') {
-                    throw new Error('图像 API 返回 ZIP 压缩包，但当前浏览器无法解压 deflate 数据');
-                }
-                const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-                bytes = new Uint8Array(await new Response(stream).arrayBuffer());
-            } else if (method !== 0) {
-                throw new Error(`图像 API 返回 ZIP 压缩包，但压缩方式不受支持：${method}`);
-            }
-            const extension = (name.match(/\.(png|jpe?g|webp)$/i) || [])[1] || 'png';
-            const mimeType = extension.toLowerCase().startsWith('jp') ? 'image/jpeg' : `image/${extension.toLowerCase()}`;
-            return blobToDataUrl(new Blob([bytes], { type: mimeType }));
-        }
-        offset = dataEnd;
-    }
-    throw new Error('图像 API 返回 ZIP 压缩包，但没有找到图片文件');
+    return blobToDataUrl(await readZipImage(blob));
 }
 
 function bytesToText(bytes) {

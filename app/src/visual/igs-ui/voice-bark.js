@@ -6,6 +6,7 @@ import { moodFallbackChain, resolvePresetGroup } from '../../scene/mood-groups.j
 import { busInput, resumeAudioBus } from './audio-bus.js';
 import { duckSceneAudio } from './scene-audio.js';
 import { spritePan, yieldTypewriterAudio } from './typewriter-audio.js';
+import { resolveCreatureVoice, creatureVoiceRecipe, synthCreatureBark, CREATURE_VOICE_LABELS } from './creature-voice.js';
 import { getVoiceFilter, insertVoiceFilter, voiceFilterGain, voiceFilterParams, voiceFilterUsesDry } from './voice-filter.js';
 
 export const VOICE_BARK_FREQUENCIES = Object.freeze([
@@ -65,7 +66,7 @@ export function normalizeVoiceBarkSettings(value) {
     };
 }
 
-// 单个角色的声线设置：pack 为空表示自动；'off' 表示这个角色不发语气音。tts 为台词朗读单独指定的声音名，空为自动。
+// 单个角色的声线设置：pack 为空表示自动；'off' 表示这个角色不发语气音。tts 为台词朗读单独指定的声音名，空为自动；ttsStyle 为这个角色的朗读风格描述。
 export function normalizeCharacterVoice(value) {
     const source = plainObject(value) || {};
     const pack = source.pack === 'off' || voicePackById(source.pack) ? source.pack : '';
@@ -76,6 +77,7 @@ export function normalizeCharacterVoice(value) {
         speed: normalizeVoiceSpeed(source.speed),
         tts: typeof source.tts === 'string' ? source.tts.trim().slice(0, 200) : '',
         ttsVolume: normalizeTtsVolume(source.ttsVolume),
+        ttsStyle: typeof source.ttsStyle === 'string' ? source.ttsStyle.trim().slice(0, 300) : '',
     };
 }
 
@@ -99,9 +101,9 @@ export function normalizeCharacterVoices(value) {
         const key = String(name || '').trim();
         if (!key || FORBIDDEN_KEYS.has(key)) continue;
         const voice = normalizeCharacterVoice(entry);
-        if (!voice.pack && !voice.pitch && voice.speed === 1 && !voice.tts && voice.ttsVolume === 1) continue;
-        const { tts, ttsVolume, ...bark } = voice;
-        out[key] = { ...bark, ...(tts ? { tts } : {}), ...(ttsVolume !== 1 ? { ttsVolume } : {}) };
+        if (!voice.pack && !voice.pitch && voice.speed === 1 && !voice.tts && voice.ttsVolume === 1 && !voice.ttsStyle) continue;
+        const { tts, ttsVolume, ttsStyle, ...bark } = voice;
+        out[key] = { ...bark, ...(tts ? { tts } : {}), ...(ttsVolume !== 1 ? { ttsVolume } : {}), ...(ttsStyle ? { ttsStyle } : {}) };
     }
     return out;
 }
@@ -177,6 +179,10 @@ export function resolveCharacterVoice(sceneAssets, speaker) {
     const tune = { pitch: manual.pitch, speed: manual.speed };
     if (manual.pack === 'off') return { pack: null, pitch: 0, speed: 1, source: 'off' };
     if (manual.pack) return { pack: voicePackById(manual.pack), ...tune, source: 'manual' };
+    // 已登记的非人角色未手动指定声线时，用非人声线（低吼、嘶鸣、虫鸣、幽灵低语）代替人声语气音。
+    const dnaMap = plainObject(assets.characterDna);
+    const creature = resolveCreatureVoice(name, dnaMap && hasOwn(dnaMap, name) ? dnaMap[name] : null);
+    if (creature) return { pack: null, creature, ...tune, source: 'creature' };
     const gender = characterDnaGender(assets, name);
     const pool = gender ? VOICE_PACKS.filter((pack) => pack.gender === gender && !AUTO_EXCLUDE.has(pack.id)) : [];
     if (!pool.length) return { pack: null, ...tune, source: '' };
@@ -229,6 +235,11 @@ export function decideVoiceBark(state, line, settings, { sceneAssets, random = M
     if (config.frequency !== 'every' && !changed) return null;
     if (config.frequency === 'sometimes' && random() >= SOMETIMES_RATE) return null;
     const voice = resolveCharacterVoice(sceneAssets, speaker);
+    if (voice.creature) {
+        const shape = resolveBarkShape(line, mood);
+        return { creature: voice.creature, pack: '', url: '', volume: Math.min(GAIN_CAP, config.volume * shape.gain), pitch: voice.pitch, speed: voice.speed, mood,
+            pan: shape.pan, close: shape.close, phone: shape.phone };
+    }
     if (!voice.pack) return null;
     const lastBy = state.lastClip || (state.lastClip = new Map());
     const slot = `${voice.pack.id}|${mood}`;
@@ -357,6 +368,8 @@ function tunedBuffer(context, url, buffer, rate, speed) {
 }
 
 function releaseJob(job) {
+    if (job.timer) clearTimeout(job.timer);
+    job.timer = null;
     if (job.releaseDuck) job.releaseDuck();
     job.releaseDuck = null;
     for (const node of job.nodes) {
@@ -442,6 +455,48 @@ export function playVoiceBark({ url, volume = 1, pitch = 0, speed = 1, pan = 0, 
     return job;
 }
 
+// 非人声线：现场合成，没有素材要加载；同样只留一条在响，掐断、让位、声像与听筒规则与人声语气音一致。
+export function playCreatureBark({ creature, mood = '', volume = 1, pitch = 0, speed = 1, pan = 0, close = false, phone = false, yieldTyping = false, duck = false } = {}) {
+    if (!creature) return null;
+    const bus = busInput(close || phone || voiceFilterUsesDry() ? 'dry' : 'voice');
+    if (!bus) return null;
+    stopVoiceBark();
+    const context = bus.context;
+    const job = { cancelled: false, source: null, nodes: [], releaseDuck: null, timer: null };
+    active = job;
+    resumeAudioBus().then(() => {
+        if (job.cancelled || context.state !== 'running') return;
+        try {
+            const recipe = creatureVoiceRecipe({ ...creature, mood, pitch, speed: normalizeVoiceSpeed(speed) });
+            const synth = synthCreatureBark(context, buildBarkChain(context, bus, { volume, pan, phone }, job.nodes), recipe, job.nodes);
+            job.source = synth;
+            const seconds = synth.duration + BARK_TAIL_S;
+            job.timer = setTimeout(() => {
+                releaseJob(job);
+                if (active === job) active = null;
+            }, seconds * 1000 + 120);
+            if (yieldTyping) yieldTypewriterAudio(seconds);
+            if (duck) job.releaseDuck = duckSceneAudio({ ratio: BARK_DUCK_RATIO, durationMs: seconds * 1000 + 150 });
+        } catch {
+            releaseJob(job);
+            if (active === job) active = null;
+        }
+    });
+    return job;
+}
+
+export function creatureVoiceLabel(creature) {
+    return (creature && CREATURE_VOICE_LABELS[creature.kind]) || '';
+}
+
+// 设置里的试听：非人声线依次换几种情绪。
+export function previewCreatureVoice(creature, { pitch = 0, speed = 1, volume = 0.8 } = {}) {
+    if (!creature) return;
+    ['平和', '愤怒', '惊讶', '悲伤'].forEach((mood, i) => {
+        setTimeout(() => playCreatureBark({ creature, mood, volume, pitch, speed }), i * 1100);
+    });
+}
+
 const states = new WeakMap();
 
 // 阅读器每次渲染调用；同一句重复渲染（设置变化、窗口缩放）由 key 去重，不会重播。
@@ -453,6 +508,7 @@ export function applyVoiceBark(root, line, settings, sceneAssets) {
     warmCastVoices(sceneAssets, line.cast, settings);
     const plan = decideVoiceBark(state, line, settings, { sceneAssets, ready });
     if (!plan) return null;
+    if (plan.creature) return playCreatureBark({ ...plan, yieldTyping: true, duck: true });
     warmMood(plan.pack, plan.mood);
     return playVoiceBark({ ...plan, yieldTyping: true, duck: true });
 }

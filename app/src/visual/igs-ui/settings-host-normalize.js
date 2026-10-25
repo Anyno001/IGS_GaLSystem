@@ -13,6 +13,8 @@ import { normalizeSpriteHeads } from './fx-anchor.js';
 import { normalizeGeneratedLibrary } from '../../scene/asset-match.js';
 import { normalizeCharacterDnaMap } from '../../scene/character-dna.js';
 import { normalizeCharacterOutfits, normalizeWardrobe } from '../../scene/character-outfits.js';
+import { normalizeCharacterDefaultOutfits } from '../../scene/character-appearance.js';
+import { normalizeCharacterSeeds } from '../../scene/generation-seeds.js';
 import { normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { normalizeSettingsTheme } from './settings-theme.js';
@@ -36,6 +38,8 @@ import { TYPEWRITER_DEFAULTS, normalizeTypewriterSettings } from './typewriter-r
 import { normalizeChatShowSettings } from './chat-show-runtime.js';
 import { normalizeSystemRoleSettings } from './system-role.js';
 import { normalizePromptPlacement } from './tag-grammar.js';
+import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
+import { normalizeStatsSettings } from '../../scene/stats/stat-settings.js';
 
 export function normalizeBridgeConfig(bridge) {
     // 不改入参、不深拷：入参可能是存储里共享的只读配置。改到哪层就浅拷哪层，没动的子树（素材库）原样共享。
@@ -49,11 +53,15 @@ export function normalizeBridgeConfig(bridge) {
     normalized.sentencePaging = normalizeBoolean(normalized.sentencePaging, false);
     normalized.dialogueSentencePaging = normalizeBoolean(normalized.dialogueSentencePaging, false);
     normalized.imageApi = normalizeImageApi(normalized.imageApi);
+    normalized.imageCache = { ...normalized.imageCache,
+        maxCount: normalizeImageCacheCount(normalized.imageCache?.maxCount),
+        compressDisplay: normalized.imageCache?.compressDisplay !== false };
     normalized.sceneAssets = normalizeSceneAssets(normalized.sceneAssets);
     normalized.vnTheme = normalizeVnTheme(normalized.vnTheme);
     normalized.entry = normalizeEntryConfig(normalized.entry);
     normalized.optionBubble = normalizeOptionBubble(normalized.optionBubble);
     normalized.autoIllustration = normalizeAutoIllustrationSettings(normalized.autoIllustration);
+    normalized.stats = normalizeStatsSettings(normalized.stats);
     return normalized;
 }
 
@@ -89,6 +97,8 @@ export function normalizeImageApi(value) {
         ? normalized.availableModels.filter(Boolean)
         : [];
     normalized.dbgenSpriteTransparent = normalized.dbgenSpriteTransparent !== false;
+    normalized.naiSpriteTransparent = normalized.naiSpriteTransparent !== false;
+    normalized.externalSpriteDna = normalized.externalSpriteDna === true;
     return normalized;
 }
 
@@ -147,10 +157,16 @@ export function normalizeSceneAssets(value) {
         normalized.characterAliases[characterName] = nextAliases;
     }
     normalized.characterDna = normalizeCharacterDnaMap(normalized.characterDna);
+    if (Object.hasOwn(normalized, 'characterSeeds')) normalized.characterSeeds = normalizeCharacterSeeds(normalized.characterSeeds);
     normalized.characterOutfits = normalizeCharacterOutfits(normalized.characterOutfits);
+    if (Object.hasOwn(normalized, 'characterDefaultOutfits')) {
+        normalized.characterDefaultOutfits = normalizeCharacterDefaultOutfits(normalized.characterDefaultOutfits);
+    }
     normalized.characterHouses = normalizeCharacterHouses(normalized.characterHouses);
     normalized.characterVoices = normalizeCharacterVoices(normalized.characterVoices);
     normalized.characterSpriteScales = normalizeCharacterSpriteScales(normalized.characterSpriteScales);
+    // 指定为 USER 立绘的角色名，空 = 不指定。
+    normalized.userCharacter = typeof normalized.userCharacter === 'string' ? normalized.userCharacter.trim() : '';
     normalized.wardrobe = normalizeWardrobe(normalized.wardrobe);
     normalized.eventCgs = normalizeEventCgs(normalized.eventCgs);
     normalized.moodGroups = normalizeMoodGroups(normalized.moodGroups);
@@ -181,6 +197,9 @@ export function normalizeSceneAssets(value) {
     normalized.unifiedSpriteLayout = normalizeBoolean(normalized.unifiedSpriteLayout, false);
     normalized.moodFuzzyMatch = normalizeBoolean(normalized.moodFuzzyMatch, false);
     normalized.moodAutoClassify = normalizeBoolean(normalized.moodAutoClassify, false);
+    normalized.nameFallback = normalizeBoolean(normalized.nameFallback, true);
+    normalized.narrationNameSwitch = normalizeBoolean(normalized.narrationNameSwitch, true);
+    normalized.sceneCarryMode = ['strict', 'smart', 'loose'].includes(normalized.sceneCarryMode) ? normalized.sceneCarryMode : 'smart';
     normalizeAssetCards(normalized);
     return normalized;
 }
@@ -211,6 +230,15 @@ export function normalizeVnTheme(value, fallback = VN_THEME_PRESETS.genshin) {
         ? null
         : clampNumber(normalizeFiniteNumber(normalized.bgOpacity, 0.62), 0, 1);
     return normalized;
+}
+
+// 设置 schema 版本比较；缺失或无法解析视为最旧。
+function schemaBefore(value, target) {
+    const parse = v => String(v || '').split('.').map(n => Number.parseInt(n, 10));
+    const a = parse(value), b = parse(target);
+    if (a.some(n => !Number.isFinite(n))) return true;
+    for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0);
+    return false;
 }
 
 export function normalizeReaderSettings(settings, legacyTheme) {
@@ -252,7 +280,9 @@ export function normalizeReaderSettings(settings, legacyTheme) {
         showStatusLine: false,
         dblclickCgOnly: false,
         titleScreen: true,
+        resumePrompt: 'title',
         dialogAutoHeight: false,
+        embeddedHeight: 1,
         // 场景在水下时对话框自动换成深海人鱼。
         underwaterSkin: true,
         mermaidTone: MERMAID_TONE_DEFAULT,
@@ -269,7 +299,8 @@ export function normalizeReaderSettings(settings, legacyTheme) {
         imageCountOverride: null,
         shortcuts: {},
         pinnedBtns: Array.from(DEFAULT_PINNED_TOOLBAR_BUTTONS),
-        hiddenBtns: [],
+        // Live2D 是少数人用的实验功能：工具栏按钮默认隐藏，需要时在按钮管理里打开。
+        hiddenBtns: ['live2d-settings'],
         btnOrder: TOOLBAR_ACTIONS.map(([id]) => id),
         toolbarSplit: 'split',
         toolbarPlate: 'off',
@@ -326,7 +357,9 @@ export function normalizeReaderSettings(settings, legacyTheme) {
     normalized.showStatusLine = normalizeBoolean(normalized.showStatusLine, false);
     normalized.dblclickCgOnly = normalizeBoolean(normalized.dblclickCgOnly, false);
     normalized.titleScreen = normalizeBoolean(normalized.titleScreen, true);
+    normalized.resumePrompt = normalized.resumePrompt === 'simple' ? 'simple' : 'title';
     normalized.dialogAutoHeight = normalizeBoolean(normalized.dialogAutoHeight, false);
+    normalized.embeddedHeight = [0.8, 1, 1.25, 1.5].includes(Number(normalized.embeddedHeight)) ? Number(normalized.embeddedHeight) : 1;
     normalized.underwaterSkin = normalizeBoolean(normalized.underwaterSkin, true);
     normalized.mermaidTone = normalizeMermaidTone(normalized.mermaidTone);
     normalized.mermaidAccent = normalizeMermaidAccent(normalized.mermaidAccent);
@@ -346,6 +379,8 @@ export function normalizeReaderSettings(settings, legacyTheme) {
     normalized.shortcuts = normalizeShortcutOverrides(normalized.shortcuts);
     normalized.pinnedBtns = normalizePinnedButtons(normalized.pinnedBtns);
     normalized.hiddenBtns = normalizeHiddenButtons(normalized.hiddenBtns);
+    // 0.5.7 之前保存的设置里没有 Live2D 按钮，补进隐藏列表一次；此后用户手动打开会随 _v 保留。
+    if (schemaBefore(src._v, '0.5.7') && !normalized.hiddenBtns.includes('live2d-settings')) normalized.hiddenBtns.push('live2d-settings');
     normalized.btnOrder = normalizeBtnOrder(normalized.btnOrder);
     normalized.toolbarSplit = normalizeToolbarSplit(normalized.toolbarSplit);
     normalized.toolbarPlate = normalizeToolbarPlate(normalized.toolbarPlate);

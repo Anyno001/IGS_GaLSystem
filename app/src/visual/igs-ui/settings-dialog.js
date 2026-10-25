@@ -21,7 +21,7 @@ export const SETTINGS_DIALOG_STYLE_TEXT = `
 #igs-unified-settings .igs-settings-dialog.is-pick .igs-settings-dialog-choice{min-height:40px;font-size:13px}
 #igs-unified-settings .igs-settings-dialog.is-pick .igs-settings-dialog-choice.is-current{background:var(--igs-settings-accent);color:var(--igs-settings-on-accent)}
 #igs-unified-settings .igs-settings-dialog-actions [data-settings-dialog="all"]{margin-right:auto}
-#igs-unified-settings .igs-settings-dialog-select{display:block;width:100%;margin:10px 0 4px;padding:6px 8px;font-size:14px}
+#igs-unified-settings .igs-settings-dialog-select{display:block;box-sizing:border-box;min-width:0;max-width:100%;width:100%;margin:10px 0 4px;padding:6px 8px;font-size:14px}
 #igs-unified-settings .igs-settings-dialog-choice:focus-visible{outline:2px solid var(--igs-settings-accent);outline-offset:2px}
 `;
 
@@ -112,6 +112,7 @@ export function createSettingsDialogs({ getContainer = () => null, global: globa
         if (entry.kind === 'choose' && entry.dropdown) {
             const select = doc.createElement('select');
             select.className = 'igs-asset-move igs-settings-dialog-select';
+            select.setAttribute('aria-label', entry.message);
             for (const choice of entry.choices) {
                 const opt = doc.createElement('option');
                 opt.value = choice.value;

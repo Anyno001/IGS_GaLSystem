@@ -1,3 +1,5 @@
+import { onStageIdleChange } from './stage-pause.js';
+
 const text = (value) => String(value == null ? '' : value).trim();
 
 const DIR = (cam) => (cam.target === 'left' ? 'left' : 'right');
@@ -35,7 +37,7 @@ function animate(el, frames, options) {
     try { return el.animate(frames, options); } catch { return null; }
 }
 
-const HAND_FRAMES = Object.freeze([
+export const HAND_FRAMES = Object.freeze([
     { translate: '0 0', rotate: '0deg' },
     { translate: '3px -2px', rotate: '0.4deg' },
     { translate: '-2px 3px', rotate: '-0.3deg' },
@@ -52,6 +54,8 @@ export function playCameraExtras(state, root, { key = '', shot = '', mod = '', l
         try { anim.cancel(); } catch { /* 已结束 */ }
     }
     state.camAnims.clear();
+    state.camOffIdle?.();
+    state.camOffIdle = null;
     state.camKey = camKey;
     const played = [];
     if (!root || typeof root.querySelector !== 'function') return played;
@@ -66,6 +70,12 @@ export function playCameraExtras(state, root, { key = '', shot = '', mod = '', l
         const options = { duration: HAND_PERIOD_MS, iterations: Infinity, easing: 'ease-in-out', composite: 'add' };
         keep(animate(bg, HAND_FRAMES, options), 'camera:hand-bg');
         keep(animate(sprite, HAND_FRAMES, options), 'camera:hand-sprite');
+        // 无限循环的 WAAPI 不吃 CSS 暂停：舞台静置 / 暂停时跟着停，恢复时接着晃。
+        if (state.camAnims.size) state.camOffIdle = onStageIdleChange(bg, (idle) => {
+            for (const anim of state.camAnims) {
+                try { if (idle) anim.pause(); else anim.play(); } catch { /* 已结束 */ }
+            }
+        });
     }
     if (newPage && shot.startsWith('whip-')) {
         const sign = shot.endsWith('left') ? 1 : -1;
@@ -87,5 +97,7 @@ export function cancelCameraExtras(state) {
         try { anim.cancel(); } catch { /* 已结束 */ }
     }
     state.camAnims.clear();
+    state.camOffIdle?.();
+    state.camOffIdle = null;
     state.camKey = '';
 }

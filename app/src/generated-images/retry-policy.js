@@ -68,10 +68,14 @@ export async function withImageRetry(run, options = {}) {
     let seed;
     let waited = 0;
     for (let attempt = 0; ; attempt += 1) {
+        if (options.signal?.aborted || (options.shouldStart && !options.shouldStart()))
+            return { ok: false, reason: 'request-stale', stopGeneration: true };
         await gate.wait();
+        if (options.signal?.aborted || (options.shouldStart && !options.shouldStart()))
+            return { ok: false, reason: 'request-stale', stopGeneration: true };
         let result;
         try { result = await run({ attempt, seed }); } catch (error) { result = { ok: false, error: (error && error.message) || String(error) }; }
-        if (result && (result.ok || result.delegate)) return result;
+        if (result && (result.ok || result.delegate || result.stopGeneration)) return result;
         const failure = failureOf(result, source, attempt + 1);
         if (failure.kind === 'rateLimit429') gate.note429(retryAfterMs(result));
         const delay = backoffMs(failure.kind, attempt, result);

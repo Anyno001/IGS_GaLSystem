@@ -28,9 +28,13 @@ export function floorHasEventCg(text, eventCgs) {
 
 // 第 index 页该显示哪张：往前 holdPages 页内最近一次触发的那张。标签按它后面第一页算触发页。
 export function resolveEventCgForPage({ source, segments, index, holdPages = 4, eventCgs } = {}) {
+    return prepareEventCgPages({ source, segments, holdPages, eventCgs })[index] || null;
+}
+
+export function prepareEventCgPages({ source, segments, holdPages = 4, eventCgs } = {}) {
     const map = normalizeEventCgs(eventCgs);
     const names = Object.keys(map).filter((name) => map[name].url);
-    if (!names.length || !Array.isArray(segments) || !segments.length) return null;
+    if (!names.length || !Array.isArray(segments) || !segments.length) return (segments || []).map(() => null);
     const pages = segments.map((s) => String(s || ''));
     const triggers = new Map();
     const text = String(source || '');
@@ -47,8 +51,9 @@ export function resolveEventCgForPage({ source, segments, index, holdPages = 4, 
         if (name) triggers.set(page, name);
     });
     const hold = Math.max(1, Number(holdPages) || 4);
-    for (let page = index; page >= 0 && page > index - hold; page -= 1) {
-        if (triggers.has(page)) { const name = triggers.get(page); return { name, ...map[name] }; }
-    }
-    return null;
+    let latest = -Infinity, name = '';
+    return pages.map((_, page) => {
+        if (triggers.has(page)) { latest = page; name = triggers.get(page); }
+        return page - latest < hold ? { name, ...map[name] } : null;
+    });
 }

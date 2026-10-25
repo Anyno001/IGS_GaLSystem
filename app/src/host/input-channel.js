@@ -1,3 +1,10 @@
+export function appendInputDraft(existing, text) {
+    const current = String(existing ?? ''), command = String(text ?? '');
+    if (!current) return command;
+    if (current === command || current.endsWith(`\n${command}`)) return current;
+    return `${current}${current.endsWith('\n') ? '' : '\n'}${command}`;
+}
+
 export function createInputChannel(hostAdapter) {
     if (!hostAdapter || typeof hostAdapter.typeAndSend !== 'function') {
         throw new Error('IGS input channel requires a host adapter with typeAndSend(text).');

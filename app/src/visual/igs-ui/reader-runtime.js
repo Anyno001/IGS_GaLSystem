@@ -1,6 +1,9 @@
 import { getOwnerWindow } from './reader-dom-utils.js';
 import { clampNumber } from './reader-value-utils.js';
 import { isEmbeddedReaderMode } from '../../schemas/reader-mode.js';
+import { installReaderFullscreen, exitDocumentFullscreen } from './reader-fullscreen.js';
+
+export { exitDocumentFullscreen } from './reader-fullscreen.js';
 
 export function applyReaderModeRuntime(root, snapshot, current, ctx = {}) {
     if (current.runtime && current.runtime.mode === snapshot.mode && current.runtime.root === root) {
@@ -105,6 +108,12 @@ function applyInlineReaderRuntime(root, mode, runtime, current) {
     const floatingState = current && current.floatingState
         ? current.floatingState
         : { dragged: false, left: null, top: null };
+    if (floatingState.sizeMode !== mode) {
+        const saved = readFloatingSize(win, mode);
+        floatingState.sizeMode = mode;
+        floatingState.width = saved ? saved.width : null;
+        floatingState.height = saved ? saved.height : null;
+    }
     let suppressTimer = null;
     root.style.top = 'auto';
     root.style.right = 'auto';
@@ -136,8 +145,13 @@ function applyInlineReaderRuntime(root, mode, runtime, current) {
         const designHeight = Math.round(baseHeight * scale);
         let targetWidth = Math.min(designWidth, safeWidth);
         let targetHeight = Math.min(designHeight, safeHeight);
+        const sized = Number.isFinite(floatingState.width) && Number.isFinite(floatingState.height);
+        if (sized) {
+            targetWidth = clampNumber(floatingState.width, Math.min(minSize, safeWidth), safeWidth);
+            targetHeight = clampNumber(floatingState.height, Math.min(minExtremeSize, safeHeight), safeHeight);
+        }
         const availableHeight = (viewport.height || (targetHeight + sideGap + bottomGap)) - sideGap - bottomGap;
-        if (availableHeight < targetHeight) {
+        if (!sized && availableHeight < targetHeight) {
             targetHeight = Math.max(minExtremeSize, Math.min(targetHeight, availableHeight));
         }
         const minLeft = viewport.left + 8;
@@ -202,6 +216,15 @@ function applyInlineReaderRuntime(root, mode, runtime, current) {
         }, 120);
     });
     addEventListenerWithCleanup(win, 'resize', schedule, runtime);
+    installFloatingResizeRuntime(root, runtime, mode, floatingState, () => {
+        current.dragSuppressClick = true;
+        runtime.dragSuppressClick = true;
+        const setter = typeof win.setTimeout === 'function' ? win.setTimeout.bind(win) : setTimeout;
+        setter(() => {
+            current.dragSuppressClick = false;
+            runtime.dragSuppressClick = false;
+        }, 120);
+    });
     addEventListenerWithCleanup(win, 'orientationchange', schedule, runtime);
     if (win.visualViewport) {
         addEventListenerWithCleanup(win.visualViewport, 'resize', schedule, runtime);
@@ -315,6 +338,132 @@ function installFloatingDragRuntime(root, runtime, current, floatingState, onSup
     });
 }
 
+const FLOATING_SIZE_KEY = 'igs:floating-size:';
+const RESIZE_CORNERS = ['nw', 'ne', 'sw', 'se'];
+
+function readFloatingSize(win, mode) {
+    try {
+        const raw = win.localStorage && win.localStorage.getItem(FLOATING_SIZE_KEY + mode);
+        const value = raw ? JSON.parse(raw) : null;
+        return value && Number.isFinite(value.width) && Number.isFinite(value.height) ? value : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function writeFloatingSize(win, mode, width, height) {
+    try {
+        if (win.localStorage) win.localStorage.setItem(FLOATING_SIZE_KEY + mode, JSON.stringify({ width, height }));
+    } catch (error) {
+        // Storage full or blocked: size still applies for this session.
+    }
+}
+
+// 四角拖拽改窗口宽高，对角固定；尺寸按模式记在本机，下次打开沿用。
+function installFloatingResizeRuntime(root, runtime, mode, floatingState, onSuppressClick) {
+    const doc = runtime && runtime.doc;
+    if (!root || !doc || typeof doc.createElement !== 'function' || typeof doc.addEventListener !== 'function') return;
+    const win = runtime.win || {};
+    const handles = RESIZE_CORNERS.map((corner) => {
+        const handle = doc.createElement('div');
+        handle.className = 'igs-resize-handle';
+        handle.setAttribute('data-igs-corner', corner);
+        root.appendChild(handle);
+        return handle;
+    });
+    let drag = null;
+
+    const onMove = (event) => {
+        if (!drag) return;
+        const clientX = Number(event && event.clientX);
+        const clientY = Number(event && event.clientY);
+        if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+        if (event.cancelable && typeof event.preventDefault === 'function') event.preventDefault();
+        const viewport = getInlineViewportMetrics(win, doc);
+        const { rect, corner } = drag;
+        const west = corner.includes('w');
+        const north = corner.includes('n');
+        const right = rect.left + rect.width;
+        const bottom = rect.top + rect.height;
+        const minW = 240;
+        const minH = 180;
+        let left = rect.left;
+        let top = rect.top;
+        let width;
+        let height;
+        if (west) {
+            left = clampNumber(clientX - drag.offsetX, viewport.left + 8, right - minW);
+            width = right - left;
+        } else {
+            width = clampNumber(clientX - drag.offsetX - rect.left, minW, viewport.right - 8 - rect.left);
+        }
+        if (north) {
+            top = clampNumber(clientY - drag.offsetY, viewport.top + 8, bottom - minH);
+            height = bottom - top;
+        } else {
+            height = clampNumber(clientY - drag.offsetY - rect.top, minH, viewport.bottom - 8 - rect.top);
+        }
+        drag.moved = true;
+        floatingState.dragged = true;
+        floatingState.left = left;
+        floatingState.top = top;
+        floatingState.width = Math.round(width);
+        floatingState.height = Math.round(height);
+        root.style.maxWidth = 'none';
+        root.style.maxHeight = 'none';
+        root.style.width = `${floatingState.width}px`;
+        root.style.height = `${floatingState.height}px`;
+        root.style.left = `${Math.round(left)}px`;
+        root.style.top = `${Math.round(top)}px`;
+        root.style.right = 'auto';
+        root.style.bottom = 'auto';
+        root.style.transform = 'none';
+    };
+
+    const onUp = () => {
+        if (!drag) return;
+        const moved = drag.moved;
+        drag = null;
+        doc.removeEventListener('pointermove', onMove);
+        doc.removeEventListener('pointerup', onUp);
+        doc.removeEventListener('pointercancel', onUp);
+        root.classList.remove('is-resizing');
+        if (!moved) return;
+        writeFloatingSize(win, mode, floatingState.width, floatingState.height);
+        if (typeof onSuppressClick === 'function') onSuppressClick();
+    };
+
+    for (const handle of handles) {
+        handle.addEventListener('pointerdown', (event) => {
+            if (event && event.button !== undefined && event.button !== 0) return;
+            event.stopPropagation();
+            if (event.cancelable) event.preventDefault();
+            const box = root.getBoundingClientRect();
+            const corner = handle.getAttribute('data-igs-corner');
+            drag = {
+                corner,
+                moved: false,
+                rect: { left: box.left, top: box.top, width: box.width, height: box.height },
+                offsetX: Number(event.clientX) - (corner.includes('w') ? box.left : box.left + box.width),
+                offsetY: Number(event.clientY) - (corner.includes('n') ? box.top : box.top + box.height),
+            };
+            root.classList.add('is-resizing');
+            doc.addEventListener('pointermove', onMove);
+            doc.addEventListener('pointerup', onUp);
+            doc.addEventListener('pointercancel', onUp);
+        });
+        handle.addEventListener('click', (event) => event.stopPropagation());
+    }
+
+    addRuntimeCleanup(runtime, () => {
+        doc.removeEventListener('pointermove', onMove);
+        doc.removeEventListener('pointerup', onUp);
+        doc.removeEventListener('pointercancel', onUp);
+        root.classList.remove('is-resizing');
+        for (const handle of handles) handle.remove();
+    });
+}
+
 function applyWebReaderRuntime(root, runtime) {
     const win = runtime.win || {};
     const doc = runtime.doc;
@@ -377,65 +526,26 @@ function applyFullscreenReaderRuntime(root, current, runtime, ctx = {}) {
     const doc = runtime.doc;
     if (!doc) return;
     const win = runtime.win || doc.defaultView || globalThis;
-    // 全屏模式同样会被软键盘顶走：高度跟随可见区域，键盘收起时交回 CSS 的 100dvh。
-    const syncKeyboard = () => {
+    const syncViewport = () => {
         const vv = win.visualViewport;
-        const full = Number(win.innerHeight) || 0;
-        const open = Boolean(vv && full > 0 && Number.isFinite(vv.height) && vv.height < full * 0.85);
-        if (root && root.style) root.style.height = open ? `${Math.round(vv.height)}px` : '';
+        const height = Number(vv?.height) || Number(win.innerHeight) || 0;
+        if (root && root.style) root.style.height = height > 0 ? `${Math.round(height)}px` : '';
         syncKeyboardOffset(root, win);
+        syncOrientationClass(root, win);
     };
-    if (win.visualViewport) {
-        addEventListenerWithCleanup(win.visualViewport, 'resize', syncKeyboard, runtime);
-        addEventListenerWithCleanup(win.visualViewport, 'scroll', syncKeyboard, runtime);
-    }
     addRuntimeCleanup(runtime, () => {
         if (root && root.style) { root.style.height = ''; root.style.top = ''; }
         if (root && root.classList) root.classList.remove('igs-keyboard-open');
     });
 
-    // requestFullscreen() 会重置浏览器的音频自动播放许可上下文，
-    // 导致 vertin-tips 等插件在进入全屏后调用 HTMLAudioElement.play() 被静默拒绝。
-    // 在用户手势调用链仍然有效时提前 resume 一个无声 AudioContext，以保留许可。
-    try {
-        const AudioCtorKey = win.AudioContext ? 'AudioContext' : (win.webkitAudioContext ? 'webkitAudioContext' : null);
-        if (AudioCtorKey) {
-            const ac = new win[AudioCtorKey]();
-            ac.resume().catch(() => {});
-            ac.close().catch(() => {});
-        }
-    } catch (e) { /* ignore — AudioContext not available */ }
-
     syncOrientationClass(root, win);
-    const onOrientationChange = () => syncOrientationClass(root, win);
+    const onOrientationChange = syncViewport;
     addEventListenerWithCleanup(win, 'orientationchange', onOrientationChange, runtime);
     if (win.screen && win.screen.orientation) {
         addEventListenerWithCleanup(win.screen.orientation, 'change', onOrientationChange, runtime);
     }
 
-    const target = doc.documentElement || doc.body;
-    const request = target && (target.requestFullscreen || target.webkitRequestFullscreen);
-    if (typeof request === 'function' && !doc.fullscreenElement && !doc.webkitFullscreenElement) {
-        try {
-            const result = request.call(target);
-            if (result && typeof result.catch === 'function') result.catch(() => {});
-        } catch (error) {
-            // Ignore fullscreen failures in simulation.
-        }
-    }
-}
-
-export function exitDocumentFullscreen(doc) {
-    if (!doc) return;
-    const exit = doc.exitFullscreen || doc.webkitExitFullscreen;
-    if ((doc.fullscreenElement || doc.webkitFullscreenElement) && typeof exit === 'function') {
-        try {
-            const result = exit.call(doc);
-            if (result && typeof result.catch === 'function') result.catch(() => {});
-        } catch (error) {
-            // Ignore exit failures.
-        }
-    }
+    addRuntimeCleanup(runtime, installReaderFullscreen({ ...runtime, win }, syncViewport));
 }
 
 function getInlineViewportMetrics(win, doc) {

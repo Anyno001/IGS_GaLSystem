@@ -67,7 +67,7 @@ export function mountEditControls({ doc, editor, el, btn, bar, msg, stage, close
             try { r = await editor.acceptAi(); } catch (error) { r = null; }
             if (r && r.ok) { if (typeof onSaved === 'function') onSaved(r); close(); return; }
             msg.textContent = (r && r.message) || 'AI 结果未保存，素材未改动。';
-            if (r && (r.reason === 'stale-revision' || r.reason === 'no-candidate')) showCandidate(''); else acceptAi.disabled = false;
+            if (r?.reason === 'no-candidate') showCandidate(''); else acceptAi.disabled = false;
         });
         discardAi = btn('放弃 AI 结果', () => { editor.cancelAi(); showCandidate(''); msg.textContent = '已放弃 AI 候选，素材未改动。'; });
         showCandidate('');

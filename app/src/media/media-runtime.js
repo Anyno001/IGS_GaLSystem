@@ -3,8 +3,10 @@ import { disposeMapImageRepository } from './tavern-map-images.js';
 import { mediaFileGcFor } from './media-file-gc.js';
 import { flushMediaJournals, stopMediaJournals, mediaJournalDiagnostics } from './media-record-journal.js';
 import { storedImageReferences } from './image-references.js';
+import { startMediaRequests, stopMediaRequests } from './tavern-media-http.js';
 
 export function createMediaRuntime(globalObject, { generatedAssetStore } = {}) {
+    startMediaRequests(globalObject);
     const cache = localImageCacheFor(globalObject), gc = mediaFileGcFor(globalObject);
     gc.start();
     const offReferences = gc.register(async () => [...storedImageReferences(globalObject).paths].map(dataUrl => ({ dataUrl })));
@@ -29,8 +31,10 @@ export function createMediaRuntime(globalObject, { generatedAssetStore } = {}) {
         },
         flush: () => flushMediaJournals(globalObject),
         retryDeletes: () => gc.drain(),
+        referencesChanged: () => gc.referencesChanged(),
         destroy() {
             if (destroying) return destroying;
+            stopMediaRequests(globalObject);
             offReferences();
             const settled = Promise.allSettled([stopMediaJournals(globalObject), gc.stop()]).then(results => {
                 const failed = results.find(result => result.status === 'rejected');

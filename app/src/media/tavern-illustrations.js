@@ -3,6 +3,7 @@ import { createMediaRecordJournal } from './media-record-journal.js';
 import { mediaFileGcFor } from './media-file-gc.js';
 import { IMAGE_FIELDS } from './image-identity.js';
 import { retryInlineMedia } from './media-migration.js';
+import { applyIllustrationSlotUpdate, unchangedIllustrationSlot } from './illustration-store.js';
 export const CG_RECORDS_FILE = 'igs-cg-records.json';
 
 export function withTavernIllustrationFiles(store, globalObject = globalThis) {
@@ -19,7 +20,7 @@ export function withTavernIllustrationFiles(store, globalObject = globalThis) {
         get: getRaw,
         onApply: (key, old, next, previous) => files.acceptRemote(old, next, [`cg:${key}`], [`thumb:cg:${key}:`], previous),
         async beforeFlush() { return retryInlineMedia(await all(), files, (key, record) => save(key.slice(0, key.lastIndexOf('|')), record, record)); },
-        put: (key, value) => store.putSlot(value.floorKey || key.slice(0, key.lastIndexOf('|')), value),
+        put: (key, value) => store.putSlot(value.floorKey || key.slice(0, key.lastIndexOf('|')), value, { restore: true }),
         remove: key => store.deleteSlot(key.slice(0, key.lastIndexOf('|')), Number(key.slice(key.lastIndexOf('|') + 1))),
     });
     mediaFileGcFor(globalObject).register(async () => (await all()).map(([, value]) => value));
@@ -27,12 +28,19 @@ export function withTavernIllustrationFiles(store, globalObject = globalThis) {
         await journal.restore().catch(() => {});
         const key = keyOf(floorKey, value.slot), old = await getRaw(key);
         const next = await files.offload({ ...value, floorKey }, key, old);
+        let saved;
         try {
+            if (unchangedIllustrationSlot(old, next, floorKey)) {
+                if (!files.sameRecord(expected || old, await getRaw(key))) throw new Error('image-write-stale');
+                return old;
+            }
             await journal.write(key, next, async () => {
                 if (!files.sameRecord(expected || old, await getRaw(key))) throw new Error('image-write-stale');
-                return store.putSlot(floorKey, next);
+                saved = await store.putSlot(floorKey, next);
+                return { ok: true, record: saved };
             });
             await files.dropUnused(old, next);
+            return saved;
         } catch (error) { await files.dropUnused(next, old); throw error; }
         finally { await files.release(next); }
     }
@@ -64,6 +72,29 @@ export function withTavernIllustrationFiles(store, globalObject = globalThis) {
             return Promise.all(list.map(record => files.hydrate(record, options)));
         },
         putSlot: save,
+        async updateSlot(floorKey, slot, expectedRevision, patch, options = {}) {
+            await journal.restore().catch(() => {});
+            await options.beforeCommit?.();
+            const key = keyOf(floorKey, slot), old = await getRaw(key);
+            const checked = applyIllustrationSlotUpdate(old, expectedRevision, patch, options);
+            if (!checked.ok) return checked;
+            const next = await files.offload(checked.record, key, old);
+            try {
+                const result = await journal.write(key, async () => {
+                    const latest = await getRaw(key);
+                    const valid = applyIllustrationSlotUpdate(latest, expectedRevision, patch, options);
+                    if (!valid.ok) throw Object.assign(new Error(valid.reason), { result: valid });
+                    return next;
+                }, () => store.updateSlot(floorKey, slot, expectedRevision, next,
+                    { ...options, beforeCommit: undefined, preserveBaseline: false }));
+                await files.dropUnused(old, result.record);
+                return result;
+            } catch (error) {
+                await files.dropUnused(next, await getRaw(key));
+                if (error.result) return error.result;
+                throw error;
+            } finally { await files.release(next); }
+        },
         async deleteSlot(floorKey, slot) {
             await journal.restore().catch(() => {});
             const key = keyOf(floorKey, slot), old = await getRaw(key);

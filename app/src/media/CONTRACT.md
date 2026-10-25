@@ -1,5 +1,58 @@
 # media 模块契约
 
+- 0.36.91：备份与回收的同一故障最多三次自动处理；备份 restore 失败也计数，GC 和备份定时器共享同步次数。达到次数保留 dirty/WAL/回收记录、显示明确失败和处理入口，清除自动定时器；重启不重新执行耗尽的旧 GC，旧 attempts 已超过次数但 paused 为 false 时补标记。网络恢复允许原队列开启新批次；新保存数据及明确的备份操作沿原入口处理。GC 自管重读，不叠加 HTTP 通用恢复预算。
+
+- 0.36.90：媒体固定路径、本机清单、目录及分块 ZIP 保存显式声明可安全续存，失败时显示具体原因并主动重做当前保存步骤；原图读取继续实际观察来源。恢复通知不持有像素，读写仍遵守原 WAL、写后核验与上传回执规则，不重放未知上传或丢弃已生成图片。
+
+## 自动恢复（0.36.88 本地草稿）
+
+完整生成记录保存失败时保留原图、工作图、遮罩与元数据，续写同一记录，取消此前额度不足时删字段的降级。媒体网络及响应体读取失败自动恢复；失效 IndexedDB 连接重新打开。备份/回收没有三次后暂停，引用保护仍保留。CG 目录同步失败继续同步，不要求用户刷新。导出块写入独立暂存库，写入器失效后释放旧锁，在同一目标文件逐块重放；暂存写失败不推进块号。媒体运行时关闭会中止挂起网络请求，再次启动重新建立请求所有者。
+
+`recoverMediaOperation` 将本地清单、媒体目录与文件操作绑定到同一媒体生命周期。自定义地图按固定键依次写入，上传成功后只续存同一文件；清除需实际删除并读回确认，后台内联迁移遇到已经替换的引用时采用当前值。字体清单保存失败续存原上传结果，删除先完成配置和清单持久化，再删除服务端文件；字体加载失败重新建立 FontFace，无需再次渲染。CG 收藏、隐藏、删除与拍照按持久化步骤续接，目录失败不重新拍照或重复已完成的删除。拍照中有图层读取失败时恢复该次合成，保持原图层完整。
+
+
+上传和删除的响应丢失时，按本次固定路径读回确认；上传比较原字节，删除确认 404。确认已完成便交付原路径，不因响应体损坏重复上传。未确认写入交给原业务记录与 WAL 保留，不在 HTTP 层重放未知写入。journal 的单次远端读取失败交还原调度，不持有同步锁永久等待；自定义地图本机写入继续沿 WAL。
+
+## 可选显示压缩与整包读写（0.36.88 本地草稿）
+
+- `bridge.imageCache.compressDisplay` 默认 false。开启后，从服务端取回图片，在浏览器串行缩放并编码为 WebP，再进入同一中央内存/IndexedDB 缓存；最长边 1600、总像素不超过 160 万、不放大、质量 0.82、保留透明。GIF、动画 WebP/APNG 保持动画；浏览器没有编码能力时沿用原显示。没有服务端扩展，不改原文件。
+- `igs-image-cache` 保持 v3 表结构，meta 记录增加可选 `displayCompressed` 字段，不为记录字段升库版本。已被本地草稿升级到 v4 的同结构库在 VersionError 后直接重开现有版本，保留像素和别名；其它数据库默认不启用此兼容。缺标记的缓存视为未压缩，默认关闭时直接复用；仅 v1/v2 的重复旧格式按原规则重建。切换时失效旧显示地址、取消在途任务并批量删除不匹配的可再生缓存；重启复用相同模式的缓存。业务记录和服务端原图不变。
+- 内存与磁盘在数量或编码字节超上限后，按原 LRU 顺序将超限指标清至 80% 低水位；数量由 `cache-eviction` 统一向下取整、至少保留一项，避免小容量取整后仍等于高水位。别名和无引用 token 索引同样批量回收。磁盘按共享内容的最近访问时间选择一批，`deleteMany` 在一个事务中解除别名并删除不再共享的字节；不再每删一项重算总量、重开事务。保留既有内存租约和活跃资源超硬预算时拒收新图的规则。
+- `readBlob` 独立取得原图，整包/批量下载始终走此端口。`read({original:true})` 用于下载、编辑和一致性参考；压缩开启时绕过显示缓存，关闭时可复用已经驻留的原像素，不将新下载原图写入显示缓存。普通显示不得把未接纳结果的原像素作为压缩模式的兜底。
+- `archive-zip` 逐张、逐块等待目标写入后再读下一张；支持文件选择器、OPFS 临时文件，无可用文件接口才回退浏览器 Blob 下载。Blob 回退仍受浏览器存储/内存限制；ZIP32 超过约 4 GiB 或 65535 项明确失败，ZIP64 留待超出该格式的需求实现。导入只读目录/清单，图片逐条校验并落盘，失败补偿回滚；不把整包图片预热到显示缓存。
+- 旧内容哈希恢复仍用原像素匹配，只在本次恢复记录上以非枚举 Symbol 暂持字节；不建立第二套原图缓存。
+
+## 生成候选与衣装适配（0.36.88 本地草稿）
+
+- CG `updateSlot` 的 revision 校验与更新在同一业务事务中完成，继续经过当前 WAL、文件卸载、目录索引、备份与 GC；恢复 journal 不重新生成版本。普通 `putSlot` 保存相同元数据时不因属性顺序不同标脏或增加版本。
+- 一致性基线等图片字段纳入统一图片字段和引用处理，按需 hydrate。候选失败不能释放原 CG 引用；接受成功后才释放被替换引用。
+- 临时立绘匹配缓存仅投影 `characterKey/outfitName` 等必要绑定，不缓存完整 DNA、prompt、衣装快照或第二份像素。元数据继续服从中央预算；CG 库候选变更同样先预留预算再替换。
+- 图片可用性区分 available/loading/missing/read-error/decode-error/unverified，失败状态有界并可过期。明确读取可恢复，失败或未驻留结果不通过完成通知触发循环重读。
+- `png-validation`、`reference-image-reader`、`canvas-image-codec` 和 `cg-reference-canvas` 只负责图片有效性、受控读取与几何，不决定业务衣装或发起 provider 请求。
+
+## 静态页缓存收敛（test-v0.36.65）
+
+- 非活跃资源继续按 LRU 淘汰；当前页租约资源优先于预热。活跃图片本身的总量超过硬字节预算时，先拒绝后来读入的活跃图，保住已驻留图片，避免同一静态页图片互相挤出后不停重读。硬字节预算保持不变，租约释放后后续正常读取可重新接纳图片。
+- `load()` 非空结果不代表中央缓存已经接纳资源；显示层就绪通知必须核实 `peek/get` 的可显示地址，不能用完成通知自行驱动无进展的重试。
+
+## 图片读取失败分类（v0.36.59）
+
+- 文件 `read/hydrate` 的内部 `strictRead` 模式保留网络、状态码和读取不完整错误：404/410 记为确认缺图，其它 HTTP、网络或超时错误为暂不可读取。默认读取接口仍保留空串与来源引用的兼容行为。
+- 中央缓存的服务器下载共用一条 4 并发队列。`load` 的超时（默认 30 秒）只计本机读取与实际下载的时间，排在队列里等名额时暂停计时，轮到下载重新计满；否则一次要很多图时，排在后面的没开始下就被判 `image-load-timeout`、记成暂不可读取。
+- 素材读取失败元数据登记在中央辅助预算内，最多 128 条 / 64 KiB；临时失败冷却 1500ms，确认缺图保留 30000ms，均在访问时过期，不安排定时重试或轮询。图片身份 token 变化或有效原图到达立即作废旧失败状态。
+
+## 首次显示的恢复顺序（v0.36.57）
+
+- 素材文件适配器暴露 `restore` 和 `hydrateImage`：前者复用 journal 的元数据恢复，后者只 hydrate 已取得的记录，不再次发起记录恢复。原有 `getImage/getImageRecord` 和本机读取后备保持兼容。`peekImageRecord` 只读本机记录、不等恢复，阅读器显示先用它，恢复在后台完成。
+- 调用方先完成记录恢复及原始记录读取，再开始以图片身份为键的缓存任务，避免恢复中的引用失效取消首楼正在读取的图片。未知读取失败不在此处更改原路径或冒充像素可用。
+
+## 变更驱动的备份与回收（v0.36.56）
+
+- 四类记录只有本机版本、值或删除记录未被远程备份确认时才上传；已同步的记录不更新 `savedAt`，相同内容写入不增加版本。显式 `flush` 仍读取、合并并修复丢失的备份；回收使用 `onlyPending`，干净的记录直接跳过。
+- 共享引用的回收候选持久保留为等待状态，不启动周期定时器。旧引用实际解除后重新入队；配置提交、恢复或脚本启动时可一次复查。写入租约与正式引用分开，暂被写入保护的候选在租约释放后唤醒；崩溃遗留的过期租约在下一次启动或手动重试时复查。
+- 备份/像素搬家的自动尝试共用三次预算，真正的新记录变更或手动重试重置预算。回收的删除、备份阻塞或引用读取失败最多三次后暂停，错误和候选保留，重载不重置已暂停的回收状态。稳定状态下无媒体备份或回收定时器；写入中的租约续期不属于缓存扫描。
+- `diagnostics` 补充备份 `retryPaused`、回收 `pausedDeletes`；设置可手动重试两类任务。删除前仍在提交锁中检查所有引用及写入租约，引用检查失败不能删除文件。
+
 ## 活跃资源优先（v0.36.51）
 
 - 数量或字节压力下先按 LRU 淘汰无租约资源，全部非活跃资源淘汰后仍超过硬字节预算才处理活跃资源；数量上限仍允许当前页的租约资源超过软限制，字节预算不放宽。
@@ -13,10 +66,10 @@
 - 自动插图的 tag 与图片持久化（`illustration-store.js`，IndexedDB，键 `chatId|messageId|swipeId[|slot]`）。
 - 素材补全的图片与临时素材持久化（`generated-asset-store.js`，IndexedDB `igs-generated-assets`：`images` 存图片本体、`assets` 存本聊天临时素材、`floors` 记录楼层是否已处理）。
 - 立绘抠图（`alpha-matte.js`）：从四边洪泛抠除与边缘连通的浅灰纯色底，边缘羽化 + 去溢色，并裁掉透明留白；无 canvas 时原样返回。调用方传的 `alreadyTransparent` 只是预期：没传时先用 `hasTransparentBorder` 看四边，过半像素已透明（智绘姬 / 柏宝绘接 NAI V5 等直接回透明底）就只裁边、不洪泛，`diagnostics.detectedTransparent` 为 true；否则透明像素的 RGB（多为黑色）会被当成底色，把深色描线和黑发一起抠掉。「从原图重新自动抠图」同样走这条判断。
-- CG 库（`cg-library.js`）三层数据分开：目录（`cg-index-store.js`，IndexedDB `igs-cg-index` 的 `entries`，每张 CG / 照片一条轻记录，不含图片）、缩略图（统一 `igs-image-cache`，键 `thumb:cg:<key>:<updatedAt>`，320 宽 JPEG，CG 重画后自动作废；`igs-cg-index` v2 保留 `entries` 并移除旧 `thumbs`）、原图（`igs-illustrations` / `igs-photo-album` + 酒馆文件，只在看大图或生成缩略图时读）。打开 CG 库只读目录；对账只比主键（`getAllKeys`），只读缺失 / 未就绪的记录，每批 20 条。`withCgIndexSync` 让 `putSlot` / `deleteSlot` 顺手更新目录。每一步都有期限（`CG_LIBRARY_TIMEOUTS`），失败带原因码，`cgReasonText` 转中文。`idb-connection.js` 统一 IndexedDB 连接：打开超时 8 秒、被挡住直接报错、`versionchange` 时关闭让路、事务 20 秒超时。`parseFloorKey` / `parseCgSlotKey` 从右取两段解析（chatId 可含 `|`）。`cg-gallery-store.js`（`igs-cg-gallery`）只存隐藏 / 收藏标记；「删除」调用 `clearIllustration`（楼层 CG 同时消失），成功后才清标记和目录。
+- CG 库（`cg-library.js`）三层数据分开：目录（`cg-index-store.js`，IndexedDB `igs-cg-index` 的 `entries`，每张 CG / 照片一条轻记录，不含图片）、缩略图（统一 `igs-image-cache`，键 `thumb:cg:<key>:<updatedAt>`，320 宽 JPEG，CG 重画后自动作废；`igs-cg-index` v2 保留 `entries` 并移除旧 `thumbs`）、原图（`igs-illustrations` / `igs-photo-album` + 酒馆文件，只在看大图或生成缩略图时读）。打开 CG 库只读目录；对账只比主键（`getAllKeys`），只读缺失 / 未就绪的记录，每批 20 条。`withCgIndexSync` 让 `putSlot` / `deleteSlot` 顺手更新目录。原读取保持到实际返回，失败带原因码，`cgReasonText` 转中文。`idb-connection.js` 统一 IndexedDB 连接：打开 8 秒和事务 20 秒计时仅提示，被挡住保留原请求；`versionchange` 时关闭让路，所有者关闭取消等待，迟到连接关闭。`parseFloorKey` / `parseCgSlotKey` 从右取两段解析（chatId 可含 `|`）。`cg-gallery-store.js`（`igs-cg-gallery`）只存隐藏 / 收藏标记；「删除」调用 `clearIllustration`（楼层 CG 同时消失），成功后才清标记和目录。
 
   - `createAlphaMatte()(dataUrl, { detailed: true })` 返回 `{ dataUrl, alphaMaskDataUrl, diagnostics: { crop, sourceWidth, sourceHeight } }`；不传 `detailed` 时仍只返回字符串（旧契约）。遮罩为 RGB=alpha 的不透明 PNG，与透明结果同尺寸。
-- 生成图片记录 schema v2（`generated-asset-store.js`）：立绘额外保存不可变 `originalDataUrl`、最近接受的 AI 重建 `workingDataUrl`、当前遮罩 `alphaMaskDataUrl`、自动抠图裁边 `matteCrop` 与 `revision`；`dataUrl` 始终是当前透明结果，供旧消费者读取。只有 `dataUrl` 的旧记录按 legacy 读取，不伪造原图、不可编辑。`updateImage(id, expectedRevision, patch)` 在同一 readwrite 事务内校验 revision 后写入，`originalDataUrl`/`id` 永不改写；失败原因为 `not-found` / `source-unavailable` / `stale-revision` / `empty-result`。写入完整记录遇存储额度错误时降级为只存透明结果，并在素材记录上标 `sourceUnavailable: 'quota'`。
+- 生成图片记录 schema v2（`generated-asset-store.js`）：立绘额外保存不可变 `originalDataUrl`、最近接受的 AI 重建 `workingDataUrl`、当前遮罩 `alphaMaskDataUrl`、自动抠图裁边 `matteCrop` 与 `revision`；`dataUrl` 始终是当前透明结果，供旧消费者读取。只有 `dataUrl` 的旧记录按 legacy 读取，不伪造原图、不可编辑。`updateImage(id, expectedRevision, patch)` 在同一 readwrite 事务内校验 revision 后写入，`originalDataUrl`/`id` 永不改写；失败原因为 `not-found` / `source-unavailable` / `stale-revision` / `empty-result`。完整记录保存失败时自动续存，不删掉原图或遮罩。
 - 遮罩编辑（`matte-brush.js` 纯函数、`matte-edit-session.js` 会话）：保留 / 删除 / 软边画笔、坐标映射回原像素、有界撤销重做（默认 20 步，只在内存中）；会话不写存储，由调用方保存。
 
 ## 子能力
@@ -39,7 +92,7 @@
 ## 统一生命周期（v0.36.39）
 
 - 图片像素、派生缩略图、对象 URL、下载和预载任务由 `tavern-image-cache.js` 管理。默认 320 个内容条目，设置允许 1–2000；内存编码字节预算 64 MiB，磁盘 192 MiB。当前页面通过 `media-lease-scope.js` 持有资源键，活跃资源可超过条目数软限制，字节预算仍为硬限制。浏览器解码/GPU/HTTP 缓存由浏览器管理，不包含在该字节统计里。
-- 磁盘 schema v3：`files` 按内容身份存一份 Blob，`meta` 存路径别名与 LRU 信息；两者同事务。v1/v2 升级只清可再生缓存。旧素材缩略图库删除，CG 目录保留。业务层不得另建原图 Map、对象 URL 或无限预载缓存。
+- 磁盘 schema v3（兼容已有同结构 v4）：`files` 按内容身份存一份 Blob，`meta` 存路径别名、压缩表示和 LRU 信息；两者同事务。v3/v4 未压缩缓存保留，v1/v2 升级只清可再生缓存。旧素材缩略图库删除，CG 目录保留。业务层不得另建原图 Map、对象 URL 或无限预载缓存。
 - 新文件使用像素字节 SHA-256，统一到 `user/images/igs-media/<sha256>.<ext>`。非安全 HTTP 环境用分片 SHA-256 后备实现。持久记录只存文件路径；上传失败时原始像素留在业务数据库并标记待上传，重试成功后才能宣称备份完成。
 - 四类文件适配器共用 `media-record-journal.js`：先准备 WAL，提交业务事务，再标记日志完成；备份 v2 保存版本、删除标记和前一版文件引用。未提交的离线像素可临时保留在 WAL，提交后移除，不能当可再生缓存清空。
 - 元数据查询用原始记录；显示只 hydrate `dataUrl`，编辑/导出才显式 hydrate 所需字段。读图失败返回空显示结果，不改原始路径；缺少原图/遮罩的记录不得冒充可编辑完整记录。
@@ -50,11 +103,12 @@
 
 ## 文件适配器依赖方向（v0.36.40）
 
-`tavern-image-files.js` 只提供底层文件读写，禁止反向导入或导出 `tavern-generated-assets.js`、`tavern-illustrations.js`、`tavern-photos.js`。业务适配器由 core 直接装配。发布构建必须冷启动压缩包和调试包的自动/手动入口，创建正确版本的 IGS API 后才成功；仅导入源码或检查导出函数不构成启动验收。
+`tavern-image-files.js` 只提供底层文件读写，禁止反向导入或导出 `tavern-generated-assets.js`、`tavern-illustrations.js`、`tavern-photos.js`。业务适配器由 core 直接装配。按用户 2026-10-15 指令，构建只生成发布文件，不自动执行启动检查或全量门禁。排查启动时直接下载并执行实际产物，分别记录下载内容、执行环境与 API 是否创建；仅导入源码、HTTP 200 或构建成功不构成启动验收。
 
 ## 缓存所有权（v0.36.41）
 
 - 每个中央图片缓存持有一个 `media-cache-registry.js`。所有可再生辅助缓存经 `auxiliary.createMap/register` 登记；容量、TTL、负缓存规则集中在 `MEDIA_CACHE_POLICIES`，统计返回用途、条目数、容量或作用范围、过期规则和在途数量。新缓存必须加入此处，不能再自行维护不可见图片 Map。
+- registry 的 12 类 Map 在条目数/单所有者字节超限时选定整批旧项，删除后统一预算记账，再执行逐资源释放回调。全局字节压力也以 80% 为目标按原所有者访问顺序整批回收，不再反复调用单条淘汰；不可接纳的新查询不破坏业务存储或当前完整视图。TTL、替换、销毁和显式删除保持原语义，成功回收接纳不误报拒绝。全仓核查与保留的业务历史清单见 `docs/CACHE_EVICTION_AUDIT_20261017.md`。
 
 v0.36.43 补充：业务工厂必须显式接收中央 `mediaCache`，或使用所注入的 index/thumb 适配器持有的同一实例；缺失、不同所有者或已销毁时立即报错，不私建缓存。辅助元数据共享 16 MiB 估算预算，并有每个所有者的字节预算；这不是浏览器真实堆上限，也不计浏览器像素、GPU 或临时加载/编辑工作区。普通可再生索引按条数和字节淘汰；素材/物品记录各 4 MiB，按需逐条读取和淘汰，缓存拒绝接纳不影响本次查询返回值。CG 视图目录最多 8 MiB，整份接纳或明确失败。素材/物品补图必须直接查询权威数据库，禁止把缓存未命中或读库失败当作无记录；过期查询拒绝等待者，重新读取可恢复实际读取失败。`stats().auxiliary` 暴露总估算、总预算、拒绝次数，以及每项估算、预算和读取错误。
 

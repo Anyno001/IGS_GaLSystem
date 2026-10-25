@@ -3,14 +3,21 @@ import { createMediaRecordJournal } from './media-record-journal.js';
 import { mediaFileGcFor } from './media-file-gc.js';
 import { localImageCacheFor } from './tavern-image-cache.js';
 import { retryInlineMedia } from './media-migration.js';
-import { mediaRequest } from './tavern-media-http.js';
+import { mediaRequest, recoverMediaOperation } from './tavern-media-http.js';
 const repositories = new WeakMap();
 const PREFIX = 'igs-map-custom:';
 
 export function mapImageRepositoryFor(globalObject = globalThis) {
     if (repositories.has(globalObject)) return repositories.get(globalObject);
     const files = createTavernImageFiles(globalObject, 'igs-map');
-    const intents = new Map();
+    const writes = new Map(), controller = new AbortController();
+    const recover = execute => recoverMediaOperation(globalObject, execute, { signal: controller.signal });
+    const enqueue = (key, execute) => {
+        const pending = (writes.get(key) || Promise.resolve()).catch(() => {}).then(execute);
+        writes.set(key, pending);
+        void pending.finally(() => { if (writes.get(key) === pending) writes.delete(key); }).catch(() => {});
+        return pending;
+    };
     const storage = () => globalObject.localStorage;
     const list = async () => {
         const out = [], store = storage();
@@ -54,45 +61,44 @@ export function mapImageRepositoryFor(globalObject = globalThis) {
         })().finally(() => { restoringLegacy = null; });
         return restoringLegacy;
     }
-    async function save(key, dataUrl, expected) {
-        if (expected !== undefined && intents.has(key)) return { ok: false, error: 'map-image-stale' };
-        const intent = {}; intents.set(key, intent);
-        let old, next;
-        try {
-            await journal.restore().catch(() => {});
-            old = { settingKey: key, dataUrl: storage()?.getItem(key) || '' };
-            if (expected !== undefined && expected !== old.dataUrl) throw new Error('map-image-stale');
-            next = await files.offload({ settingKey: key, dataUrl }, key, old);
-            await journal.write(key, () => {
-                if (intents.get(key) !== intent || (storage()?.getItem(key) || '') !== old.dataUrl) throw new Error('map-image-stale');
-                return next;
-            }, value => put(key, value));
-            await files.dropUnused(old, next);
-            return { ok: true, url: next.dataUrl };
-        } catch (error) { if (next) await files.dropUnused(next, { dataUrl: storage()?.getItem(key) || '' }); return { ok: false, error: error.message }; }
-        finally { if (next) await files.release(next); if (intents.get(key) === intent) intents.delete(key); }
+    function save(key, dataUrl, expected) {
+        return enqueue(key, async () => {
+            await journal.restore().catch(() => {}); // 本机 WAL 已先恢复；离线写入由原同步队列补传。
+            const old = { settingKey: key, dataUrl: storage()?.getItem(key) || '' };
+            // 后台内联迁移遇到已经替换的图片时，采用当前引用；用户写入依次完成。
+            if (expected !== undefined && expected !== old.dataUrl) return { ok: true, url: old.dataUrl };
+            const next = await recover(() => files.offload({ settingKey: key, dataUrl }, key, old));
+            if (next?.cancelled) return next;
+            try {
+                const saved = await recover(() => journal.write(key, next, value => put(key, value)));
+                if (saved?.cancelled) return saved;
+                const cleaned = await recover(() => files.dropUnused(old, next));
+                return cleaned?.cancelled ? cleaned : { ok: true, url: next.dataUrl };
+            } finally { await recover(() => files.release(next)); }
+        });
     }
     const repository = {
-        restore,
-        async resolveUrl(path) { const value = await files.read(path); return value ? localImageCacheFor(globalObject).peek(path) || value : ''; },
+        restore: () => recover(restore),
+        async resolveUrl(path) { const value = await files.read(path, { display: true }); return value ? localImageCacheFor(globalObject).peek(path) || value : ''; },
         set: save,
-        async remove(key) {
-            const intent = {}; intents.set(key, intent);
-            try {
-                await journal.restore().catch(() => {});
-                const old = { dataUrl: storage()?.getItem(key) || '' };
-                await journal.write(key, () => {
-                    if (intents.get(key) !== intent || (storage()?.getItem(key) || '') !== old.dataUrl) throw new Error('map-image-stale');
-                    return null;
-                }, () => storage()?.removeItem(key));
-                await files.dropUnused(old, null);
-                return { ok: true };
-            } finally { if (intents.get(key) === intent) intents.delete(key); }
-        },
+        remove: key => enqueue(key, async () => {
+            await journal.restore().catch(() => {});
+            const old = { dataUrl: storage()?.getItem(key) || '' };
+            const saved = await recover(() => journal.write(key, null, () => {
+                const store = storage();
+                if (!store) throw new Error('map-storage-unavailable');
+                store.removeItem(key);
+                if (store.getItem(key) !== null) throw new Error('map-remove-failed');
+            }));
+            if (saved?.cancelled) return saved;
+            const cleaned = await recover(() => files.dropUnused(old, null));
+            return cleaned?.cancelled ? cleaned : { ok: true };
+        }),
+        dispose: () => controller.abort(),
         diagnostics: journal.diagnostics,
     };
     repositories.set(globalObject, repository);
     return repository;
 }
 
-export function disposeMapImageRepository(globalObject) { repositories.delete(globalObject); }
+export function disposeMapImageRepository(globalObject) { repositories.get(globalObject)?.dispose(); repositories.delete(globalObject); }

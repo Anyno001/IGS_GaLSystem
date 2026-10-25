@@ -1,4 +1,4 @@
-import { IMAGE_FIELDS, isImageData, isImagePath, imageContentId, imagePaths, blobDataUrl } from './image-identity.js';
+import { IMAGE_FIELDS, IMAGE_RECOVERY_PIXELS, isImageData, isImagePath, imageContentId, imagePaths, blobDataUrl } from './image-identity.js';
 import { createLegacyImageRecovery } from './legacy-image-recovery.js';
 import { localImageCacheFor } from './tavern-image-cache.js';
 import { mediaRequest, tavernHeaders } from './tavern-media-http.js';
@@ -15,7 +15,7 @@ export function createTavernImageFiles(globalObject, legacyDir) {
     if (!uploads.has(globalObject)) uploads.set(globalObject, new Map());
     const flights = uploads.get(globalObject);
     const directories = cache.auxiliary.sharedMap('directories', { onRemove: entry => entry.controller?.abort() });
-    async function upload(dataUrl, hash) {
+    async function upload(dataUrl, hash, { cacheDisplay = true } = {}) {
         if (flights.has(hash)) return flights.get(hash);
         const job = (async () => {
             const match = /^data:image\/([^;]+);base64,/i.exec(dataUrl);
@@ -25,21 +25,39 @@ export function createTavernImageFiles(globalObject, legacyDir) {
                 if (!response?.ok) return dataUrl;
                 const path = String((await response.json())?.path || '').replace(/\\/g, '/').replace(/^\//, '');
                 if (!isImagePath(path)) return dataUrl;
-                await cache.put(path, dataUrl).catch(() => {});
+                if (cacheDisplay) await cache.put(path, dataUrl).catch(() => {});
                 return path;
             } catch { return dataUrl; }
         })().finally(() => { if (flights.get(hash) === job) flights.delete(hash); });
         flights.set(hash, job);
         return job;
     }
-    async function read(path) {
-        return cache.load(path, async signal => {
-            const response = await mediaRequest(globalObject, `/${String(path).replace(/^\//, '')}`, { cache: 'no-store', signal });
-            if (!response?.ok) throw new Error('image-file-unreadable');
-            return blobDataUrl(await response.blob(), globalObject, { signal });
-        }, { download: true }).catch(() => '');
+    async function readBlob(path, { signal } = {}) {
+        const response = await mediaRequest(globalObject, `/${String(path).replace(/^\//, '')}`, { cache: 'no-store', signal });
+        if (!response?.ok) throw Object.assign(new Error(response?.status === 404 || response?.status === 410 ? 'image-file-not-found' : 'image-file-unreadable'), { status: response?.status });
+        return response.blob();
     }
-    async function offload(record, key, old) {
+    // 原图任务绕过显示缓存，显示通道是否压缩由中央缓存开关决定。
+    async function read(path, { strictRead = false, display = false, original = false, ticket = null, signal } = {}) {
+        if (original) {
+            if (!cache.compressDisplay && cache.peek(path)) return cache.dataUrl(path);
+            const task = readBlob(path, { signal }).then(blob => blobDataUrl(blob, globalObject, { signal }));
+            return strictRead ? task : task.catch(() => '');
+        }
+        const fetchBlob = signal => readBlob(path, { signal });
+        // 没有 createObjectURL 的环境（测试桩）无法给 Blob 生成地址，退回 dataUrl。
+        const useBlob = typeof globalObject.URL?.createObjectURL === 'function';
+        const loader = useBlob ? fetchBlob : async signal => blobDataUrl(await fetchBlob(signal), globalObject, { signal });
+        const task = cache.load(path, loader, { download: true, blob: display && useBlob, ticket }).then(async shown => {
+            if (display || !shown || typeof shown === 'string' && shown.startsWith('data:')) return shown;
+            return cache.dataUrl(path);
+        });
+        if (!strictRead) return task.catch(() => '');
+        const value = await task;
+        if (!value) throw new Error('image-read-incomplete');
+        return value;
+    }
+    async function offload(record, key, old, options = {}) {
         if (!record) return record;
         const next = { ...record };
         const held = new Set();
@@ -55,7 +73,7 @@ export function createTavernImageFiles(globalObject, legacyDir) {
             const existing = [...imagePaths(old)].find(path => path.includes(hash));
             const type = /^data:image\/([^;]+);/i.exec(value)[1].toLowerCase();
             await hold(existing || `user/images/igs-media/${hash}.${/^(jpeg|jpg)$/.test(type) ? 'jpg' : type}`);
-            if (!seen.has(value)) seen.set(value, existing || await upload(value, hash));
+            if (!seen.has(value)) seen.set(value, existing || await upload(value, hash, options));
             next[field] = seen.get(value);
         }
         for (const path of imagePaths(next)) await hold(path);
@@ -70,9 +88,16 @@ export function createTavernImageFiles(globalObject, legacyDir) {
         if (!record) return record;
         const next = { ...record };
         const fields = options.fields === '*' ? IMAGE_FIELDS : options.fields || ['dataUrl'];
+        const readOptions = { original: options.fields === '*', ...options };
         const references = {};
         await Promise.all(fields.map(async field => {
-            if (isImagePath(record[field])) { references[field] = record[field]; next[field] = await read(record[field]); }
+            if (isImagePath(record[field])) {
+                references[field] = record[field];
+                const recovered = record[IMAGE_RECOVERY_PIXELS]?.get(record[field]);
+                if (recovered && readOptions.original) next[field] = recovered;
+                else if (recovered) next[field] = await cache.load(record[field], async () => recovered, { blob: readOptions.display === true });
+                else next[field] = await read(record[field], readOptions);
+            }
         }));
         Object.defineProperty(next, IMAGE_PROVENANCE, { value: references, enumerable: true });
         return next;
@@ -96,8 +121,8 @@ export function createTavernImageFiles(globalObject, legacyDir) {
         directories.set(legacyDir, entry, { ttlMs: 0 });
         return entry.promise;
     }
-    const recover = createLegacyImageRecovery(globalObject, { dir: legacyDir, listFiles, read, slug });
-    return { offload, hydrate, read, recover, listFiles, sameRecord,
+    const recover = createLegacyImageRecovery(globalObject, { dir: legacyDir, listFiles, read: path => read(path, { original: true }), slug });
+    return { offload, hydrate, read, readBlob, recover, listFiles, sameRecord,
         hasData: record => IMAGE_FIELDS.some(field => isImageData(record?.[field])),
         async release(record) { const results = await Promise.allSettled([...record?.[IMAGE_LEASES] || []].map(path => gc.release(path))); const failed = results.find(result => result.status === 'rejected'); if (failed) throw failed.reason; },
         dropUnused: (old, next) => gc.released(old, next),

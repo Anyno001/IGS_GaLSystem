@@ -1,21 +1,24 @@
+import { normalizePromptEntries } from '../scene/prompt-entries.js';
 import { createMediaRuntime } from '../media/media-runtime.js';
 import { createPublicApi, attachPublicApi, detachPublicApi } from '../api/public-api.js';
 import { createTavernHelperAdapter, getSillyTavernContext } from '../host/tavern-helper-adapter.js';
-import { sceneAssetsForContext } from '../scene/asset-scope.js';
+import { sceneAssetsForContext, resolveAssetScope } from '../scene/asset-scope.js';
+import { createCharacterDnaStore } from './character-dna-store.js';
+import { creatureSystemEnabled, normalizeCreatureDisplaySettings, setCreatureSystem } from '../scene/creature-profile.js';
+import { createStoryOutfitRuntime } from './story-outfit-runtime.js';
+import { migrateSpriteSystem } from '../scene/sprite-system-migration.js';
+import { captureOutfitScope, prepareCgOutfitCandidates } from '../scene/outfit-identity.js';
+import { loadStoryOutfitCandidates, saveStoryOutfitCandidates } from '../scene/outfit-review-store.js';
 import { withTavernGeneratedAssetFiles } from '../media/tavern-generated-assets.js';
 import { withTavernIllustrationFiles } from '../media/tavern-illustrations.js';
+import { readReferenceImageUrl } from '../media/reference-image-reader.js';
 import { localImageCacheFor } from '../media/tavern-image-cache.js';
 import { createPresetRegistry } from '../presets/preset-registry.js';
 import { createInputChannel } from '../host/input-channel.js';
 import { parseSceneText } from '../scene/text-parser.js';
 import { createSceneState } from '../scene/scene-state.js';
 import { resolveScene } from '../scene/scene-resolver.js';
-import {
-    LEGACY_READER_MODES,
-    readLegacyIgsSettings,
-    writeLegacyIgsSettings,
-    resolveLegacyReaderMode,
-} from '../storage/legacy-igs.js';
+import { LEGACY_READER_MODES, readLegacyIgsSettings, writeLegacyIgsSettings, resolveLegacyReaderMode } from '../storage/legacy-igs.js';
 import { createPresetStore } from '../storage/preset-store.js';
 import { createTavernSettingsSync } from '../storage/tavern-settings-file.js';
 import { createExpressionNotesFile, fillExpressionNotes } from '../storage/expression-notes-file.js';
@@ -38,14 +41,28 @@ import { resolveLiveDigestRule } from '../visual/igs-ui/danmaku-interact.js';
 import { applyFxWorldview, resolveCarryPhonePrompt, resolveWorldviewPromptRule } from '../scene/fx-era.js';
 import { resolveWorldview } from '../scene/worldview.js';
 import { resolveBattleFxPromptRule } from '../visual/igs-ui/fx-battle-model.js';
+import { resolveCreatureFxPromptRule } from '../visual/igs-ui/fx-creature-model.js';
 import { createEventBus } from './event-bus.js';
 import { createMagicWandEntry } from '../host/magic-wand-entry.js';
 import { createExtensionPanel } from '../host/extension-panel.js';
 import { createReaderImageService } from '../generated-images/reader-image-service.js';
 import { createPromptInjector } from '../host/prompt-injector.js';
+import { createStatsRuntime } from './stats-runtime.js';
+import { describeLlmReady } from '../generated-images/illustration/caption-writer.js';
+import { statsFxOf, statsNoticeLines } from '../scene/stats/stat-fx.js';
+import { clearStatsRivals, registerStatsRivals } from '../visual/igs-ui/romance-runtime.js';
+import { normalizeStatsSettings } from '../scene/stats/stat-settings.js';
+import { createShujukuClient } from '../data/shujuku/client.js';
+import { describeStatMappings } from '../data/shujuku/stats-push.js';
+import { buildInitialState } from '../scene/stats/stat-build.js';
 import { createIllustrationMessageHost } from '../host/illustration-message-host.js';
 import { createSecondaryLlm } from '../host/secondary-llm.js';
+import { createImageWorldInfoSource } from '../host/image-world-info.js';
+import { createImagePromptLlm } from '../generated-images/image-prompt-runtime.js';
+import { createBuiltinImageTaskRuntime } from '../generated-images/builtin-image-task-runtime.js';
 import { createImageBackend, mergeLegacyNaiSettings } from '../generated-images/image-backend.js';
+import { createCharacterReferenceRecovery } from './character-reference-recovery.js';
+import { wakeRecoveringOperations } from '../storage/automatic-recovery.js';
 import { IMAGE_ACTIVITY_EVENT, trackImageActivity } from '../generated-images/generation-activity.js';
 import { createNaiOfficialClient } from '../generated-images/nai-official-client.js';
 import { createImageJobLog } from '../generated-images/image-job-log.js';
@@ -55,21 +72,31 @@ import { createAssetThumbnailer, createIndexedDbAssetThumbStore } from '../media
 import { withCgIndexSync } from '../media/cg-library.js';
 import { createAutoIllustrationService, ILLUSTRATION_PROGRESS_EVENT, ILLUSTRATION_UPDATED_EVENT, readCgViewport } from '../generated-images/illustration/auto-illustration-service.js';
 import { createAssetGenerationService, GENERATED_ASSET_UPDATED_EVENT } from '../generated-images/illustration/asset-generation-service.js';
+import { protectedAssetImageIds } from '../generated-images/illustration/asset-image-references.js';
 import { createItemAndCgServices } from './item-cg-services.js';
 import { createIndexedDbGeneratedAssetStore } from '../media/generated-asset-store.js';
+import { createCanvasImageCodec } from '../media/canvas-image-codec.js';
+import { isGeneratedAssetUrl, generatedAssetIdOf } from '../scene/asset-match.js';
 import { createAlphaMatte } from '../media/alpha-matte.js';
 import { firstMoodWord, resolvePromptRuleContent, scenePromptRuleEnabled } from '../scene/prompt-rule-content.js';
 import { buildTagGrammar, DEPTH0_REMINDER, GRAMMAR_HEADER, normalizePromptPlacement } from '../visual/igs-ui/tag-grammar.js';
 import { resolvePromptTriggers, setLastPromptReport } from '../scene/prompt-triggers.js';
 import { collectPromptContext } from '../host/prompt-context.js';
 
-const IGS_VERSION = '0.36.55';
+const IGS_VERSION = '0.37.15';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
-const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
 
 // 自动插图 / 素材补全的进度与失败原因：始终写控制台；阅读器开着时交给对话框顶边的生成细线，
 // 没开时失败与成功再按「显示提示弹窗」弹酒馆 toastr。
+
+// 非人角色总开关与巨型铺满随已保存的设置同步到运行时；读不到设置时保持默认（开）。
+function syncCreatureSystem(legacy) {
+    const by = legacy && legacy.readerSettingsByMode && typeof legacy.readerSettingsByMode === 'object' ? legacy.readerSettingsByMode : {};
+    const rs = by.default && Object.keys(by.default).length ? by.default : (legacy && legacy.readerSettings) || {};
+    const { enabled, giantFill } = normalizeCreatureDisplaySettings(rs.creatureDisplay);
+    setCreatureSystem({ enabled, giantFill });
+}
 export function createImageJobReporter(globalObject, getBridge, log, getReaderNotice) {
     return (level, message) => {
         if (log && typeof log.add === 'function') log.add(level, message);
@@ -87,12 +114,25 @@ export function createImageJobReporter(globalObject, getBridge, log, getReaderNo
     };
 }
 
+const OPEN_FAILURE_TEXT = Object.freeze({
+    'no-readable-text': '本楼未读取到可显示的正文，阅读器未打开。请检查正文标签设置。',
+    'no-message': '当前聊天没有可读取的楼层。',
+});
+
+function notifyOpenFailure(globalObject, reason) {
+    const text = OPEN_FAILURE_TEXT[reason] || `阅读器未打开（${reason || '未知原因'}）。`;
+    console.warn('[IGS] 打开阅读器失败：', reason);
+    const toastr = globalObject && globalObject.toastr;
+    if (toastr && typeof toastr.warning === 'function') toastr.warning(text, 'IGS');
+}
+
 export function bootstrapIGS(options = {}) {
     const globalObject = options.global || globalThis.window || globalThis;
     function sceneAssetsNow(sceneAssets) {
         return sceneAssetsForContext(sceneAssets, getSillyTavernContext(globalObject));
     }
     const events = options.events || createEventBus();
+    const offRecoveryWake = events.on('igs:legacy-settings-updated', () => wakeRecoveringOperations(globalObject));
     const mediaCache = localImageCacheFor(globalObject);
     let destroying = null;
     // getUnifiedSettingsSnapshot 的复用缓存（见该函数）；启动途中就会被调用，所以放在最前面声明。
@@ -100,31 +140,31 @@ export function bootstrapIGS(options = {}) {
     const hostAdapter = options.hostAdapter || createTavernHelperAdapter(globalObject);
     const storageLike = options.storage || getStorageLike(globalObject);
     const legacyIgs = options.legacyIgsSettings || readLegacyIgsSettings(storageLike);
+    syncCreatureSystem(legacyIgs);
     const presetStore = options.presetStore || createPresetStore(storageLike);
     const presetRegistry = options.presetRegistry || createPresetRegistry({ store: presetStore });
     const inputChannel = createInputChannel(hostAdapter);
     const layerController = options.layerController || createLayerController(options.layers || {});
     const renderer = options.renderer || createStageRenderer(layerController);
+    const readerImageOptions = (opts = {}) => {
+        const bridge = opts.unifiedSettings?.bridge || {};
+        return { ...opts, unifiedSettings: {
+            ...opts.unifiedSettings,
+            bridge: { ...bridge, autoIllustration: mergeLegacyNaiSettings(bridge.autoIllustration, bridge.imageApi) },
+        } };
+    };
     const readerImageService = options.readerImageService || createReaderImageService({
         mediaCache,
         global: globalObject,
+        getUnifiedSettings: getUnifiedSettingsSnapshot,
         hostAdapter,
-        imageGenerator: options.imageGenerator || ((request, opts) => imageBackend.generateForReader(request, {
-            ...opts,
-            unifiedSettings: {
-                ...(opts && opts.unifiedSettings),
-                bridge: (() => {
-                    const bridge = (opts && opts.unifiedSettings && opts.unifiedSettings.bridge) || {};
-                    return { ...bridge, autoIllustration: mergeLegacyNaiSettings(bridge.autoIllustration, bridge.imageApi) };
-                })(),
-            },
-        })),
+        imageGenerator: options.imageGenerator || ((request, opts) =>
+            imageBackend.generateForReader(request, readerImageOptions(opts))),
         providers: options.imageProviders,
         fetch: options.fetch,
     });
     const promptInjector = options.promptInjector || createPromptInjector(globalObject);
     const illustrationMessageHost = options.illustrationMessageHost || createIllustrationMessageHost(globalObject);
-    const secondaryLlm = options.secondaryLlm || createSecondaryLlm(globalObject, { fetch: options.fetch });
     const naiOfficialClient = options.naiOfficialClient || createNaiOfficialClient({ fetch: options.fetch || (typeof globalObject.fetch === 'function' ? globalObject.fetch.bind(globalObject) : undefined) });
     // 只读一两个字段的地方用浅合并，不为一个开关整份深拷贝配置（素材库大时每条生图日志、每次取阅读模式都很贵）。
     const peekBridge = () => ({ ...(state.legacyIgs && state.legacyIgs.bridge || {}), ...(state.config || {}) });
@@ -132,6 +172,11 @@ export function bootstrapIGS(options = {}) {
         const bridge = (getUnifiedSettingsSnapshot() || {}).bridge || {};
         return { ...bridge, autoIllustration: mergeLegacyNaiSettings(bridge.autoIllustration, bridge.imageApi) };
     };
+    const imageTaskRuntime = createBuiltinImageTaskRuntime({ readBridge: readImageBridge, registry: presetRegistry, global: globalObject,
+        subscribeSettings: handler => events.on('igs:legacy-settings-updated', handler) });
+    const secondaryLlm = createImagePromptLlm(options.secondaryLlm
+        || createSecondaryLlm(globalObject, { fetch: options.fetch }), presetRegistry, imageTaskRuntime,
+        createImageWorldInfoSource(globalObject));
     const imageJobLog = options.imageJobLog || createImageJobLog({
         storage: storageLike,
         getSettings: () => cloneData(peekBridge().imageJobLog),
@@ -149,13 +194,14 @@ export function bootstrapIGS(options = {}) {
         global: globalObject,
         llm: secondaryLlm,
         onRetry: (event) => { const notice = app.igsUi && app.igsUi.showImageNotice; if (typeof notice === 'function') notice.call(app.igsUi, 'info', event.text); },
+        taskRuntime: imageTaskRuntime,
         report: (level, message) => {
             if (imageJobLog && typeof imageJobLog.add === 'function') imageJobLog.add(level, message);
         },
     }), (event) => events.emit(IMAGE_ACTIVITY_EVENT, event));
     // CG 库与自动插图共用同一个插图存储实例；写入 / 删除槽位时顺手更新 CG 库目录。
     const cgIndexStore = options.cgIndexStore || createIndexedDbCgIndexStore(globalObject);
-    const illustrationStore = options.illustrationStore || withCgIndexSync(withTavernIllustrationFiles(createIndexedDbIllustrationStore(globalObject), globalObject), cgIndexStore);
+    const illustrationStore = options.illustrationStore || withCgIndexSync(withTavernIllustrationFiles(createIndexedDbIllustrationStore(globalObject), globalObject), cgIndexStore, globalObject);
     const readerModeNow = () => {
         const bridge = peekBridge();
         return String(resolveLegacyReaderMode(undefined, state.legacyIgs && state.legacyIgs.displayMode, bridge) || bridge.openMode || 'pc');
@@ -170,6 +216,53 @@ export function bootstrapIGS(options = {}) {
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
+        ensureCgReferences: createCharacterReferenceRecovery({
+            readAssets: () => readImageBridge().sceneAssets,
+            readContext: () => getSillyTavernContext(globalObject),
+            saveAssets: sceneAssets => saveUnifiedSettings({ bridge: { sceneAssets } }),
+            getService: () => assetGenerationService,
+        }),
+        captureCgOutfitScope: (keys) => captureOutfitScope(readImageBridge().sceneAssets || {},
+            resolveAssetScope(getSillyTavernContext(globalObject)).key, keys),
+        stageCgOutfits: (record, floor) => {
+            const bridge = readImageBridge();
+            const staged = prepareCgOutfitCandidates(bridge.sceneAssets || {},
+                resolveAssetScope(getSillyTavernContext(globalObject)).key, record, floor);
+            if (!staged.ok) return staged;
+            const loaded = loadStoryOutfitCandidates(storageLike);
+            if (!loaded.ok) return loaded;
+            const existing = new Set(loaded.items.map(row => row.id));
+            return saveStoryOutfitCandidates(storageLike, staged.items.filter(row => !existing.has(row.id)));
+        },
+        imageCodec: options.imageCodec || createCanvasImageCodec(globalObject),
+        readSpritePrompt: async (url) => (isGeneratedAssetUrl(url) && typeof assetGenerationService?.getImagePrompt === 'function'
+            ? assetGenerationService.getImagePrompt(generatedAssetIdOf(url)) : null),
+        readCgReferenceImage: async (url, options) => {
+            if (!isGeneratedAssetUrl(url)) {
+                const dataUrl = await readReferenceImageUrl(url, globalObject, options);
+                return dataUrl === null ? null : { type: 'sprite', dataUrl };
+            }
+            const id = generatedAssetIdOf(url);
+            if (typeof generatedAssetStore.readImage !== 'function') throw new Error('reference-read-unavailable');
+            const image = await generatedAssetStore.readImage(id, options);
+            if (image && (image.id !== id || image.type !== 'sprite')) throw new Error('reference-type-invalid');
+            return image;
+        },
+        subscribeCgAppearance: handler => {
+            const offs = [events.on('igs:legacy-settings-updated', () => handler({})),
+                events.on(GENERATED_ASSET_UPDATED_EVENT, detail => {
+                    if (!['image-loaded', 'hydrated'].includes(detail?.reason)) handler(detail);
+                })];
+            for (const name of ['CHAT_CHANGED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'MESSAGE_DELETED'])
+                offs.push(illustrationMessageHost.on(name, () => handler({ targetChanged: true })));
+            return () => offs.forEach(off => off?.());
+        },
+        resolveCgReference: async (characterKey, assets) => {
+            const url = assets.characters?.[characterKey]?.['默认'] || assets.generated?.characters?.[characterKey]?.['默认'] || '';
+            if (!isGeneratedAssetUrl(url)) return url;
+            const image = await generatedAssetStore.getImage(generatedAssetIdOf(url));
+            return image?.dataUrl || '';
+        },
         getSourceFilter: () => readImageBridge().sourceFilter,
         events,
         random: options.random,
@@ -177,12 +270,27 @@ export function bootstrapIGS(options = {}) {
     });
     // 物品图与素材补全共用 igs-generated-assets 存储实例。
     const generatedAssetStore = options.generatedAssetStore || withTavernGeneratedAssetFiles(createIndexedDbGeneratedAssetStore(globalObject), globalObject);
+    const characterDnaStore = createCharacterDnaStore({
+        readAssets: () => readImageBridge().sceneAssets,
+        readContext: () => getSillyTavernContext(globalObject),
+        saveAssets: sceneAssets => saveUnifiedSettings({ bridge: { sceneAssets } }),
+    });
     const assetGenerationService = options.assetGenerationService || createAssetGenerationService({
+        global: globalObject,
         messageHost: illustrationMessageHost,
         llm: secondaryLlm,
         nai: imageBackend,
+        registerCreatureProfiles: hints => (creatureSystemEnabled() ? characterDnaStore.registerCreatures(hints) : { ok: true, changed: false }),
+        captureCharacterDnaTarget: name => {
+            const target = characterDnaStore.capture(name);
+            return app.igsUi?.withCharacterDnaDraftSync?.(target) || target;
+        },
         store: generatedAssetStore,
         mediaCache,
+        readProtectedImageIds: () => protectedAssetImageIds({
+            readSceneAssets: () => readImageBridge().sceneAssets || {},
+            storage: storageLike, illustrationStore,
+        }),
         matte: options.alphaMatte || createAlphaMatte(globalObject),
         getSettings: () => {
             const bridge = readImageBridge();
@@ -196,6 +304,17 @@ export function bootstrapIGS(options = {}) {
         thumbStore: options.assetThumbStore !== undefined ? options.assetThumbStore : createIndexedDbAssetThumbStore(globalObject),
         makeThumb: createAssetThumbnailer(globalObject),
     });
+    const storyOutfits = assetGenerationService.writeWardrobePrompt && storageLike
+        ? createStoryOutfitRuntime({ storage: storageLike, assets: assetGenerationService,
+            messageHost: illustrationMessageHost,
+            readContext: () => getSillyTavernContext(globalObject), readBridge: readImageBridge,
+            saveAssets: sceneAssets => saveUnifiedSettings({ bridge: { sceneAssets } }),
+            onAssetsSaved: (before, next) => app.igsUi?.syncStoryOutfitDraft?.(before, next),
+            onAutoResult(_row, result) {
+                if (result?.ok) reportImageJob('success', '剧情衣装和对应立绘已入库');
+                else reportImageJob('error', '剧情衣装自动处理未完成，请查看衣装审核与生图日志');
+            },
+        }) : null;
     generatedAssetStore.setReferenceResolver?.(() => readImageBridge().sceneAssets);
     const media = createMediaRuntime(globalObject, { generatedAssetStore });
     const itemCg = createItemAndCgServices({
@@ -262,8 +381,30 @@ export function bootstrapIGS(options = {}) {
     let sceneAssetsInjectionTimer = null;
     app.igsUi = options.igsUi || createIgsReaderHost({
         global: globalObject,
+        // statsRuntime 在阅读器之后创建，这里按需读取。
+        statsLookup: () => (app.statsRuntime && typeof app.statsRuntime.metricsLookup === 'function' ? app.statsRuntime.metricsLookup() : null),
+        statsChat: () => (app.statsRuntime ? app.statsRuntime.chatStatus() : null),
+        statsArchive: () => (app.statsRuntime ? app.statsRuntime.archive() : null),
+        // 推送映射页：读当前表格，按草稿里的覆盖值标出每列状态；没装数据库插件时返回 null。
+        statsMappings: (overridesByFingerprint) => {
+            const api = globalObject.AutoCardUpdaterAPI;
+            return api ? describeStatMappings(createShujukuClient(api).readTables(), overridesByFingerprint || {}) : null;
+        },
+        statsChatAction: (kind, payload) => {
+            if (!app.statsRuntime) return { ok: false, reason: 'stats-runtime-missing' };
+            if (kind !== 'enable') return app.statsRuntime.disableForChat();
+            // 按分配启用：超点或多选时不建卡，返回原因；已有存档（之前暂停过）时沿用冻结的数值，分配不覆盖（§10A）。
+            if (payload && Object.hasOwn(payload, 'build')) {
+                // 世界观附加技能只在当前世界观下计入；与设置页显示的候选保持一致。
+                const built = buildInitialState(payload.build, { worldview: payload.worldview });
+                if (!built.ok) return { ok: false, reason: built.reason };
+                return app.statsRuntime.enableForChat({ initial: built.state });
+            }
+            return app.statsRuntime.enableForChat();
+        },
         media,
         version: app.version,
+        presetRegistry,
         random: options.random,
         getIllustrationSource: (messageId) => illustrationMessageHost.readFloor(messageId),
         getIllustrationUrl: (query) => illustrationService.getIllustrationUrl(query),
@@ -273,10 +414,12 @@ export function bootstrapIGS(options = {}) {
         onIllustrationProgress: (handler) => events.on(ILLUSTRATION_PROGRESS_EVENT, handler),
         onImageActivity: (handler) => events.on(IMAGE_ACTIVITY_EVENT, handler),
         generatedAssets: assetGenerationService,
+        storyOutfits,
         // 遮罩修复编辑器的 AI 局部重绘：只经 describeEdit/edit 显式调用，不影响普通生成。
         imageEditBackend: imageBackend,
         alphaMatte: options.alphaMatte || createAlphaMatte(globalObject),
         onGeneratedAssetUpdated: (handler) => events.on(GENERATED_ASSET_UPDATED_EVENT, handler),
+        onSettingsUpdated: (handler) => events.on('igs:legacy-settings-updated', handler),
         itemImages: itemCg.itemImages,
         cgGallery: itemCg.cgGallery,
         onItemImageUpdated: itemCg.onItemImageUpdated,
@@ -284,6 +427,11 @@ export function bootstrapIGS(options = {}) {
         requestMoodClassification({ system, user }, llmSettings) {
             return secondaryLlm.request({ system, user }, llmSettings);
         },
+        requestSecondaryText({ system, user }, llmSettings) {
+            return secondaryLlm.request({ system, user }, llmSettings);
+        },
+        readCardWorldbook: (names) => (typeof illustrationMessageHost.readCardWorldbook === 'function'
+            ? illustrationMessageHost.readCardWorldbook(names) : []),
         getCurrentChatId: () => (typeof illustrationMessageHost.getChatId === 'function' ? illustrationMessageHost.getChatId() : ''),
         imageJobLog,
         getUnifiedSettings: getUnifiedSettingsSnapshot,
@@ -291,11 +439,12 @@ export function bootstrapIGS(options = {}) {
         getSettingsRevision: () => state.settingsRevision || 0,
         saveUnifiedSettings,
         typeAndSend,
+        resumeReply: () => hostAdapter.resumeReply?.() || { ok: false, reason: 'reply-host-not-ready' },
         setInputText(text) {
             return typeof hostAdapter.setInputText === 'function' ? hostAdapter.setInputText(text) : { ok: false, reason: 'missing-input-api' };
         },
-        fillEmptyInputText(text) {
-            return typeof hostAdapter.fillEmptyInputText === 'function' ? hostAdapter.fillEmptyInputText(text) : { ok: false, reason: 'missing-readable-input' };
+        fillEmptyInputText(text, options) {
+            return typeof hostAdapter.fillEmptyInputText === 'function' ? hostAdapter.fillEmptyInputText(text, options) : { ok: false, reason: 'missing-readable-input' };
         },
         // 内嵌模式点小铅笔编辑完成 / 取消后，按原模式重新打开最新楼层；publicApi 在阅读器宿主之后创建，延迟取用。
         reopenReader(mode) {
@@ -335,6 +484,9 @@ export function bootstrapIGS(options = {}) {
         testImageApi(context = {}) {
             return readerImageService.test({
                 ...context,
+                imageGenerator: options.imageGenerator || ((request, opts) =>
+                    (imageBackend.testForReader || imageBackend.generateForReader)
+                        .call(imageBackend, request, readerImageOptions(opts))),
                 providers: getImageProviders(),
                 unifiedSettings: context.settings || context.unifiedSettings || getUnifiedSettingsSnapshot({ mode: context.mode }),
             });
@@ -352,6 +504,17 @@ export function bootstrapIGS(options = {}) {
         getCurrentMessage: () => hostAdapter.getCurrentMessage(),
     });
     publicApi = createPublicApi(app);
+    // QR 按钮经 loader 直接调用此入口，失败时 loader 只写控制台，表现为点击无反应；失败原因在此提示。
+    const openLatestQuiet = publicApi.openLatestAvailable;
+    publicApi.openLatestAvailable = (...args) => Promise.resolve()
+        .then(() => openLatestQuiet(...args))
+        .then((result) => {
+            if (result && result.ok === false) notifyOpenFailure(globalObject, result.reason);
+            return result;
+        }, (error) => {
+            notifyOpenFailure(globalObject, error && error.message || String(error));
+            throw error;
+        });
     readerImageService.registerProviders(publicApi.api.imageProviders);
     attachPublicApi(globalObject, publicApi);
     app.magicWandEntry = options.magicWandEntry || createMagicWandEntry({
@@ -360,7 +523,7 @@ export function bootstrapIGS(options = {}) {
         media,
         version: app.version,
         label: '沉浸式Galgame系统',
-        open: (mode) => publicApi.openLatestAvailable(mode),
+        open: (mode) => openLatestQuiet(mode),
         resolveMode: () => {
             const snapshot = publicApi.getUnifiedSettings({});
             return snapshot && (snapshot.readerMode || snapshot.bridge && snapshot.bridge.openMode) || 'pc';
@@ -397,14 +560,30 @@ export function bootstrapIGS(options = {}) {
             app.extensionPanel.attach();
         }
     }
+    runSpriteMigration();
+    function runSpriteMigration() {
+        const bridge = { ...state.legacyIgs?.bridge, ...state.config };
+        const planned = migrateSpriteSystem(bridge.sceneAssets, state.legacyIgs?.readerSettingsByMode || {});
+        if (!planned.changed) return;
+        const assets = Object.keys(planned.sceneAssets.generated?.expressionNotes || {}).length
+            ? { ...planned.sceneAssets, spriteMigrationNotesPending: true } : planned.sceneAssets;
+        const saved = saveUnifiedSettings({ bridge: { sceneAssets: assets },
+            readerSettingsByMode: planned.readerSettingsByMode, spriteMigration: true });
+        state.spriteMigration = saved.ok ? { ok: true } : { ok: false, reason: saved.reason };
+        if (!saved.ok) console.warn('[IGS] 旧立绘迁移保存失败，原数据保持不变，可在下次保存或启动时重试。');
+    }
     // 全局配置镜像到酒馆 user/files：另一台设备存得更新时写回本机并刷新运行时设置。
     if (!options.storage && storageLike && options.tavernSettingsSync !== false) {
         state.settingsSync = createTavernSettingsSync(globalObject, {
             storage: storageLike,
+            onUploaded: () => { if (!state.destroyed) void media.referencesChanged().catch(() => {}); },
             onRestored: () => {
                 if (state.destroyed) return;
+                void media.referencesChanged().catch(() => {});
                 state.legacyIgs = readLegacyIgsSettings(storageLike);
+                syncCreatureSystem(state.legacyIgs);
                 state.config = mergeInitialConfig(options.config, state.legacyIgs);
+                runSpriteMigration();
                 state.settingsRevision = (state.settingsRevision || 0) + 1;
                 if (typeof presetRegistry.hydrate === 'function') presetRegistry.hydrate();
                 events.emit('igs:legacy-settings-updated', state.legacyIgs);
@@ -418,11 +597,25 @@ export function bootstrapIGS(options = {}) {
     }
     // 立绘提示词单独落酒馆文件（localStorage 不存这段）：读回后补进运行时配置。
     if (!options.storage && storageLike && options.tavernSettingsSync !== false) {
-        state.notesFile = createExpressionNotesFile(globalObject);
+        state.notesFile = createExpressionNotesFile(globalObject, {
+            onUploaded: body => {
+                const assets = state.config?.sceneAssets;
+                if (state.destroyed || !assets?.spriteMigrationNotesPending
+                    || JSON.stringify(assets.generated?.expressionNotes || {}) !== body) return;
+                saveUnifiedSettings({ bridge: { sceneAssets: { ...assets, spriteMigrationNotesPending: false } } });
+            },
+        });
         void state.notesFile.load().then((notes) => {
-            if (state.destroyed || !notes) return;
-            state.fileExpressionNotes = notes;
-            if (applyFileExpressionNotes()) events.emit('igs:legacy-settings-updated', state.legacyIgs);
+            if (state.destroyed) return;
+            if (notes) {
+                state.fileExpressionNotes = notes;
+                if (applyFileExpressionNotes()) events.emit('igs:legacy-settings-updated', state.legacyIgs);
+            }
+            const current = state.config?.sceneAssets?.generated?.expressionNotes;
+            if (current) {
+                state.fileExpressionNotes = cloneData(current);
+                state.notesFile.save(current);
+            }
         });
     }
     // 存储里的配置只读：补进来的提示词按路径浅拷出新的 bridge 再整份换上，并升版本让缓存失效。
@@ -437,7 +630,8 @@ export function bootstrapIGS(options = {}) {
             const next = {};
             for (const [name, moods] of Object.entries(current)) next[name] = moods && typeof moods === 'object' && !Array.isArray(moods) ? { ...moods } : moods;
             if (!fillExpressionNotes(next, notes)) return bridge;
-            return { ...bridge, sceneAssets: { ...sa, generated: { ...generated, expressionNotes: next } } };
+            const migrated = migrateSpriteSystem({ ...sa, generated: { ...generated, expressionNotes: next } });
+            return { ...bridge, sceneAssets: migrated.sceneAssets };
         };
         const config = withNotes(state.config);
         const legacyBridge = state.legacyIgs && state.legacyIgs.bridge;
@@ -450,6 +644,9 @@ export function bootstrapIGS(options = {}) {
     }
     function applyImageCacheLimit(bridge) {
         const cache = mediaCache;
+        if (cache && typeof cache.setDisplayCompression === 'function') {
+            void cache.setDisplayCompression(bridge?.imageCache?.compressDisplay !== false).catch(error => console.warn('[IGS 图片缓存] 设置未完成', error));
+        }
         if (cache && typeof cache.setMaxCount === 'function') {
             void cache.setMaxCount(bridge && bridge.imageCache && bridge.imageCache.maxCount);
         }
@@ -461,11 +658,48 @@ export function bootstrapIGS(options = {}) {
     applyImageCacheLimit((getUnifiedSettingsSnapshot() || {}).bridge);
     illustrationService.start();
     assetGenerationService.start();
+    storyOutfits?.start();
     itemCg.itemImages.start();
     itemCg.itemLedger.start();
     scheduleSceneAssetsInjection(SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS, 1);
     attachChatChangedReinjection();
     attachMetaDigestSync();
+    // 数值系统：总开关关闭时 sync() 不挂任何监听；设置保存后重新同步（易错点 H1）。
+    const statsRuntime = createStatsRuntime({
+        getContext: resolveTavernContext,
+        readSettings: () => ((getUnifiedSettingsSnapshot() || {}).bridge || {}).stats,
+        getPushClient: () => (globalObject.AutoCardUpdaterAPI ? createShujukuClient(globalObject.AutoCardUpdaterAPI) : null),
+        // 词表冲突时的辅助模型（§4.1、G1/G2）：只用独立 API。生成开始事件会被宿主等待，此时再走酒馆 generateRaw 等于嵌套主生成，可能互相阻塞，因此沿用酒馆 API 时不启用，按无需检定继续。
+        getModelRequest: () => {
+            const auto = ((getUnifiedSettingsSnapshot() || {}).bridge || {}).autoIllustration || {};
+            const llm = auto.llm;
+            if (!llm || llm.source !== 'openai' || !describeLlmReady(llm).ok) return null;
+            return (prompt) => secondaryLlm.request({ system: prompt.system, user: prompt.user }, llm);
+        },
+        onChange: (statsState, entry, info) => {
+            // 换聊天时清掉上一个聊天的吃醋情敌，同名角色不串（§5.3 修罗场联动）。
+            if (info && info.chatChanged) clearStatsRivals();
+            events.emit('igs:stats-updated', { state: statsState, entry });
+            // 演出数据（P5）：只在本楼有新结算时发出；没有可播内容时 statsFxOf 返回 null，直接跳过。
+            if (!entry) return;
+            const hudLabel = normalizeStatsSettings(((getUnifiedSettingsSnapshot() || {}).bridge || {}).stats).hudLabel;
+            const fx = statsFxOf(entry, { hudLabel });
+            if (!fx) return;
+            events.emit('igs:stats-fx', { messageId: entry.messageId, swipeId: entry.swipeId, ...fx });
+            // 吃醋扣过好感的角色登记为修罗场情敌来源；主对象仍只认 romance 第 3 栏。
+            if (fx.jealous && fx.jealous.length) registerStatsRivals(fx.jealous);
+            // 成长与战斗结果走阅读器生成细线（不弹窗、不挡画面，§10）；阅读器未打开时 info 级不退回 toastr。
+            const notice = app.igsUi && app.igsUi.showImageNotice;
+            if (typeof notice === 'function') {
+                for (const line of statsNoticeLines(fx)) {
+                    try { notice.call(app.igsUi, 'info', line); } catch (error) { /* 细线出错不影响结算 */ }
+                }
+            }
+        },
+    });
+    app.statsRuntime = statsRuntime;
+    state.statsSettingsOff = events.on('igs:legacy-settings-updated', () => statsRuntime.sync());
+    statsRuntime.sync();
     events.emit('igs:ready', publicApi);
 
     return publicApi;
@@ -626,7 +860,11 @@ export function bootstrapIGS(options = {}) {
             nextBridge,
         );
         // 只换 default 桶，其余桶原样共享（只读）。
-        const readerSettingsByMode = { ...(currentLegacy.readerSettingsByMode || {}) };
+        let readerSettingsByMode = { ...(currentLegacy.readerSettingsByMode || {}),
+            ...cloneData(payload.readerSettingsByMode || {}) };
+        const hasValues = value => value && typeof value === 'object' && Object.keys(value).length > 0;
+        if (!hasValues(readerSettingsByMode.default)) readerSettingsByMode.default = cloneData(
+            [readerSettingsByMode.pc, readerSettingsByMode.mobile, currentLegacy.readerSettings].find(hasValues) || {});
         // v0.21.4 起全模式共用一套设置，统一存取 'default' 桶。
         // 历史上保存按 readerMode 分桶、读取却固定读 'default'，导致移动端存了读不回。
         for (const mode of LEGACY_READER_MODES) {
@@ -635,6 +873,11 @@ export function bootstrapIGS(options = {}) {
         if (payload.readerSettings && typeof payload.readerSettings === 'object') {
             readerSettingsByMode['default'] = cloneData(payload.readerSettings);
         }
+        const migration = migrateSpriteSystem(nextBridge.sceneAssets, readerSettingsByMode);
+        nextBridge.sceneAssets = migration.sceneAssets;
+        if (migration.changed && Object.keys(nextBridge.sceneAssets?.generated?.expressionNotes || {}).length)
+            nextBridge.sceneAssets = { ...nextBridge.sceneAssets, spriteMigrationNotesPending: true };
+        readerSettingsByMode = migration.readerSettingsByMode;
         const nextLegacy = {
             ok: true,
             bridge: nextBridge,
@@ -644,7 +887,7 @@ export function bootstrapIGS(options = {}) {
             readerSettingsByMode,
         };
         const writeResult = storageLike
-            ? writeLegacyIgsSettings(storageLike, nextLegacy)
+            ? writeLegacyIgsSettings(storageLike, nextLegacy, { migration: migration.changed || payload.spriteMigration === true })
             : { ok: true, legacy: nextLegacy, persisted: false };
         if (writeResult.ok === false) return writeResult;
         const savedNotes = nextBridge.sceneAssets && nextBridge.sceneAssets.generated && nextBridge.sceneAssets.generated.expressionNotes;
@@ -654,6 +897,7 @@ export function bootstrapIGS(options = {}) {
         // 整份替换：nextBridge 是本次唯一一次深拷（payload 多半是设置草稿，之后还会被原地改），已含 state.config 全部键。
         // 从此它和 writeResult.legacy 都只读，config 与 legacy.bridge 共用同一份。
         state.legacyIgs = writeResult.legacy;
+        syncCreatureSystem(state.legacyIgs);
         state.config = nextBridge;
         state.settingsRevision = (state.settingsRevision || 0) + 1;
         // 监听方只当通知用（不读载荷），传引用即可；需要数据请走 getUnifiedSettings。
@@ -688,14 +932,16 @@ export function bootstrapIGS(options = {}) {
         // 交互摘要：只在有待送出的事件时注入，生成结束后清空（见 attachMetaDigestSync）。
         // 直播互动与 Meta 互动共用待送出事件，各自开关、各自成段，合并后走同一条注入路径。
         const metaDigestRule = [resolveMetaDigestRule(readerSettings && readerSettings.metaFx), resolveLiveDigestRule(readerSettings)].filter(Boolean).join('\n\n');
+        const promptContext = collectPromptContext(resolveTavernContext(), { document: globalObject.document });
+        const outfitContext = { previousAiTexts: promptContext.previousAiTexts,
+            sourceFilter: unified.bridge?.sourceFilter, virtualRegex: unified.bridge?.virtualRegex };
         if (sceneAssets && sceneAssets.promptAdaptive === false) {
-            return injectLegacyPromptRules(sceneAssets, readerSettings, { ancient, eraRule, placement, metaDigestRule });
+            return injectLegacyPromptRules(sceneAssets, readerSettings, { ancient, eraRule, placement, metaDigestRule, outfitContext });
         }
         if (generationType === 'impersonate' || generationType === 'quiet') {
             promptInjector.clear();
             return { ok: true, reason: 'generation-type-skipped' };
         }
-        const promptContext = collectPromptContext(resolveTavernContext(), { document: globalObject.document });
         // 社区平台写法只展开最近提到的平台，其余只列名字。
         if (readerSettings && readerSettings.feedFx) readerSettings.feedFx.mentioned = mentionedFeedPlatforms([promptContext.userText, ...(promptContext.recentAiTexts || []).slice(-2)]);
         const sceneOn = Boolean(sceneAssets && sceneAssets.enabled && scenePromptRuleEnabled(sceneAssets) && sceneAssets.promptRule);
@@ -703,7 +949,7 @@ export function bootstrapIGS(options = {}) {
         const triggers = resolvePromptTriggers({ ...promptContext, entries });
         const grammar = buildTagGrammar({
             readerSettings,
-            sceneRule: sceneOn ? resolvePromptRuleContent(sceneAssets, { compact: true, presentText: promptContext.presentText }) : '',
+            sceneRule: sceneOn ? resolvePromptRuleContent(sceneAssets, { compact: true, presentText: promptContext.presentText, ...outfitContext }) : '',
             ancient,
             expand: triggers.hits,
             tailRules: eraRule ? [eraRule] : [],
@@ -722,14 +968,16 @@ export function bootstrapIGS(options = {}) {
     }
 
     // 关闭按需注入时的旧行为：各块完整拼接；未自定义的场景规则用改版前的长版原文。
-    function injectLegacyPromptRules(sceneAssets, readerSettings, { ancient, eraRule, placement, metaDigestRule }) {
+    function injectLegacyPromptRules(sceneAssets, readerSettings, { ancient, eraRule, placement, metaDigestRule, outfitContext }) {
         const rules = [];
         // 场景规则自带 [igs标签语法] 头部（含通用机制）；没有它时，若后面有演出规则就补一次兜底，
         // 因为各演出块已把通用机制抽到头部、自身不再复述。
         let hasHeader = false;
         if (sceneAssets && sceneAssets.enabled && scenePromptRuleEnabled(sceneAssets) && sceneAssets.promptRule) {
-            const promptRule = sceneAssets.promptRule === DEFAULT_SCENE_PROMPT_RULE ? LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3 : sceneAssets.promptRule;
-            rules.push(resolvePromptRuleContent({ ...sceneAssets, promptRule }));
+            const promptRule = sceneAssets.promptRule === DEFAULT_SCENE_PROMPT_RULE
+                ? `${LEGACY_DEFAULT_SCENE_PROMPT_RULE_V3}\n{{previous_outfit_dna}}`
+                : sceneAssets.promptRule;
+            rules.push(resolvePromptRuleContent({ ...sceneAssets, promptRule }, outfitContext));
             hasHeader = true;
         }
         const rs = readerSettings || {};
@@ -751,6 +999,10 @@ export function bootstrapIGS(options = {}) {
         pushFx('bilingual', resolveBilingualPromptRule(rs.bilingual));
         pushFx('daily', resolveDailyFxPromptRule(rs.dailyFx));
         pushFx('battle', resolveBattleFxPromptRule(Boolean(rs.battleFx && rs.battleFx.enabled)));
+        // 非人角色标签：与 pushFx 同一注入条件（inject 打开且战斗演出开启）；条目关闭则不发，条目正文非空时用用户的覆盖文本。
+        { const entry = normalizePromptEntries(sceneAssets && sceneAssets.promptEntries).creature;
+            const creatureRule = resolveCreatureFxPromptRule(Boolean(rs.battleFx && rs.battleFx.enabled && rs.battleFx.creature !== false) && creatureSystemEnabled());
+            if (fxPrompts.inject && creatureRule && entry.mode !== 'off') rules.push(entry.text.trim() || creatureRule); }
         pushFx('romance', resolveRomanceFxPromptRule(rs.romanceFx));
         pushFx('bgm', resolveBgmPromptRule(rs.bgm));
         pushFx('cast', resolveStageCastFxPromptRule(rs.stageCast));
@@ -775,7 +1027,8 @@ export function bootstrapIGS(options = {}) {
     function syncSceneAssetsInjectionWithRetry(attempt) {
         const result = syncSceneAssetsInjection();
         if (shouldRetrySceneAssetsInjection(result, attempt)) {
-            scheduleSceneAssetsInjection(SCENE_ASSETS_INJECTION_RETRY_MS, attempt + 1);
+            scheduleSceneAssetsInjection(Math.min(30000,
+                SCENE_ASSETS_INJECTION_RETRY_MS * 2 ** Math.min(attempt, 5)), attempt + 1);
         }
         return result;
     }
@@ -802,7 +1055,7 @@ export function bootstrapIGS(options = {}) {
 
     function shouldRetrySceneAssetsInjection(result, attempt) {
         if (!result || result.ok !== false) return false;
-        if (attempt >= SCENE_ASSETS_INJECTION_MAX_ATTEMPTS) return false;
+        if (state.destroyed) return false;
         return result.reason !== 'empty-content';
     }
 
@@ -915,12 +1168,17 @@ export function bootstrapIGS(options = {}) {
         close(() => state.notesFile?.flush());
         close(() => state.metaDigestCleanup?.());
         state.metaDigestCleanup = null;
+        close(() => state.statsSettingsOff?.());
+        close(() => app.statsRuntime?.destroy());
+        close(() => imageTaskRuntime.dispose());
         close(() => promptInjector.clear());
+        close(() => storyOutfits?.dispose());
         close(() => illustrationService.stop());
         close(() => assetGenerationService.stop());
         close(() => itemCg.itemImages.stop());
         close(() => itemCg.itemLedger.stop());
         close(offMediaClear);
+        close(offRecoveryWake);
         close(() => readerImageService.destroy?.());
         close(() => app.igsUi?.destroy?.());
         close(() => app.magicWandEntry?.destroy?.());

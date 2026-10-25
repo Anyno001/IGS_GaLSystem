@@ -1,5 +1,6 @@
 import { IMAGE_FIELDS, isImageData, imageFingerprint } from './image-identity.js';
 import { collectImageReferences } from './image-references.js';
+export const IMAGE_IMPORT_READER = Symbol('igs-archive-image-reader');
 
 export function remapImageReferences(value, ids) {
     if (typeof value === 'string') return value.startsWith('igs-gen:') && ids.has(value.slice(8)) ? `igs-gen:${ids.get(value.slice(8))}` : value;
@@ -24,8 +25,8 @@ export async function prepareImageImport(images, value, service, options = {}) {
     const source = extractInlineAvatars(value, records), ids = new Map(), written = [];
     const newId = options.newId || (() => `import-${Date.now().toString(36)}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`);
     for (const record of records) {
-        if (!record?.id || ids.has(String(record.id)) || !isImageData(record.dataUrl)
-            || IMAGE_FIELDS.some(field => record[field] && !isImageData(record[field]))) return { ok: false, reason: 'invalid-image-pack' };
+        if (!record?.id || ids.has(String(record.id)) || (typeof record[IMAGE_IMPORT_READER] !== 'function' && (!isImageData(record.dataUrl)
+            || IMAGE_FIELDS.some(field => record[field] && !isImageData(record[field]))))) return { ok: false, reason: 'invalid-image-pack' };
         const id = newId();
         if (!id || [...ids.values()].includes(id) || id === String(record.id)) return { ok: false, reason: 'image-import-id-collision' };
         ids.set(String(record.id), id);
@@ -43,8 +44,10 @@ export async function prepareImageImport(images, value, service, options = {}) {
     try {
         for (const record of records) {
             const id = ids.get(String(record.id));
+            const loaded = typeof record[IMAGE_IMPORT_READER] === 'function' ? await record[IMAGE_IMPORT_READER]() : record;
+            if (loaded?.id !== record.id || !isImageData(loaded.dataUrl) || IMAGE_FIELDS.some(field => loaded[field] && !isImageData(loaded[field]))) throw new Error('invalid-image-pack');
             written.push(id); // 包括可能已落盘、但后续返回失败的当前记录。
-            const result = await service?.writeStoredImage?.({ ...record, id });
+            const result = await service?.writeStoredImage?.(remapImageReferences({ ...loaded, id }, ids), { cacheDisplay: false });
             if (!result?.ok) throw new Error(result?.error || 'image-import-save-failed');
         }
     } catch (error) {

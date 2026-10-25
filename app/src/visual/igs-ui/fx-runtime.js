@@ -31,6 +31,9 @@ export const FX_LIFETIME_MS = Object.freeze({
     favor: 2400, notify: 3300, delivery: 3300, eye: 1600, call: 2400, 'call-end': 1800, nickname: 3400, voicemail: 4200, contact: 3000, cutin: 1400, promise: 3200, 'promise-due': 3600,
 });
 export const TITLE_CARD_LIFETIME_MS = Object.freeze({ fast: 1800, medium: 2700, slow: 4200 });
+// 水墨武侠的过场标题卡：朱砂印 2.08s 才落定，至少停 3600ms，与序章开场卡一致。
+export const WUXIA_TITLE_CARD_MS = 3600;
+const isWuxiaInkSkin = (snapshot) => String((snapshot && snapshot.readerSettings && snapshot.readerSettings.dialogSkin) || '') === 'wuxia-ink';
 const SEEN_LIMIT = 256;
 const FAVOR_LIMIT = 256;
 const MIN_FAVOR_DELTA = 1;
@@ -122,7 +125,10 @@ export function diffFavorMetrics(baseline, character, metrics) {
     if (!name || !Array.isArray(metrics)) return changes;
     for (const metric of metrics) {
         const label = text(metric && metric.label);
-        const value = Number(metric && metric.percent);
+        // 数值系统的指标带原始值（含负数），按原始值算增减；表格指标仍按条长。
+        const value = metric && metric.statValue != null && Number.isFinite(Number(metric.statValue))
+            ? Number(metric.statValue)
+            : Number(metric && metric.percent);
         if (!label || !Number.isFinite(value)) continue;
         const key = `${name}::${label}`;
         const previous = baseline.get(key);
@@ -130,7 +136,7 @@ export function diffFavorMetrics(baseline, character, metrics) {
         baseline.set(key, value);
         if (previous == null) continue;
         const delta = Math.round((value - previous) * 10) / 10;
-        if (Math.abs(delta) >= MIN_FAVOR_DELTA) changes.push({ character: name, label, delta });
+        if (Math.abs(delta) >= MIN_FAVOR_DELTA) changes.push({ character: name, label, delta, ...(metric.quiet === true ? { quiet: true } : {}) });
     }
     while (baseline.size > FAVOR_LIMIT) baseline.delete(baseline.keys().next().value);
     return changes;
@@ -626,7 +632,7 @@ function pulseSpriteBeat(root, tone, reduced) {
 function playEffect(effect, ctx) {
     const { state, layers, doc, snapshot, options, reduced, plan, root } = ctx;
     const base = effect.type === 'title'
-        ? (TITLE_CARD_LIFETIME_MS[plan.titleSpeed] || TITLE_CARD_LIFETIME_MS.medium)
+        ? Math.max(TITLE_CARD_LIFETIME_MS[plan.titleSpeed] || TITLE_CARD_LIFETIME_MS.medium, isWuxiaInkSkin(snapshot) ? WUXIA_TITLE_CARD_MS : 0)
         : (FX_LIFETIME_MS[effect.type] || 1000);
     const life = HOLDABLE.has(effect.type) ? Math.round(base * (FX_HOLD_SCALE[plan.style.hold] || 1)) : base;
     const busy = BUSY_EFFECTS.has(effect.type);
@@ -649,13 +655,18 @@ function playEffect(effect, ctx) {
     } else if (effect.type === 'title') {
         // 古代背景是一条宣纸竖幅：地点、时间竖排，末尾朱印；竖排里不要「——」引线。
         const el = node(doc, (ctx.ancient ? 'igs-fx-title-card is-ancient' : 'igs-fx-title-card') + (ctx.worldSkin || '') + (ctx.xianxiaInk || ''));
+        // 印文取标题首字，供带字小印的皮肤（水墨武侠）用 attr() 读出。
+        el.setAttribute('data-igs-seal', Array.from(String(effect.main || ''))[0] || '');
         const sub = ctx.ancient && effect.sub ? effect.sub.replace(/^——\s*/, '') : effect.sub;
         if (effect.main) el.appendChild(node(doc, 'igs-fx-title-main', effect.main));
         if (sub) el.appendChild(node(doc, 'igs-fx-title-sub', sub));
         spawn(state, layers.front, el, life, false, true);
     } else if (effect.type === 'favor') {
         const up = effect.delta > 0;
-        const el = node(doc, 'igs-fx-favor', `${effect.character} ${effect.label} ${up ? '↑' : '↓'} ${up ? '+' : ''}${effect.delta}`);
+        // 阶段名模式只出心形，不露数字（§10）。
+        const el = node(doc, 'igs-fx-favor', effect.quiet
+            ? `${effect.character} ${up ? '♥' : '♡'}`
+            : `${effect.character} ${effect.label} ${up ? '↑' : '↓'} ${up ? '+' : ''}${effect.delta}`);
         el.setAttribute('data-dir', up ? 'up' : 'down');
         const stack = persistent(layers.front, doc, 'igs-fx-favor-stack');
         spawn(state, stack, el, life);
@@ -1116,7 +1127,8 @@ export function applyFxToDom(root, snapshot, options = {}) {
         accent: accent || pickFxAccent(options.theme) || '',
     });
     const { flashback, dream, letterbox } = plan.ranges;
-    return { played: [...plan.effects.map((effect) => effect.type), ...castPlayed, ...dlcPlayed], phone: remote, whisper: plan.whisper === true, ranges: { flashback: Boolean(flashback), dream: Boolean(dream), letterbox: Boolean(letterbox) } };
+    // umbrella 交给场景音频：撑伞区间里伞外雨声变闷、头顶叠雨打伞面。
+    return { played: [...plan.effects.map((effect) => effect.type), ...castPlayed, ...dlcPlayed], phone: remote, whisper: plan.whisper === true, ranges: { flashback: Boolean(flashback), dream: Boolean(dream), letterbox: Boolean(letterbox), umbrella: Boolean(plan.atmos.umbrella) } };
 }
 
 export function cancelFxEffects(root) {

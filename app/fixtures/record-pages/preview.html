@@ -122,17 +122,17 @@ function openSettingsScene() {
   const mem = createMemoryStorage();
   // ?card=卡名：模拟打开了一张角色卡，小雪和睡衣提示词放在这张卡里，其余在全局。
   const cardAssets = {
-    characters: { 小雪: q.get('gen') ? { 默认: 'igs-gen:snow-default', 微笑: 'igs-gen:snow-smile', 害羞: '' } : { 默认: img, 微笑: img, 害羞: '' } },
+    characters: { 小雪: q.get('gen') ? { 默认: 'igs-gen:snow-default', 微笑: 'igs-gen:snow-smile', 害羞: '' } : { 默认: img, 微笑: img, 害羞: '' }, ...(q.get('creature') ? { 岩甲蜥: { 默认: img }, 狐妖: { 默认: img } } : {}) },
     characterAliases: { 小雪: ['雪'] },
     characterOutfits: { 小雪: { 校服: { moods: { 微笑: img }, words: ['制服'], scenes: [], note: '' }, 睡衣: { moods: {}, words: [], scenes: ['卧室'], note: '晚上在家' } } },
     wardrobe: { 睡衣: { prompt: 'pink pajamas' } },
   };
-  mem.setItem('igs_bridge_config', JSON.stringify({ sceneAssets: {
+  mem.setItem('igs_bridge_config', JSON.stringify({ ...(q.get('nai') ? { imageApi: { mode: 'nai' } } : {}), sceneAssets: {
     enabled: true, promptRule: '规则', characterAliases: {}, moodGroups: [],
     // 带时间行和长名字，看窄屏挤不挤。
     scenes: { 教室: { url: img, times: { '14:50': { url: img } } }, 走廊: { url: img, times: {} }, 海边: { url: img, times: { '黄昏': { url: img } } }, 天台: { url: '', times: {} }, 伦敦国王十字车站: { url: 'https://example.com/london.png', times: {} } },
     characters: { 林夏: { 普通: img, 微笑: img }, 陈屿: { 普通: img }, 路人: { 普通: '' } },
-    characterDna: { 林夏: { identity: '黑色长发，琥珀色眼睛' } },
+    characterDna: { 林夏: { identity: '黑色长发，琥珀色眼睛' }, ...(q.get('creature') ? { 岩甲蜥: { creature: { form: 'beast', size: 'large' } }, 狐妖: { creature: { form: 'humanoid', size: 'medium', framing: 'half' } } } : {}) },
     wardrobe: { 校服: { prompt: 'white shirt, pleated skirt' }, 泳装: { prompt: '' } },
     ...(q.get('card') ? { cards: { [`card:${q.get('card')}`]: cardAssets } } : cardAssets),
   } }));
@@ -144,6 +144,7 @@ function openSettingsScene() {
     雪之国日常: { scenes: { 教室: { url: img, times: {} } }, characters: {}, scopeCards: { 'card:雪之国': { label: '雪之国', library: { scenes: { 小雪的房间: { url: img } }, characters: { 小雪: { 默认: img } } } } } },
   } }));
   mem.setItem('igs:mood-review:v1', JSON.stringify({ version: 1, items: [{ word: '幽怨' }, { word: '嘲弄' }] }));
+  if (q.get('recent')) mem.setItem('igs:settings-recent:v1', JSON.stringify([{ path: 'readerSettings.showStatusLine', label: '显示页码', page: 'style' }, { path: 'readerSettings.dialogSkin', label: '对话框皮肤', page: 'style' }, { path: 'bridge.optionBubble.enabled', label: '启用选项气泡', page: 'ui-option' }]));
   const view = q.get('view') === 'list' ? 'list' : 'grid';
   mem.setItem('igs-asset-folders-v1', JSON.stringify({ scopes: { '': {
     scenes: { view, folders: ['学校', '户外'], collapsed: [], assign: { 教室: '学校', 走廊: '学校', 海边: '户外' } },
@@ -159,6 +160,7 @@ function openSettingsScene() {
   // ?gen=1：假的生成图服务，igs-gen: 地址都显示成示例图，另放两张刚生成的图。
   const fakeGen = q.get('gen') ? new Proxy({
     resolveUrl: (url) => (String(url || '').startsWith('igs-gen:') ? img : url),
+    writeWardrobePrompt: async () => ({ ok: true, prompt: 'pink pajamas' }),
     listTemp: () => [
       { key: 'temp/sp', type: 'sprite', name: '小雪 · 泳装', status: '临时', imageId: 'tmp-sp', url: img },
       { key: 'temp/bg', type: 'background', name: '海边黄昏', status: '临时', imageId: 'tmp-bg', url: img },
@@ -181,6 +183,13 @@ function openSettingsScene() {
   const subtab = q.get('subtab');
   if (subtab) opened.controller?.switchSceneSubTab?.(subtab);
   // ?act=命令:参数:参数,… 依次点设置里的 data-action 按钮（参数按原文写，这里替它编码）。
+  if (fakeGen && q.get('wardrobe-pick') === '1') {
+    document.querySelector(`[data-action="wardrobe-generate-prompt:${encodeURIComponent('睡衣')}"]`)?.click();
+    setTimeout(() => {
+      const editor = document.querySelector('.igs-settings-dialog.is-edit');
+      editor?.querySelector('[data-settings-dialog="ok"]')?.click();
+    }, 0);
+  }
   for (const step of (q.get('act') || '').split(',').filter(Boolean)) {
     const [command, ...rest] = step.split(':');
     // ui-toggle-open 的键本身带冒号，整段当一个参数。

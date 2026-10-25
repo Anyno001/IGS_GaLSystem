@@ -25,6 +25,7 @@ export function mountMatteEditor(doc, editor, { onClose, onSaved, confirm } = {}
     const close = () => {
         if (closed) return;
         closed = true;
+        editor?.dispose?.();
         if (root.parentNode) root.parentNode.removeChild(root);
         if (typeof onClose === 'function') onClose();
     };

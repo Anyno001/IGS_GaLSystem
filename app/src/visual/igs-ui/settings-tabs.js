@@ -61,8 +61,10 @@ const BACKUP_TEMPLATE = `
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">本地缓存</div>
     <div class="igs-source-filter-grid">{{imageCacheCountField}}</div>
+    {{imageCompressionField}}
+    <div class="igs-source-filter-note">开启后降低显示占用；下载与编辑仍用原图。</div>
     <div class="igs-settings-row"><button class="igs-settings-action" data-action="purge-asset-cache" type="button" title="清空浏览器里缓存的图片和设置页缩略图，酒馆上的原图不动">清素材缓存</button></div>
-    <div class="igs-settings-row"><button class="igs-settings-action" data-action="image-cache-status" type="button">查看占用</button><button class="igs-settings-action" data-action="image-files-retry-delete" type="button">重试待删除文件</button></div>
+    <div class="igs-link-row"><button class="igs-link-btn" data-action="image-cache-status" type="button">查看占用</button><span aria-hidden="true">·</span><button class="igs-link-btn" data-action="image-records-retry-backup" type="button">重试备份</button><span aria-hidden="true">·</span><button class="igs-link-btn" data-action="image-files-retry-delete" type="button">重试删除</button></div>
     <div class="igs-source-filter-note">{{imageCacheStatus}}</div>
   </div>
 </div>
@@ -74,18 +76,24 @@ const IMAGE_SOURCE_TEMPLATE = `
     <div class="igs-source-filter-title">图像来源</div>
     {{imageSourceField}}
     <div class="igs-source-filter-note">{{imageSourceNote}}</div>
+    {{globalArtistField}}
+    <div class="igs-settings-sub" data-image-feature="external-sprite-dna"{{sourceExternalHidden}}>
+      {{externalSpriteDnaField}}
+    </div>
     <div class="igs-settings-sub" data-image-source="nai"{{sourceNaiHidden}}>
       <div class="igs-source-filter-grid">
-        {{autoNaiKeyField}}
+        <div class="igs-settings-full">{{autoNaiEndpointField}}</div>
+        {{autoNaiKeyField}}{{autoNaiTransportField}}
         {{autoNaiModelField}}{{autoNaiSizeField}}
-        <div class="igs-settings-full">{{autoNaiArtistField}}</div>
-        <div class="igs-settings-full">{{autoNaiNegativeField}}</div>
+      </div>
+      {{modelProfileImageRow}}
+      <div class="igs-settings-sub" data-image-feature="nai-transparency"{{sourceBuiltinHidden}}>
+        {{naiSpriteTransparentField}}
       </div>
       <div class="igs-settings-result" data-result="nai-models">{{autoNaiModelsMessage}}</div>
       <details class="igs-settings-sub igs-settings-advanced" data-advanced="nai"{{advancedNaiOpen}}>
-        <summary>连接与采样</summary>
+        <summary>采样参数</summary>
         <div class="igs-source-filter-grid">
-          {{autoNaiTransportField}}{{autoNaiEndpointField}}
           {{autoNaiStepsField}}{{autoNaiScaleField}}
           {{autoNaiSamplerField}}
         </div>
@@ -100,8 +108,16 @@ const IMAGE_SOURCE_TEMPLATE = `
     <div class="igs-settings-sub" data-image-source="dbgen"{{sourceDbgenHidden}}>
       {{dbgenSpriteTransparentField}}
     </div>
+    <div class="igs-settings-sub" data-image-feature="consistency"{{sourceConsistencyHidden}}>
+      <div class="igs-source-filter-grid">{{consistencyStrengthField}}{{consistencyModelField}}</div>
+    </div>
     <div class="igs-settings-row"><button class="igs-settings-action" data-action="test-image" type="button">{{imageTestActionLabel}}</button><button class="igs-settings-action" data-action="open-dbgen-settings" type="button"{{sourceDbgenHidden}}>插件设置</button></div>
     <div class="igs-settings-result" data-result="image">{{imageTestHelp}}</div>
+  </div>
+  <div class="igs-source-filter" data-image-prompt-entry{{sourceBuiltinHidden}}>
+    <div class="igs-source-filter-title">提示词组</div>
+    <div class="igs-source-filter-note">已内置默认词组。</div>
+    <div class="igs-settings-row"><button type="button" class="igs-settings-action" data-setting-go="image-prompt-presets">查看 / 编辑</button></div>
   </div>
 </div>
 `.trim();
@@ -120,20 +136,20 @@ const IMAGE_LLM_TEMPLATE = `
         {{autoLlmEndpointField}}{{autoLlmKeyField}}
         {{autoLlmModelField}}
       </div>
+      {{modelProfileLlmRow}}
       <div class="igs-settings-result" data-result="llm-models">{{autoLlmModelsMessage}}</div>
     </div>
   </div>
-  <div class="igs-source-filter igs-perf-group" data-image-feature="llm-prompts">
-    <details data-advanced="llm-prompts"{{autoLlmPromptsOpen}}>
-      <summary><b>提示词</b><span class="igs-perf-brief">系统提示词 · 头尾附加词，清空即恢复内置</span></summary>
-      <div class="igs-perf-group-body">
-        <div class="igs-settings-full">{{autoLlmPromptIllustrationField}}</div>
-        <div class="igs-settings-full">{{autoLlmPromptIllustrationSoftField}}</div>
-        <div class="igs-settings-full">{{autoLlmPromptAssetField}}</div>
-        <div class="igs-settings-full">{{autoLlmPromptAssetSoftField}}</div>
-        <div class="igs-settings-full">{{autoLlmJailbreakHeadField}}</div>
-        <div class="igs-settings-full">{{autoLlmJailbreakTailField}}</div>
-      </div>
+  {{imagePromptPanel}}
+  <div class="igs-source-filter" data-image-feature="llm-prompts">
+    <details class="igs-settings-sub igs-settings-advanced" data-advanced="llm-prompts"{{autoLlmPromptsOpen}}>
+      <summary><b>附加写词要求（可选）</b><span class="igs-perf-brief">修改后作为追加要求生效</span></summary>
+      <div class="igs-settings-full">{{autoLlmPromptIllustrationField}}</div>
+      <div class="igs-settings-full">{{autoLlmPromptIllustrationSoftField}}</div>
+      <div class="igs-settings-full">{{autoLlmPromptAssetField}}</div>
+      <div class="igs-settings-full">{{autoLlmPromptAssetSoftField}}</div>
+      <div class="igs-settings-full">{{autoLlmJailbreakHeadField}}</div>
+      <div class="igs-settings-full">{{autoLlmJailbreakTailField}}</div>
     </details>
   </div>
 </div>
@@ -144,7 +160,6 @@ const IMAGE_LOGS_TEMPLATE = `
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">生图日志</div>
     <div class="igs-source-filter-note">出图失败时在这里看原因。</div>
-    <div class="igs-source-filter-grid">{{imageLogRetainDaysField}}{{imageLogMaxEntriesField}}</div>
     <div class="igs-settings-row">
       <button class="igs-settings-action" data-action="image-log-refresh" type="button">刷新</button>
       <button class="igs-settings-action" data-action="image-log-copy" type="button">复制</button>
@@ -152,6 +167,10 @@ const IMAGE_LOGS_TEMPLATE = `
     </div>
     <div class="igs-settings-result" data-result="image-log">{{imageLogStatus}}</div>
     <div class="igs-image-log-list" data-image-log-list>{{imageLogList}}</div>
+    <details class="igs-settings-sub igs-settings-advanced" data-advanced="image-log-retain"{{advancedImageLogOpen}}>
+      <summary>自动清理</summary>
+      <div class="igs-source-filter-grid">{{imageLogRetainDaysField}}{{imageLogMaxEntriesField}}</div>
+    </details>
   </div>
 </div>
 `.trim();
@@ -160,7 +179,7 @@ const IMAGE_CG_TEMPLATE = `
 <div class="igs-settings-grid" data-image-pane="cg">
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">CG库</div>
-    <div class="igs-source-filter-note">生成过的 CG 都在这里，点图看大图。</div>
+    <div class="igs-source-filter-note">已生成的CG，点击图片查看大图。</div>
     <div class="igs-cg-actions">
       <div class="igs-cg-actions-row"><span class="igs-cg-actions-label">查看</span>
         <button class="igs-settings-action" data-action="image-cg-refresh" type="button">刷新</button>
@@ -186,6 +205,7 @@ const IMAGE_AUTO_TEMPLATE = `
   <div class="igs-source-filter-note">{{imageContentNote}}</div>
   <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
   {{promptKindsPanel}}
+  {{artistLibraryPanel}}
 </div>
 `.trim();
 
@@ -196,7 +216,8 @@ const READER_DIALOG_TEMPLATE = `
     {{dialogSkinField}}
     {{gradientVeilFields}}
     {{magicHouseField}}
-    <div class="igs-settings-row igs-switch-stack">{{statusLineToggle}}</div>
+    <div class="igs-settings-row igs-switch-stack igs-dialog-style-options">{{statusLineToggle}}</div>
+    <div class="igs-source-filter-grid">{{resumePromptField}}</div>
   </div>
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">尺寸{{resetReaderDialogSize}}</div>
@@ -205,12 +226,13 @@ const READER_DIALOG_TEMPLATE = `
       {{classicDialogWidthPercentField}}
       {{skinDialogScaleField}}
       {{dialogHeightField}}
+      {{dialogAutoHeightField}}
       {{inputScaleField}}
     </div>
   </div>
   <div class="igs-source-filter igs-perf-group">
     <details data-advanced="dialog-glass"{{advancedDialogGlassOpen}}>
-      <summary><b>面板玻璃</b><span class="igs-perf-brief">{{glassScopeNote}}</span></summary>
+      <summary><b>面板透明度</b><span class="igs-perf-brief">{{glassScopeNote}}</span></summary>
       <div class="igs-perf-group-body">
     <div class="igs-source-filter-grid">
       {{glassOpacityField}}
@@ -242,9 +264,10 @@ const READER_TEXT_TEMPLATE = `
     <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">台词</div><div class="igs-settings-row">{{textFontField}}{{textColorField}}</div></div>
     <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">旁白</div><div class="igs-settings-row">{{narrationFontField}}{{narrationColorField}}</div></div>
     <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">心里话</div><div class="igs-settings-row">{{thoughtFontField}}{{thoughtColorField}}</div></div>
-    <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">系统角色</div>{{systemRoleFields}}</div>
-    <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">上传字体</div>{{customFontManager}}</div>
     <div class="igs-settings-group igs-text-style-line"{{dividerHidden}}><div class="igs-settings-subhead">分隔线</div><div class="igs-settings-row">{{dividerField}}{{dividerColorField}}</div></div>
+    <div class="igs-settings-group igs-text-style-line"{{themeHidden}}><div class="igs-settings-subhead">上传字体</div>{{customFontManager}}</div>
+    <div class="igs-settings-group igs-text-style-line igs-system-role"{{themeHidden}}><div class="igs-settings-subhead">系统消息</div>{{systemRoleFields}}</div>
+    {{systemRoleAdvanced}}
   </div>
 </div>
 `.trim();
@@ -278,7 +301,8 @@ const READER_UI_OPTION_TEMPLATE = `
     <div class="igs-source-filter-title">选项气泡{{resetReaderInterfaceOptionBubble}}</div>
     {{optionBubbleToggle}}
     <div class="igs-settings-sub"{{optionBubbleHidden}}>
-      <div class="igs-source-filter-grid">{{optionFontSizeField}}{{optionBubbleWidthToggle}}</div>
+      {{optionFontSizeField}}
+      {{optionBubbleWidthToggle}}
       {{optionBubblePositionField}}
       {{optionBubbleActionField}}
       {{optionSourcesField}}
@@ -310,14 +334,19 @@ const RULES_TEMPLATE = `
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">AI格式规则<span class="igs-outfit-muted">{{promptRuleTag}}</span></div>
     {{promptRuleToggle}}
-    {{promptRuleField}}
-    <div class="igs-settings-row">
-      <button class="igs-settings-action" data-action="reset-prompt-rule" type="button">恢复默认</button>
-      <button class="igs-settings-action" data-action="save-prompt-rule" type="button">保存</button>
-      <button class="igs-settings-action" data-action="copy-prompt-rule" type="button" title="复制到酒馆预设">复制预设</button>
-    </div>
-    <div class="igs-settings-result" data-result="prompt-rule">{{promptRuleStatus}}</div>
-    {{promptRuleOutfitHint}}
+    <details class="igs-settings-sub igs-settings-advanced" data-advanced="prompt-rule-edit"{{advancedPromptRuleOpen}}>
+      <summary>规则内容与注入位置</summary>
+      {{promptRuleHint}}
+      {{promptRuleField}}
+      <div class="igs-settings-row">
+        <button class="igs-settings-action" data-action="reset-prompt-rule" type="button">恢复默认</button>
+        <button class="igs-settings-action" data-action="save-prompt-rule" type="button">保存</button>
+        <button class="igs-settings-action" data-action="copy-prompt-rule" type="button" title="复制到酒馆预设">复制预设</button>
+      </div>
+      <div class="igs-settings-result" data-result="prompt-rule">{{promptRuleStatus}}</div>
+      {{promptRuleOutfitHint}}
+      {{promptPlacementField}}
+    </details>
     {{promptAdvanced}}
   </div>
 </div>
@@ -327,7 +356,7 @@ const RULES_TEMPLATE = `
 const WARDROBE_TEMPLATE = `
 <div class="igs-settings-grid" data-scene-settings-pane="wardrobe">
   <div class="igs-source-filter" data-wardrobe-section>
-    <div class="igs-source-filter-title">衣柜提示词<span class="igs-outfit-muted">生图用</span><button class="igs-btn-mgr-icon igs-title-add" data-action="wardrobe-add" type="button" title="添加一条衣柜提示词" aria-label="添加一条衣柜提示词">+</button></div>
+    <div class="igs-source-filter-title">衣柜提示词<span class="igs-outfit-muted">生图用</span>{{wardrobeSelectToggle}}<button class="igs-btn-mgr-icon igs-title-add" data-action="wardrobe-add" type="button" title="添加一条衣柜提示词" aria-label="添加一条衣柜提示词">+</button></div>
     <div class="igs-source-filter-note">生成服装立绘时使用的服装描述；未指定时使用同名的那一条。</div>
     {{wardrobeSection}}
   </div>
@@ -339,18 +368,64 @@ const WARDROBE_TEMPLATE = `
 </div>
 `.trim();
 
-// 预置CG：作者预置的、正文触发的 CG。
+// 预置CG：作者预置的、正文触发的 CG；在 CG库 页底部的折叠「高级：正文触发的预置CG」里。
 const EVENTCG_TEMPLATE = `
 <div class="igs-settings-grid" data-scene-settings-pane="eventcg">
   <div class="igs-source-filter" data-event-cg-section>
-    <div class="igs-source-filter-title">正文触发的预置CG<button class="igs-btn-mgr-icon igs-title-add" data-action="event-cg-add" type="button" title="添加一张预置CG" aria-label="添加一张预置CG">+</button></div>
-    <div class="igs-source-filter-note">正文出现触发词或AI写 [igs-cg:名字] 时显示这张图；命中的楼不再生成过场CG。</div>
+    <div class="igs-source-filter-title">预置CG<button class="igs-btn-mgr-icon igs-title-add" data-action="event-cg-add" type="button" title="添加一张预置CG" aria-label="添加一张预置CG">+</button></div>
+    <div class="igs-source-filter-note">正文出现触发词或[igs-cg:名字]时显示对应图片，命中的楼层不再生成过场CG。</div>
     {{eventCgSection}}
   </div>
 </div>
 `.trim();
 
 export { RULES_TEMPLATE, WARDROBE_TEMPLATE, EVENTCG_TEMPLATE, SCENE_HEAD_TEMPLATE, PARSE_TEMPLATE, BACKUP_TEMPLATE };
+
+// 数值系统：总开关在最上；关闭时下方整块隐藏，只留一行说明。
+const STATS_TEMPLATE = `
+<div class="igs-settings-grid" data-settings-pane="stats">
+  <div class="igs-source-filter">
+    <div class="igs-source-filter-title">数值系统</div>
+    <div class="igs-settings-row">{{statsToggle}}</div>
+    <div class="igs-source-filter-note"{{statsOffNoteHidden}}>开启后，好感、技能、体力与金钱由脚本掷骰结算，AI 只报告发生了什么。每个聊天第一次使用时可以选择是否启用。</div>
+  </div>
+  <div class="igs-settings-sub"{{statsHidden}}>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">规则</div>
+      <div class="igs-settings-section">{{autoSkillField}}{{intimacyField}}</div>
+      <div class="igs-source-filter-grid">{{registerField}}{{hudLabelField}}</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">生活条</div>
+      <div class="igs-settings-section">{{barsFields}}</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">同步到表格</div>
+      <div class="igs-settings-section">{{pushField}}</div>
+      {{statsMappingFields}}
+      <div class="igs-source-filter-note">表格里的数值只作展示；在表格里改动的数值会在下一次同步时被覆盖。</div>
+      <div class="igs-source-filter-note">推荐导入「IGS 数值系统适配版」表格模板：填表 AI 不再改好感与属性，导入后无需配置。</div>
+      <div class="igs-settings-row">
+        <button class="igs-settings-action" data-action="stats-template-download" type="button">下载适配版表格模板</button>
+      </div>
+    </div>
+    <div class="igs-source-filter">{{statsPromptFields}}</div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">存档</div>
+      {{statsArchiveFields}}
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">本聊天</div>
+      <div class="igs-source-filter-note" data-result="stats-chat">{{statsChatNote}}</div>
+      <div{{statsBuildHidden}}>{{statsBuildFields}}</div>
+      <div class="igs-settings-row">
+        <button class="igs-settings-action" data-action="stats-chat-enable" type="button"{{statsChatEnableHidden}}>快速开始（默认数值）</button>
+        <button class="igs-settings-action" data-action="stats-chat-disable" type="button"{{statsChatDisableHidden}}>本聊天暂停（数值冻结）</button>
+      </div>
+    </div>
+  </div>
+</div>
+`.trim();
 
 const PAGE_TEMPLATES = Object.freeze({
     style: READER_DIALOG_TEMPLATE,
@@ -366,13 +441,13 @@ const PAGE_TEMPLATES = Object.freeze({
     'perf-rhythm': READER_PERFORMANCE_TEMPLATE,
     sound: READER_PERFORMANCE_TEMPLATE,
     wardrobe: WARDROBE_TEMPLATE,
-    eventcg: EVENTCG_TEMPLATE,
     cglib: IMAGE_CG_TEMPLATE,
     source: IMAGE_SOURCE_TEMPLATE,
     kinds: IMAGE_AUTO_TEMPLATE,
     llm: IMAGE_LLM_TEMPLATE,
     rules: RULES_TEMPLATE,
     parse: PARSE_TEMPLATE,
+    stats: STATS_TEMPLATE,
     data: BACKUP_TEMPLATE,
     logs: IMAGE_LOGS_TEMPLATE,
 });

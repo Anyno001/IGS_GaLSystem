@@ -1,6 +1,98 @@
 # igs-ui
 
+- 0.36.106：整楼准备的场景状态直接读取本页最近的 `[igs-scene]` 标签，未出现标签时保留原有继承来源。正文、台词和心里话里提到钟点不改变场景时间、底图或触发换图转场；显式标签换时/换场与时间字段的钟点归档继续生效，不再消费正文钟点覆盖状态。
+
+- 0.36.105：「生图与AI → 图像来源」选择内置 NAI 后，API 地址、Key 和传输方式直接显示在主区，采样参数单独折叠。地址沿用 `bridge.autoIllustration.nai.endpoint` 与原保存/客户端入口，留空走官方，根地址或 `/ai` 补全生图路径，完整路径与查询参数保留；直连和酒馆代理共用此地址。搜索中转或自定义 URL 可定位，不引入第二套连接配置。
+
+- 0.36.103：浏览器原生全屏由 `reader-fullscreen` 随当前运行时持有。后台切回按实际可见视口恢复布局，已退出的原生全屏在下一次正常阅读器点击中恢复；同一次点击继续原操作，不定时重试。前台主动退出不强制重进，输入编辑及其它元素全屏继续原行为。切模式或关闭释放监听与动画帧，迟到申请不能退出后来接手的新阅读器；恢复沿用原音频手势解锁。
+
+- 0.36.102：素材入库面板消费衣装服务合并后的候选。同一衣装经历正文更新、阅读器关闭重开仍只出现一行；旧重复按钮共享在途采用，已准备的衣装资料与图片继续复用，界面重绘不重新写词或出图。
+
+- 0.36.95：衣柜列表缩略图优先显示独立参考图，缺少时按衣柜实际绑定读取对应命名衣装的现有立绘，复用统一平和/旧基础图/其它表情选择和中央缩略图缓存。只读当前有效素材库，不解析衣柜名称猜角色、不借其它衣装、不新增参考图或触发生图；显式参考图和生图参考设置保持原用途。
+
+- 0.36.91：缓存清理动作实际成功后才发出存储空间变更通知，让因空间不足暂停的原保存继续；取消、失败、无关设置保存都不重启它。持续失败显示次数和原因，备份/回收/同步保留原记录与处理入口。
+
+- 0.36.90：`recovery-notice` 订阅统一恢复状态，在阅读器与设置层均可见，沿用设置配色及紧凑字号；条件等待显示原因、处理方式和对应设置按钮，相关配置生效后自动续接并收起。成功或取消清除状态，明确失败显示终态并可收起，销毁释放订阅。普通流式回复仍等待真实完成；保存失败仍续存原结果，关闭保存失败不得递归重开一轮关闭。
+
+- 0.36.89：副 API 补 DNA 的进度接收写词恢复事件，显示空正文及自动重取次数；达到输出恢复次数时结束进度并展示具体错误。`recovery-exhausted` 在设置动作最外层直接返回失败，释放同一动作的在途锁，不能再次伪装为“补齐中”或静默等待配置。
+
+## 自动完成原操作（0.36.88 本地草稿）
+
+设置动作复用原输入、确认、文件与成功生成结果；修订推进后重读权威状态，合并本次修改并续存。关闭设置时先自动保存草稿及配置，成功后关闭。剧情衣装与素材审核不比较整库，也不以资料编辑制造终止状态。阅读器发送/回复、图片读回、固定目标翻楼沿原操作续接；主动取消和作用域切换保留。恢复状态沿现有进度条展示，不要求用户重试。
+
+设置页依据动作返回的结构化结果处理，不能按提示文案是否含“失败、检查、重试”吞掉弹窗或重新执行。等待状态不记为完成；关闭成功后释放面板等待，普通设置保存不取消生成服务的在途请求。阅读器流式完成或关闭须通知当前等待，销毁须释放等待中的操作。
+
+自定义地图与字体选择只打开一次文件选择器，读取或保存失败续接原文件。CG 大图读取失败自动恢复，关闭大图结束其等待；收藏、隐藏、删除交由媒体服务逐步保存。抠图编辑的解码、编码、AI 预览、采用及恢复原图分别续接，保存失败复用同一候选和遮罩；主动关闭编辑器取消等待。地图和物品操作保留现有输入，在草稿末尾追加命令；续接不重复追加，也不发送。资料页的字体、主题和阅读偏好持久化失败自动续存。
+
+地图和资料页读表暂时失败时保留已经显示的资料，并自动续读；恢复成功直接显示，不依赖宿主更新通知或用户再次打开。关闭页面取消本页读取，重新打开建立新读取。
+
+
+- 手动默认立绘持有本次角色 DNA、目标衣装说明和对应图片槽；其它角色或衣装保存不使任务失效，自己的服装 DNA 保存成功后推进该目标基线。采用按衣装合并并保留已选默认，不用整个衣柜快照拦截正常资料推进。
+
+- 自动生成任务由 core 的已生效角色目标判断有效性；设置窗口和草稿编辑不挂接生成守卫。`withCharacterDnaDraftSync` 只为自动 DNA 保存检查未保存的同角色资料冲突，并在成功后同步该角色草稿，保留其它编辑。手动按钮自己的取消/目标校验仍由对应动作持有。
+
 本目录是 IGS 的 `Immersive Galgame System` 原版 UI 等价层。
+
+- 正文解析与整楼准备缓存复用 media 的统一低水位规则，默认超过 8 楼清至 6 楼，解析与准备同进同出，准备命中也刷新 LRU；保留普通翻页复用、依赖失效和缺图重绘收敛。舞台解码标记超 64 项保留最近 51 项，命中刷新访问顺序。TTS 内存 60→48、持久 300→240 批量回收，持久层仍按原写入顺序；写入/删除串行交接，清理后的旧请求不回填或删除新去重任务。演出基线、防重和用户历史保持原留存语义，完整范围见 `docs/CACHE_EVICTION_AUDIT_20261017.md`。
+
+- 「数据 → 备份 → 本地缓存」提供「压缩显示图片（WebP）」开关，默认关闭，保存后由 core 应用。切换失效旧显示缓存并按现有缓存清理通知刷新，下载/导出/编辑使用原图。素材导出和本区下载按图写入 ZIP，导入使用 File/Blob 分片读取，旧无 Blob 接口的测试/宿主保留原字节读取入口；取消或读图失败不提示成功。
+
+## 生图与衣装迁入（0.36.88 本地草稿）
+
+- 图像来源页的「外部生图前补齐角色 DNA」对应 `bridge.imageApi.externalSpriteDna`，默认关，仅外部来源显示。`settings-external-sprite-dna.js` 统一手动立绘/衣装/表情/头像的缺资料确认、取消、保存与回滚；副 API 失败不进入原生图动作。自动建档在面板打开时也校验草稿目标，只同步单角色 DNA；用户编辑或切卡后的旧任务不覆盖草稿。
+- 默认立绘先收集本次外貌/衣装要求，再确认并补 DNA，把本次要求交给建档请求。自身保存后更新目标 DNA 基线，继续原生成动作。原图提示词缺失时，仅在图片权威回读确认已丢失后允许重新写词；读取异常保留旧引用。
+
+- 「生图与AI → 画师与模型」管理画师库，不依赖当前图像来源；内置 NAI 和数据库生图均在图像来源公共区及画师与模型的八类生成卡片通过原生下拉框选用已有条目。分类选择同步开启分区画师，留空跟随全局；数据库生图全局留空时显示「使用插件默认画师」。下拉选用立即经现有保存入口生效，无需关闭设置或额外应用，紧接着手动生成就读取新画师；在途任务保留本次快照。库与当前已选文本仍沿用现有配置端口，管理动作不会发起生成请求。
+- 「生图 → 图像来源」的内置 NAI 提示词入口共用 presets/generated-images 服务。编辑器保存草稿、保存版本和激活是不同动作；预览不扫描世界书或发起 LLM/图像请求。未知协议、revision 冲突和保存失败明确显示。
+- 画师库的导入、保存与条目操作沿用提示词编辑器的弹性换行排布：按钮按完整文案占宽，空间不足换整颗按钮，不等分挤压或拆成多行文字；共用现有按钮和主题 token，选择/禁用及动作语义不变。
+- 画师文件与粘贴 JSON 导入遇到重复 ID 或名称时，只统一询问一次「覆盖 / 跳过」；跳过只保留重复项的已有版本，不取消其余条目的导入。无冲突直接导入，不另问是否追加；结果显示新增、覆盖和跳过数量，仍需保存，且不自动应用到生成配置。异步确认后继续校验面板有效性，过期草稿不写入。
+- 角色页 DNA 编辑区提供「启用三景别 DNA」的显式确认，只升级该角色；保留旧文本、图片和默认选择，保存失败回滚。旧格式继续生成，未升级角色不能因 UI 入口统一而被强制要求三景别。
+- 旧原装/生成槽在 core 启动、恢复和保存时自动接入命名衣装，初始默认仍指向原图；明确选过的默认不覆盖。基础图独立 `base`，平和及其它表情各自保留；查看/编辑/上传/重画与标定使用真实衣装键，正常显示统一走新解析。临时立绘按角色与衣装匹配，不跨卡借图。
+- 生成、采用与表情绘图完成走 `spriteAssetChanged` 精准失效。新增原图读取走现有 `resolveReaderAssetUrl`/Map 请求身份；只有当前页仍需要且缓存驻留新地址才刷新，保留整楼准备与静态页读取收敛。
+- CG 一致性由既有 CG 库入口展示进度和内存候选；取消、失败、切卡或目标过期不替换原图；接受后走服务原子提交。列表替换必须先通过现有元数据预算。
+- 阅读器的单张重画、一致性重绘、手动出图和旧楼补图共用忙碌状态同步入口，同时更新当前快照与工具栏；任务完成后立即恢复按钮，无需翻页或重开。后台补图的同步异常与异步拒绝均收束并释放忙碌状态；不靠重画整个舞台刷新按钮。
+
+## 古风 UI 验收候选 2026-10-13
+
+- 古代数值、系统、任务框使用 nine-slice 云肩轮廓，仅取既有皮肤 ink/mention；不新增模态、关闭按钮或计时器。现稿替换此前山竹和模糊遮罩装饰，现代面板原样。
+- 信件、字条、诗笺、告示与圣旨由 fx-ancient-paper 管理：安全转义、右起竖排、隐藏滚动条、末尾落款/印章同列；节点内事件随节点释放，宿主 capture 快捷键排除文书滚动区，Escape 保留退出。
+- 字体使用既有构建字体资源清单与许可清单。完整 Ma/Zhi 分别 3250320/2300564 字节；主字库不按样例文字裁剪，动态缺字回退 LXGW WenKai。离线验收 HTML 自含字体，与实际 bundle 的按需资源分发区分。
+- SVG 静态标记由 fx-selected-svg 注册、每次实例前缀隔离本地 ID；减少动态无 SMIL，原有 life/sounds/anchor 不变。新艺术仅 19/20/32/34/54/55/56，64 不改。
+
+## 静态页的图片完成通知（test-v0.36.65）
+
+- 读取完成仅在当前页仍需要该图、中央缓存确实出现新显示地址时重绘。读空、失败、结果未被缓存接纳、已同步显示的地址及 inline 图片不推动下一次重绘和读取。
+- 在途任务按请求身份去重；清缓存后迟到的旧任务不能删除新任务或触发旧完成通知。不新增失败黑名单、周期重试或第二套像素缓存，后续翻页、补图及明确读取仍可恢复。
+
+## 稳定页的演出调度（test-v0.36.64）
+
+- 保留用户开启的天气、立绘呼吸、背景运镜与节律，不因静置或触屏自动冻结、关闭或切换画质。正文/素材仍按既有准备与变更通知驱动，持续动画不重新解析正文。
+- 亲密演出复用舞台暂停状态；面板遮挡、内嵌离屏、直播盖住背景、页面隐藏时立即停止不可见画面的逐帧调度。前景 `.igs-rm-front` 纳入 CSS 暂停范围；面板里自己的画布和自动翻页不受背景遮挡影响。
+- 声画节拍按下一次心跳、呼吸、节律或钟声的时间提前排程，不以固定 50ms 轮询。没有真实声音也没有动态画面时不保留时钟；面板遮挡时有意继续播放的音频仍按节拍排程。
+- 相同 CSS 变量值不重复写入。关闭或舞台节点移除后取消帧、计时器和订阅，迟到回调不能重启旧演出。`onStageIdleChange` 只在合并的暂停/遮挡状态发生变化时通知。
+
+## 整楼准备（v0.36.62）
+
+- `reader-source-cache` 同时持有解析与准备结果，最多八楼，同步失效/淘汰；配置修订不变时按实际准备依赖判断，世界观重绘创建的新对象不代表正文变化。
+- `reader-floor-plan` 预先建立页位置、对白/心理归属、场景/NSFW/CG/演出状态，演出区间与旁白继承顺序累积；`reader-floor-assets` 预先建立换装、同台与资源匹配，正常翻页只取当前页。资源命中只持有稳定身份，不能永久缓存 blob URL 或复制像素。
+- 单图读取事件只使该图的依赖失效；临时生成记录沿用素材键与聊天身份定位依赖，补齐后仅预热新增引用。缺失/过期只在实际使用或既有通知到达时处理，不设置轮询或第二套图片缓存。
+- 状态栏、服装线索、约定复用 `reader-table-data` 的本楼只读快照；数据库更新回调先失效、再按既有 250ms 窗口刷新。服装启用时即使状态栏关闭也订阅；切楼、API 变化、手动重读、关闭与销毁正确失效并解绑。
+- `.mes_text` 是宿主可见正文指纹来源，阅读器自身的页码和台词变动不能反过来改变正文指纹。
+
+## 原装立绘恢复（v0.36.59）
+
+- 显示匹配分别接入确认缺图和暂不可读取探针，临时失败可以换同角色可用图，但不等于要求生成替代图；online 恢复通知通过已有合并窗口刷新当前舞台。
+- 本页诊断在未命中时区分原装候选暂不可读、原装无有效引用、当前库未找到对应角色图片；诊断保持手机端可复制，不要求开发者控制台。
+
+## 首楼素材就绪（v0.36.57）
+
+- `onSettingsUpdated` 通知使配置快照及整楼预热计划失效，通过已有图片刷新窗口更新当前页；设置器遮挡时记下待刷新，舞台实际重绘后清除该标记。
+- `records-ready` 与 `image-loaded` 接入既有素材更新链路，首楼背景和立绘异步读取完成后自动显示，不需要打开设置器。销毁解除配置通知订阅，不新增周期扫描。
+
+## 媒体任务重试（v0.36.56）
+
+- 设置的缓存占用页提供「重试待备份记录」与「重试待删除文件」，分别调用既有媒体 `flush` 与 `retryDeletes`；操作后读取统计并显示等待引用解除和失败暂停状态。
+- UI 不设置备份或回收轮询，不自行改写媒体日志或跳过引用检查。
 
 ## 立绘与图片等待（v0.36.51）
 
@@ -20,7 +112,13 @@
 - 内嵌选项气泡必须约束在右上工具按钮与底部对话框之间；选项过多时只允许容器内部滚动，不得越出阅读器。
 - 对话框内 `#igs-progress` 的“当前页/总页数、图位”等进度元数据是行内状态栏；五种阅读模式（含楼层内嵌）都由 `showStatusLine` 开关控制，默认关闭，开启时显示当前页数，关闭时不显示、不占位。不得再在底部重复渲染页数。
 - 内嵌模式不渲染 IGS 输入框与发送按钮；选项“填入输入框”必须写入酒馆默认输入框，自动发送仍复用统一宿主发送链。
-- 五种模式的等待过场持续到回复完成、正文解析可读且阅读源实际替换成功；生成中的静默、120s 无活动和小游戏结算不主动撤掉等待层。只有确认结束后才解析正文，读取期间的新写入使旧结果失效。无新正文、空回、停止、宿主失败、读取/显示失败和发送失败显示常驻错误演出，点击「返回当前楼」恢复当前页；等待过场开关关闭时仍显示错误，发送失败保留输入。
+- 五种模式的等待过场持续到回复完成、正文解析可读且阅读源实际替换成功；生成中的静默、120s 无活动和小游戏结算不主动撤掉等待层。正在玩小游戏时，下一楼写好后停在当前层，等玩家点击「加载下一楼」才换页。小游戏不在前端主体里，只有另装并启用「等待小游戏」脚本后才出现；未安装时等待层只轮换台词。工具栏「小游戏」（`mini-games`，默认 Y，未装脚本时隐藏）不等回复也能把这一层叫出来玩：不受等待过场与等待小游戏开关影响，不显示三点和「正在写」口吻的台词，「返回阅读」、Esc 或再点一次按钮只收起这一层，期间翻页快捷键不穿透；玩着时开始等回复，层与牌局就地变回等待过场。只有确认结束后才解析正文，读取期间的新写入使旧结果失效。无新正文、空回、停止、宿主失败、读取/显示失败和发送失败显示常驻错误演出，点击「返回当前楼」恢复当前页；等待过场开关关闭时仍显示错误，发送失败保留输入。
+- 等待层模型里的立绘、衣装底图与场景图保留原地址（图库为 `igs-gen:`），建模型时不读图：整卡几百张一起读会挤爆 64MB 图片缓存，高优先级排队超时的图被记成读不到、不再重试。小游戏显示哪张才经 `gameContext.loadImage(url)` 读哪张：缓存里有返回可显示地址，没读回返回 Promise（读回给地址，图丢失或 90 秒没到给空串）；读过的图在游戏开着时租住不被挤出，收起小游戏或等待层时放掉。麻将选人只读滚进视野格子的「平和」，牌桌只读当前要显示的表情。
+- 小游戏上下文的 `audio` 借出主程序混音总线 `{ context: audioBusContext, input: () => busInput('sfx'), resume: resumeAudioBus }`，游戏音效接进 sfx 子总线，受总音量与离开页面挂起管；没有时游戏包自开 AudioContext。立直麻将音效（`wait-stage-mahjong-sound.js`）全部实时合成：洗牌、自己摸牌、打牌、立直、吃碰、杠、轮到自己有鸣牌 / 和牌可选、和了（自己和 / 别人和 / 自己放铳三种）、流局、终局（第一名 / 其他）；接回牌局时重放的旧事件不出声。音效开关在牌桌工具栏，存本地 `igs-wait-mahjong-sound-v1`，默认开。
+- 小游戏上下文的 `host` 交出等待层自己的「返回阅读 / 返回当前楼」与「加载下一楼」：`state()` 给 `{ back: 按钮文字或空串, next, nextBusy }`，`back()` / `next()` 与底栏按钮同路，`onChange(listener)` 在按钮显隐变化时通知。立直麻将（选人与牌桌）铺满整层：不显示底栏，这两个按钮并进右上角和阅读器工具栏同款的图标条（选人：收起 | 返回；牌桌：音效 | 结束这局、收起 | 返回 / 下一楼，「下一楼」带字并发光）；等待层的提示改成牌桌顶部的浮条，游戏自己的操作说明不再写进提示。牌桌比 16:9 宽时横向铺满（至多 2.4:1）：牌区（牌垫、三家牌墙、牌河、中央计分牌）与自己的手牌、头像仍按 16:9 居中，左右家头像、宝牌面板、工具栏贴边；尺寸单位 `--igs-mj-u` 为 16:9 基准宽的百分之一。手机上不许有会抖的东西：牌区（牌垫、三家牌墙与副露、四家牌河、中央计分牌）整张画在一块 canvas 上（`wait-stage-mahjong-felt.js`），透视（视距 90、俯角 24°）在脚本里算好、远牌先画近牌后画，每手整张重画、尺寸变化时同步重画；画布走 CPU（`willReadFrequently`），不单独成 GPU 合成层，盖在上面的气泡、按钮出没时安卓 Chrome 才不会让整张桌面闪一帧；不用 CSS 3D（每手重绘都要重新透视采样，牌和计分板会错位）；牌垫只描外框和一道内框，不画对角线；自己的手牌、吃碰杠按钮、头像、宝牌面板、工具栏仍是 DOM，不倾斜；悬停上浮只在 `(hover:hover)` 设备上生效；吃碰杠按钮同一次询问不重画；盖在牌桌上的台词气泡和吃碰杠按钮出现、收起都硬切，不带缩放、淡入（带动画会临时成合成层，牵动下面的画布）；头像换表情硬切、至多 1.5 秒一次，新图 decode 完才在同一帧里顶上并撤旧图（只等 load 会透出一帧底色）；同一套衣装、同尺寸的表情图沿用第一张的取景框（各表情头部标定差几像素，逐张裁脸会挪位），没标头部的表情借「平和」的标定。
+- 立直麻将每局与终局的结算停在原处，等玩家点「继续」，不自动往下走。每局惩罚罚这一局输分最多的人（放铳者、自摸时付得最多的、流局没听牌付分的；输得一样多的一起罚，没人丢分不罚），由这一局赢分最多的人动手，只能全年龄；终局惩罚罚总分并列末位的所有人加所有被飞（分数为负）的人，四家同分不罚，由第一名动手，可选成人向。被罚的有玩家时由动手的人决定罚法、玩家只以第一人称入镜，同罚的角色一起画进去；惩罚 CG 按每人这一场正穿着的衣装画（这一场已换裸体的才画裸体），成人向也不替被罚的人脱；「成人向」是个开关，只管把同罚的角色记下来、再来一局时换裸体立绘（要开着 NSFW 插图才能选），和这张图怎么画无关，出图请求里不带它。
+- 小游戏上下文的 `model` 是开局那一刻的快照；场景素材变化（新生成立绘）时等待层重建模型，经 `gameContext.onModel(listener)` 推给正在玩的游戏，`getModel()` 取最新一份，关掉游戏即失效。麻将选人格子与牌桌头像据此就地换图，保留所选衣装与受罚裸体，收起后再开牌桌时补一次。
+- 麻将对手的性格层（`wait-stage-mahjong-mind.js`，在小游戏包里）：牌效、危险度和期望值仍由电脑麻将引擎计算，推退、鸣牌、立直/默听按打法参数、场况（名次、分差、最后一局）和跨局情绪缩放；`plain` 模式与引擎逐手一致，测试守住。别家副露按副露数、巡目、宝牌和染手算威胁，牌技越低越不看副露。打法来源：宿主经 `gameContext.persona`（`status/lore/ask`）提供角色卡世界书命中条目与副 API 调用，游戏侧拼提示词、解析 JSON，按世界书内容哈希缓存于 `igs-wait-mahjong-persona-v1`，世界书改了才重问；只送启用且关键字或标题含角色名的条目，整条不截断，不送角色卡描述。副 API 不可用、走酒馆主连接且正文仍在流式输出时不发请求，按名字固定随机一种并在下次选人时重试。选人格子的打法标签显示来源（世界书 / 手选 / 随机），点击循环换打法，转回世界书配的即清除手选；手选优先于副 API 但保留其台词。牌桌上对手决定前按打法停顿（同步对局不停顿），立直、追立、弃和、硬推、鸣牌和开局情绪在头像下冒气泡，和牌与放铳的台词写进结算卡，并走等待过场的语气音；续局重放期间不说话，收起时还在思考的对手按最后一条消息重新决定。
 - 内嵌对话框必须完整约束在阅读器容器内：正文区域自行滚动，角色名和分割线不得收缩或被裁出可视范围；增加顶部留白时不得同步扩大左右与底部内边距。
 - 内嵌容器桌面比例使用更修长的 `8:5`，移动端高度上限为 `min(74dvh, 680px)`；不得通过放大内部对话框代替容器增高。
 - 默认对话框皮肤与全部选项使用霜夜微圆角平面语言；默认对话框无描边，选项仅允许极弱描边，透明度继续由现有玻璃浓度设置控制。
@@ -49,7 +147,7 @@
 - 设置页面以 `settings-pages.js` 的分类与页面表为准；切换只改变当前设置视图，不改写设置值。「对话框」承载皮肤、尺寸与面板玻璃；「文字」承载字号、字重与文字主题；「演出」分台词、画面、情绪与提示、题材、节奏，声音独立分类。「界面」分阅读器（`ui-reader`，打开方式、提示弹窗与快捷键）、背景状态（`ui-bg`）、选项（`ui-option`）、工具栏（`ui-bar`）四个子页。旧 `ui` 页面与 `switchReaderSubTab('interface')` 兼容映射到 `ui-reader`，搜索与引导应直达控件所属子页；仪表盘也提供打开方式。重分类不得改写既有持久化路径。
 - 设置面板提供持久化的四种配色：`地雷色`（默认）、`奶油风`、`浅色`、`深色`；四套配色只作用于 IGS 设置面板，均保留毛玻璃遮罩、水波纹材质、浏览器不支持毛玻璃时的实心回退和 `prefers-reduced-transparency` 降级。历史 `night` / `day` 值读取时分别兼容迁移为 `landmine` / `cream`，新保存值使用四主题内部值。
 - 天气演出（`readerSettings.weatherFx`，默认关闭）由 `weather-fx-runtime.js` 按当前 `[igs-scene:地点|时间|天气]` 解析出类型（雨/雪/雾/沙尘/风/阴/晴，按序先命中者为主）、程度、雷与风修饰、室内外与五时段，只写 `#igs-effect-layer`（背景之上、立绘之下）与 `#igs-effect-front-layer`（立绘之上、对话层之下）的 `data-igs-weather-fx-*` 属性；程度由 `resolveWeatherFxGrade` 细分为 `drizzle / light / medium / heavy / storm`（毛毛雨、小雨、中雨、大雨、暴雨，重词先于轻词判定），方案同时带旧三档 `level`（由细分档折算，与细分前判定一致，场景音频等旧消费方继续用 `level`）；粒子密度/速度/雨丝长度、天气调色幅度、地图光照与暴雨闪电间隔按 `grade` 取值，调用方不得另写程度词表；样式集中在 `weather-fx-style.js`，时段只提供色彩与光源方位变量。室内外按地点末尾命中词判定（室内词与 `outdoorWords` 均可在设置编辑），室内不得出现雨雪粒子，只保留压暗、窗面水痕、窗光尘埃与闪电侧光，室内风不演出。雨/雪/风/沙尘室外粒子由 `weather-fx-particles.js` 的双画布承担，必须锁 30fps、按 CSS 像素绘制、合批、图层隐藏时停帧、脱离文档时自退；减少动态效果时只保留静态调色。
-- 舞台暂停（`stage-pause.js`）：每个 `#igs-overlay` 维护暂停原因集合，任一成立即暂停，overlay 挂 `data-igs-paused`（值为原因列表），全部解除后移除并通知 `onStageResume` 订阅者。原因：`hidden`（页面隐藏）、`offscreen`（仅内嵌模式，IntersectionObserver 观察阅读器根）、`panel:settings` / `panel:record` / `panel:map` / `panel:gallery`（盖住舞台的面板打开期间）。`openReader` 起驱动、`closeReader` 解绑。CSS 只对舞台层（背景、立绘、多人立绘、天气双层、演出双层、日常天空层、调色层、亲密演出后层、舞台指示残影与幕布）及其子元素和伪元素设 `animation-play-state:paused`；对话层（打字机、点击等待）、工具栏、资料页 / 地图 / CG 库与设置面板不暂停，WAAPI 动画与计时器不受影响。常驻粒子循环（天气粒子、花瓣落叶）暂停时不排帧、恢复后重新拉起；烟花与孔明灯是带音效与计时的一次性演出，不暂停。面板内的画布（如地图天气层）不属于舞台，不受暂停影响。
+- 舞台暂停（`stage-pause.js`）：每个 `#igs-overlay` 维护暂停原因集合，任一成立即暂停，overlay 挂 `data-igs-paused`（值为原因列表），全部解除后移除并通知 `onStageResume` 订阅者。原因：`hidden`（页面隐藏）、`offscreen`（仅内嵌模式，IntersectionObserver 观察阅读器根）、`panel:settings` / `panel:record` / `panel:map` / `panel:gallery`（盖住舞台的面板打开期间）。`openReader` 起驱动、`closeReader` 解绑。CSS 只对舞台层（背景、立绘、多人立绘、天气双层、演出双层、日常天空层、调色层、亲密演出前后层、舞台指示残影与幕布）及其子元素和伪元素设 `animation-play-state:paused`；对话层（打字机、点击等待）、工具栏、资料页 / 地图 / CG 库与设置面板不暂停，WAAPI 动画和一次性计时器保持原有规则；亲密演出的逐帧循环与可见声画节拍接入暂停通知。常驻粒子循环（天气粒子、花瓣落叶）暂停时不排帧、恢复后重新拉起；烟花与孔明灯是带音效与计时的一次性演出，不暂停。面板内的画布（如地图天气层）不属于舞台，不受暂停影响。
 - 画质档（`render-quality.js`，`readerSettings.performance.quality`：`auto` / `normal` / `low`，缺失或非法值视为 `auto`；不属于一键演出档位）：`auto` 在 `navigator.deviceMemory <= 4`、或 `hardwareConcurrency <= 4` 且为粗指针触屏、或 `prefers-reduced-motion` 时判为低画质。每次渲染由 `applyReaderSnapshotToDom` 先于天气与日常演出写入：低画质时 `#igs-overlay` 挂 `data-igs-quality="low"`，否则移除该属性。低画质的 CSS 集中在 `stage-direction-style.js`：停推镜与立绘呼吸（含亲密演出呼吸），亲密演出背景不再模糊并隐藏 `#igs-bg-blur`，梦境雾去 blur；滤镜层与 bokeh 由 `scene-grade.js` / `romance-style.js` 各自处理。粒子模块读取 `getQualityFactor()`（低画质 `{ density: .5, fps: 20, dprCap: 1 }`，标准 `{ density: 1, fps: null, dprCap: null }` 即沿用模块默认值）：天气粒子、花瓣数量减半，烟花每朵火花数与孔明灯数量减半，帧率 20，烟花与孔明灯 dprCap 由 2 降为 1；天气与花瓣在运行中察觉档位变化会重新布点。标准档的画质参数（密度、帧率、dprCap）与改动前一致。设置入口：首页演出档位条与「阅读器 › 演出」一键档位卡片内的「画质」下拉（`render-quality-fields.js`）。
 - 场景设置必须按「规则 / 素材」二级页面分组；素材页内继续保留「场景素材 / 角色立绘」切换。
 - 场景条目的 `words` 在设置页作为场景别名管理；角色别名存于 `sceneAssets.characterAliases[主角色名]`。别名只参与名称归约，必须复用主条目的背景、情绪立绘和 `spriteLayouts` 位置键；角色改名/删除及场景预设保存、应用、导入、导出必须同步别名。
@@ -95,8 +193,8 @@
 - 震动只作用于 `#igs-stage-motion` 内部舞台包装层，支持弱/中/强三档；同一消息同一页同一情绪的重绘不重复播放，关闭阅读器和减少动态效果模式必须清理或跳过演出。
 - 演出增强（`fx-*.js`）包含标题卡、漫画情绪符号/集中线、心跳、闪白、数值提示与 igs-fx 标签演出，各自由 `readerSettings.titleCard / mangaFx / heartbeatFx / flashFx / favorToast / fxTags` 控制、默认关闭，音效由 `fxSound` 统一控制。情绪类演出与震动同源：只读原始 `content.statusEmotion` 做中文精确匹配，NSFW、聊天页与卡片页不触发，显式空词表保持为空；漫画情绪符号只在当前说话人有立绘 URL 时生成，无立绘时不播放且不消费该页的符号重播机会，集中线、心跳与闪白不受此限制。
 - 过场标题卡（换地点 / 时间变化的报幕）跟随对话框皮肤：`fx-title-themes.js` 的 `getDialogThemeTitleCardStyleText(skin)` 由 `dialog-skin-style.js` 拼入，配色、字体与卡片取 `fx-battle-themes.js` 的 `getBattleTheme(skin)`，作用域 `#igs-overlay[data-igs-dialog-skin] .igs-fx-title-card:not(.is-ancient)`；古代竖幅不受皮肤影响，无主题的皮肤沿用世界观换皮。
-- 对话框皮肤的显示名只登记在 `dialog-skin-catalog.js` 的 `DIALOG_SKIN_CHOICES`（顺序即设置页下拉顺序）；新增皮肤须同时补齐对话框框体与窄屏、选项、状态栏、字体墨色（`dialog-theme-typography.js`）、战斗与主界面主题（`fx-battle-themes.js`）、过场标题卡、物品卡、手机聊天配色、句末等待符号、文字强调色与界面音色族，由 `tests/dialog-theme-scifi-wasteland.test.js` 一类契约测试逐表核对。全息投影（`scifi-holo`，`dialog-theme-scifi.js`）与废土锈铁（`wasteland-rust`，`dialog-theme-wasteland.js`）为纯 CSS 主题，不引用外置素材、对话框不开毛玻璃。
-- 第 0 层主界面（`title-screen.js`）：`readerSettings.titleScreen`（默认开）开启时，第 0 层第一页先盖主界面，盖着时不渲染正文、不放演出、翻页与阅读器动作（设置 / 关闭除外）被拦；从末尾打开、`skipTitle`、其他楼层不出。世界观 → 推荐皮肤只登记在 `worldview-skins.js` 的 `WORLDVIEW_DIALOG_SKINS`（首个为默认，现代以 `default` 打头）；选定后写进当前角色卡 `sceneAssets.cards[card:名]` 的 `worldview` 与 `dialogSkin`，阅读器快照经 `effectiveDialogSkin` 以卡上的盖过全局，不写回全局 `readerSettings.dialogSkin`；设置页「对话框风格」下方提示本卡皮肤，可用 `card-dialog-skin-clear` 清除。
+- 对话框皮肤的显示名只登记在 `dialog-skin-catalog.js` 的 `DIALOG_SKIN_CHOICES`（顺序即设置页下拉顺序）；新增皮肤须同时补齐对话框框体与窄屏、选项、状态栏、字体墨色（`dialog-theme-typography.js`）、战斗与主界面主题（`fx-battle-themes.js`）、过场标题卡、物品卡、手机聊天配色、句末等待符号、文字强调色与界面音色族，由 `tests/dialog-theme-scifi-wasteland.test.js` 一类契约测试逐表核对。全息投影（`scifi-holo`，`dialog-theme-scifi.js`）、废土锈铁（`wasteland-rust`，`dialog-theme-wasteland.js`）与水墨武侠（`wuxia-ink`，`dialog-theme-wuxia.js`）为纯 CSS 主题，不引用外置素材、对话框不开毛玻璃。
+- 第 0 层主界面（`title-screen.js`）：`readerSettings.titleScreen`（默认开）开启时，第 0 层第一页先盖主界面，盖着时不渲染正文、不放演出、翻页与阅读器动作（设置 / 关闭除外）被拦；从末尾打开、`skipTitle`、其他楼层不出。世界观 → 推荐皮肤只登记在 `worldview-skins.js` 的 `WORLDVIEW_DIALOG_SKINS`（首个为默认，现代以 `default` 打头）；选定后写进当前角色卡 `sceneAssets.cards[card:名]` 的 `worldview` 与 `dialogSkin`，阅读器快照经 `effectiveDialogSkin` 以卡上的盖过全局，不写回全局 `readerSettings.dialogSkin`；设置页「对话框风格」下方提示本卡皮肤，可用 `card-dialog-skin-clear` 清除。主界面外观：主图是角色卡封面（无封面退第一页场景背景），0 楼已有 CG 时按本机序号 `igs:title-cover-turn` 每次打开轮换；大色块取封面主色（`title-cover-color.js`，按地址缓存，偏灰退皮肤强调色），不放立绘、不用模糊。调性 `data-igs-ts-tone`（tech / modern / soft / ink / classic / mystic / dark）先按皮肤、再按世界观定，决定切角、字体与装饰；底纹按 `data-igs-ts-world` 换，柔和与水墨不换；水墨借 `wuxia-ink-svg.js` 笔形，魔法借星夜四芒星。进场动画只播一次（`data-igs-ts-phase` wait → intro → idle）。
 - 语音通话画面 `fxTags.callSprite`：`split`（默认）为斜切分屏，对方格从右侧横向滑入，`data-active` 为说话方（remote / local），说话方格子变大、另一方压暗收窄，舞台挂 `data-igs-fx-call-split`；对方格显示对方最近一次说话时的立绘，未开口时显示大头像；挂断时替身 `.igs-fx-call-split-out` 向右滑出。`avatar` 为右上角头像小窗；视频通话不受此项影响。
 - AI 镜头指令 `[igs-fx:cam|镜头|角色或方向]`（`camera.enabled` 且 `camera.aiShots`）：特写 / 拉远 / 虚化 / 摇镜（左、右）/ 倾斜 / 复位，只作用于标签所在页，经 `resolveCameraShot` 写到根节点 `data-igs-sd-cam`，该页不再按情绪自动特写；摇镜在减少动态效果时不播，虚化在低画质档不做。
 - 环境滤镜（`scene-grade.js`）：时段调色由 `readerSettings.timeTint`（设置页称「环境滤镜」，含强度）控制；子开关 `timeTint.night`（「夜间调色」，缺省视为开启，旧存档行为不变）关闭时夜晚与深夜不做时段调色，清晨、黄昏与天气调色照常；天气调色跟随 `weatherFx.enabled`，没有单独开关；两者任一开启即运行。由渲染层 `applySceneGrade` 直接调用，不依附舞台调度。背景与立绘的 `filter` 一律由样式表按变量合成：`#igs-bg` = `brightness(--igs-bg-brightness)` + `--igs-grade-bg`；`#igs-sprite`、`.igs-sd-sprite-ghost` = `--igs-sprite-dim`（旁白压暗，由 `.igs-sprite-narration` 写入）+ `--igs-grade-sprite`；`#igs-cast` 整层吃 `--igs-grade-sprite`。两个调色变量只写在上述消费元素（及 `#igs-bg-blur`）上，不写 overlay 根，避免渐变每帧整棵子树重算样式；渐变结束后才出现的立绘 / 多人层在下次 render 时补写。`#igs-bg-blur` 默认 `display:none`（不透明的 `#igs-bg` 本就完全盖住它），只在亲密演出给背景加模糊（`[data-igs-rm-glow]` 且非回忆 / 梦境）时显示。任何模块不得再给 `#igs-bg` / `#igs-sprite` 写行内 `filter`。调色层 `.igs-grade-layer`（A/B 两层交替淡入）插在 `#igs-bg` 与 `#igs-sprite` 之间，只染背景；立绘色偏用 `<svg class="igs-grade-defs">` 内每个阅读器独立 id 的 `feColorMatrix`，调色幅度为背景的 0.55。参数在 1.4s 内由 JS 插值，减少动态效果时直接跳到终值；天气演出开启时，`igs-weather-flash` 会让背景与立绘同步提亮后回落。回忆、梦境期间完全让位（叙事滤镜的 `!important` 覆盖，调色层透明）；亲密演出的背景规则同样带 `!important`，期间暂时覆盖背景调色。低画质档（`#igs-overlay[data-igs-quality="low"]`）不用混合模式：调色层改为普通叠色 `--igs-grade-flat`（`paintLayers` 按 `flatGradeTint` 对正片叠底颜色做最小二乘逼近后写在每层上），`::after` 高光不渲染。关闭阅读器调用 `cancelSceneGrade`。调参试看页：`app/fixtures/filter-lab/`。
@@ -125,7 +223,7 @@
 - 文字演出：`readerSettings.textFx`（默认关闭）解析正文内 `{抖|波|大|吼|渐大|渐小|小|淡|强:文字}`，只在已转义 HTML 的文本段内替换、不跨标签、不拆实体；`大` / `吼` 的弹出动画只在 `#igs-text[data-igs-tfx-armed="1"]` 下播放：换正文时 `disarmTextFx`，打字机启动后以其返回的 `revealDelay(el)` 调用 `armTextFx` 写入 `--igs-tfx-delay`，使动画对准该段被揭开的时刻；关闭时标记只剥离为纯文字，提示词仅在开启时注入。正文字体度量：`dialog-theme-typography.js` 按字体栈首个字体给出 `--igs-font-optical` / `--igs-font-leading`，与用户字号档位相乘，不改档位；`preloadDialogFonts` 每个字体族只请求一次。`readerSettings.clickWaitMark`（默认关闭）以 `#igs-text::after` 在打字机结束后显示随皮肤变化的呼吸等待符号，`glyph` 可覆盖皮肤默认，打字机播放中隐藏。经典打字机 `typewriter.punctuationPause`（默认关闭）在逗号、句末、省略号后按字速倍数追加停顿，只改变遮罩与音效时间轴。`typewriter.prosody`（说话韵律，默认关闭，仅经典模式显示在「标点处停顿」下方）由纯函数 `speech-prosody.js` 的 `buildProsody` 计算逐字时间 / 音高 / 音量：按句切分并识别陈述、疑问、感叹、省略、拖腔（`？！` 按感叹加上扬，省略号后紧跟文字不断句），`Intl.Segmenter` 分词（不支持或每字成词时不分拍、不强制发声，保持匀速），词内字距 ×0.8、句尾两字拖长、结巴（`X、X` / `X……X`）顿号只停 1.5 倍；情绪档（开心 / 难过 / 生气 / 害羞 / 紧张 / 慵懒）定速、定调、定抖动，前面紧跟否定词（不 / 没 / 不太 / 没那么等）的命中不算；情绪与句调只作用于台词和心里话，旁白只按词分拍、不带角色情绪、音高音量不起伏；文字演出 `吼|大|强|小|淡|抖|渐大|渐小` 调节奏与音量；打字音按词取音（词首、句首、强调字必响）。整页揭字总时长限制在关闭时的 0.8～1.25 倍，逐音符音高限制在 ±20%，以文本哈希为种子结果恒定；关闭时时间轴与旧算法逐字节一致。韵律开启时 `audioScheduler` 参数在 `timesMs` 之外新增 `notes: [{ timeMs, pitch, gain, hold }]`，每页音符上限 60（关闭时 40）。情绪词表由 `speech-prosody.js` 维护，`emotionPitch`（角色声线：开心 ×1.06、难过 ×0.92）数值不变；韵律开启时情绪音高只进逐音符语调，`resolveTypewriterVoice` 的整页音高只取说话人音高，避免乘两次。
 - 双语台词（`bilingual-text.js`）：`readerSettings.bilingual = { enabled, display: 'ruby'|'source'|'translation', layout: 'interleave'|'stack'|'clause', foreign: 'auto'|'ja'|'en', target: 'zh-Hans'|'zh-Hant' }`，默认关闭，由 `normalizeBilingualSettings` 规范化。开启时只往提示词注入 `resolveBilingualPromptRule` 与语法块 `bilingualGrammarBlock`：角色台词和心里话用外语写并用 `〖译文〗` 附译文（`layout` 为 `clause` 时要求每个分句一个 `〖〗`，否则一段连续台词只在末尾一个），旁白不受影响。渲染只在已转义的对话框 HTML 上做（`renderBilingualHtml`），每个 `〖〗` 注音它前面那一段原文，不跨标签配对；`ruby` 显示按 `layout` 排版：`interleave`（默认）整段原文配整段 `<ruby><rt>`，能折行的内核里译文随原文逐行交错；`stack` 直接输出 `span.igs-bi-stack`（完整译文 `span.igs-bi-note` 小字在上、原文照常折行）；`clause` 把超过 14 字的注音按分句拆开。有些内核（iOS Safari、旧版安卓 WebView）里 `<ruby>` 整体不能折行，所以对话框定好字体字号后由 `fitBilingualRuby` 逐个测量，超出文字框的注音改成同样的 `span.igs-bi-stack`，`source` / `translation` 只留一边。关闭时 `resolveBilingualDisplay` 返回空串，正文里的 `〖〗` 原样显示，与未加双语前一致。阅读器里按 `T` 在三种显示方式间临时切换，只存在 `state.bilingualDisplay`（`readerSettings._bilingualDisplay`），设置里的显示方式一改就失效，不写设置。经典打字机不逐字揭示 `<rt>` 和 `.igs-bi-note`、不为它们发打字音，`<rt>` 随原文折行时每段高度并入它正下方那一行，`.igs-bi-note` 的高度并入下面原文的第一行；弹幕心声截句前用 `stripBilingualTranslation` 去掉译文；句子分页不在 `〖〗` 前后断开。
 - 获得物品演出（`fx-item-model.js` / `fx-item.js` / `fx-item-render.js`，`readerSettings.itemFx`，默认关闭，归入「演出 → 剧情提示」）：读取 `[igs-fx:item|获得/失去/使用|名称|描述]`（`scene/fx-directives.js` 独立分支，不进入 `FX_TAG_KINDS` 与标签演出开关，提示词只在开启时注入）；同页最多 3 张卡依次弹出，超出显示「等 N 件」；图未就绪显示 SVG 占位，图后到只在 chatId/messageId/swipeId/页 一致时替换；同页重绘不重播；减少动态效果时静态显示；NSFW、聊天页、卡片页不触发；图片 URL 只接受 data:image(png/jpeg/webp/gif) 与 blob:。选项气泡内的物品目录和动作面板在同一楼、同一 swipe、同一页重绘后继续显示，翻页、换楼或退出时收起。
-- 战斗演出（`fx-battle-model.js` / `fx-battle.js` / `fx-battle-render.js` / `fx-battle-sfx.js`，场景层 `scene/battle-context.js`；`readerSettings.battleFx`：`enabled` 默认关、`letterbox` 默认开，归入「演出 → 剧情提示」）：读取 `[igs-fx:battle|对手|称号]` … `[igs-fx:battle-end|胜利/败北/撤退]` 与 `[igs-fx:hit|出手者|目标|招式|命中/暴击/闪避/格挡/击倒/治疗]`（`scene/fx-directives.js` 独立分支，不进入 `FX_TAG_KINDS`，提示词只在开启时注入）；不显示任何数值。按页播放「遭遇 → 出招（每页最多 3 招）→ 结算」时间轴，时长乘演出风格的停留倍率，灵动风格改逐格；战斗区间内对手名牌、暗角与黑边（`data-igs-fx-battle-letterbox`，复用 letterbox 条）常驻。跨楼层：开启时 `buildReaderPayload` 把向前的消息逐条交给 `createBattleHistoryScanner`，带出招的楼层算战斗仍在继续、沿链找到开战标签（最多 12 个 AI 楼层），连续 2 个 AI 楼层无战斗标签即视为已结束，扫描器有结论即停止读宿主；未结束的战斗作为 `resolveFxAtPage` 第 4 参 `initial.battle` 继承；紧挨本楼的用户消息 `<meta:检定结果>` 为大成功 / 大失败时，本楼主角（我 / 你 / 主角 / 玩家 / 用户名）第一招的普通命中改为暴击 / 闪避并标注。对手立绘：素材模式开启时 reader-host 按对手名 `resolveSpriteAsset(对手, '')` 写入 `fx.foeImage`，渲染时经 `resolveAssetUrl` 与 `safePortraitUrl`（拒绝 http(s)/data:image/blob 以外的协议，允许酒馆相对路径）后用 `<img>` 显示，遭遇演出里从剪影亮起。目标类型：当前立绘角色 → 冲击点按立绘头位落在上半身（`resolveImpactPoint`），立绘以 `composite:add` 叠加受击反应，击倒姿态保持到翻页；主角 → 屏幕边缘闪红、不画斩击；有立绘的对手（且不是当前立绘角色）→ 出招期间临时登场在 fx 后层（`.igs-fx-battle-foe`，对话框之下），受击反应走 CSS，随招式退场；其他 → 舞台中上部。多事件时间轴期间前层有透明点击层，点击跳到结算且不翻页，单招不拦截。遭遇 / 结算整屏演出期间隐藏状态 HUD（`data-igs-fx-battle-show`），出招震屏用 `data-igs-fx-battle-shake`；音效沿用 `fxSound`；同页重绘不重播，翻回看过的页按 `fxStyle.replay` 决定是否重播，换页即取消上一页未播完的出招与立绘动画；减少动态效果时不震屏、不闪光、无立绘反应、无音效、静态显示；NSFW、聊天页、卡片页不触发。外观：名牌、招式条、判定字、结算带与遭遇横幅不用边框色块，默认是两端渐隐的暗色通栏加强调色细线，颜色走演出容器上的 `--igs-bt-*` 变量；世界观只改变量与字体。对话框皮肤换装由 `fx-battle-themes.js` 的 `getDialogThemeBattleFxStyleText(skin)` 经 `dialog-skin-style.js` 只注入当前皮肤：暗纱主题（优雅欧式、魔法星夜、西欧古典）换变量，渐变黑幕无线无框、四面化开并取用户黑幕颜色，青绿山水为绢底石青线与朱砂小印，卡片主题（植物咖啡、黑白漫画、超可爱粉、复古日式、冒险旅途、温暖绘本、日间简约）用与对话框同款的卡片；古代背景（`is-ancient`）的水墨换皮不受皮肤影响。
+- 战斗演出（`fx-battle-model.js` / `fx-battle.js` / `fx-battle-render.js` / `fx-battle-sfx.js`，场景层 `scene/battle-context.js`；`readerSettings.battleFx`：`enabled` 默认关、`letterbox` 默认开，归入「演出 → 剧情提示」）：读取 `[igs-fx:battle|对手|称号]` … `[igs-fx:battle-end|胜利/败北/撤退]` 与 `[igs-fx:hit|出手者|目标|招式|命中/暴击/闪避/格挡/击倒/治疗]`（`scene/fx-directives.js` 独立分支，不进入 `FX_TAG_KINDS`，提示词只在开启时注入）；不显示任何数值。按页播放「遭遇 → 出招（每页最多 3 招）→ 结算」时间轴，时长乘演出风格的停留倍率，灵动风格改逐格；战斗区间内对手名牌、暗角与黑边（`data-igs-fx-battle-letterbox`，复用 letterbox 条）常驻。跨楼层：开启时 `buildReaderPayload` 把向前的消息逐条交给 `createBattleHistoryScanner`，带出招的楼层算战斗仍在继续、沿链找到开战标签（最多 12 个 AI 楼层），连续 2 个 AI 楼层无战斗标签即视为已结束，扫描器有结论即停止读宿主；未结束的战斗作为 `resolveFxAtPage` 第 4 参 `initial.battle` 继承；紧挨本楼的用户消息 `<meta:检定结果>` 为大成功 / 大失败时，本楼主角（我 / 你 / 主角 / 玩家 / 用户名）第一招的普通命中改为暴击 / 闪避并标注。对手立绘：素材模式开启时 reader-host 按对手名 `resolveSpriteAsset(对手, '')` 写入 `fx.foeImage`，渲染时经 `resolveAssetUrl` 与 `safePortraitUrl`（拒绝 http(s)/data:image/blob 以外的协议，允许酒馆相对路径）后用 `<img>` 显示，遭遇演出里从剪影亮起。目标类型：当前立绘角色 → 冲击点按立绘头位落在上半身（`resolveImpactPoint`），立绘以 `composite:add` 叠加受击反应，击倒姿态保持到翻页；主角 → 屏幕边缘闪红、不画斩击；有立绘的对手（且不是当前立绘角色）→ 出招期间临时登场在 fx 后层（`.igs-fx-battle-foe`，对话框之下），受击反应走 CSS，随招式退场；其他 → 舞台中上部。多事件时间轴期间前层有透明点击层，点击跳到结算且不翻页，单招不拦截。遭遇 / 结算整屏演出期间隐藏状态 HUD（`data-igs-fx-battle-show`），出招震屏用 `data-igs-fx-battle-shake`；音效沿用 `fxSound`；同页重绘不重播，翻回看过的页按 `fxStyle.replay` 决定是否重播，换页即取消上一页未播完的出招与立绘动画；减少动态效果时不震屏、不闪光、无立绘反应、无音效、静态显示；NSFW、聊天页、卡片页不触发。外观：名牌、招式条、判定字、结算带与遭遇横幅不用边框色块，默认是两端渐隐的暗色通栏加强调色细线，颜色走演出容器上的 `--igs-bt-*` 变量；世界观只改变量与字体。对话框皮肤换装由 `fx-battle-themes.js` 的 `getDialogThemeBattleFxStyleText(skin)` 经 `dialog-skin-style.js` 只注入当前皮肤：暗纱主题（优雅欧式、魔法星夜、西欧古典）换变量，渐变黑幕无线无框、四面化开并取用户黑幕颜色，青绿山水为绢底石青线与朱砂小印，卡片主题（植物咖啡、黑白漫画、超可爱粉、复古日式、冒险旅途、温暖绘本、日间简约）用与对话框同款的卡片；古代背景（`is-ancient`）的水墨换皮不受皮肤影响。例外是水墨武侠（`wuxia-ink`）：`fx-battle-render.js` 传 `wuxia`，任何世界观下战斗节点都挂 `is-ancient is-wuxia`（判定字得手 / 要害 / 身法 / 化解 / 重创 / 调息，招式名逐字显出只用 CSS 延时，计时器数量不变，样式见 `fx-battle-wuxia-style.js`）；古代背景下其他皮肤仍走原水墨分支。武侠江湖题材包（`fx-pack-wuxia.js`，`era:'ancient'`，默认关）只在古代背景开放，不改战斗演出。
 - 结果展示（`fx-result-model.js` / `fx-result.js`；`readerSettings.resultFx.enabled` 默认关，归入「演出 → 剧情提示」）：「过程动画 → 结果定格」通用卡片，挂在 `#igs-fx-front`，`role=status` + `aria-live=polite`。首个消费者是选项检定：`dice-check.js` 的掷骰分支额外返回结构化 `detail`，`line` 与必成/必败返回契约不变，必成/必败由 `resultDetailOf` 从 `success` 推出；无需检定、判定失败降级或明细不完整时不播放，禁止编造骰点。滚动数字预先整列写入 DOM，最后一帧必须是真实骰点，播放期只做 CSS 阶梯位移，不改写文本节点；减少动态效果时只显示终值并立即放行。reader-host 等结论定格后再发送或填入输入框；关闭阅读器时 `cancelResultFx` 清理节点与计时器，并以 `false` 放行，不阻塞发送。
   - 定格细化：滚动整列用减速缓动连续位移，落点时加 `is-settled`（落点回弹）；检定按成功档位写 `data-igs-fx-result-tier`（crit/extreme/hard/regular/fumble，失败不分档），大成功外发光、大失败抖动、困难/极难加字形强调；对抗双栏按 `reel.outcome` 标 `is-win` / `is-lose`（胜者用强调色、负者淡出）。强调色由 reader-host 经 `resolveChatTheme(dialogSkin)` + `pickFxAccent` 跟随当前对话框皮肤，`playResultFx` 只接受颜色字面量写入 `--igs-fx-result-accent`，取不到时用默认色。减少动态效果时所有动画关闭、立即定格。
 
@@ -151,12 +249,12 @@
 - 亲密演出扩展（`romance-moments.js` / `romance-actions.js`，均为 `readerSettings.romanceFx` 子开关、默认关闭，总开关关闭时全部不生效）：
   - 好感常驻（`favorAmbience` / `favorWords` / `favorThreshold` 40·60·80）：只读快照 `content.statusHud.metrics`，标签精确命中词表取最大百分比，按角色缓存（旁白页沿用），达标且该角色立绘在场时置 `data-igs-rm-favor`，只开很淡的暖光与光斑（不逼近、不柔焦、不占整数档）；需状态栏开启并选表，NSFW 不生效。
   - 关系变化卡（`relationCard`）：`status-hud-model.js` 的 `extractStatusHudRelation` 取列名含「关系」的非数字文字，快照 `statusHud.relation`；按角色记基线，首次只记录、变化才弹卡（挂 `#igs-fx-front`，点击关闭）；不从好感推断关系名。
-  - 修罗场（`rival`）：`[igs-fx:romance|档位|对象]` 第 3 栏为对象（`fx.romanceTarget`，升档沿用；缺省时不算修罗场，不猜对象），1、2 档内另一位已登记角色（`resolveCharacterKey`，含别名）出场时 `data-igs-rm-tone="rival"` 转冷色，并在其头部旁弹一次心碎符号（复用 `MANGA_SYMBOL_SVG.heartbreak` 与头部定位）。
+  - 修罗场（`rival`）：`[igs-fx:romance|档位|对象]` 第 3 栏为对象（`fx.romanceTarget`，升档沿用；缺省时不算修罗场，不猜对象），1、2 档内另一位已登记角色（`resolveCharacterKey`，含别名）出场时 `data-igs-rm-tone="rival"` 转冷色，并在其头部旁弹一次心碎符号（复用 `MANGA_SYMBOL_SVG.heartbreak` 与头部定位）。情敌来源有两种：当过 romance 对象的角色，以及数值系统里吃醋扣过好感的角色（`registerStatsRivals`，bootstrap 在 `igs:stats-fx` 时登记、换聊天时清空）；主对象仍只认第 3 栏，不猜对象。
   - 告白（`confess`）：瞬时 `[igs-fx:confess]`（`fx.confess`），告白页起连续同一说话人最多 3 页为告白段：`data-igs-rm-confess` 驱动黑边与粉色心跳暗角，打字机降一档；段后第一页（回答）经 `applyTypewriterEffect` 的 `delay` 选项停顿 600ms（打字音与行内文字效果同步后移）；减少动态效果时只保留黑边；NSFW 不触发。
   - 恋爱回忆（`memories`）：瞬时 `[igs-fx:memory|名称]`（`fx.memory`），读取舞台背景与立绘交给宿主 `onRomanceMemory` → `cgGallery.capturePhoto` 写入相册，宿主按「chatId|messageId|名称」记在 localStorage `igs-romance-memory-keys`（上限 300）跨会话去重；NSFW 不拍。
   - 快捷动作（`quickActions` / `actions`，上限 8 项，模板 `{角色}` 替换为当前立绘角色）：1、2 档或好感常驻、有立绘、非 NSFW 时在 `#igs-fx-front` 放心形按钮（头部右上方，复用「心」的落点），菜单项写入 `#igs-input` 并聚焦、不自动发送，输入框不可见时复制到剪贴板；翻页收起菜单；按钮点击不冒泡到翻页。
   - NSFW 强度曲线（`nsfwCurve`，默认开）：`reader-host` 在开启且当前页为 NSFW 时按与当前页相同的场景判定得出 `content.nsfwSpan`（`resolveNsfwSpan`），3 档参数乘 `nsfwCurveFactor`：前 3 页 0.55 / 0.8 / 1，段在本楼结束时最后 2 页 0.8 / 0.6；上一楼层末尾为 NSFW 时不渐强，延续到楼层末尾不回落；不影响剪影显隐。
-  - 亲密声画（`romance-intimate.js` 纯函数 / `romance-intimate-audio.js` 合成音色 / `romance-intimate-runtime.js` 调度与 DOM / `romance-intimate-style.js`，由 `applyRomanceToDom` 末尾调用 `syncRomanceIntimate`）：子开关 `edgeFx`（默认开）、`softSound`（默认开）、`nsfwSound`（默认关）、`rhythm`（默认关）、`rhythmSound`（默认开，旧设置缺字段时保持开启；关闭后停止节律音效但保留晃动及节拍时钟）、`sway`（`off/weak/medium/strong`，默认 `medium`）；声音另受 `fxSound` 开关与音量约束。情事阶段由 `content.nsfwSpan` 得出（`resolveIntimatePhase`：开头 2 页升温、段在本楼结束时倒数第 3 页顶点、最后 2 页余韵），`reader-host` 在亲密演出开启且当前页为 NSFW 时总是计算该段（不再只看 `nsfwCurve`）。一个节拍时钟同时驱动吱呀声与晃动、心跳声与暗角脉动：有声音时以 AudioContext 时间为准并扣掉输出延迟，否则用 performance 时间；排程器 50ms 一次、前瞻 0.3s。速度越往后越快（中段按段内进度 +16 bpm、同页停留最多 +10；顶点页按停留时间每秒 +1.5 至 150 bpm，晃动放大至 1.3 倍）。床的材质按地点选（`resolveIntimateMaterial`：木床 / 铁床 / 皮革 / 沙发 / 被褥，被褥没有吱呀）。压低场景声音复用 `duckSceneAudio`（1 档 .75、2 档 .55、3 档 .4），顶点页向前翻到余韵页时全场静音 1.5s（含 BGM 与环境声）、白场，随后心跳回来、床落定两声；从非情事页进入情事段开头时暗转。前景层 `.igs-rm-front`（z-index 3，插在 `#igs-click-layer` 前，即立绘之上、对话框之下）含窗帘光影 / 心跳暗角 / 热浪 / 色散 / 白场暗转，全部只画在边缘；热浪用 `backdrop-filter`，触屏与低画质不做。晃动每帧往 `#igs-bg`（×0.45）、`#igs-sprite`、`#igs-cast`（×0.8）写 `--igs-rm-sx/sy/sr`，样式沿用视差与恋爱逼近的 translate 算式再加晃动量、并去掉 translate 过渡；对话框不动，减少动态效果时不晃，触屏限约 30 帧。`whisper` 为真时 `reader-dom-render` 在没有情绪的页给打字音补「耳语」（`speech-prosody` 的 whisper 档）。
+  - 亲密声画（`romance-intimate.js` 纯函数 / `romance-intimate-audio.js` 合成音色 / `romance-intimate-runtime.js` 调度与 DOM / `romance-intimate-style.js`，由 `applyRomanceToDom` 末尾调用 `syncRomanceIntimate`）：子开关 `edgeFx`（默认开）、`softSound`（默认开）、`nsfwSound`（默认关）、`rhythm`（默认关）、`rhythmSound`（默认开，旧设置缺字段时保持开启；关闭后停止节律音效但保留晃动及节拍时钟）、`sway`（`off/weak/medium/strong`，默认 `medium`）；声音另受 `fxSound` 开关与音量约束。情事阶段由 `content.nsfwSpan` 得出（`resolveIntimatePhase`：开头 2 页升温、段在本楼结束时倒数第 3 页顶点、最后 2 页余韵），`reader-host` 在亲密演出开启且当前页为 NSFW 时总是计算该段（不再只看 `nsfwCurve`）。一个节拍时钟同时驱动吱呀声与晃动、心跳声与暗角脉动：有声音时以 AudioContext 时间为准并扣掉输出延迟，否则用 performance 时间；按下一次声画节拍提前排程、前瞻 0.3s，不固定轮询。速度越往后越快（中段按段内进度 +16 bpm、同页停留最多 +10；顶点页按停留时间每秒 +1.5 至 150 bpm，晃动放大至 1.3 倍）。床的材质按地点选（`resolveIntimateMaterial`：木床 / 铁床 / 皮革 / 沙发 / 被褥，被褥没有吱呀）。压低场景声音复用 `duckSceneAudio`（1 档 .75、2 档 .55、3 档 .4），顶点页向前翻到余韵页时全场静音 1.5s（含 BGM 与环境声）、白场，随后心跳回来、床落定两声；从非情事页进入情事段开头时暗转。前景层 `.igs-rm-front`（z-index 3，插在 `#igs-click-layer` 前，即立绘之上、对话框之下）含窗帘光影 / 心跳暗角 / 热浪 / 色散 / 白场暗转，全部只画在边缘；热浪用 `backdrop-filter`，触屏与低画质不做。晃动每帧往 `#igs-bg`（×0.45）、`#igs-sprite`、`#igs-cast`（×0.8）写 `--igs-rm-sx/sy/sr`，样式沿用视差与恋爱逼近的 translate 算式再加晃动量、并去掉 translate 过渡；对话框不动，减少动态效果时不晃，触屏限约 30 帧。`whisper` 为真时 `reader-dom-render` 在没有情绪的页给打字音补「耳语」（`speech-prosody` 的 whisper 档）。
   - 素材保护：`content.illustrationActive`（生成 CG / 插图）为真时，`#igs-stage-motion` 挂 `data-igs-rm-asset`，亲密演出不柔焦背景、环境层 `.igs-rm-back` 遮成只留边缘；`applySceneGrade({ asset })` 把时段与天气调色整体乘 `ASSET_GRADE_RATIO`（0.35）。亲密演出的背景 filter 叠在 `var(--igs-grade-bg)` 之后，不再整条替换环境滤镜。
   - 关闭阅读器调用 `closeRomanceFx`（清环境层、卡片、按钮、计时器、好感缓存、关系基线与修罗场对象）；普通页的 `cancelRomanceFx` 只收环境层与快捷动作按钮。
 - Meta 互动（`meta-settings.js` 纯函数 / `meta-runtime.js` DOM 投影 / `meta-style.js` / `meta-fields.js` / `meta-digest.js` 摘要暂存；`readerSettings.metaFx`，总开关默认关闭，不进入 `PERFORMANCE_FEATURES` 一键档位，「演出」页单独一张卡片）：
@@ -211,8 +309,39 @@
 ## 图片资源（v0.36.39）
 
 - 阅读器、CG 当前页、地图当前底图/灯光只持中央媒体资源键和租约，换页与关闭释放；中央清理后重读当前页面，迟到的旧缩略图不得回填。
-- 地图上传捕获发起时的聊天/表/层键，在提交时检查同键最新意图；删除/替换能取消迟到写入。旧配置不能覆盖地图删除标记。
+- 地图上传捕获发起时的聊天/表/层键，同键操作按发起顺序完成；失败保留同一文件续存，最终引用服从最后一次替换或清除。旧配置不能覆盖地图删除标记。
 - 设置「备份」页的清缓存只清可再生字节；占用/回收重试和诊断包含统一媒体统计。图片导入失败先恢复设置和预设引用，再补偿新 ID，原有共享图片不被覆盖。
 - `fx-anchor` 只缓存有界几何信息，inline 图片用指纹作键；清理中止旧探测，失败只暂存 30 秒。抠图、缩略图、头像和编辑器使用有期限的媒体解码 helper，编辑会话的画笔像素/撤销缓冲只保留到关闭或提交。
 
 v0.36.41：立绘探测按 document 绑定的媒体所有者取缓存，几何/失败/在途统一登记，所有读取方传入实际宿主 document，不再共用模块全局 Map。CG 视图的目录和失败索引也登记到同一个注册表；中央清理后重读目录与当前页，关闭视图解除登记。设置占用文案显示真实存储后端和辅助缓存，不把无 IndexedDB 的环境称为本地磁盘缓存。
+
+
+## Live2D 本地实验适配
+
+- content.spriteLive2d 与 spriteImage 分离：模型清单不得作为图片 URL 进入缓存、头部检测或换装裁切。
+- 绑定按上游角色卡作用域独立存储，不改变 sceneAssets/图包 schema；当前仅主角色模型；未绑定模型的静态陪衬保持兼容，已绑定模型的陪衬不得回退静态差分。
+- 模型映射使用剧情原始情绪，不使用静态图「默认」槽位替换后的情绪。
+- SDK 只在 allow-scripts sandbox iframe 中运行，不授予同源权限；收发校验 source 和通道，仅发送模型相关字段。
+- 同模型只更新动作/布局，切模型销毁旧 iframe，关闭 reader 必须释放监听和计时器；暂停必须停止模型和渲染 ticker。
+- 表情/动作异步串行追赶最新状态；不得让过期请求覆盖新情绪，重复 DOM 更新不得重复注册 ticker。
+- 本卡启用 Live2D 且角色存在模型绑定时，在静态匹配前分流：不解析、不显示、不预加载其普通静态差分，别名同样适用；加载中或失败也不得回退静态图。保留原静态素材，关闭或移除模型后恢复。CG、HTML、隐藏立绘规则优先。
+- live2d-settings 走现有 controller action 与工具栏管理，面板 Escape 不得同时关闭 reader。
+- 本地 loader 不回落到官方 main；非正式发布，不自动修改用户酒馆脚本或真实存档。
+
+### Live2D 角色工作台与本地资源（实验版）
+
+- 角色页入口只保留「角色 → 角色」的 Live2D 模型库，不在静态角色行重复放置按钮；模型库放在该页底部默认折叠的「Live2D 角色模型（实验）」；工具栏立方体默认隐藏（`hiddenBtns` 默认含 `live2d-settings`，schema 0.5.7 前的设置一次性补入），快捷键默认不绑定，二者仍打开同一工作台，不另建孤立设置路径。
+- ZIP / webkitdirectory 导入先检查路径、大小预算和完整资源引用，模型文件不作为图片处理，不执行包内脚本。多清单包允许选择入口。
+- 模型资源保存于 IndexedDB `igs-live2d-models/models`，绑定仍按原角色卡作用域存 localStorage；导入草稿不得在保存前持久化。配置写入失败尽力回滚新模型，不破坏旧绑定。
+- 本地包传给隔离 iframe 后仅以 Blob URL 加载，释放模型、失败和关闭时撤销 URL；不得把整个酒馆状态发送给 iframe。关闭后 SDK 异步完成不得重建模型或遗留渲染器。
+- 差分名称下拉复用原情绪组/预设，剧情同义词按同一情绪组匹配，精确旧绑定优先，旧自定义名称不得丢失。工作台差分行用实际表情与动作下拉绑定，默认行不可删除，重复名称不能保存；预览与主舞台暂停独立，试播可重复触发同一个动作。
+- 本地资源只初次发送到 iframe；普通翻页只更新 action/layout/paused，同模型继续复用。
+- Live2D 成品 ZIP 包含必要模型资源及 IGS v1 差分/布局配置，支持根目录、嵌套 ZIP、完整解压文件夹；按模型入口匹配绑定，不接受备份内 runtime 脚本覆盖。损坏/不支持/重复配置明确拒绝导入，不得静默丢差分或修改旧草稿。空角色名自动填原名，已填目标名不覆盖；成品恢复所有原名称和布局，不追加静态槽，仍须保存才持久化。原素材包 schema/导出不包含模型，界面和说明必须明确告知。
+- 替换/移除后尽力清理无绑定引用的模型；未承诺跨标签并发事务。设置关闭和 host.destroy 必须强制清理编辑器、计时器与预览 iframe。
+
+### 上游 0.36.75 接入
+
+- 新版设置分组为「角色」（原「素材 → 角色」），模型库与静态角色同页（位于静态角色列表之后）；默认隐藏的立方体按钮打开同一页与工作台。
+- 整楼素材计划在普通静态立绘匹配前检查模型绑定，绑定启停使计划/预热缓存失效；裸立绘 CG 与头像沿用上游规则。
+- 模型绑定角色（包括没有静态立绘的角色）只加入本楼临时出场名单，旁白点名、有效别名与代词继承可选中；不写回静态角色库、不伪造图片 URL。绑定启停与角色名单变化重建整楼准备，别名变化重建素材匹配。
+- 新版舞台 hidden/offscreen/panel 暂停、covered 与 rest 静置状态均暂停模型 ticker；独立工作台预览不随主舞台暂停。

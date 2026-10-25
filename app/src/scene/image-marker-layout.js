@@ -1,14 +1,63 @@
 const MARKER_RE = /\[igs-img:\s*(\d+)\s*\]|<IMG>\s*(\d+)\s*<\/IMG>/gi;
 const VOID_HTML = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
-function structureRanges(source) {
-    const ranges = [];
-    const opaque = [];
-    for (const match of source.matchAll(/```[\s\S]*?(?:```|$)|<!--[\s\S]*?(?:-->|$)/g)) {
-        const closed = match[0].startsWith('```') ? match[0].length >= 6 && match[0].endsWith('```') : match[0].endsWith('-->');
-        const range = { start: match.index, end: closed ? match.index + match[0].length : null };
-        opaque.push(range); ranges.push(range);
+function opaqueRanges(source) {
+    const out = [];
+    // 思维链是文本块，里面提到的标签、括号和代码示例不参与正文结构配对。
+    const pattern = /<(thinking|think|subtext_think)\b[^>]*>[\s\S]*?<\/\1\s*>|```[\s\S]*?(?:```|$)|<!--[\s\S]*?(?:-->|$)/gi;
+    for (const match of source.matchAll(pattern)) {
+        const closed = match[1] || (match[0].startsWith('```') ? match[0].length >= 6 && match[0].endsWith('```') : match[0].endsWith('-->'));
+        out.push({ start: match.index, end: closed ? match.index + match[0].length : null });
     }
+    return out;
+}
+
+// 正文容器是结构检查的独立作用域；前面的未闭合示例不能延伸到这一段正文。
+export function imageMarkerContentRanges(raw) {
+    const source = String(raw || '');
+    const opaque = opaqueRanges(source);
+    const ranges = [];
+    let body = null, depth = 0;
+    for (const match of source.matchAll(/<content(?=[\s/>])(?:"[^"]*"|'[^']*'|[^'">])*>|<\/content\s*>/gi)) {
+        if (opaque.some(range => range.start <= match.index && (range.end == null || match.index < range.end))) continue;
+        if (match[0].startsWith('</')) {
+            if (body && --depth === 0) {
+                ranges.push({ ...body, closeStart: match.index, end: match.index + match[0].length });
+                body = null;
+            }
+        } else if (!/\/\s*>$/.test(match[0])) {
+            if (!body) body = { start: match.index, openEnd: match.index + match[0].length };
+            depth++;
+        }
+    }
+    if (body) ranges.push({ ...body, closeStart: source.length, end: source.length });
+    return ranges;
+}
+
+function structureRanges(source) {
+    const bodies = imageMarkerContentRanges(source);
+    if (!bodies.length) return scanStructureRanges(source);
+    const ranges = [];
+    const append = (from, to) => {
+        for (const range of scanStructureRanges(source.slice(from, to))) ranges.push({ ...range,
+            start: from + range.start, end: range.end == null ? null : from + range.end,
+            ...(range.openEnd != null && { openEnd: from + range.openEnd }),
+            ...(range.closeStart != null && { closeStart: from + range.closeStart }), scopeEnd: to });
+    };
+    let from = 0;
+    for (const body of bodies) {
+        if (body.start > from) append(from, body.start);
+        append(body.start, body.end);
+        from = body.end;
+    }
+    if (from < source.length) append(from, source.length);
+    return ranges;
+}
+
+function scanStructureRanges(source) {
+    const ranges = [];
+    const opaque = opaqueRanges(source);
+    ranges.push(...opaque);
     const hidden = at => opaque.some(range => range.start <= at && (range.end == null || at < range.end));
     const brackets = [], closes = { '[': ']', '【': '】', '［': '］' };
     for (let i = 0; i < source.length; i++) {
@@ -49,7 +98,8 @@ export function imageMarkerBoundary(raw, index) {
     while (true) {
         let next = at;
         for (const range of ranges) {
-            if (range.container || next <= range.start || (range.end != null && next >= range.end)) continue;
+            if (range.container || next <= range.start || (range.end != null && next >= range.end)
+                || (range.scopeEnd != null && next >= range.scopeEnd)) continue;
             if (range.end == null) return -1;
             next = Math.max(next, range.end);
         }
@@ -84,7 +134,8 @@ export function normalizeImageMarkerLayout(raw) {
     for (const marker of markers.reverse()) {
         const from = marker.index, to = from + marker[0].length;
         const ranges = structureRanges(source);
-        const enclosing = ranges.filter(range => !range.container && range.start < from && (range.end == null || range.end > to));
+        const enclosing = ranges.filter(range => !range.container && range.start < from && (range.end == null || range.end > to)
+            && (range.scopeEnd == null || from < range.scopeEnd));
         const lineStart = source.lastIndexOf('\n', from - 1) + 1;
         const lineEnd = source.indexOf('\n', to);
         const ownLine = !source.slice(lineStart, from).trim() && !source.slice(to, lineEnd < 0 ? source.length : lineEnd).trim();

@@ -86,6 +86,8 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
     const favor = featureRow(more, 'favor', `${p}.favorToast.enabled`, s.favorToast.enabled, '数值变化提示', '好感等升降');
     const itemFx = featureRow(more, 'item-fx', `${p}.itemFx.enabled`, s.itemFx.enabled, '获得物品演出', '', checkbox(`${p}.itemFx.mention`, s.itemFx.mention, '正文里点亮已获得的物品名'));
     const battleFx = featureRow(more, 'battle-fx', `${p}.battleFx.enabled`, s.battleFx.enabled, '战斗演出', '', checkbox(`${p}.battleFx.letterbox`, s.battleFx.letterbox, '战斗时加电影黑边'));
+    // 非人演出跟随战斗演出：总开关关闭时置灰，不另计入档位。
+    const battleCreature = perfItem(more, 'battle-creature', checkbox(`${p}.battleFx.creature`, s.battleFx.creature, '非人演出', !s.battleFx.enabled));
     const resultFx = featureRow(more, 'result-fx', `${p}.resultFx.enabled`, s.resultFx.enabled, '选项检定掷骰');
     const tags = featureRow(more, 'fx-tags', `${p}.fxTags.enabled`, s.fxTags.enabled, '来电、通知、回忆等演出', '', grid(FX_TAG_KINDS.map((kind) => checkbox(`${p}.fxTags.${kind}`, s.fxTags[kind], FX_TAG_LABELS[kind])).join('') + checkbox(`${p}.fxTags.emergency`, s.fxTags.emergency, '紧急求助') + checkbox(`${p}.fxTags.spam`, s.fxTags.spam, '垃圾短信样式'))
         + (s.fxTags.call ? field(`${p}.fxTags.callSprite`, '语音通话画面', segmentedInput(`${p}.fxTags.callSprite`, s.fxTags.callSprite, [['split', '分屏'], ['avatar', '头像小窗'], ['hide', '隐藏'], ['show', '照常显示']], '语音通话画面')) : ''));
@@ -103,7 +105,7 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
         + perfSubhead('泡的外形 · 触发情绪')
         + toneWords(COMIC_TONE_KINDS));
     const mangaBack = featureRow(more, 'manga-back', `${p}.mangaBack.enabled`, s.mangaBack.enabled, '漫画背景与特效', '花背景、气场、石化', MANGA_BACK_ALL_KINDS.map((kind) => renderWordListField(`mangaBack.words.${kind}`, MANGA_BACK_LABELS[kind], s.mangaBack.words[kind])).join(''));
-    const crowd = featureRow(more, 'crowd-fx', `${p}.crowdFx.enabled`, s.crowdFx.enabled, '人群剪影', '人多的地点', checkbox(`${p}.crowdFx.react`, s.crowdFx.react, '正文写到鼓掌、欢呼时整群反应'));
+    const crowd = featureRow(more, 'crowd-fx', `${p}.crowdFx.enabled`, s.crowdFx.enabled, '人群氛围', '人多的地点', checkbox(`${p}.crowdFx.react`, s.crowdFx.react, '正文写到鼓掌、欢呼时整群反应'));
     const notifyCenter = featureRow(more, 'notify-center', `${p}.notifyCenter.enabled`, s.notifyCenter.enabled, '通知中心', '攒下没点开的消息');
     const sound = featureRow(more, 'fx-sound', `${p}.fxSound.enabled`, s.fxSound.enabled, '演出音效', '', field(`${p}.fxSound.volume`, '音量', rangeInput(`${p}.fxSound.volume`, s.fxSound.volume, '音量')));
     // DLC 演出：每个已登记的一条开关，默认开；没装 DLC 时整行不出现。
@@ -112,5 +114,5 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
     const dlc = dlcDefs.length
         ? perfItem(more, 'dlc-fx', `<span>扩展演出（DLC）</span>`, { hint: `${dlcDefs.length}个`, detail: grid(dlcDefs.map((def) => checkbox(`${p}.dlcFx.${def.kind}`, dlcOff[def.kind] !== false, def.label)).join('')) })
         : '';
-    return { style, manga, heartbeat, flash, title, favor, itemFx, battleFx, resultFx, tags, dlc, sound, comic, mangaBack, crowd, notifyCenter };
+    return { style, manga, heartbeat, flash, title, favor, itemFx, battleFx, battleCreature, resultFx, tags, dlc, sound, comic, mangaBack, crowd, notifyCenter };
 }

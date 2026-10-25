@@ -1,3 +1,4 @@
+import { resolveCharacterLive2dBinding } from './live2d-config.js';
 import { esc } from './reader-value-utils.js';
 import { normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
@@ -8,8 +9,9 @@ import { CHAT_SFX_PRESET_LABELS } from './chat-sfx.js';
 import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions } from './settings-outfit-fields.js';
 import { MAGIC_HOUSES, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { resolveCharacterMagicHouse } from './magic-house.js';
-import { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } from './voice-bark.js';
-import { TTS_CHARACTER_VOLUMES, listSystemVoices, resolveTtsVoice, systemVoiceOptions, ttsApiVoiceList } from './tts.js';
+import { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions, creatureVoiceLabel } from './voice-bark.js';
+import { TTS_CHARACTER_VOLUMES, findSystemVoice, listSystemVoices, resolveTtsVoice, systemVoiceOptions, ttsApiVoiceOptions } from './tts.js';
+import { renderCharacterCreatureMenuItem, renderCharacterCreatureRows, renderCharacterCreatureTag } from './creature-settings.js';
 import { resolveSpriteBaseScale } from './sprite-height.js';
 import { hasCharacterSpriteLayout } from './sprite-key-migration.js';
 
@@ -89,11 +91,11 @@ export function splitLabelNote(label) {
     return match ? [match[1], match[2]] : [text, ''];
 }
 
-export function checkbox(path, value, label) {
+export function checkbox(path, value, label, disabled = false) {
     const [main, note] = splitLabelNote(label);
     const noteHtml = note ? `<small class="igs-switch-note">${esc(note)}</small>` : '';
     const ariaLabel = note ? ` aria-label="${esc(label)}"` : '';
-    return `<button type="button" class="igs-switch${value ? ' is-on' : ''}" data-switch="${esc(path)}" aria-pressed="${value ? 'true' : 'false'}"${ariaLabel}><i></i><span>${esc(main)}${noteHtml}</span></button>`;
+    return `<button type="button" class="igs-switch${value ? ' is-on' : ''}" data-switch="${esc(path)}" aria-pressed="${value ? 'true' : 'false'}"${ariaLabel}${disabledAttr(disabled)}><i></i><span>${esc(main)}${noteHtml}</span></button>`;
 }
 
 export function tableMultiSelect(paths, selected, catalog, options = {}) {
@@ -207,16 +209,25 @@ export function renderSystemRoleSettings(settings, options = {}) {
     const p = 'readerSettings.systemRole';
     const disabled = options.disabled === true;
     const fontItems = [['', '跟随旁白']].concat((options.fontOptions || []).filter(([value]) => value !== 'inherit'));
-    const tags = s.words.map((word) => `<span class="igs-mood-word-tag">${esc(word)}<button type="button" class="igs-mood-word-del" data-action="system-role-remove-word:${encSeg(word)}" title="删除">×</button></span>`).join('');
-    const colorNote = s.color ? '<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="system-role-follow-color">跟随旁白</button>' : '<em>跟随旁白</em>';
+    const followBtn = s.color ? '<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="system-role-follow-color">跟随旁白</button>' : '';
     return [
         '<div class="igs-settings-row">',
         field(`${p}.font`, '字体', selectInput(`${p}.font`, s.font, fontItems, disabled)),
-        `<label class="igs-settings-field"><span>颜色</span>${colorInput(`${p}.color`, s.color || options.narrationColor, disabled)}${colorNote}</label>`,
+        `<label class="igs-settings-field"><span>颜色</span>${colorInput(`${p}.color`, s.color || options.narrationColor, disabled)}</label>`,
+        followBtn,
         '</div>',
-        checkbox(`${p}.showName`, s.showName, '显示角色名'),
-        `<div class="igs-settings-field"><span>角色词池</span><div class="igs-mood-word-list">${tags || '<div class="igs-scene-empty">暂无</div>'}<button type="button" class="igs-btn-mgr-icon" data-action="system-role-add-word" title="添加系统类角色">+</button></div><em>这些发送者用本样式；线上交流里显示为居中提示条。</em></div>`,
     ].join('');
+}
+
+// 系统消息的折叠设置：显示发送者名称、识别名单。默认收起，展开状态走 advancedOpen。
+export function renderSystemRoleAdvanced(settings, options = {}) {
+    const s = settings;
+    const p = 'readerSettings.systemRole';
+    const tags = s.words.map((word) => `<span class="igs-mood-word-tag">${esc(word)}<button type="button" class="igs-mood-word-del" data-action="system-role-remove-word:${encSeg(word)}" title="删除">×</button></span>`).join('');
+    return `<details class="igs-settings-sub igs-settings-advanced igs-system-role-advanced" data-advanced="system-role"${options.open ? ' open' : ''}${options.hidden || ''}><summary>系统消息设置</summary>`
+        + checkbox(`${p}.showName`, s.showName, '显示发送者名称')
+        + `<div class="igs-settings-field"><span>识别名单</span><div class="igs-mood-word-list">${tags || '<div class="igs-scene-empty">暂无</div>'}<button type="button" class="igs-btn-mgr-icon" data-action="system-role-add-word" title="添加系统类发送者">+</button></div><em>名单内的发送者使用此样式，线上交流中显示为居中提示条</em></div>`
+        + '</details>';
 }
 
 export function renderWeatherFxSettings(settings) {
@@ -268,9 +279,9 @@ export function renderCustomFontManager(fonts, message = '') {
     const list = Array.isArray(fonts) ? fonts : [];
     const rows = list.map((font) => `<div class="igs-settings-row igs-custom-font-row"><span style="font-family:${esc(`"${font.family}",serif`)}">${esc(font.label)}　永字八法Aa</span><button class="igs-settings-action" data-action="custom-font-remove:${esc(encodeURIComponent(font.id))}" type="button">删除</button></div>`).join('');
     return `<div class="igs-custom-fonts">
-        <div class="igs-source-filter-note">支持ttf / otf / woff / woff2，单个不超过32MB；文件存进酒馆的user/files，上传后在上面的字体下拉末尾选择。</div>
         ${rows}
-        <div class="igs-settings-row"><button class="igs-settings-action" data-action="custom-font-upload" type="button">上传字体</button></div>
+        <div class="igs-settings-row"><button class="igs-settings-action igs-custom-font-upload" data-action="custom-font-upload" type="button">上传字体</button></div>
+        <div class="igs-source-filter-note">支持ttf/otf/woff/woff2，单个≤32MB</div>
         ${message ? `<div class="igs-settings-result" data-result="custom-font">${esc(message)}</div>` : ''}
     </div>`;
 }
@@ -493,8 +504,8 @@ export function renderCharacterAssetList(characters, options = {}) {
             const c = encSeg(charName);
             const m = encSeg(mood);
             const acts = slotActions([
-                mood !== '默认' && (imageId || (note && note.error)) ? [`char-expression-retry:${c}:${m}`, '重新生成', 'retry'] : null,
-                mood === '默认' && rawUrl ? [`char-generate-sprite:${c}`, '重新生成', 'retry'] : null,
+                mood !== '默认' && (!rawUrl || imageId || (note && note.error)) ? [`char-expression-retry:${c}:${m}`, rawUrl ? '重新生成' : '生成立绘', 'retry'] : null,
+                mood === '默认' && rawUrl ? [`char-redraw-sprite:${c}`, '重新生成', 'retry'] : null,
             ]);
             const slotMenu = renderRowMenu([
                 canPrompt ? menuItem(`char-expression-prompt:${c}:${m}`, '提示词') : '',
@@ -517,8 +528,9 @@ export function renderCharacterAssetList(characters, options = {}) {
         }).join('');
         const slotArea = renderCharacterSlotTabs({
             charName,
+            builtinImageSource: options.imageSourceMode === undefined || options.imageSourceMode === 'nai',
             baseMoods: moodEntries.map(([mood]) => mood),
-            baseListHtml: `<div class="igs-outfit-panel"><div class="igs-btn-mgr-list">${moodRows || '<div class="igs-scene-empty">暂无情绪，可点击页签上的「添加情绪」图标</div>'}</div></div>`,
+            baseListHtml: `<div class="igs-outfit-panel"><div class="igs-btn-mgr-list">${moodRows || '<div class="igs-scene-empty">暂无情绪</div>'}</div></div>`,
             outfits: outfitForChar,
             activeOutfit,
             expressionNotes: options.expressionNotes,
@@ -531,12 +543,16 @@ export function renderCharacterAssetList(characters, options = {}) {
         const openKey = `char-open:${charName}`;
         const open = isOpen(openKey);
         const toggle = `ui-toggle-open:${encSeg(openKey)}`;
-        const meta = aliases.join('、');
+        const isUserChar = String((options.sceneAssets || {}).userCharacter || '').trim() === charName;
+        const live2dOn = Boolean(resolveCharacterLive2dBinding(options.live2dConfig, options.sceneAssets || { characters, characterAliases: aliasesByCharacter }, charName));
+        const meta = [aliases.join('、'), live2dOn ? 'Live2D 已启用 · 静态差分暂停' : ''].filter(Boolean).join(' · ');
         const head = `<div class="igs-char-head"><button type="button" class="igs-char-avatar" data-action="status-avatar-pick:${encSeg(charName)}" title="上传状态栏头像">${avatarPreview}</button>`
-            + `<button type="button" class="igs-char-title" data-action="${toggle}" aria-expanded="${open}"><b class="igs-char-name">${esc(charName)}</b><span class="igs-char-aliases">${esc(meta)}</span></button>`
+            + `<button type="button" class="igs-char-title" data-action="${toggle}" aria-expanded="${open}"><b class="igs-char-name">${esc(charName)}</b>${isUserChar ? '<span class="igs-char-user-tag" title="旁白里的「你」和酒馆用户名都用这个角色的立绘">User</span>' : ''}${renderCharacterCreatureTag(dna)}<span class="igs-char-aliases">${esc(meta)}</span></button>`
             + `${scopeTag(options, 'characters', charName)}`
             + renderRowMenu([
                 menuItem(`scene-toggle-dna:${encSeg(charName)}`, dnaOpen ? '收起角色设定' : `角色设定${characterDnaFilled(dna) ? '' : '（外貌未填）'}`),
+                menuItem(`scene-set-user-char:${encSeg(charName)}`, isUserChar ? '取消User立绘' : '设为User立绘'),
+                renderCharacterCreatureMenuItem(charName, dna),
                 folderSelect(charName, { menu: true }),
                 String((moods || {}).默认 || '').trim() ? menuItem(`scene-migrate-outfit:${encSeg(charName)}`, '原装迁成差分服装') : '',
                 menuItem(`scene-rename-char:${encSeg(charName)}`, '重命名'),
@@ -550,6 +566,7 @@ export function renderCharacterAssetList(characters, options = {}) {
                 `<div class="igs-char-info-row"><span class="igs-char-info-label">状态栏头像</span>${avatarHtml}</div>`,
                 houseHtml,
                 voiceHtml,
+                renderCharacterCreatureRows(charName, dna),
             ].join(''))
             : '';
         return `<div class="igs-scene-char-group igs-char-card${open ? ' is-open' : ''}">${head}${setup}${open ? `<div class="igs-char-body">${heightRow ? renderCharacterSpriteHeightRow(charName, heightRow) : ''}${slotArea}</div>` : ''}</div>`;
@@ -581,16 +598,19 @@ function voiceTuneOptions(manual) {
     return { pitchOpts, speedOpts };
 }
 
-// 台词朗读开着时：这个角色的朗读声音（自动按 DNA 性别分配，或单独指定），外加音高、语速与试听。
+// 台词朗读开着时：这个角色的朗读声音（自动按 DNA 性别分配，或单独指定），外加音高、语速、音量、风格与试听。
 function renderCharacterTtsRow(charName, { sceneAssets, tts }) {
     const voices = sceneAssets && typeof sceneAssets.characterVoices === 'object' ? sceneAssets.characterVoices || {} : {};
     const manual = normalizeCharacterVoice(Object.prototype.hasOwnProperty.call(voices, charName) ? voices[charName] : null);
     const systemVoices = tts.provider === 'system' ? listSystemVoices() : [];
     const auto = resolveTtsVoice({ textType: 'dialogue', speaker: charName }, tts, { ...sceneAssets, characterVoices: {} }, systemVoices);
     const autoName = auto.voice ? auto.voice.replace(/^Microsoft\s+/i, '') : '默认声音';
-    const items = tts.provider === 'system' ? systemVoiceOptions(systemVoices) : ttsApiVoiceList(tts).map((v) => [v, v]);
-    if (manual.tts && !items.some(([id]) => id === manual.tts)) items.push([manual.tts, `${manual.tts}（不可用）`]);
-    const option = (id, label) => `<option value="${esc(id)}"${id === manual.tts ? ' selected' : ''}>${esc(label)}</option>`;
+    const items = tts.provider === 'system' ? systemVoiceOptions(systemVoices, { all: tts.allVoices }) : ttsApiVoiceOptions(tts);
+    // 已保存的是 voiceURI 时按它对应的声音名显示。
+    const savedVoice = tts.provider === 'system' ? findSystemVoice(systemVoices, manual.tts) : null;
+    const savedId = savedVoice ? savedVoice.name : manual.tts;
+    if (manual.tts && !items.some(([id]) => id === savedId)) items.push([manual.tts, `${manual.tts}（不可用）`]);
+    const option = (id, label) => `<option value="${esc(id)}"${id === savedId ? ' selected' : ''}>${esc(label)}</option>`;
     const { pitchOpts, speedOpts } = voiceTuneOptions(manual);
     const volumeOpts = TTS_CHARACTER_VOLUMES.map(([v, label]) => `<option value="${v}"${v === manual.ttsVolume ? ' selected' : ''}>${esc(label)}</option>`).join('');
     // 接口来源不支持调音高，只给语速。
@@ -600,6 +620,7 @@ function renderCharacterTtsRow(charName, { sceneAssets, tts }) {
         + pitchSelect
         + `<select class="igs-asset-move" data-char-voice-speed="${esc(charName)}" aria-label="朗读语速" title="语速">${speedOpts}</select>`
         + `<select class="igs-asset-move" data-char-voice-ttsVolume="${esc(charName)}" aria-label="朗读音量" title="这个角色的朗读音量">${volumeOpts}</select>`
+        + `<input class="igs-asset-move" type="text" maxlength="300" data-char-voice-ttsStyle="${esc(charName)}" value="${esc(manual.ttsStyle)}" placeholder="朗读风格（可选）" aria-label="朗读风格" title="这个角色的朗读风格描述，仅 OpenAI 兼容与自定义请求生效">`
         + `<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-preview:${encSeg(charName)}">试听</button></div>`;
 }
 
@@ -609,7 +630,7 @@ function renderCharacterVoiceRow(charName, { sceneAssets, tts }) {
     const voices = sceneAssets && typeof sceneAssets.characterVoices === 'object' ? sceneAssets.characterVoices || {} : {};
     const manual = normalizeCharacterVoice(Object.prototype.hasOwnProperty.call(voices, charName) ? voices[charName] : null);
     const auto = resolveCharacterVoice({ ...sceneAssets, characterVoices: {} }, charName);
-    const autoText = auto.pack ? `自动（${auto.pack.name}）` : '自动（无法从DNA判断性别，不发声）';
+    const autoText = auto.creature ? `自动（非人声线：${creatureVoiceLabel(auto.creature)}）` : auto.pack ? `自动（${auto.pack.name}）` : '自动（无法从DNA判断性别，不发声）';
     const option = (id, label) => `<option value="${esc(id)}"${id === manual.pack ? ' selected' : ''}>${esc(label)}</option>`;
     const packs = voicePackOptions();
     const groups = VOICE_GENDER_GROUPS.map(([gender, label]) => {
@@ -646,28 +667,48 @@ const CHARACTER_DNA_FIELD_LABELS = [
     ['defaultAppearance', '默认外观', '默认发型、服装、饰品；剧情明确换装时可被覆盖'],
     ['negative', '负面词', '防漂移与禁止增加的特征'],
     ['triggerWords', '触发词', 'LoRA触发词等纯文本'],
+    ['personality', '性格特点 DNA', '只描述该角色稳定的性格特点，不含外貌、衣装、当次表情、动作或场景；生图时与所选景别身份一起使用'],
+    ...[['full_body', '全身'], ['half_body', '半身'], ['portrait', '头像']].flatMap(([view, label]) => [
+        [`views.${view}.subject`, `${label}身份（含年龄感）`, '英文身份主语片段；核对有依据的年龄感、角、尾巴、非人耳及标志饰品。全身保留已知身体特征，头像保留头颈锚点；三景别同一身份，不含普通服装、动作或临时表情'],
+        [`views.${view}.negative`, `${label}身份负面词`, '该景别固定身份的排除词，可留空'],
+    ]),
 ];
 
 // 角色 DNA 折叠编辑器：角色名只进 data 属性，不拼入点号路径；输入只更新草稿。
-const dnaValue = (dna, field) => (dna && typeof dna === 'object' && !Array.isArray(dna) && typeof dna[field] === 'string' ? dna[field] : '');
+const dnaValue = (dna, field) => {
+    const value = field.split('.').reduce((node, key) => node?.[key], dna);
+    return typeof value === 'string' ? value : '';
+};
 
 function characterDnaFilled(dna) {
-    return CHARACTER_DNA_FIELD_LABELS.some(([field]) => dnaValue(dna, field).trim());
+    return characterDnaEditFields(dna).some(([field]) => dnaValue(dna, field).trim());
+}
+
+function characterDnaEditFields(dna) {
+    const legacy = dna?.version !== 2 && (dna?.identityInitialized === true
+        || ['identity', 'defaultAppearance', 'negative', 'triggerWords'].some(field => dnaValue(dna, field).trim()));
+    return CHARACTER_DNA_FIELD_LABELS.filter(([field]) => legacy
+        ? !field.startsWith('views.') : field === 'personality' || field.startsWith('views.'));
 }
 
 function renderCharacterDnaFields(charName, dna) {
-    const rows = CHARACTER_DNA_FIELD_LABELS.map(([field, label, hint]) => (
-        `<label class="igs-dna-field"><span class="igs-btn-mgr-label">${esc(label)}</span>`
+    const fields = characterDnaEditFields(dna);
+    const legacy = fields.some(([field]) => field === 'identity');
+    const rows = fields.map(([field, label, hint]) => (
+        `<label class="igs-dna-field${field === 'personality' ? ' is-wide' : ''}"><span class="igs-btn-mgr-label">${esc(label)}</span>`
         + `<textarea class="igs-scene-url-input igs-dna-input" rows="2" data-dna-char="${esc(charName)}" data-dna-field="${field}" placeholder="${esc(hint)}">${esc(dnaValue(dna, field))}</textarea></label>`
     )).join('');
-    return `<div class="igs-dna-fields" data-dna-editor="${esc(charName)}">${rows}</div>`;
+    const protocol = `<div class="igs-dna-protocol"><span class="igs-outfit-muted">${legacy ? '旧版外貌资料' : '三景别外貌资料'}</span>`
+        + (legacy ? `<button type="button" class="igs-review-link" data-action="char-upgrade-dna:${encSeg(charName)}">使用三景别外貌</button>` : '') + '</div>';
+    return `${protocol}<div class="igs-dna-fields" data-dna-editor="${esc(charName)}">${rows}</div>`;
 }
 
 // 「角色立绘」标题旁的 ＋：和场景页一样是个下拉，新增角色或只有 DNA 的角色。
 export const CHARACTER_ADD_MENU = `<details class="igs-add-menu" data-add-menu="characters"><summary class="igs-btn-mgr-icon" title="新增角色" aria-label="新增角色">+</summary>`
     + '<div class="igs-add-menu-list" role="menu"><button class="igs-add-menu-item" data-action="scene-add-char" type="button" role="menuitem">新增角色</button>'
     + '<button class="igs-add-menu-item" data-action="scene-add-dna-char" type="button" role="menuitem">新增只登记外貌的角色</button>'
-    + '<button class="igs-add-menu-item" data-action="scene-add-user-char" type="button" role="menuitem">用酒馆用户设定生成主角</button></div></details>';
+    + '<button class="igs-add-menu-item" data-action="scene-add-user-char" type="button" role="menuitem">用酒馆用户设定生成主角</button>'
+    + '<button class="igs-add-menu-item" data-action="live2d-open" type="button" role="menuitem">Live2D模型（高级）</button></div></details>';
 
 function renderCharacterSetupPanel(charName, dna, profileRows) {
     return `<div class="igs-char-dna-panel"><div class="igs-char-dna-panel-head">角色设定`
@@ -680,7 +721,7 @@ export function renderCharacterDnaEditor(charName, dna) {
     return `<details class="igs-dna-editor"><summary class="igs-dna-summary">外貌（DNA）${characterDnaFilled(dna) ? '' : '（未填写）'}</summary>${renderCharacterDnaFields(charName, dna)}</details>`;
 }
 
-// 审核卡带来的 DNA 候选：只展示，用户点「采用」才写入 defaultAppearance（不覆盖已填内容）。
+// 历史审核候选可能混合人物、衣装和动作，只供查看，不写入人物或服装 DNA。
 export function renderDnaCandidateBar(candidate) {
     const name = candidate && typeof candidate.name === 'string' ? candidate.name.trim() : '';
     if (!name) return '';
@@ -798,7 +839,7 @@ function renderSpriteSlotExpansion(charName, mood, url, moodGroups, icons) {
 }
 
 
-export function renderPinnedButtons(pinnedValue, hiddenValue, orderValue, dialogValue = null, splitValue = 'split') {
+export function renderPinnedButtons(pinnedValue, hiddenValue, orderValue, dialogValue = null, splitValue = 'split', open = false) {
     const dialogIds = Array.isArray(dialogValue) ? dialogValue : [];
     const splitMode = splitValue === 'split';
     const dialogIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><line x1="7" y1="16" x2="17" y2="16"/></svg>';
@@ -820,14 +861,15 @@ export function renderPinnedButtons(pinnedValue, hiddenValue, orderValue, dialog
         const eyeBtn = canHide
             ? `<button type="button" class="igs-btn-mgr-icon${isHidden ? '' : ' is-on'}" data-action="toolbar-toggle-visible:${esc(id)}" title="显示/隐藏">${isHidden ? eyeOff : eyeOn}</button>`
             : `<span class="igs-btn-mgr-icon" title="此按钮不可隐藏" style="opacity:.3;cursor:default">${eyeOn}</span>`;
-        // 分两截时每个按钮可单独放到对话框下（设置键除外）。
+        // 分布为「顶栏+对话框下」时每个按钮可单独放到对话框下（设置键除外）。
         const inDialog = dialogIds.includes(id);
         const dialogBtn = splitMode && id !== 'settings'
             ? `<button type="button" class="igs-btn-mgr-icon${inDialog ? ' is-on' : ''}" data-action="toolbar-toggle-dialog:${esc(id)}" title="放在对话框下">${dialogIcon}</button>`
             : '';
         return `<div class="igs-btn-mgr-row${isHidden ? ' is-hidden-btn' : ''}"><span class="igs-btn-mgr-handle" data-action="toolbar-move-up:${esc(id)}" title="上移">☰</span><span class="igs-btn-mgr-label">${esc(label)}</span>${eyeBtn}<button type="button" class="igs-btn-mgr-icon${isPinned ? ' is-on' : ''}" data-action="toggle-toolbar-pin:${esc(id)}" title="常驻">${pinIcon}</button>${dialogBtn}</div>`;
     }).join('');
-    return `<div class="igs-settings-field"><span>按钮管理</span><div class="igs-btn-mgr-list">${rows}</div></div>`;
+    const head = `<div class="igs-btn-mgr-legend">右侧图标依次为：显示、常驻${splitMode ? '、放在对话框下' : ''}</div>`;
+    return `<details class="igs-settings-advanced" data-advanced="toolbar-buttons"${open ? ' open' : ''}><summary>按钮管理（${order.length}个）</summary><div class="igs-btn-mgr-list">${head}${rows}</div></details>`;
 }
 
 
@@ -845,7 +887,7 @@ export function renderShortcutSettings(value, globalObject = globalThis, asyncSt
         const active = recording === id;
         const clash = conflicts[id] || [];
         const clashNote = clash.length ? `<span class="igs-shortcut-conflict" role="alert">与「${clash.map((other) => esc(labelOf.get(other) || other)).join('」「')}」冲突</span>` : '';
-        return `<div class="igs-btn-mgr-row igs-shortcut-row${clash.length ? ' is-conflict' : ''}" data-shortcut-id="${esc(id)}"><span class="igs-btn-mgr-label">${esc(label)}</span><kbd class="igs-shortcut-keys">${active ? '请按下新按键，Esc取消' : esc(shown)}</kbd><button type="button" class="igs-settings-action" data-action="shortcut-record:${esc(id)}">${active ? '录制中' : '修改'}</button><button type="button" class="igs-settings-action" data-action="shortcut-clear:${esc(id)}">清除</button><button type="button" class="igs-settings-action" data-action="shortcut-reset:${esc(id)}">默认</button>${clashNote}</div>`;
+        return `<div class="igs-btn-mgr-row igs-shortcut-row${clash.length ? ' is-conflict' : ''}" data-shortcut-id="${esc(id)}"><span class="igs-btn-mgr-label">${esc(label)}</span><button type="button" class="igs-shortcut-keys" data-action="shortcut-record:${esc(id)}" title="点击修改">${active ? '请按下新按键，Esc取消' : esc(shown)}</button><details class="igs-add-menu igs-shortcut-menu" data-add-menu="shortcut"><summary class="igs-btn-mgr-icon" title="更多" aria-label="更多">⋯</summary><div class="igs-add-menu-list" role="menu"><button class="igs-add-menu-item" data-action="shortcut-clear:${esc(id)}" type="button" role="menuitem">清除</button><button class="igs-add-menu-item" data-action="shortcut-reset:${esc(id)}" type="button" role="menuitem">默认</button></div></details>${clashNote}</div>`;
     }).join('');
     const conflictCount = Object.keys(conflicts).length;
     const summary = conflictCount ? `<div class="igs-shortcut-conflict-summary" role="status">有${conflictCount}个动作的快捷键冲突，冲突时只会触发列表中靠前的动作。</div>` : '';
@@ -933,15 +975,15 @@ export function renderGeneratedAssetPane({ library = {}, temp = [], tempPage, re
     const error = readError || tempPage?.error;
     const controls = tempPage ? `<div class="igs-gen-tile-actions">`
         + `<button type="button" class="igs-review-link" data-action="gen-temp-page:previous"${tempPage.hasPrevious ? '' : ' disabled'}>上一页</button>`
-        + `<span>${tempPage.loading ? '正在读取素材…' : `临时素材共 ${tempPage.total || 0} 项，每页 24 项`}</span>`
+        + `<span class="igs-gen-page-note">${tempPage.loading ? '正在读取素材…' : `共 ${tempPage.total || 0} 项，每页 24 项`}</span>`
         + `<button type="button" class="igs-review-link" data-action="gen-temp-page:next"${tempPage.hasNext ? '' : ' disabled'}>下一页</button>`
         + `<button type="button" class="igs-review-link" data-action="gen-records-retry">重新读取</button></div>`
-        + (error ? '<p role="alert">素材或物品记录读取失败，请点“重新读取”。本机数据保留，失败不会当作缺图重新生成。</p>' : '') : '';
+        + (error ? '<p role="alert" class="igs-gen-page-note">素材或物品记录正在自动恢复，读取完成后继续原操作。</p>' : '') : '';
     return renderReviewCard({
         key: 'generated',
         title: '刚生成的图',
         count,
-        hint: '存好后移到角色或场景里，这里不再保留。',
+        hint: '存入后从此处移除。',
         body: controls + (tempRows || leftoverRows.length ? `<div class="igs-gen-grid">${tempRows}${leftoverRows.join('')}</div>` : ''),
         empty: '暂无刚生成的素材',
     });

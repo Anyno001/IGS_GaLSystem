@@ -2,6 +2,7 @@ import { CAMPUS_FX_KINDS, COURTESY_FX_KINDS, DAILY_FX_KINDS, PLAY_FX_KINDS, WARD
 import { CAMPUS_TRIGGER_WORDS } from './campus-fx.js';
 import { FX_PACKS_ACTIVE, FX_PACK_TRIGGER_WORDS, isPackKind, packBlockKey } from './fx-packs.js';
 import { compileKeywordMatcher, joinPromptKeywords, normalizePromptEntries, parsePromptKeywords } from './prompt-entries.js';
+import { trimCacheEntries } from '../media/cache-eviction.js';
 
 // 按需展开的提示词块：最近几层出现过对应标签、用户输入或最近 AI 正文命中触发词、或对应成对标签未闭合时才发完整写法。
 export const DEFAULT_TRIGGER_LOOKBACK = 3;
@@ -117,9 +118,14 @@ const BLOCK_TRIGGERS = Object.freeze({
         open: /\[igs-fx:battle[|\]]/g,
         close: /\[igs-fx:battle-end[|\]]/g,
     },
+    // 非人角色：开关跟随战斗演出，条目设置与其他块相同。
+    creature: {
+        tag: /\[igs-fx:creature[|\]]/,
+        words: ['怪物', '魔物', '妖怪', '妖兽', '魔兽', '使魔', '坐骑', '恶魔', '幽灵', '兽人', '人鱼', 'Boss'],
+    },
     romance: {
         // 最近几层出现 NSFW 场景标签也展开：感官调度的写法要在情事段里用得上。
-        tag: /\[igs-fx:(?:romance|romance-end|confess|memory|sense|sense-end|solo|solo-end|noise)[|\]]|\[igs-scene:[^\]\n]*\|\s*nsfw\s*\]/i,
+        tag: /\[igs-fx:(?:romance|romance-end|confess|memory|sense|sense-end|solo|solo-end|noise)[|\]]|\[igs-scene:[^\]\n]*\|\s*nsfw\s*(?:\|[^\]\n]*)?\]/i,
         words: ['告白', '表白', '约会', '亲吻', '接吻', '拥抱', '心动', '暧昧', '喜欢你', '爱你'],
         open: /\[igs-fx:romance[|\]]/g,
         close: /\[igs-fx:romance-end\]/g,
@@ -153,7 +159,7 @@ const BLOCK_TRIGGERS = Object.freeze({
     // 体贴与礼仪：开门礼让、护身、照料、公主抱，及点灯烛火 / 递接 / 站位身段三块积木（约会与后宫共用）。
     // 亲密场景标签在场也展开：写法要在约会、情事段里用得上。
     courtesy: {
-        tag: new RegExp(`\\[igs-fx:(?:${COURTESY_FX_KINDS.join('|')})[|\\]]|\\[igs-scene:[^\\]\\n]*\\|\\s*nsfw\\s*\\]`, 'i'),
+        tag: new RegExp(`\\[igs-fx:(?:${COURTESY_FX_KINDS.join('|')})[|\\]]|\\[igs-scene:[^\\]\\n]*\\|\\s*nsfw\\s*(?:\\|[^\\]\\n]*)?\\]`, 'i'),
         words: [...new Set(Object.entries(DAILY_TRIGGER_WORDS).filter(([k]) => COURTESY_FX_KINDS.includes(k)).flatMap(([, w]) => w))],
     },
     // 校园：黑板写字、传纸条、抽屉里的发现、点名、考试发卷、文化祭、毕业典礼、第二颗纽扣，只在正文 / 用户提到校园场面时才补完整写法。
@@ -195,9 +201,9 @@ function compileEntry(block, entry) {
     if (!primary) {
         const words = entry.keys ? parsePromptKeywords(entry.keys) : rule.words;
         primary = compileKeywordMatcher(words);
-        if (MATCHER_CACHE.size >= MATCHER_CACHE_MAX) MATCHER_CACHE.clear();
-        MATCHER_CACHE.set(cacheKey, primary);
     }
+    MATCHER_CACHE.delete(cacheKey); MATCHER_CACHE.set(cacheKey, primary);
+    trimCacheEntries(MATCHER_CACHE, MATCHER_CACHE_MAX);
     return { rule, primary };
 }
 

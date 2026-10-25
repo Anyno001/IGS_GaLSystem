@@ -12,6 +12,7 @@ import { NOTIFY_CENTER_STYLE_TEXT } from './notify-center-style.js';
 import { SPAM_SMS_STYLE_TEXT } from './spam-sms-style.js';
 import { STAGE_DIRECTION_STYLE_TEXT } from './stage-direction-style.js';
 import { STAGE_CAST_STYLE_TEXT } from './stage-cast-render.js';
+import { CREATURE_LAYOUT_STYLE_TEXT } from './creature-layout.js';
 import { SCENE_GRADE_STYLE_TEXT } from './scene-grade.js';
 import { ROMANCE_STYLE_TEXT } from './romance-style.js';
 import { INTIMATE_STYLE_TEXT } from './romance-intimate-style.js';
@@ -47,9 +48,8 @@ import { CROWD_STYLE_TEXT } from './crowd-fx.js';
 
 import { SETTINGS_THEME_OPTIONS, getSettingsThemePalette } from './settings-theme.js';
 import { STATUS_HUD_PHONE_MEDIA } from '../../data/shujuku/status-hud-model.js';
-import {
-    IGS_UI_BLUR, IGS_UI_EDGE_NIGHT, IGS_UI_ELEVATION, IGS_UI_FONT_SANS, IGS_UI_INK, IGS_UI_RADIUS, IGS_UI_THICKNESS, igsUiSurface,
-} from '../../styles/ui-material.js';
+import { IGS_UI_BLUR, IGS_UI_EDGE_NIGHT, IGS_UI_ELEVATION, IGS_UI_FONT_SANS, IGS_UI_INK, IGS_UI_RADIUS, IGS_UI_THICKNESS, igsUiSurface } from '../../styles/ui-material.js';
+import { ORIGINAL_READER_ICONS } from './reader-icons.js';
 
 // 提示弹窗兜底配色：对话框皮肤有专属主题时由 dialog-theme-hud.js 的提示弹窗规则覆盖，否则取设置器主题的面板 token。
 const TOAST_THEME_STYLE_TEXT = SETTINGS_THEME_OPTIONS.map(({ value }) => {
@@ -57,34 +57,7 @@ const TOAST_THEME_STYLE_TEXT = SETTINGS_THEME_OPTIONS.map(({ value }) => {
     return `#igs-toast[data-igs-toast-theme="${value}"]{background:${tokens['shell-bg']};color:${tokens.ink};box-shadow:${tokens['shell-shadow']};}`;
 }).join('');
 
-export const ORIGINAL_READER_ICONS = Object.freeze({
-    db: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display:block"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg>',
-    prev: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="15 18 9 12 15 6"/></svg>',
-    next: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="9 18 15 12 9 6"/></svg>',
-    play: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="m8 5 11 7-11 7z"/></svg>',
-    replay: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>',
-    stop: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
-    assets: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="9" cy="7" r="3.2"/><path d="M3.5 20v-1.5A4.5 4.5 0 0 1 8 14h2"/><path d="M13 20l3.2-4.2 2 2.5 1.3-1.6L22 20z"/><path d="M18 4v5M15.5 6.5h5"/></svg>',
-    // 绘制 / 重画系列：同一圆角画框与线宽。整楼 = 两层叠框 + 星芒，单张 = 单框 + 循环箭头；小尺寸只靠框内大符号区分。
-    regen: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M8 3h11a2 2 0 0 1 2 2v11"/><rect x="3" y="7" width="14" height="14" rx="2"/><path d="M10 9.6l1.1 2.6 2.6 1.1-2.6 1.1-1.1 2.6-1.1-2.6-2.6-1.1 2.6-1.1z" fill="currentColor"/></svg>',
-    clearCg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 10v6M14 10v6"/></svg>',
-    clearFloorCg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 10v6M14 10v6"/><path d="M4 3h16"/></svg>',
-    rerollCg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M16.5 12a4.5 4.5 0 1 1-1.32-3.18"/><path d="M16.5 6.5v3h-3"/></svg>',
-    rescan: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>',
-    save: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
-    settings: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 5 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 5a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.4.6.8 1 1 .3.2.7.3 1.1.3H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>',
-    hide: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
-    prevTurn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polygon points="19 20 9 12 19 4 19 20" fill="currentColor" stroke="none"/><line x1="5" y1="19" x2="5" y2="5"/></svg>',
-    nextTurn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polygon points="5 4 15 12 5 20 5 4" fill="currentColor" stroke="none"/><line x1="19" y1="5" x2="19" y2="19"/></svg>',
-    firstTurn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg>',
-    quickSave: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M6 3.5h12v17l-6-4.5-6 4.5z"/><path d="M12 6.5v6M9.5 10l2.5 2.5 2.5-2.5"/></svg>',
-    quickLoad: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M6 3.5h12v17l-6-4.5-6 4.5z"/><path d="M12 12.5v-6M9.5 9l2.5-2.5L14.5 9"/></svg>',
-    toggleBar: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:block"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
-    firstPage: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>',
-    lastPage: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>',
-    close: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:block"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-    spriteEdit: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 15 22 12 19 9"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>',
-});
+export { ORIGINAL_READER_ICONS };
 
 export const ORIGINAL_READER_TOOLBAR_BUTTONS = Object.freeze([
     // group 决定工具栏分隔：nav 翻页 / create 画图与素材 / view 画面 / system 系统。
@@ -103,6 +76,7 @@ export const ORIGINAL_READER_TOOLBAR_BUTTONS = Object.freeze([
     { id: 'quick-load', group: 'nav', title: '快速读档', html: ORIGINAL_READER_ICONS.quickLoad },
     { id: 'regen', group: 'create', title: '绘制 CG', html: ORIGINAL_READER_ICONS.regen },
     { id: 'reroll-cg', group: 'create', title: '重画这张（提示词不变，只重画当前这一张）', html: ORIGINAL_READER_ICONS.rerollCg },
+    { id: 'consistency-cg', group: 'create', title: '角色一致性重绘（预览后接受）', html: ORIGINAL_READER_ICONS.consistencyCg },
     { id: 'clear-cg', group: 'create', title: '清扫当前 CG', html: ORIGINAL_READER_ICONS.clearCg },
     { id: 'clear-floor-cg', group: 'create', title: '清扫本楼（删掉本楼全部 CG 和挂载点，不重新出图）', html: ORIGINAL_READER_ICONS.clearFloorCg },
     { id: 'generate-assets', group: 'create', title: '补全立绘与背景', html: ORIGINAL_READER_ICONS.assets },
@@ -110,7 +84,9 @@ export const ORIGINAL_READER_TOOLBAR_BUTTONS = Object.freeze([
     { id: 'cg-gallery', group: 'create', title: 'CG 库', html: ITEM_CG_ICONS.cgGallery },
     { id: 'save', group: 'view', title: '保存图片', html: ORIGINAL_READER_ICONS.save },
     { id: 'hide', group: 'view', title: '隐藏对话框', html: ORIGINAL_READER_ICONS.hide },
+    { id: 'live2d-settings', group: 'view', title: 'Live2D 角色绑定', html: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 1 15 5v6l-7 4-7-4V5Zm0 0v14M1 5l7 4 7-4"/></svg>' },
     { id: 'sprite-edit', group: 'view', title: '调整立绘', html: ORIGINAL_READER_ICONS.spriteEdit },
+    { id: 'mini-games', group: 'view', title: '小游戏（立直麻将等，玩完回到当前楼）', html: ORIGINAL_READER_ICONS.games },
     { id: 'rescan', group: 'system', title: '重新加载', html: ORIGINAL_READER_ICONS.rescan },
     { id: 'settings', group: 'system', title: '设置', html: ORIGINAL_READER_ICONS.settings },
 ]);
@@ -246,6 +222,19 @@ const ORIGINAL_READER_STYLE_TEXT = `
 .igs-dialog.igs-hidden{opacity:0;transform:translateX(-50%) translateY(20px);pointer-events:none;}
 #igs-overlay.igs-floating #igs-click-layer{cursor:grab;touch-action:none;}
 #igs-overlay.igs-floating.is-dragging #igs-click-layer{cursor:grabbing;}
+/* 悬浮窗四角拖拽改尺寸：角上一道细折线，平时很淡，指上或拖动时才清楚。 */
+#igs-overlay .igs-resize-handle{position:absolute;z-index:41;width:16px;height:16px;touch-action:none;color:var(--igs-bar-ink,#fff);opacity:.22;transition:opacity .15s;}
+#igs-overlay .igs-resize-handle::before{content:"";position:absolute;inset:4px;border:0 solid currentColor;}
+#igs-overlay .igs-resize-handle:hover,#igs-overlay.is-resizing .igs-resize-handle{opacity:.7;}
+#igs-overlay .igs-resize-handle[data-igs-corner="nw"]{left:0;top:0;cursor:nwse-resize;}
+#igs-overlay .igs-resize-handle[data-igs-corner="ne"]{right:0;top:0;cursor:nesw-resize;}
+#igs-overlay .igs-resize-handle[data-igs-corner="sw"]{left:0;bottom:0;cursor:nesw-resize;}
+#igs-overlay .igs-resize-handle[data-igs-corner="se"]{right:0;bottom:0;cursor:nwse-resize;}
+#igs-overlay .igs-resize-handle[data-igs-corner="nw"]::before{border-left-width:1.5px;border-top-width:1.5px;border-top-left-radius:6px;}
+#igs-overlay .igs-resize-handle[data-igs-corner="ne"]::before{border-right-width:1.5px;border-top-width:1.5px;border-top-right-radius:6px;}
+#igs-overlay .igs-resize-handle[data-igs-corner="sw"]::before{border-left-width:1.5px;border-bottom-width:1.5px;border-bottom-left-radius:6px;}
+#igs-overlay .igs-resize-handle[data-igs-corner="se"]::before{border-right-width:1.5px;border-bottom-width:1.5px;border-bottom-right-radius:6px;}
+@media (pointer:coarse){#igs-overlay .igs-resize-handle{width:22px;height:22px;opacity:.35;}#igs-overlay .igs-resize-handle::before{inset:6px;}}
 #igs-overlay.igs-floating .igs-dialog{box-sizing:border-box;left:12px;right:12px;bottom:14px;width:auto;transform:translateZ(0);display:flex;flex-direction:column;max-height:none;overflow:visible;padding:7px 18px 14px;}
 #igs-overlay.igs-floating .igs-dialog[data-igs-narration="1"]{padding-top:12px;}
 #igs-overlay.igs-floating .igs-dialog.igs-hidden{transform:translateY(20px);}
@@ -257,6 +246,7 @@ const ORIGINAL_READER_STYLE_TEXT = `
 #igs-overlay.igs-floating #igs-toolbar-layer{left:12px;right:12px;bottom:14px;width:auto;transform:none;}
 #igs-overlay.igs-floating-mobile #igs-toolbar-layer{left:10px;right:10px;bottom:12px;}
 .igs-ctrl-bar{position:absolute;top:-50px;right:0;display:flex;align-items:flex-start;gap:6px;z-index:5;padding:6px;background:var(--igs-toolbar-bg,var(--igs-glass-bg,rgba(20,20,22,.62)));border:1px solid var(--igs-toolbar-border,rgba(255,255,255,.14));-webkit-backdrop-filter:var(--igs-toolbar-blur,none);backdrop-filter:var(--igs-toolbar-blur,none);border-radius:var(--igs-toolbar-radius,18px);box-shadow:var(--igs-toolbar-shadow,0 4px 24px rgba(0,0,0,.20));pointer-events:auto;transition:opacity .3s;}
+#igs-sprite.igs-live2d-ready{background-image:none!important;}
 .igs-ctrl-bar.igs-hidden{opacity:0;pointer-events:none;}
 #igs-bar-btns{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;max-width:min(336px,calc(100vw - 112px));justify-content:flex-start;align-content:flex-start;}
 /* 顶部固定栏贴右上角收成一团，不把按钮、菜单、关闭撑到屏幕两头。 */
@@ -433,6 +423,7 @@ ${SPRITE_TURN_STYLE_TEXT}
 ${FX_STYLE_TEXT}
 ${STAGE_DIRECTION_STYLE_TEXT}
 ${STAGE_CAST_STYLE_TEXT}
+${CREATURE_LAYOUT_STYLE_TEXT}
 ${SCENE_GRADE_STYLE_TEXT}
 ${ROMANCE_STYLE_TEXT}
 ${INTIMATE_STYLE_TEXT}

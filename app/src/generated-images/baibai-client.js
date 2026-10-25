@@ -1,6 +1,6 @@
 // 柏宝绘（ST-BaiBai-Image）出图桥。
 // 走柏宝绘公开接口 globalThis.STBaiBaiImage（apiVersion 1）：后端、并发闸门与限流退避都由柏宝绘负责，
-// 本模块只负责找接口、发请求、归一化结果；NAI 兜底由 image-backend 处理。
+// 本模块只负责找接口、发请求、归一化结果；图像来源由 image-backend 保持用户选择。
 export const BAIBAI_DEFAULT_TIMEOUT_MS = 240000;
 
 export function findBaibaiApi(globalObject = globalThis) {
@@ -28,6 +28,8 @@ function joinTags(parts) {
 // slot：{ scene, sceneUc, chars: [{ name?, tags }] }。后端支持多角色时按角色分开传，否则拼进一段 prompt。
 // size 取 'WxH'，宽大于高按横图，具体像素用柏宝绘渠道页的设置。
 export async function requestBaibaiImage(api, slot = {}, options = {}) {
+    const cancelled = () => ({ ok: false, reason: 'request-stale', stopGeneration: true });
+    if (options.signal?.aborted) return cancelled();
     if (!api) return { ok: false, error: '未检测到柏宝绘' };
     const status = readBaibaiStatus(api);
     if (status.configured === false) return { ok: false, error: `柏宝绘未就绪：${status.reason || '请先在柏宝绘配置出图渠道'}` };
@@ -40,10 +42,19 @@ export async function requestBaibaiImage(api, slot = {}, options = {}) {
     const m = String(options.size || '').match(/(\d+)\s*[x×*]\s*(\d+)/i);
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : BAIBAI_DEFAULT_TIMEOUT_MS;
-    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    let stop;
+    const stopped = new Promise(resolve => { stop = resolve; });
+    const abort = () => { controller?.abort(); stop(cancelled()); };
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) {
+        abort();
+        options.signal.removeEventListener('abort', abort);
+        return cancelled();
+    }
+    const timer = setTimeout(() => { try { options.onSlow?.(); } catch { /* 原插件调用继续。 */ } }, timeoutMs);
     if (timer && typeof timer.unref === 'function') timer.unref();
     try {
-        const result = await api.generate({
+        const result = await Promise.race([api.generate({
             prompt,
             ...(floorTag && floorTag.nl && { nl: floorTag.nl }),
             ...(String(slot.sceneUc || '').trim() && { negative: String(slot.sceneUc).trim() }),
@@ -51,14 +62,17 @@ export async function requestBaibaiImage(api, slot = {}, options = {}) {
             size: m && Number(m[1]) > Number(m[2]) ? 'landscape' : 'portrait',
             ...(Number.isInteger(options.seed) && options.seed > 0 && { seed: options.seed }),
             save: false,
-        }, controller ? { signal: controller.signal } : undefined);
+        }, controller ? { signal: controller.signal } : undefined), stopped]);
+        if (options.signal?.aborted || result?.reason === 'request-stale') return cancelled();
         const dataUrl = result && typeof result.dataUrl === 'string' ? result.dataUrl : '';
         return dataUrl ? { ok: true, dataUrl, prompt } : { ok: false, error: '柏宝绘没有返回图片', prompt };
     } catch (error) {
         const code = error && error.code;
-        const text = code === 'aborted' ? `${Math.round(timeoutMs / 1000)} 秒内没有返回图片` : ((error && error.message) || String(error));
+        if (options.signal?.aborted) return cancelled();
+        const text = code === 'aborted' ? '插件取消了本次出图' : ((error && error.message) || String(error));
         return { ok: false, error: `柏宝绘出图失败：${text}`, prompt };
     } finally {
         if (timer != null) clearTimeout(timer);
+        options.signal?.removeEventListener('abort', abort);
     }
 }

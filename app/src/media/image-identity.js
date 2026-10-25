@@ -1,5 +1,6 @@
 import { imageSha256 } from './image-sha256.js';
-export const IMAGE_FIELDS = ['dataUrl', 'originalDataUrl', 'workingDataUrl', 'alphaMaskDataUrl'];
+export const IMAGE_RECOVERY_PIXELS = Symbol('igs-recovery-pixels');
+export const IMAGE_FIELDS = ['dataUrl', 'originalDataUrl', 'workingDataUrl', 'alphaMaskDataUrl', 'consistencyBaselineDataUrl'];
 export const isImageData = value => typeof value === 'string' && /^data:image\/(?:png|jpeg|jpg|webp|gif);base64,/i.test(value);
 export const isImagePath = value => typeof value === 'string' && /^\/?user\/images\/igs-[^?#]+$/.test(value);
 export const normalizeImagePath = value => String(value || '').replace(/^\//, '');
@@ -68,3 +69,5 @@ export async function blobDataUrl(blob, globalObject, { signal, timeoutMs = 1500
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     return `data:${blob.type || 'image/png'};base64,${(globalObject.btoa || globalThis.btoa)(binary)}`;
 }
+export const cgEntryStamp = entry => entry?.revisionToken
+    ? `${entry.updatedAt || ''}|${entry.revisionToken}` : String(entry?.updatedAt || '');
