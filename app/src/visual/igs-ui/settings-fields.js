@@ -9,8 +9,9 @@ import { CHAT_SFX_PRESET_LABELS } from './chat-sfx.js';
 import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions } from './settings-outfit-fields.js';
 import { MAGIC_HOUSES, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { resolveCharacterMagicHouse } from './magic-house.js';
-import { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } from './voice-bark.js';
+import { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions, creatureVoiceLabel } from './voice-bark.js';
 import { TTS_CHARACTER_VOLUMES, findSystemVoice, listSystemVoices, resolveTtsVoice, systemVoiceOptions, ttsApiVoiceOptions } from './tts.js';
+import { renderCharacterCreatureMenuItem, renderCharacterCreatureRows, renderCharacterCreatureTag } from './creature-settings.js';
 import { resolveSpriteBaseScale } from './sprite-height.js';
 import { hasCharacterSpriteLayout } from './sprite-key-migration.js';
 
@@ -90,11 +91,11 @@ export function splitLabelNote(label) {
     return match ? [match[1], match[2]] : [text, ''];
 }
 
-export function checkbox(path, value, label) {
+export function checkbox(path, value, label, disabled = false) {
     const [main, note] = splitLabelNote(label);
     const noteHtml = note ? `<small class="igs-switch-note">${esc(note)}</small>` : '';
     const ariaLabel = note ? ` aria-label="${esc(label)}"` : '';
-    return `<button type="button" class="igs-switch${value ? ' is-on' : ''}" data-switch="${esc(path)}" aria-pressed="${value ? 'true' : 'false'}"${ariaLabel}><i></i><span>${esc(main)}${noteHtml}</span></button>`;
+    return `<button type="button" class="igs-switch${value ? ' is-on' : ''}" data-switch="${esc(path)}" aria-pressed="${value ? 'true' : 'false'}"${ariaLabel}${disabledAttr(disabled)}><i></i><span>${esc(main)}${noteHtml}</span></button>`;
 }
 
 export function tableMultiSelect(paths, selected, catalog, options = {}) {
@@ -546,11 +547,12 @@ export function renderCharacterAssetList(characters, options = {}) {
         const live2dOn = Boolean(resolveCharacterLive2dBinding(options.live2dConfig, options.sceneAssets || { characters, characterAliases: aliasesByCharacter }, charName));
         const meta = [aliases.join('、'), live2dOn ? 'Live2D 已启用 · 静态差分暂停' : ''].filter(Boolean).join(' · ');
         const head = `<div class="igs-char-head"><button type="button" class="igs-char-avatar" data-action="status-avatar-pick:${encSeg(charName)}" title="上传状态栏头像">${avatarPreview}</button>`
-            + `<button type="button" class="igs-char-title" data-action="${toggle}" aria-expanded="${open}"><b class="igs-char-name">${esc(charName)}</b>${isUserChar ? '<span class="igs-char-user-tag" title="旁白里的「你」和酒馆用户名都用这个角色的立绘">User</span>' : ''}<span class="igs-char-aliases">${esc(meta)}</span></button>`
+            + `<button type="button" class="igs-char-title" data-action="${toggle}" aria-expanded="${open}"><b class="igs-char-name">${esc(charName)}</b>${isUserChar ? '<span class="igs-char-user-tag" title="旁白里的「你」和酒馆用户名都用这个角色的立绘">User</span>' : ''}${renderCharacterCreatureTag(dna)}<span class="igs-char-aliases">${esc(meta)}</span></button>`
             + `${scopeTag(options, 'characters', charName)}`
             + renderRowMenu([
                 menuItem(`scene-toggle-dna:${encSeg(charName)}`, dnaOpen ? '收起角色设定' : `角色设定${characterDnaFilled(dna) ? '' : '（外貌未填）'}`),
                 menuItem(`scene-set-user-char:${encSeg(charName)}`, isUserChar ? '取消User立绘' : '设为User立绘'),
+                renderCharacterCreatureMenuItem(charName, dna),
                 folderSelect(charName, { menu: true }),
                 String((moods || {}).默认 || '').trim() ? menuItem(`scene-migrate-outfit:${encSeg(charName)}`, '原装迁成差分服装') : '',
                 menuItem(`scene-rename-char:${encSeg(charName)}`, '重命名'),
@@ -564,6 +566,7 @@ export function renderCharacterAssetList(characters, options = {}) {
                 `<div class="igs-char-info-row"><span class="igs-char-info-label">状态栏头像</span>${avatarHtml}</div>`,
                 houseHtml,
                 voiceHtml,
+                renderCharacterCreatureRows(charName, dna),
             ].join(''))
             : '';
         return `<div class="igs-scene-char-group igs-char-card${open ? ' is-open' : ''}">${head}${setup}${open ? `<div class="igs-char-body">${heightRow ? renderCharacterSpriteHeightRow(charName, heightRow) : ''}${slotArea}</div>` : ''}</div>`;
@@ -595,7 +598,7 @@ function voiceTuneOptions(manual) {
     return { pitchOpts, speedOpts };
 }
 
-// 台词朗读开着时：这个角色的朗读声音（自动按 DNA 性别分配，或单独指定），外加音高、语速与试听。
+// 台词朗读开着时：这个角色的朗读声音（自动按 DNA 性别分配，或单独指定），外加音高、语速、音量、风格与试听。
 function renderCharacterTtsRow(charName, { sceneAssets, tts }) {
     const voices = sceneAssets && typeof sceneAssets.characterVoices === 'object' ? sceneAssets.characterVoices || {} : {};
     const manual = normalizeCharacterVoice(Object.prototype.hasOwnProperty.call(voices, charName) ? voices[charName] : null);
@@ -617,6 +620,7 @@ function renderCharacterTtsRow(charName, { sceneAssets, tts }) {
         + pitchSelect
         + `<select class="igs-asset-move" data-char-voice-speed="${esc(charName)}" aria-label="朗读语速" title="语速">${speedOpts}</select>`
         + `<select class="igs-asset-move" data-char-voice-ttsVolume="${esc(charName)}" aria-label="朗读音量" title="这个角色的朗读音量">${volumeOpts}</select>`
+        + `<input class="igs-asset-move" type="text" maxlength="300" data-char-voice-ttsStyle="${esc(charName)}" value="${esc(manual.ttsStyle)}" placeholder="朗读风格（可选）" aria-label="朗读风格" title="这个角色的朗读风格描述，仅 OpenAI 兼容与自定义请求生效">`
         + `<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-preview:${encSeg(charName)}">试听</button></div>`;
 }
 
@@ -626,7 +630,7 @@ function renderCharacterVoiceRow(charName, { sceneAssets, tts }) {
     const voices = sceneAssets && typeof sceneAssets.characterVoices === 'object' ? sceneAssets.characterVoices || {} : {};
     const manual = normalizeCharacterVoice(Object.prototype.hasOwnProperty.call(voices, charName) ? voices[charName] : null);
     const auto = resolveCharacterVoice({ ...sceneAssets, characterVoices: {} }, charName);
-    const autoText = auto.pack ? `自动（${auto.pack.name}）` : '自动（无法从DNA判断性别，不发声）';
+    const autoText = auto.creature ? `自动（非人声线：${creatureVoiceLabel(auto.creature)}）` : auto.pack ? `自动（${auto.pack.name}）` : '自动（无法从DNA判断性别，不发声）';
     const option = (id, label) => `<option value="${esc(id)}"${id === manual.pack ? ' selected' : ''}>${esc(label)}</option>`;
     const packs = voicePackOptions();
     const groups = VOICE_GENDER_GROUPS.map(([gender, label]) => {

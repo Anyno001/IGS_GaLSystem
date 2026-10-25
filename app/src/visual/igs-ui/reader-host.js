@@ -12,14 +12,16 @@ import { createSettingsHost } from './settings-host.js';
 import { createRecoveryNotice } from './recovery-notice.js';
 import { handleSettingsAction } from './settings-actions.js';
 import { normalizeBridgeConfig, normalizeReaderSettings } from './settings-host-normalize.js';
-import { extractSceneDirectives, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers, classifySceneKey, resolveCharacterKey, setCharacterNameFallback } from '../../scene/scene-directives.js';
+import { extractSceneDirectives, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers, classifySceneKey, resolveCharacterKey, setCharacterNameFallback, lookupAssetValue } from '../../scene/scene-directives.js';
 
 import { recordOutfitReview, dropConfirmedOutfitReview, removeOutfitReview, storyOutfitSourceHash } from '../../scene/outfit-review-store.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { createStoryOutfitService } from '../../generated-images/illustration/story-outfit-service.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
+import { secondaryLlmText } from '../../host/secondary-llm-result.js';
 
 import { isMarkerDirectiveLine, stripMarkerDirectives } from '../../scene/directive-tags.js';
+import { overlayStatsMetrics } from '../../scene/stats/stat-metrics.js';
 import { readStoryNow, resolveDuePromises } from '../../scene/promise-reminder.js';
 import { normalizeItemImageSettings } from '../../generated-images/illustration/item-image-settings.js';
 import { createCgGalleryPanel } from './cg-gallery-panel.js';
@@ -41,14 +43,15 @@ import { normalizeDailyFxSettings } from './fx-daily-model.js';
 import { cancelDailyFx } from './fx-daily.js';
 import { cancelSceneAudio, skipBgmTrack } from './scene-audio.js';
 import { applyBgmNoteToDom, toggleBgmNote } from './bgm-note.js';
-import { parkAudioBus, unparkAudioBus } from './audio-bus.js';
+import { audioBusContext, busInput, parkAudioBus, resumeAudioBus, unparkAudioBus } from './audio-bus.js';
 import { isStagePaused, markStageActive, watchStagePause } from './stage-pause.js';
 import { scheduleFontGuard } from './font-guard.js';
 import { createReaderAutoPlay } from './reader-auto-play.js';
-import { isTtsSpeaking, replayTts, setTtsErrorHandler, stopTts } from './tts.js';
+import { decideTts, guessTtsLine, isTtsSpeaking, listSystemVoices, normalizeTtsSettings, replayTts, setTtsErrorHandler, speakTtsLine, stopTts } from './tts.js';
+import { resolveRegionCrop } from './stage-snapshot.js';
 import { playUiSfx } from './ui-sfx.js';
 import { parseHtmlCardMarker } from '../../scene/html-cards.js';
-import { isGeneratedAssetUrl, bindGeneratedBackground, bindGeneratedSprite } from '../../scene/asset-match.js';
+import { isGeneratedAssetUrl, generatedAssetIdOf, bindGeneratedBackground, bindGeneratedSprite } from '../../scene/asset-match.js';
 import { STAGE_CAST_MAX_SEATS, pickCastMembers } from '../../scene/stage-cast.js';
 import { resolveReaderSpriteAsset } from './reader-sprite-asset.js';
 import { normalizeStageCastSettings } from './stage-direction-settings.js';
@@ -56,10 +59,14 @@ import { SPRITE_BACK_MOOD } from './sprite-turn.js';
 import { isReactMoodHit } from '../../scene/react-mood.js';
 
 import { clearCastDom } from './stage-cast-render.js';
+import { hasGroupSuffix, sameFoeName, splitFoeNames } from '../../scene/creature-battle.js';
+import { foeIsDown } from './creature-battle-model.js';
+import { CREATURE_FOE_SLOTS, composeCreatureStage, creatureProfileOf, isGiantCreature, resolveCreatureFoes } from './creature-layout.js';
 import { createOutfitResolver, fuzzyOutfitName, normalizeWardrobe } from '../../scene/character-outfits.js';
 import { isStrictBackgroundMatch, normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { clearCurrentCg } from '../../generated-images/illustration/clear-current-cg.js';
 import { floorKeyOf } from '../../media/illustration-store.js';
+import { cgEntryFromPhoto } from '../../media/cg-library.js';
 import { normalizeMoodGroups, resolveMoodGroup } from '../../scene/mood-groups.js';
 
 import { getOriginalReaderHtml, getOriginalReaderSource, getOriginalReaderStyleText, ORIGINAL_READER_REQUIRED_SELECTORS, ORIGINAL_READER_STYLE_CONTRACT } from './original-reader-source.js';
@@ -69,6 +76,7 @@ import { DEFAULT_IMAGE_API, DIALOG_FONT_OPTIONS, DEFAULT_PINNED_TOOLBAR_BUTTONS,
 import { eventToShortcut, findShortcutAction, resolveShortcuts } from './reader-shortcuts.js';
 import { isEmbeddedReaderMode } from '../../schemas/reader-mode.js';
 import { buildWaitStageModel, createWaitStageRuntime } from './wait-stage-runtime.js';
+import { getWaitStageGamePack, subscribeWaitStageGamePack } from './wait-stage-games-api.js';
 import { onDlcSkinsChange } from './dlc-skin-registry.js';
 import { onDlcFxChange } from '../../scene/fx-registry.js';
 import { cloneData, esc, firstDefined, firstNonEmptyString, firstRenderableText, clampNumber, normalizeBoolean, normalizeFiniteIndex, normalizeFiniteNumber, normalizeNullableNumber, normalizeOpacity, toHex } from './reader-value-utils.js';
@@ -110,7 +118,7 @@ import { applyPerformanceProfile, applyProfileDetails } from './performance-prof
 import { applyFxWorldview } from '../../scene/fx-era.js';
 import { applyWorldview, resolveWorldview } from '../../scene/worldview.js';
 import { effectiveDialogSkin, sceneDialogSkin } from './worldview-skins.js';
-import { applyTitleSkin, buildTitleScreenModel, createTitleGate, playOpeningCard, playTitleBgm, reduceTitleAction, removeTitleScreen, renderTitleScreen, shouldGateTitleScreen, titleCardOf } from './title-screen.js';
+import { applyTitleSkin, buildTitleScreenModel, createTitleGate, nextTitleCoverTurn, playOpeningCard, playTitleBgm, reduceTitleAction, removeTitleScreen, renderTitleScreen, shouldGateTitleScreen, titleCardOf } from './title-screen.js';
 import { loadMoodReview, recordMoodReview, removeMoodReview } from '../../scene/mood-review-store.js';
 import { applyMoodAssignments, buildMoodClassificationRequest, parseMoodClassification, resolveSecondaryLlm } from '../../scene/mood-classify.js';
 import { CLASSIC_DIALOG_HEIGHT, CLASSIC_DIALOG_WIDTH_PERCENT_DEFAULT, CLASSIC_DIALOG_THEME_DEFAULTS, DIALOG_SKIN_ADVENTURE_JOURNEY, DIALOG_SKIN_BLACK_WHITE_MANGA, DIALOG_SKIN_CUTE_PINK, DIALOG_SKIN_DAY_MINIMAL, DIALOG_SKIN_ELEGANT_EUROPEAN, DIALOG_SKIN_GRADIENT_VEIL, DIALOG_SKIN_PLANT_COFFEE, DIALOG_SKIN_RETRO_JAPANESE, DIALOG_SKIN_WARM_PICTUREBOOK, DIALOG_SKIN_WESTERN_CLASSIC, isIllustratedDialogSkin, normalizeClassicDialogWidthPercent, normalizeDialogSkin } from './classic-dialog-skin.js';
@@ -124,7 +132,7 @@ import { formatChatBlockAsText, parseChatMarker } from '../../scene/chat-blocks.
 import { comicContentKey, isComicModeActive } from './comic-settings.js';
 import { nextBilingualDisplay, normalizeBilingualSettings, resolveBilingualDisplay } from './bilingual-text.js';
 
-import { applyReaderSnapshotToDom, applyToolbarState, buildFallbackReaderOverlay, buildFallbackSettingsOverlay, normalizeReaderStableLayers, pinEmbeddedHostFrame } from './reader-dom-render.js';
+import { applyReaderSnapshotToDom, applyToolbarState, buildFallbackReaderOverlay, buildFallbackSettingsOverlay, normalizeReaderStableLayers, pinEmbeddedHostFrame, watchTitleEmbeddedFrame } from './reader-dom-render.js';
 
 const CHARACTER_COLLECTIONS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 
@@ -148,6 +156,23 @@ function missingImageProbe(generatedAssets) {
 function unavailableImageProbe(generatedAssets) {
     return generatedAssets && typeof generatedAssets.hasUnavailableImages === 'function' && generatedAssets.hasUnavailableImages()
         ? generatedAssets.isUnavailableImage : undefined;
+}
+
+// 阅读器认领的 Esc：IGS 自己的面板、弹窗照常收到（冒泡途经它们），到 <html> 再截住，不让酒馆 document 上的「中止生成」收到。
+const claimedReaderEscapes = new WeakSet();
+const escapeGuardDocs = new WeakSet();
+
+function installReaderEscapeGuard(doc) {
+    const html = doc && doc.documentElement;
+    if (!html || escapeGuardDocs.has(doc) || typeof html.addEventListener !== 'function') return;
+    escapeGuardDocs.add(doc);
+    html.addEventListener('keydown', (event) => {
+        if (claimedReaderEscapes.has(event)) event.stopPropagation();
+    });
+}
+
+function claimReaderEscape(event) {
+    if (event && typeof event === 'object') claimedReaderEscapes.add(event);
 }
 
 export function createIgsReaderHost(options = {}) {
@@ -269,8 +294,117 @@ export function createIgsReaderHost(options = {}) {
         },
     });
     // 等待过场：五种阅读器模式共用黑屏 + 一句台词（回放角色说过的话 + 通用兜底）。
-    // 回复写完后，未在游戏中就地换页；在游戏中等这一局结算再换页。
+    // 回复写完后，没在玩就地换页；正在玩小游戏时先留在这一层，等玩家点「加载下一楼」。
+    // 等待小游戏的惩罚 CG：写词出图沿用楼内 CG 的来源，成图原样存进 CG 库相册，小游戏只记照片 id。
+    const waitStagePenalty = {
+        status() {
+            const service = options.illustrations;
+            if (!service || typeof service.paintStandaloneCg !== 'function') return { ok: false, nsfw: false };
+            return service.standaloneCgStatus();
+        },
+        async paint({ characters, outfits, nude, description, nsfw, caption, aspect } = {}) {
+            const service = options.illustrations;
+            if (!service || typeof service.paintStandaloneCg !== 'function') return { ok: false, error: '生图服务没有接入' };
+            const result = await service.paintStandaloneCg({ characters, outfits, nude, description, nsfw, aspect });
+            if (!result || !result.ok) return { ok: false, error: (result && result.error) || 'CG 生成失败' };
+            const album = options.cgGallery;
+            let id = '';
+            if (album && typeof album.keepPhoto === 'function') {
+                const chatId = typeof options.getCurrentChatId === 'function' ? options.getCurrentChatId() : '';
+                const saved = await Promise.resolve(album.keepPhoto({ dataUrl: result.dataUrl, chatId, caption })).catch(() => null);
+                id = saved && saved.ok && saved.photo ? saved.photo.id : '';
+            }
+            return { ok: true, url: result.dataUrl, id, size: result.size, request: result.request, prompt: result.prompt };
+        },
+        async read(id) {
+            const album = options.cgGallery;
+            if (!id || !album || typeof album.readFull !== 'function') return { ok: false };
+            const got = await Promise.resolve(album.readFull(cgEntryFromPhoto({ id }))).catch(() => null);
+            return got && got.ok ? { ok: true, url: got.dataUrl } : { ok: false };
+        },
+    };
+    // 麻将对手的打法：宿主只交出角色卡世界书里按名字命中的条目和一次副 API 文本请求，怎么问、怎么用由小游戏定。
+    const waitStagePersona = {
+        status() {
+            if (typeof options.readCardWorldbook !== 'function' || typeof options.requestSecondaryText !== 'function') {
+                return { ok: false, reason: 'unavailable' };
+            }
+            const via = moodAutoContext().llm.source === 'openai' ? 'secondary' : 'tavern';
+            // 没单独配副 API 时走酒馆当前连接，正文还在写就别去抢。
+            const current = state.activeReader;
+            if (via === 'tavern' && current && current.streamPhase === 'streaming') return { ok: false, reason: 'busy', via };
+            return { ok: true, via, chat: typeof options.getCurrentChatId === 'function' ? String(options.getCurrentChatId() || '') : '' };
+        },
+        async lore(names) {
+            try {
+                const list = await options.readCardWorldbook(Array.isArray(names) ? names : []);
+                return { ok: true, list: Array.isArray(list) ? list : [] };
+            } catch (error) {
+                return { ok: false, list: [] };
+            }
+        },
+        async ask({ system, user } = {}) {
+            const status = waitStagePersona.status();
+            if (!status.ok) return { ok: false, reason: status.reason };
+            try {
+                const raw = await options.requestSecondaryText({ system, user }, moodAutoContext().llm);
+                const text = secondaryLlmText(raw);
+                return text.trim() ? { ok: true, text } : { ok: false, reason: 'empty' };
+            } catch (error) {
+                return { ok: false, reason: 'failed', error: String(error && error.message || '') };
+            }
+        },
+    };
+    // 小游戏的图在显示时才读、读一张租一张：整卡几百张立绘一起读会挤爆图片缓存，排在后面的超时后被记成读不到。
+    const WAIT_STAGE_IMAGE_TIMEOUT_MS = 90000;
+    const waitStageImageWaiters = new Map();
+    let waitStageLeases = null;
+    function loadWaitStageImage(url) {
+        const source = String(url || '').trim();
+        if (!source || !isGeneratedAssetUrl(source)) return source;
+        const id = generatedAssetIdOf(source);
+        waitStageLeases ||= options.media?.cache ? createMediaLeaseScope(options.media.cache) : null;
+        waitStageLeases?.use(`asset:${id}`);
+        const service = options.generatedAssets;
+        const stored = service?.imageAvailability?.(source);
+        if (stored?.status === 'missing') return '';
+        const ready = stored?.status === 'read-error' && typeof service.retryImageRead === 'function'
+            ? String(service.retryImageRead(source) || '') : concreteReaderAssetUrl(source);
+        if (ready) return ready;
+        return new Promise((resolve) => {
+            const g = options.global || globalThis;
+            const waiters = waitStageImageWaiters.get(id) || new Set();
+            waitStageImageWaiters.set(id, waiters);
+            const waiter = (value) => {
+                g.clearTimeout(timer);
+                waiters.delete(waiter);
+                if (!waiters.size) waitStageImageWaiters.delete(id);
+                resolve(value);
+            };
+            waiter.source = source;
+            const timer = g.setTimeout(() => waiter(''), WAIT_STAGE_IMAGE_TIMEOUT_MS);
+            waiters.add(waiter);
+        });
+    }
+    function settleWaitStageImage(detail) {
+        const waiters = detail && detail.imageId ? waitStageImageWaiters.get(detail.imageId) : null;
+        if (!waiters) return;
+        for (const waiter of [...waiters]) {
+            if (detail.reason === 'image-lost') { waiter(''); continue; }
+            if (detail.reason !== 'image-loaded') continue;
+            const value = concreteReaderAssetUrl(waiter.source);
+            if (value) waiter(value);
+        }
+    }
+    function releaseWaitStageImages() {
+        waitStageLeases?.releaseAll();
+    }
     const waitStage = createWaitStageRuntime({
+        penalty: waitStagePenalty,
+        persona: waitStagePersona,
+        loadImage: (url) => loadWaitStageImage(url),
+        releaseImages: () => releaseWaitStageImages(),
+        audio: { context: () => audioBusContext(), input: () => busInput('sfx'), resume: () => resumeAudioBus() },
         getDoc: () => resolveEmbeddedDocument(state.activeReader),
         onVoice: (line) => playWaitStageVoice(line),
         onExitReady: () => finishPendingWaitExit(),
@@ -278,8 +412,15 @@ export function createIgsReaderHost(options = {}) {
             streamObserver.cancelPending();
             exitEmbeddedLoading();
         },
+        onClose: () => closeReader(),
     });
     let pendingReplyMessage = null;
+    // 小游戏脚本可能比阅读器晚装上：装上或卸掉都要重排一次工具栏里的「小游戏」。
+    const offWaitGamePack = subscribeWaitStageGamePack((pack) => {
+        const current = state.activeReader;
+        if (!pack && waitStage.isPlaying()) waitStage.close();
+        if (current) applyToolbarState(current.dom && current.dom.overlay, current);
+    });
     // 物品图到达后重绘阅读器：演出占位与背包格位据此替换为生图。
     const offItemImageUpdatedRaw = typeof options.onItemImageUpdated === 'function'
         // 物品图可能一批连着到，和生图一样按窗口合并成一次重绘。
@@ -328,6 +469,7 @@ export function createIgsReaderHost(options = {}) {
     }
     const offGeneratedAssetUpdated = typeof options.onGeneratedAssetUpdated === 'function'
         ? options.onGeneratedAssetUpdated((detail) => {
+            settleWaitStageImage(detail);
             sourceCache.visitPrepared(floor => floor.assets?.invalidate(detail));
             const settings = state.activeSettings;
             const imageLost = Boolean(detail && detail.reason === 'image-lost');
@@ -517,6 +659,10 @@ export function createIgsReaderHost(options = {}) {
     return host;
 
     function openReader(payload = {}, openOptions = {}) {
+        // 开着时重开（切轮、报错后重建）带上没发出去的草稿；关掉再开是新输入框。
+        const draft = state.activeReader ? String(state.activeReader.inputValue || '') : '';
+        const prevInput = state.activeReader && state.activeReader.dom && state.activeReader.dom.input;
+        const draftFocused = Boolean(prevInput && prevInput.ownerDocument && prevInput.ownerDocument.activeElement === prevInput);
         closeReader({ keepFullscreen: true });
         payload = cloneReaderPayload(payload);
         unparkAudioBus();
@@ -555,7 +701,7 @@ export function createIgsReaderHost(options = {}) {
             streamPhase: 'idle',
             mountBaselineRaw: getMessagePrimaryText(payload.message && (payload.message.raw || payload.message) || payload.raw || ''),
             mountBaselineVisible: String(payload.visibleText || ''),
-            inputValue: '',
+            inputValue: draft,
             hidden: false,
             dragSuppressClick: false,
             toolbarCollapsed: true,
@@ -584,7 +730,7 @@ export function createIgsReaderHost(options = {}) {
             messageId: snapshot.messageId,
             index: snapshot.content.currentIndex,
             startAtEnd: payload.startAtEnd === true,
-        }) ? createTitleGate() : null;
+        }) ? createTitleGate({ coverTurn: nextTitleCoverTurn((options.global || globalThis).localStorage) }) : null;
         if (current.titleGate) void resolveTitleHasLater(current);
         current.autoPlayer = createReaderAutoPlay({
             timers: options.autoPlayTimers || globalThis,
@@ -614,6 +760,10 @@ export function createIgsReaderHost(options = {}) {
         });
         current.autoPlay = current.autoPlayer.getState();
         updateMountedReader(snapshot);
+        // 正打着字被重开：焦点也接回新输入框，后续按键不会落到翻页快捷键上。
+        if (draftFocused && current.dom && current.dom.input && typeof current.dom.input.focus === 'function') {
+            current.dom.input.focus();
+        }
         startReaderImagePolling(state.activeReader);
         if (!progressRuntime.navigating) void offerResume(current);
         if (domState && domState.overlay) {
@@ -660,7 +810,7 @@ export function createIgsReaderHost(options = {}) {
             current.mountBaselineVisible = String(payload.visibleText || '');
         }
         current.index = 0;
-        current.inputValue = '';
+        // 输入框里没发出去的草稿留着：出图写回、回复失败都会走这里原地换源。
         current.awaitingReply = false;
         current.mountMessageId = replaceOptions.mountMessageId != null ? replaceOptions.mountMessageId : current.mountMessageId;
         current.mode = mode;
@@ -776,6 +926,7 @@ export function createIgsReaderHost(options = {}) {
         if (!content) return [];
         return [content.backgroundImage, content.spriteImage, content.pendingSpriteRef, content.nsfwCgPortrait,
             content.fx && content.fx.foeImage,
+            content.giantSprite && content.giantSprite.image,
             ...(Array.isArray(content.castSprites) ? content.castSprites.map(member => member && member.image) : []),
             ...(Array.isArray(content.pendingCastRefs) ? content.pendingCastRefs : [])].filter(Boolean);
     }
@@ -929,6 +1080,7 @@ export function createIgsReaderHost(options = {}) {
         if (current.dom && current.dom.overlay) cancelSceneAudio(current.dom.overlay);
         parkAudioBus();
         if (typeof current.stopStagePause === 'function') current.stopStagePause();
+        stopTitleFrameWatch(current);
         if (current.pageRenderTimer) clearTimeout(current.pageRenderTimer);
         current.pageRenderTimer = 0;
         clearReaderModeRuntime(current);
@@ -939,6 +1091,7 @@ export function createIgsReaderHost(options = {}) {
         if (floorAssetPlan.reader === current) floorAssetPlan = { key: '', reader: null, urls: [] };
         current.imagePollToken += 1;
         streamObserver.stop();
+        stopReplyWatchdog();
         stopEmbeddedStoryWatch();
         // 关阅读器时把等待过场一并收掉，别留下还在轮台词的一层和等着换页的旧楼。
         waitStage.close();
@@ -998,6 +1151,7 @@ export function createIgsReaderHost(options = {}) {
         offStoryOutfits();
         if (!options.storyOutfits) storyOutfits?.dispose();
         offItemImageUpdated();
+        offWaitGamePack();
         offImageJobLog();
         teardownStatusHudSubscription();
         closeReader();
@@ -1170,7 +1324,7 @@ export function createIgsReaderHost(options = {}) {
             showReplyFailure(current, 'empty');
             return false;
         }
-        // 回复已写完：当前游戏只结算这一局，之后由过场回调继续换楼。
+        // 回复已写完：正在玩就先记下这一楼，等玩家点「加载下一楼」再换。
         if (!waitStage.replyArrived()) {
             pendingReplyMessage = { reader: current, message, revision: settled.revision };
             return true;
@@ -1275,13 +1429,12 @@ export function createIgsReaderHost(options = {}) {
         const turns = await listTurnsSafe();
         if (state.activeReader !== current || !waitStage.isOpen()) return null;
         const all = turns.length ? turns.slice(-7) : (Array.isArray(current.payload && current.payload.turns) ? current.payload.turns.slice(-7) : []);
-        // 等待层的牌面不是当前正文页：外链直接可显示，生成图则由图库读回事件更新候选。
-        const resolveUrl = (url) => concreteReaderAssetUrl(url);
+        // 牌面保留图库原地址（igs-gen:），这里不读图；小游戏显示哪张再用 loadImage 读哪张。
         const model = buildWaitStageModel({
             settings: current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.waitStage,
             turns: all,
             sceneAssets: current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings._sceneAssets,
-            resolveUrl,
+            spriteHeads: current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.spriteHeads,
         });
         waitStage.update(model);
         return model;
@@ -1315,17 +1468,39 @@ export function createIgsReaderHost(options = {}) {
             : (current.dom && current.dom.overlay);
         if (!host) return;
         // 层已经在等就别重建：重建会把台词轮换打回第一句，也会抹掉玩家点开的小游戏。
-        if (waitStage.isOpen(host)) return;
+        if (waitStage.isOpen(host)) {
+            waitStage.enterWait();
+            return;
+        }
         const settings = (current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.waitStage) || null;
         waitStage.open(host, { embedded, settings, model: null });
         void refreshWaitStageModel(current);
+    }
+
+    // 工具栏「小游戏」：不等回复也把这一层叫出来玩，再按一次或点「返回阅读」收起。
+    function toggleMiniGames() {
+        const current = state.activeReader;
+        const host = current && current.dom && current.dom.overlay;
+        if (!host) return { ok: false, reason: 'reader-not-open' };
+        if (waitStage.isPlaying()) {
+            waitStage.close();
+            return { ok: true, open: false };
+        }
+        // 正在等回复时小游戏本来就摆在等待层里。
+        if (waitStage.isOpen()) return { ok: false, reason: 'awaiting-reply' };
+        if (!getWaitStageGamePack()) return { ok: false, reason: 'wait-games-not-installed' };
+        const settings = (current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.waitStage) || null;
+        waitStage.open(host, { settings, model: null, play: true });
+        void refreshWaitStageModel(current);
+        return { ok: true, open: true };
     }
 
     // observed：观察器自己报的活动，本轮生命周期已武装；再 prepareForReply 会抹掉刚记下的活动与结束标记，等待层就退不掉。
     function enterReplyWait(current, { observed = false } = {}) {
         if (!current) return;
         if (current.streamPhase !== 'streaming') {
-            waitStage.close();
+            // 正在玩的小游戏留着，下面 mountWaitStage 会把它就地变成等待层。
+            if (!waitStage.isPlaying()) waitStage.close();
             pendingReplyMessage = null;
             current.imagePollToken += 1;
             current.imagePolling = false;
@@ -1338,6 +1513,34 @@ export function createIgsReaderHost(options = {}) {
         const overlay = current.dom && current.dom.overlay;
         if (overlay && overlay.classList) overlay.classList.add('igs-awaiting-reply');
         mountWaitStage(current);
+        startReplyWatchdog();
+    }
+
+    // 等待中兜底：生成结束信号丢了时等待层会一直轮台词。每几秒看一眼，新 AI 楼已落地就补一次稳定处理。
+    // 只认楼号比发送前大的 AI 楼，回复没到时不触发，免得读到用户楼当成空回复去重发。
+    let replyWatchdog = null;
+
+    function startReplyWatchdog() {
+        if (replyWatchdog != null) return;
+        const timers = options.global || globalThis;
+        if (typeof timers.setInterval !== 'function') return;
+        replyWatchdog = timers.setInterval(checkReplyLanded, 4000);
+    }
+
+    function stopReplyWatchdog() {
+        if (replyWatchdog == null) return;
+        const timers = options.global || globalThis;
+        if (typeof timers.clearInterval === 'function') timers.clearInterval(replyWatchdog);
+        replyWatchdog = null;
+    }
+
+    function checkReplyLanded() {
+        const current = state.activeReader;
+        if (!current || current.streamPhase !== 'streaming') { stopReplyWatchdog(); return; }
+        const latest = resolveLatestLiveAiMessage(resolveEmbeddedDocument(current));
+        const baselineId = current.replyBaselineMessageId ?? current.contentMessageId;
+        if (!latest || baselineId == null || !(Number(latest.id) > Number(baselineId))) return;
+        streamObserver.kick();
     }
 
     function enterEmbeddedLoading({ observed = false } = {}) {
@@ -1358,12 +1561,14 @@ export function createIgsReaderHost(options = {}) {
         mount.host.setAttribute('data-igs-embedded-loading', '1');
         if (current.dom.root && current.dom.root.style) current.dom.root.style.display = 'none';
         mountWaitStage(current, { embedded: true });
+        startReplyWatchdog();
     }
 
     function exitEmbeddedLoading() {
         const current = state.activeReader;
         if (!current) return;
         pendingReplyMessage = null;
+        stopReplyWatchdog();
         current.streamBaselineRaw = '';
         current.replyBaselineMessageId = null;
         current.streamPhase = 'idle';
@@ -1394,6 +1599,16 @@ export function createIgsReaderHost(options = {}) {
         current.dom.embeddedMount = mountEmbeddedRoot(doc, root, message, message && message.id);
         if (!current.dom.embeddedMount) {
             (doc.documentElement || doc.body).appendChild(root);
+            return;
+        }
+        // 酒馆重画楼层（开场白最常见）后宿主是新建的，没钉过比例，只剩最小高度、宽度占满，看着就是横屏。
+        // 主界面盖着时正文不渲染，不会再钉，这里补钉，观察器改绑到新宿主。
+        if (current.titleGate) {
+            stopTitleFrameWatch(current);
+            pinTitleFrame(current, current.dom.overlay);
+        } else if (current.snapshot) {
+            const reader = current.snapshot.readerSettings || {};
+            pinEmbeddedHostFrame(current.dom.overlay, reader._cgBackgroundSize, current.snapshot.mode, reader.embeddedHeight);
         }
     }
 
@@ -2079,6 +2294,9 @@ export function createIgsReaderHost(options = {}) {
         if (normalizedAction === 'cg-gallery') {
             return openCgGallery();
         }
+        if (normalizedAction === 'mini-games') {
+            return toggleMiniGames();
+        }
         if (normalizedAction === 'fill-item-images') {
             return runFillItemImages();
         }
@@ -2435,7 +2653,20 @@ export function createIgsReaderHost(options = {}) {
             listTurns: listTurnsSafe,
             snippetOf: (turn) => (turn && (turn.visibleText || getMessagePrimaryText(turn.raw || turn))) || '',
             rawOf: (turn) => getMessagePrimaryText(turn && (turn.raw || turn)) || '',
-            currentId: () => (state.activeReader ? currentTurnMessageId(state.activeReader) : null),
+            linesOf: (turn) => backlogLinesOf(turn),
+            avatarOf: (name) => backlogAvatarOf(name, overlay.ownerDocument),
+            currentPage: () => (state.activeReader ? Number(state.activeReader.index) || 0 : -1),
+            ttsOn: () => Boolean(state.activeReader && normalizeTtsSettings(state.activeReader.snapshot?.readerSettings?.tts).enabled),
+            canSpeak: (line) => {
+                const readerSettings = state.activeReader?.snapshot?.readerSettings || {};
+                const plan = decideTts({}, { key: '', textType: line.textType, speaker: line.speaker, text: line.text }, readerSettings.tts, { sceneAssets: readerSettings._sceneAssets, voices: listSystemVoices(), record: false });
+                return Boolean(plan && !plan.skip);
+            },
+            speak: (line) => {
+                const readerSettings = state.activeReader?.snapshot?.readerSettings || {};
+                return speakTtsLine({ key: '', textType: line.textType, speaker: line.speaker, text: line.text }, readerSettings.tts, readerSettings._sceneAssets);
+            },
+            currentId:() => (state.activeReader ? currentTurnMessageId(state.activeReader) : null),
             onJump: (target) => (state.activeReader ? jumpToPosition(target) : null),
             onUnread: () => {
                 const far = readingProgress.getFarthest();
@@ -2450,6 +2681,41 @@ export function createIgsReaderHost(options = {}) {
             setTheme: (settingsTheme) => saveBridgePatch({ settingsTheme }),
         });
         return turnIndexPanel.open(overlay);
+    }
+
+    // 回想：按阅读器同一套分页拆出这一楼的每一页，page 与阅读器页号对应（点一句可跳回那页）。
+    function backlogLinesOf(turn) {
+        const current = state.activeReader;
+        const readerSettings = (current && current.snapshot && current.snapshot.readerSettings) || {};
+        let segments = [];
+        try {
+            segments = buildIgsTextPayload(turn && (turn.raw || turn), {
+                sourceFilter: current && current.payload && current.payload.sourceFilter,
+                virtualRegex: current && current.payload && current.payload.virtualRegex,
+                visibleText: turn && turn.visibleText,
+                sceneAssets: readerSettings._sceneAssets,
+                sentencePaging: readerSettings._sentencePaging,
+                dialogueSentencePaging: readerSettings._dialogueSentencePaging,
+            }).textSegments || [];
+        } catch (_) { segments = []; }
+        return segments
+            .map((seg) => stripSceneDirectivesInline(String(seg || '').replace(/[\u200B-\u200C\u2060-\u2064]/g, '')).trim())
+            .filter(Boolean)
+            .map((seg, page) => ({ ...guessTtsLine(seg), page }));
+    }
+
+    // 回想头像：状态栏头像优先，没有就裁默认立绘的脸；都没有返回 null（面板显示姓名首字）。
+    function backlogAvatarOf(name, doc) {
+        const current = state.activeReader;
+        const assets = (current && current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings._sceneAssets) || {};
+        const key = resolveCharacterKey(assets.characters || {}, assets.characterAliases, name) || name;
+        if (!current || !key) return null;
+        const status = resolveStatusAvatar(assets.statusAvatars, key);
+        if (status) return { url: resolveReaderAssetUrl(status, current) };
+        const characters = assets.characters || {};
+        const sprite = lookupAssetValue(characters[key], '', assets.moodGroups).url;
+        const url = sprite ? resolveReaderAssetUrl(sprite, current) : '';
+        return url ? { url, crop: resolveRegionCrop({ url }, 'face', 1, doc) } : null;
     }
 
     function currentReadingPosition() {
@@ -2523,8 +2789,14 @@ export function createIgsReaderHost(options = {}) {
         if (!resumeKind(last, ids, current.index)) return;
         const far = readingProgress.getFarthest();
         const unread = far ? ids.filter((id) => id > far.id).length : 0;
+        // 默认用主界面样式（继续 / 最新一层）；设置里可改回简易弹窗。
+        if (current.snapshot?.readerSettings?.resumePrompt !== 'simple') {
+            current.titleGate = createTitleGate({ coverTurn: nextTitleCoverTurn((options.global || globalThis).localStorage), resume: { label: positionLabel(last) } });
+            renderTitleGate(current);
+            return;
+        }
         const message = `上次读到 ${positionLabel(last)}${unread ? `，后面还有 ${unread} 楼没读` : ''}。\n接着上次阅读的地方，还是阅读最新一层？`;
-        const resume = await pageModal.confirm(message, { okLabel: `续读 ${last.id} 楼`, cancelLabel: '最新一层' });
+        const resume = await pageModal.confirm(message, { okLabel: '继续上次', cancelLabel: '最新一层' });
         if (!resume || state.activeReader !== current || current.progressArmed) return;
         await jumpToPosition({ pos: last });
     }
@@ -3417,7 +3689,10 @@ export function createIgsReaderHost(options = {}) {
             const sceneAssets = (settings && settings._sceneAssets) || {};
             const readResult = statusHud.tables.length ? readStatusHudTables() : null;
             const info = sceneInfo && typeof sceneInfo === 'object' ? sceneInfo : {};
-            return withConcreteAvatar(buildStatusHudModel({ settings: statusHud, sceneAssets, character: speaker, emotion, location: info.location, time: info.time, weather: info.weather, isNarration, readResult, outfitFor, parsedTables: statusHud.tables.length ? tableData.parsed() : [], rowFor: tableData.rowFor }));
+            const hud = buildStatusHudModel({ settings: statusHud, sceneAssets, character: speaker, emotion, location: info.location, time: info.time, weather: info.weather, isNarration, readResult, outfitFor, parsedTables: statusHud.tables.length ? tableData.parsed() : [], rowFor: tableData.rowFor });
+            // 数值系统接管时，已登记角色的 HUD 条以 IGS 为准（易错点 H3）。
+            const statsLookup = typeof options.statsLookup === 'function' ? options.statsLookup() : null;
+            return withConcreteAvatar(overlayStatsMetrics(hud, statsLookup, speaker));
         };
         const readStatusHudTables = () => tableData.read();
         const render = payload.render || {};
@@ -3577,6 +3852,9 @@ export function createIgsReaderHost(options = {}) {
         let spriteBackArt = false;
         let nsfwCgPortrait = '';
         let castSprites = [];
+        // 非人角色：巨型候选（不占同屏槽位，渲染在立绘层后的独立层）与战斗对手。
+        let castGiants = [];
+        let creatureFoes = [];
         let pendingCastRefs = [];
         let spriteLeft = false;
         let speakerCastOrder = null;
@@ -3617,6 +3895,26 @@ export function createIgsReaderHost(options = {}) {
         const battleFoe = pageFx.battle && pageFx.battle.foe;
         if (battleContext && battleFoe && sceneAssets && sceneAssets.enabled) {
             pageFx.foeImage = resolveGenerated(floorAssets.sprite(battleFoe, '').url) || '';
+        }
+        // 非人对手（有 creature 档案；可写多个）：战斗未结束的页面自动上台，结束那一页也认得对手（击倒 / 败北 / 撤退演出）。
+        // 人类对手与待定档不取图、行为不变。二阶段后的页面基准立绘换成狂暴档；演出用的威吓 / 受创 / 狂暴三档图随 fx 带给战斗演出。
+        const creatureFoeRaw = battleFoe || (pageFx.battleOver && pageFx.battleOver.foe) || '';
+        if (creatureFoeRaw && sceneAssets && sceneAssets.enabled && !(readerSettings.battleFx && readerSettings.battleFx.creature === false)) {
+            const foeState = pageFx.battle || pageFx.battleOver || {};
+            creatureFoes = resolveCreatureFoes({
+                raw: creatureFoeRaw, dnaMap: sceneAssets.characterDna, canonical: (name) => canonicalName(sceneAssets, name),
+                spriteOf: (name, mood) => floorAssets.sprite(name, mood), resolve: resolveGenerated,
+                frenzy: foeState.frenzy, phases: pageFx.phases, withTiers: Boolean(battleContext),
+            });
+            // 本场战斗里已被击倒 / 收服的对手（群怪要所有身影都倒了）不再上台；本页自己的击倒与收服由演出播放。
+            creatureFoes = creatureFoes.filter((f) => !foeIsDown(pageFx, f.raw, {
+                group: f.profile.group === true || hasGroupSuffix(f.raw) || (pageFx.hits || []).some((h) => hasGroupSuffix(h.target) && sameFoeName(h.target, f.raw)),
+                size: f.profile.size,
+            }));
+            if (battleContext && creatureFoes.length) {
+                if (creatureFoes.length === 1 && splitFoeNames(creatureFoeRaw).length === 1) pageFx.foeTiers = creatureFoes[0].tiers;
+                else pageFx.foes = creatureFoes.map((f) => ({ name: f.raw, image: f.image, tiers: f.tiers }));
+            }
         }
         // NSFW 页整楼挂图；SFW 页只在事件那几页显示，之后回到背景和立绘。
         const illustrationHit = prepared.illustrations[normalizedIndex];
@@ -3766,6 +4064,11 @@ export function createIgsReaderHost(options = {}) {
                         }
                     }
                 }
+                // 巨型非人角色不进同屏槽位：说话人是巨型时，图交给巨型层。
+                if (spriteImage && isGiantCreature(creatureProfileOf(sceneAssets.characterDna, spriteCharacter))) {
+                    castGiants.push({ character: spriteCharacter, image: spriteImage, speaker: true });
+                    spriteImage = null;
+                }
                 if (!chatPage && normalizeStageCastSettings(readerSettings.stageCast).enabled) {
                     // 与同屏名单同一套主名换算（上传区 + 生成区）。
                     const castKeyOf = (name) => prepared.keyOf(name);
@@ -3790,6 +4093,10 @@ export function createIgsReaderHost(options = {}) {
                             }
                             const image = resolveGenerated(hit.url);
                             if (!image && isGeneratedAssetUrl(hit.url)) pendingCastRefs.push(hit.url);
+                            if (image && isGiantCreature(creatureProfileOf(sceneAssets.characterDna, hit.character || m.character))) {
+                                castGiants.push({ character: hit.character || m.character, image });
+                                return null;
+                            }
                             return image ? { character: hit.character || m.character, mood: hit.slot || m.mood, outfit: hit.outfit || '', image } : null;
                         },
                     });
@@ -3799,6 +4106,39 @@ export function createIgsReaderHost(options = {}) {
                     castSprites.push(...picked.members);
                 }
             }
+        }
+        // 非人角色编排：巨型取代、对手自动上台。没有非人角色时 composeCreatureStage 不会运行，人类页面原样。
+        let giantSprite = null;
+        let creatureFoePin = '';
+        const creatureStageOpen = sceneAssetsEnabled && htmlCardIndex < 0 && !chatPage && !slotBoundUrl && !cgActive && sceneAssets && sceneAssets.enabled
+            && !(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw);
+        if (creatureStageOpen && (castGiants.length || (creatureFoes.length && !spriteLive2d))) {
+            const foeOne = creatureFoes.length === 1 ? creatureFoes[0] : null;
+            // 后来者取代：陪衬巨型 < 战斗对手巨型（多个时最后一个）< 说话人巨型。
+            const foeGiants = creatureFoes.filter((f) => f.image && isGiantCreature(f.profile) && !castGiants.some((g) => g.character === f.name))
+                .map((f) => ({ character: f.name, image: f.image }));
+            const giants = [...castGiants.filter((g) => !g.speaker), ...foeGiants, ...castGiants.filter((g) => g.speaker)];
+            const slotFoes = creatureFoes.filter((f) => f.image && !isGiantCreature(f.profile) && !spriteLive2d);
+            const speakerBefore = spriteImage ? { character: spriteCharacter, image: spriteImage, mood: spriteMood, outfit: spriteOutfit, order: speakerCastOrder } : null;
+            const composed = composeCreatureStage({
+                speaker: speakerBefore, members: castSprites, giants,
+                foe: foeOne && slotFoes.length ? { character: foeOne.name, image: foeOne.image, mood: '', outfit: '' } : null,
+                foes: foeOne ? [] : slotFoes.slice(0, CREATURE_FOE_SLOTS).map((f) => ({ character: f.name, image: f.image, mood: '', outfit: '' })),
+                castOn: normalizeStageCastSettings(readerSettings.stageCast).enabled,
+            });
+            if (composed.speaker !== speakerBefore) {
+                const next = composed.speaker;
+                spriteImage = next ? next.image : null;
+                if (next) {
+                    spriteCharacter = next.character;
+                    spriteMood = next.mood || '';
+                    spriteOutfit = next.outfit || '';
+                    speakerCastOrder = Number.isFinite(next.order) ? next.order : null;
+                }
+            }
+            castSprites = composed.members;
+            giantSprite = composed.giant;
+            creatureFoePin = composed.pin;
         }
         if (systemSpeaker && normalizeSystemRoleSettings(readerSettings.systemRole).showName) resolvedSpeaker = systemSpeaker;
         if (systemOnlyChat) {
@@ -3890,6 +4230,8 @@ export function createIgsReaderHost(options = {}) {
                 spriteMatch,
                 backgroundMatch,
                 castSprites,
+                giantSprite,
+                creatureFoePin,
                 userChar: { key: prepared.userKey || '', source: prepared.userSource || '' },
                 pendingCastRefs,
                 speakerCastOrder,
@@ -4048,7 +4390,17 @@ export function createIgsReaderHost(options = {}) {
                 }
             }
         });
+        // 草稿随打随记：出图写回、生成报错会重绘或重开阅读器，按记下的值回填，打到一半的字不丢。
+        root.addEventListener('input', (event) => {
+            if (event.target && event.target.id === 'igs-input' && state.activeReader) {
+                state.activeReader.inputValue = String(event.target.value || '');
+            }
+        });
         const keydownHandler = (event) => {
+            // 全屏阅读器里的 Esc 归 IGS：酒馆在 document 上把 Esc 当「中止生成」，不能让它冒泡过去。
+            if (event.key === 'Escape' && state.activeReader && !isEmbeddedReaderMode(state.activeReader.mode)) {
+                claimReaderEscape(event);
+            }
             if (onboarding.keydown(event)) return;
             if (!state.activeReader) return;
             if (state.activeSettings?.asyncState?.shortcutRecording) return;
@@ -4084,6 +4436,14 @@ export function createIgsReaderHost(options = {}) {
                 menu.setAttribute('hidden', '');
                 const arrow = host.querySelector?.('.igs-hud-entry-arrow');
                 arrow?.setAttribute('aria-expanded', 'false'); arrow?.focus?.();
+                return;
+            }
+            // 牌桌盖在正文上：Esc 只收起小游戏，翻页类快捷键也别穿过去改动底下的楼层。
+            if (waitStage.isPlaying()) {
+                if (event.key === 'Escape') {
+                    event.preventDefault(); event.stopPropagation?.();
+                    waitStage.close();
+                }
                 return;
             }
             const optionLayer = state.activeReader.dom?.overlay?.querySelector?.('#igs-option-bubbles');
@@ -4131,6 +4491,7 @@ export function createIgsReaderHost(options = {}) {
             doc.addEventListener('keydown', keydownHandler, true);
             doc.addEventListener('click', hostEditHandler, true);
         }
+        installReaderEscapeGuard(doc);
         const dbController = createDbPanelController(doc, options.global);
         // 「前往 / 使用」保留原草稿并追加命令，不发送消息。
         const fillRecordDraft = async text => {
@@ -4155,6 +4516,8 @@ export function createIgsReaderHost(options = {}) {
             subscribeItemImages: (handler) => (typeof options.onItemImageUpdated === 'function' ? options.onItemImageUpdated(handler) : null),
             getTheme: () => resolveRenderConfig(state.activeReader ? state.activeReader.mode : 'default').bridge.settingsTheme,
             setTheme: (settingsTheme) => saveBridgePatch({ settingsTheme }),
+            // 数值系统接管已登记角色的人物数值；未接管时返回 null，人际关系页照旧读表格。
+            statsLookup: () => (typeof options.statsLookup === 'function' ? options.statsLookup() : null),
         });
         const mapController = createMapPanelController(doc, options.global, fillRecordDraft, {
             mediaCache: options.media?.cache,
@@ -4407,7 +4770,7 @@ export function createIgsReaderHost(options = {}) {
         if (current.titleGate) {
             // 主界面盖着时正文不渲染：不打字、不放演出和音效，点「开始」后才从第一页演起。
             const titleOn = !snapshot.readerSettings || snapshot.readerSettings.titleScreen !== false;
-            if (titleOn && Number(snapshot.content && snapshot.content.currentIndex) === 0) {
+            if (current.titleGate.resume || (titleOn && Number(snapshot.content && snapshot.content.currentIndex) === 0)) {
                 renderTitleGate(current);
                 current.assetLeases?.releaseAll();
                 return;
@@ -4481,8 +4844,35 @@ export function createIgsReaderHost(options = {}) {
         renderTitleGate(current);
     }
 
+    // 0 楼已有的 CG（生成插图与 CG 库事件图）：主界面封面拿来轮换。插图还在后台读的先跳过，下次打开再轮到。
+    function titleCgCovers(current) {
+        const snapshot = current.snapshot;
+        const floor = snapshot && snapshot[preparedFloorKey];
+        if (!floor) return [];
+        const urls = [];
+        const slots = new Set();
+        const identity = current.illustrationIdentity || readIllustrationIdentity(0);
+        if (typeof options.getIllustrationUrl === 'function') {
+            for (const hit of floor.illustrations || []) {
+                if (!hit || slots.has(hit.slot)) continue;
+                slots.add(hit.slot);
+                urls.push(String(options.getIllustrationUrl({ chatId: identity && identity.chatId, messageId: 0, swipeId: identity && identity.swipeId, slot: hit.slot }) || ''));
+            }
+        }
+        const sceneAssets = snapshot.readerSettings && snapshot.readerSettings._sceneAssets;
+        if (sceneAssets && sceneAssets.enabled && sceneAssets.eventCgs) {
+            const generatedAssets = options.generatedAssets || null;
+            for (const hit of floor.eventCgs || []) {
+                if (!hit || !hit.url) continue;
+                urls.push(String((isGeneratedAssetUrl(hit.url) ? (generatedAssets ? generatedAssets.resolveUrl(hit.url) : '') : resolveReaderAssetUrl(hit.url, current)) || ''));
+            }
+        }
+        return urls.filter(Boolean);
+    }
+
     function titleModelOf(current) {
         return buildTitleScreenModel({
+            cgCovers: titleCgCovers(current),
             snapshot: current.snapshot,
             gate: current.titleGate,
             card: titleCardOf(getSillyTavernContext(options.global || globalThis)),
@@ -4499,17 +4889,36 @@ export function createIgsReaderHost(options = {}) {
         const model = titleModelOf(current);
         // 世界观页底部是所选皮肤的真对话框：先按正在选的皮肤挂样式，确认前不写设置。
         applyTitleSkin(overlay, model.view === 'worldview' ? { ...snapshot.readerSettings, dialogSkin: model.pick.skin } : snapshot.readerSettings);
-        // 主界面盖着时不走正文渲染，原地切到内嵌的 overlay 拿不到内嵌类名，钉框会直接跳过。
-        if (isEmbeddedReaderMode(snapshot.mode) && overlay.classList) overlay.classList.add('igs-mode-embedded');
-        pinEmbeddedHostFrame(overlay, snapshot.readerSettings && snapshot.readerSettings._cgBackgroundSize, snapshot.mode);
+        pinTitleFrame(current, overlay);
         renderTitleScreen(overlay, model, {
             onAction: (act, value) => { void handleTitleAction(current, act, value); },
         });
         playTitleBgm(overlay, snapshot);
     }
 
+    function pinTitleFrame(current, overlay) {
+        const snapshot = current.snapshot;
+        if (!overlay || !snapshot) return;
+        // 主界面盖着时不走正文渲染，原地切到内嵌的 overlay 拿不到内嵌类名，钉框会直接跳过。
+        if (isEmbeddedReaderMode(snapshot.mode) && overlay.classList) overlay.classList.add('igs-mode-embedded');
+        pinEmbeddedHostFrame(overlay, snapshot.readerSettings && snapshot.readerSettings._cgBackgroundSize, snapshot.mode, snapshot.readerSettings && snapshot.readerSettings.embeddedHeight);
+        if (!current.stopTitleFrameWatch && isEmbeddedReaderMode(snapshot.mode)) {
+            current.stopTitleFrameWatch = watchTitleEmbeddedFrame(overlay, () => {
+                const live = current.snapshot;
+                const reader = (live && live.readerSettings) || {};
+                return live ? { backgroundSize: reader._cgBackgroundSize, mode: live.mode, heightScale: reader.embeddedHeight } : null;
+            });
+        }
+    }
+
+    function stopTitleFrameWatch(current) {
+        if (typeof current.stopTitleFrameWatch === 'function') current.stopTitleFrameWatch();
+        current.stopTitleFrameWatch = null;
+    }
+
     function dropTitleGate(current) {
         if (!current) return;
+        stopTitleFrameWatch(current);
         current.titleGate = null;
         if (current.dom && current.dom.overlay) removeTitleScreen(current.dom.overlay);
     }
@@ -4522,6 +4931,11 @@ export function createIgsReaderHost(options = {}) {
         if (next.effect === 'settings') return current.controller.openSettings();
         if (next.effect === 'user-char') return generateUserCharFromTitle(current);
         if (next.effect === 'continue') return continueFromTitle(current);
+        if (next.effect === 'latest') {
+            dropTitleGate(current);
+            updateMountedReader(current.snapshot);
+            return null;
+        }
         if (next.effect === 'start') return playOpeningFromTitle(current);
         if (next.effect === 'save' || next.effect === 'save-start') {
             const saved = saveTitlePick(next.pick);

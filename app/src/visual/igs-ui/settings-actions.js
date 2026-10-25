@@ -1,3 +1,7 @@
+import { BUILD_CUSTOM_MAX, normalizeBuild, validCustomSkillName } from '../../scene/stats/stat-build.js';
+
+import { editCharacterCreature } from './creature-settings.js';
+import { storedCreatureOf } from '../../scene/creature-profile.js';
 import { characterDnaNeedsViews } from '../../scene/character-dna.js';
 import { needsSettingsExternalSpriteDna, prepareSettingsExternalSpriteDna } from './settings-external-sprite-dna.js';
 import { spriteDnaPreparationState } from '../../scene/character-dna-preparation.js';
@@ -73,8 +77,8 @@ import { prepareOutfitAdoption, prepareOutfitDnaSave } from '../../scene/outfit-
 import { resolveCharacterKey } from '../../scene/scene-directives.js';
 
 import { normalizeCharacterHouses } from './magic-house.js';
-import { normalizeCharacterVoice, normalizeCharacterVoices, normalizeVoiceBarkSettings, previewVoicePack, resolveCharacterVoice } from './voice-bark.js';
-import { clearTtsCache, fetchTtsVoices, getTtsSkipReason, listSystemVoices, mergeTtsVoices, normalizeTtsSettings, previewTts, resolveTtsVoice } from './tts.js';
+import { normalizeCharacterVoice, normalizeCharacterVoices, normalizeVoiceBarkSettings, previewVoicePack, previewCreatureVoice, resolveCharacterVoice } from './voice-bark.js';
+import { TTS_VOICE_MAX, clearTtsCache, fetchTtsVoices, getTtsSkipReason, listSystemVoices, mergeTtsVoices, normalizeTtsSettings, previewTts, resolveTtsVoice } from './tts.js';
 import { normalizeCharacterSpriteScales } from './sprite-height.js';
 import { handleOutfitAction, guardDefaultOutfitImages } from './settings-outfit-actions.js';
 import { handleEventCgAction } from './settings-event-cg.js';
@@ -911,13 +915,17 @@ export async function handleSettingsAction(action, ctx) {
     const risky = riskyActionMessage(normalizedAction, settingsState, editTarget);
     if (risky && typeof dialogs.confirm === 'function' && !(await dialogs.confirm(risky))) return rerenderSettings();
     // 素材批量删除：多选只记在界面状态里；删除时逐个走单条删除动作，别名、DNA、服装、文件夹归属的清理与单删完全一致。
-    const selectMatch = /^asset-(select|pick|pick-all|delete-picked):(scenes|characters)(?::(.*))?$/.exec(normalizedAction);
+    // 衣柜同一套：单删会把引用它的服装一并解绑。
+    const selectMatch = /^asset-(select|pick|pick-all|delete-picked):(scenes|characters|wardrobe)(?::(.*))?$/.exec(normalizedAction);
     if (selectMatch) {
         const [, op, kind, rest = ''] = selectMatch;
         const asyncState = settingsState.asyncState;
         const cur = asyncState.assetSelect && asyncState.assetSelect.kind === kind ? asyncState.assetSelect : null;
         // 列表里本卡与全局混在一起：按合并后的素材算；单条删除动作各自找到条目所在的那一边。
-        const library = (draftEffectiveAssets(settingsState) || {})[kind] || {};
+        const merged = (draftEffectiveAssets(settingsState) || {})[kind] || {};
+        const library = kind === 'wardrobe'
+            ? Object.fromEntries(Object.entries(merged).filter(([name]) => !isBuiltinNudeOutfit(name)))
+            : merged;
         if (op === 'select') {
             asyncState.assetSelect = cur ? null : { kind, names: new Set() };
             return rerenderSettings();
@@ -935,10 +943,11 @@ export async function handleSettingsAction(action, ctx) {
         }
         const names = [...cur.names].filter((name) => Object.prototype.hasOwnProperty.call(library, name));
         if (!names.length) return rerenderSettings();
-        const label = kind === 'characters' ? '角色' : '场景';
+        const label = { characters: '角色', scenes: '场景', wardrobe: '衣柜提示词' }[kind];
+        const note = { characters: '立绘、别名、服装将一并删除。', scenes: '时间、天气背景将一并删除。', wardrobe: '引用这些条目的服装改用同名提示词。' }[kind];
         const preview = names.slice(0, 5).map((name) => `「${name}」`).join('') + (names.length > 5 ? ` 等${names.length}个` : '');
-        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(`删除${preview}${label}？${kind === 'characters' ? '立绘、别名、服装将一并删除。' : '时间、天气背景将一并删除。'}`))) return rerenderSettings();
-        const prefix = kind === 'characters' ? 'scene-remove-char:' : 'scene-remove-bg:';
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(`删除${preview}${label}？${note}`))) return rerenderSettings();
+        const prefix = { characters: 'scene-remove-char:', scenes: 'scene-remove-bg:', wardrobe: 'wardrobe-remove:' }[kind];
         const quiet = { ...ctx, dialogs: { ...dialogs, confirm: async () => true } };
         for (const name of names) {
             const result = await handleSettingsAction(`${prefix}${encodeURIComponent(name)}`, quiet);
@@ -2394,6 +2403,44 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    // 数值建卡：玩家新增 / 删除自定义特有技能。新增的默认不选，不挤占已选的 3 项。
+    if (normalizedAction === 'stats-build-add-skill') {
+        const bridgeDraft = settingsState.draft.bridge = settingsState.draft.bridge || {};
+        const statsDraft = bridgeDraft.stats = bridgeDraft.stats || {};
+        const build = normalizeBuild(statsDraft.build);
+        if (build.custom.length >= BUILD_CUSTOM_MAX) return { ok: false, reason: 'stats-build-skill-full' };
+        const raw = await dialogs.prompt(`新增技能名（1–8 字，不含数字和符号，最多 ${BUILD_CUSTOM_MAX} 个）：`, '');
+        if (raw == null || !String(raw).trim()) return rerenderSettings();
+        const name = validCustomSkillName(raw);
+        if (!name) return { ok: false, reason: 'stats-build-skill-invalid' };
+        if (!build.custom.includes(name)) {
+            build.custom.push(name);
+            if (!Object.hasOwn(build.special, name)) build.special[name] = false;
+            statsDraft.build = build;
+            const persisted = persistSettingsDraft();
+            if (persisted.ok === false) return persisted;
+        }
+        return rerenderSettings();
+    }
+
+    // 「−」按钮：弹框填要删除的自定义技能名；只有一个时预填。
+    if (normalizedAction === 'stats-build-remove-skill') {
+        const bridgeDraft = settingsState.draft.bridge = settingsState.draft.bridge || {};
+        const statsDraft = bridgeDraft.stats = bridgeDraft.stats || {};
+        const build = normalizeBuild(statsDraft.build);
+        if (!build.custom.length) return rerenderSettings();
+        const raw = await dialogs.prompt(`要删除的自定义技能（现有：${build.custom.join('、')}）：`, build.custom.length === 1 ? build.custom[0] : '');
+        const name = String(raw == null ? '' : raw).trim();
+        if (!name) return rerenderSettings();
+        if (!build.custom.includes(name)) return { ok: false, reason: 'stats-build-skill-unknown' };
+        build.custom = build.custom.filter((item) => item !== name);
+        delete build.special[name];
+        statsDraft.build = build;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     if (normalizedAction === 'stage-shake-add-emotion') {
         const globalObj = options.global || globalThis;
         const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
@@ -2920,10 +2967,10 @@ export async function handleSettingsAction(action, ctx) {
         if (!charName || RESERVED_ASSET_NAMES.includes(charName)) return { ok: false, error: '角色名无效' };
         const assets = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
         if (voice) {
-            if (!['pack', 'pitch', 'speed', 'tts', 'ttsVolume'].includes(field)) return { ok: false, error: '未知的声线设置' };
+            if (!['pack', 'pitch', 'speed', 'tts', 'ttsVolume', 'ttsStyle'].includes(field)) return { ok: false, error: '未知的声线设置' };
             const voices = assets.characterVoices = normalizeCharacterVoices(assets.characterVoices);
             const entry = normalizeCharacterVoice(voices[charName]);
-            entry[field] = field === 'pack' || field === 'tts' ? value : Number(value);
+            entry[field] = field === 'pack' || field === 'tts' || field === 'ttsStyle' ? value : Number(value);
             const next = normalizeCharacterVoices({ [charName]: entry })[charName];
             if (next) voices[charName] = next;
             else delete voices[charName];
@@ -2954,23 +3001,33 @@ export async function handleSettingsAction(action, ctx) {
         await clearTtsCache();
         return { ok: true, cleared: true };
     }
-    if (normalizedAction === 'tts-fetch-voices') {
+    if (normalizedAction === 'tts-fetch-voices' || normalizedAction === 'tts-fetch-voices-narrator') {
         // 拉到的声音并进「可选声音」（去重）；草稿是设置器自己的副本，这里换一份新的 tts 对象写回。
+        // 旁白独立接口有自己的声音列表与提示信息。
+        const narrator = normalizedAction === 'tts-fetch-voices-narrator';
+        const messageKey = narrator ? 'ttsNarratorVoicesMessage' : 'ttsVoicesMessage';
+        const apiKey = narrator ? 'narratorApi' : 'api';
         const reader = settingsState.draft.readerSettings || (settingsState.draft.readerSettings = {});
         const tts = normalizeTtsSettings(reader.tts);
-        const result = await fetchTtsVoices(tts);
+        const result = await fetchTtsVoices(tts, { narrator });
         if (!result.ok) {
-            settingsState.asyncState.ttsVoicesMessage = `获取音色列表失败：${result.error}`;
+            settingsState.asyncState[messageKey] = `获取音色列表失败：${result.error}`;
             return rerenderSettings();
         }
-        const merged = mergeTtsVoices(tts.api.voices, result.voices);
-        reader.tts = { ...tts, api: { ...tts.api, voices: merged.text } };
+        const merged = mergeTtsVoices(tts[apiKey].voices, result.voices);
+        reader.tts = { ...tts, [apiKey]: { ...tts[apiKey], voices: merged.text } };
         const persisted = persistSettingsDraft();
         if (persisted.ok === false) return persisted;
-        settingsState.asyncState.ttsVoicesMessage = result.builtin
+        settingsState.asyncState[messageKey] = (result.builtin
             ? `接口没有返回自定义音色，已加入 ${merged.added} 个常用声音名（共 ${merged.total} 个可选）。`
-            : `获取到 ${result.voices.length} 个音色，新增 ${merged.added} 个（共 ${merged.total} 个可选）。`;
+            : `获取到 ${result.voices.length} 个音色，新增 ${merged.added} 个（共 ${merged.total} 个可选）。`)
+            + (merged.dropped ? `已达 ${TTS_VOICE_MAX} 个上限，其余 ${merged.dropped} 个未加入。` : '');
         return rerenderSettings();
+    }
+    if (normalizedAction === 'tts-preview-narrator') {
+        const result = await previewTts((settingsState.draft.readerSettings || {}).tts, { role: 'narrator' });
+        if (result && result.ok === false && result.error) showGeneratedNotice(options.global || globalThis, `试听失败：${result.error}`);
+        return result;
     }
     if (normalizedAction === 'tts-preview' || normalizedAction.startsWith('tts-preview:')) {
         // 试听台词朗读：可带角色名，按这个角色会用到的声音念。
@@ -2978,7 +3035,7 @@ export async function handleSettingsAction(action, ctx) {
         const charName = decodeSeg(normalizedAction.slice('tts-preview:'.length));
         const assets = settingsState.draft.bridge.sceneAssets || {};
         const voice = charName ? resolveTtsVoice({ textType: 'dialogue', speaker: charName }, reader.tts, assets, listSystemVoices()) : null;
-        const result = await previewTts(reader.tts, voice ? { role: voice.role, voice: voice.voice } : {});
+        const result = await previewTts(reader.tts, voice ? { role: voice.role, voice: voice.voice, speaker: charName, sceneAssets: assets } : {});
         // 试听失败的原因不走阅读器的报错通道，这里在设置页提示出来，免得点了像没反应。
         if (result && result.ok === false && result.error) showGeneratedNotice(options.global || globalThis, `试听失败：${result.error}`);
         return result;
@@ -2986,6 +3043,10 @@ export async function handleSettingsAction(action, ctx) {
     if (normalizedAction.startsWith('voice-bark-preview:')) {
         const charName = decodeSeg(normalizedAction.slice('voice-bark-preview:'.length));
         const voice = resolveCharacterVoice(draftEffectiveAssets(settingsState), charName);
+        if (voice.creature) {
+            previewCreatureVoice(voice.creature, { pitch: voice.pitch, speed: voice.speed, volume: normalizeVoiceBarkSettings((settingsState.draft.readerSettings || {}).voiceBark).volume });
+            return { ok: true, previewed: `creature:${voice.creature.kind}` };
+        }
         if (!voice.pack) return { ok: false, error: '该角色当前未设置声线，请先选择一个声线' };
         previewVoicePack(voice.pack.id, { pitch: voice.pitch, speed: voice.speed, volume: normalizeVoiceBarkSettings((settingsState.draft.readerSettings || {}).voiceBark).volume });
         return { ok: true, previewed: voice.pack.id };
@@ -3152,7 +3213,8 @@ export async function handleSettingsAction(action, ctx) {
         try {
             if (normalizedAction === 'image-files-retry-delete') await options.media.retryDeletes();
             if (normalizedAction === 'image-records-retry-backup') await options.media.flush();
-            settingsState.asyncState.imageCacheStatus = describeMediaUsage(await options.media.stats());
+            const local = describeLocalStorageUsage((options.global || globalThis).localStorage, { topKeys: 5 });
+            settingsState.asyncState.imageCacheStatus = `${describeMediaUsage(await options.media.stats())}${local ? `；${local}` : ''}`;
         } catch (error) { settingsState.asyncState.imageCacheStatus = `读取、备份或回收失败：${error.message}`; }
         return rerenderSettings();
     }
@@ -3802,6 +3864,25 @@ export async function handleSettingsAction(action, ctx) {
         target.library.characterDna = { ...target.library.characterDna, [target.name]: { ...source, version: 2 } };
         const saved = persistGeneratedLibrary(persistSettingsDraft);
         if (operationFailed(saved)) { restoreAdoptionFields(target.library, previous); return saved; }
+        return rerenderSettings();
+    }
+
+    // 非人角色档案：写在角色所属库的 characterDna[名].creature，写时浅拷，不改共享对象。
+    if (normalizedAction.startsWith('char-creature:')) {
+        const [field, rawName, rawValue] = normalizedAction.slice('char-creature:'.length).split(':');
+        const target = spriteAdoptionTarget(settingsState, decodeSeg(rawName));
+        if (!target.name || !target.library || target.borrowed || RESERVED_ASSET_NAMES.includes(target.name)) return { ok: false, error: '角色名无效' };
+        const map = target.library.characterDna && typeof target.library.characterDna === 'object' ? target.library.characterDna : {};
+        const next = editCharacterCreature(Object.hasOwn(map, target.name) ? map[target.name] : null, field, decodeSeg(rawValue));
+        if (!next) return rerenderSettings();
+        target.library.characterDna = { ...map, [target.name]: next };
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        // 从 ⋯ 菜单启用后直接展开「角色设定」，档案各项在那里调整。
+        if (field === 'enabled' && storedCreatureOf(next)) {
+            const open = settingsState.asyncState.advancedOpen || {};
+            settingsState.asyncState.advancedOpen = { ...open, [`char-dna:${target.name}`]: true };
+        }
         return rerenderSettings();
     }
 

@@ -2,7 +2,8 @@ import { recoverOperation, createOperationCheckpoint, checkpointService, wakeRec
 // 设置器的打开 / 关闭、挂载、事件委托、草稿写入与保存。reader-host 只负责把阅读器侧的依赖交进来。
 import { updateCharCounts } from './prompt-entries-fields.js';
 import { withCharacterDnaDraftSync } from './settings-external-sprite-dna.js';
-import { draftAssetLibrary, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
+import { draftAssetLibrary, effectiveSceneAssets, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
+import { resolveWorldview } from '../../scene/worldview.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { placeRowMenu } from './settings-outfit-fields.js';
 import { splitMigrationWords } from '../../scene/outfit-migration.js';
@@ -20,12 +21,14 @@ import { mergeLegacyNaiSettings } from '../../generated-images/image-backend.js'
 import { getSettingsStyleText } from './settings-style.js';
 import { categoryOfPage, currentSettingsPage, defaultPageOfCategory, isSettingsCategory, isSettingsPage, normalizeSettingsPage, openSettingsPage, resolveSettingsPage, resolveSettingsTarget } from './settings-pages.js';
 import { recordSettingsRecent, settingsRecentLabel } from './settings-recent.js';
+import { downloadStatsTemplate } from './stats-template-link.js';
 import { VN_THEME_PRESETS } from './reader-host-constants.js';
 import { cloneData } from './reader-value-utils.js';
 import { attachSettingsViewportEvents, clearChildren, detachSettingsViewportEvents, ensureStyleTag, getRootDocument, unmountNode } from './reader-dom-utils.js';
 import { getPath, normalizeReaderMode, normalizeSettingsValue, setPath } from './settings-normalize.js';
 import { FX_PACKS_ACTIVE, packSwitchPath } from '../../scene/fx-packs.js';
 import { handleSettingsAction as runSettingsAction, releasedGeneratedImageIds } from './settings-actions.js';
+import { ensureModelProfilesLoaded, handleModelProfileAction, isImmediateSavePath, setModelProfileSelection } from './settings-model-profiles.js';
 import { SETTINGS_NOTICE_MS, beginSettingsProgress, describeSettingsFailure, markSettingsButtonBusy, remountSettingsNotice, remountSettingsProgress, settingsBusyLabel } from './settings-notice.js';
 import { createSettingsDialogs } from './settings-dialog.js';
 import { captureSettingsFocus, restoreSettingsFocus } from './settings-focus.js';
@@ -42,10 +45,19 @@ import { preserveConfiguredArtists } from '../../generated-images/artist-library
 import { pickImagePromptFile } from './settings-image-prompt-io.js';
 import { previewStatusHudPosition } from './status-hud-position-fields.js';
 import { listSystemVoices, onSystemVoicesChanged } from './tts.js';
+import { normalizeBuild } from '../../scene/stats/stat-build.js';
+import { refreshStatsBuildStatus } from './stats-settings-fields.js';
 
 // 设置页改角色的某一项时，按这些字段里有没有这个角色名判断它在本卡还是全局。
 const ASSET_CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const LAST_SETTINGS_PAGE_KEY = 'igs:settings-last-page:v1';
+// 建卡分配的默认值（基础属性 40、默认预选的特有技能）只在规范化时补出，原始草稿里没有。
+// 改动前先把规范化结果写回草稿：开关按界面显示值取反，默认选中的技能才能取消，其余技能才能选上。
+const STATS_BUILD_PATH = 'bridge.stats.build';
+function materializeStatsBuild(draft, path) {
+    if (!draft || !String(path).startsWith(`${STATS_BUILD_PATH}.`)) return;
+    setPath(draft, STATS_BUILD_PATH, normalizeBuild(getPath(draft, STATS_BUILD_PATH)));
+}
 
 export function createSettingsHost(deps) {
     const {
@@ -174,6 +186,9 @@ export function createSettingsHost(deps) {
         const snapshot = buildSettingsSnapshot(state.activeSettings);
         state.activeSettings.snapshot = snapshot;
         updateMountedSettings(snapshot);
+        if (['source', 'llm'].includes(state.activeSettings.asyncState.page)) {
+            ensureModelProfilesLoaded(state.activeSettings, { global: options.global || globalThis, onChange: (panel) => { if (state.activeSettings === panel) rerenderSettings(); } });
+        }
         return {
             ok: true,
             tab: state.activeSettings.tab,
@@ -184,19 +199,38 @@ export function createSettingsHost(deps) {
         };
     }
 
+    // 关闭设置时：提示词编辑器有未存档修改时先存档，再落盘草稿。
+    function saveSettingsNow(panel, persistOptions = {}) {
+        const editor = panel.asyncState.imagePromptEditor;
+        if (editor?.state.dirty) {
+            const draftResult = editor.saveDraft();
+            if (!draftResult.ok) return draftResult;
+        }
+        return persistSettingsDraft(persistOptions);
+    }
+
+    // 后台生图任务读已保存配置：接口地址、密钥、模型等字段改完（change）即落盘，不等关闭设置。
+    // 打字途中停顿 800ms 也落盘，不必等失焦；同一面板内只保留最后一次。
+    let immediateSaveTimer = null;
+    function persistImmediateField(path, { debounce = false } = {}) {
+        if (!state.activeSettings || !isImmediateSavePath(path)) return;
+        clearTimeout(immediateSaveTimer);
+        immediateSaveTimer = null;
+        const panel = state.activeSettings;
+        const run = () => {
+            immediateSaveTimer = null;
+            if (state.activeSettings !== panel) return;
+            const result = persistSettingsDraft();
+            if (result && result.ok === false) reportSettingsFailure(result);
+        };
+        if (debounce) immediateSaveTimer = setTimeout(run, 800);
+        else run();
+    }
+
     function closeSettings() {
         const current = state.activeSettings;
         if (!current) return { ok: true, reason: 'settings-not-open' };
-        const editor = current.asyncState.imagePromptEditor;
-        const saveForClose = () => {
-            if (editor?.state.dirty) {
-                const draftResult = editor.saveDraft();
-                if (!draftResult.ok) return draftResult;
-            }
-            return persistSettingsDraft({
-                syncActiveModeFromSettings: current.initialOpenMode !== current.draft.bridge.openMode,
-            });
-        };
+        const saveForClose = () => saveSettingsNow(current, { syncActiveModeFromSettings: current.initialOpenMode !== current.draft.bridge.openMode });
         const saved = saveForClose();
         if (saved.ok === false) {
             if (!current.asyncState.closingRecovery) {
@@ -358,7 +392,9 @@ export function createSettingsHost(deps) {
                 return result;
             },
             toggle(path) {
-                const current = getPath(state.activeSettings && state.activeSettings.draft, path);
+                const draft = state.activeSettings && state.activeSettings.draft;
+                materializeStatsBuild(draft, path);
+                const current = getPath(draft, path);
                 return updateSettingsValue(path, !current);
             },
             async invoke(action) {
@@ -394,6 +430,7 @@ export function createSettingsHost(deps) {
             setPath(draft, 'readerSettings.dialogAutoHeight', value === 'auto');
             return editOptions.liveInput ? { ok: true } : rerenderSettings();
         }
+        materializeStatsBuild(draft, path);
         setPath(draft, path, normalizeSettingsValue(path, value));
         if (path === 'readerSettings.skinDialogScale') setPath(draft, 'readerSettings.dialogAutoHeight', false);
         // 题材包总开关打开时，该包全部细项一起开（defaultOn 通用包的细项本来就默认开，不再逐个写脏草稿）；关掉时细项原样保留。
@@ -432,6 +469,8 @@ export function createSettingsHost(deps) {
             // getSnapshot() clones before exposing this value; do not deep-copy the entire
             // asset library for every keystroke (including long prompts and API keys).
             state.activeSettings.snapshot.draft = draft;
+            // 建卡分配数字框：剩余点数与「按分配启用」就地刷新，不整页重绘。
+            if (path.startsWith(`${STATS_BUILD_PATH}.`)) refreshStatsBuildStatus(state.activeSettings.dom && state.activeSettings.dom.root, getPath(draft, STATS_BUILD_PATH));
             return { ok: true };
         }
         if (path === 'bridge.sceneAssets.moodAutoClassify' && value === true) scheduleMoodAutoClassify();
@@ -519,6 +558,47 @@ export function createSettingsHost(deps) {
     const recoveringSettingsActions = new Map();
     function handleSettingsAction(action) {
         if (String(action).startsWith('live2d-edit:')) return Promise.resolve(openLive2dManager?.(decodeURIComponent(String(action).slice('live2d-edit:'.length))));
+        // 数值系统提示词「恢复默认」：清空覆盖值，规范化后回到默认模板（§9）。
+        if (String(action).startsWith('stats-prompt-reset:')) {
+            const id = String(action).slice('stats-prompt-reset:'.length);
+            if (!/^[a-z]+$/.test(id)) return Promise.resolve({ ok: false, reason: 'stats-prompt-unknown' });
+            return Promise.resolve(updateSettingsValue(`bridge.stats.prompts.${id}`, ''));
+        }
+        // 适配版表格模板下载（§8C）。
+        // 推送映射「确认映射」：给当前模板指纹写一个空覆盖，之后不再提示「新的表格模板」（§8B 第 5 条）。
+        if (String(action).startsWith('stats-mapping-confirm:')) {
+            const fp = String(action).slice('stats-mapping-confirm:'.length);
+            if (!/^tpl-[0-9a-f]{1,8}$/.test(fp)) return Promise.resolve({ ok: false, reason: 'stats-mapping-unknown' });
+            const draft = state.activeSettings && state.activeSettings.draft;
+            const existing = draft && draft.bridge && draft.bridge.stats && draft.bridge.stats.push && draft.bridge.stats.push.mappings && draft.bridge.stats.push.mappings[fp];
+            return Promise.resolve(updateSettingsValue(`bridge.stats.push.mappings.${fp}`, existing && typeof existing === 'object' ? { ...existing } : {}));
+        }
+        if (action === 'stats-template-download') {
+            let result;
+            try { result = downloadStatsTemplate((options.global || globalThis).document); }
+            catch (error) { result = { ok: false, reason: 'stats-template-download-threw', thrown: error }; }
+            return Promise.resolve(result);
+        }
+        // 数值系统「本聊天」启用 / 暂停：直接交给运行时，结果重绘后反映到按钮与状态说明。
+        if (action === 'stats-chat-enable' || action === 'stats-chat-disable' || action === 'stats-chat-enable-build') {
+            let result;
+            try {
+                // 「按分配启用」用草稿里的分配（可能还没保存），不读已落盘的设置。
+                const draftStats = state.activeSettings && state.activeSettings.draft && state.activeSettings.draft.bridge && state.activeSettings.draft.bridge.stats;
+                // 世界观附加技能按设置页当前世界观计入，与建卡区显示的候选一致。
+                const draftBridge = state.activeSettings && state.activeSettings.draft && state.activeSettings.draft.bridge;
+                const scopeKey = state.activeSettings && state.activeSettings.asyncState && state.activeSettings.asyncState.assetScopeKey;
+                const worldAssets = draftBridge ? (scopeKey ? effectiveSceneAssets(draftBridge.sceneAssets, scopeKey) : draftBridge.sceneAssets) : null;
+                const payload = action === 'stats-chat-enable-build' ? { build: draftStats ? draftStats.build : undefined, worldview: resolveWorldview(worldAssets) } : undefined;
+                result = typeof options.statsChatAction === 'function'
+                    ? options.statsChatAction(action === 'stats-chat-disable' ? 'disable' : 'enable', payload)
+                    : { ok: false, reason: 'stats-runtime-missing' };
+            } catch (error) {
+                result = { ok: false, reason: 'stats-chat-action-threw', thrown: error };
+            }
+            if (state.activeSettings) rerenderSettings();
+            return Promise.resolve(result || { ok: false, reason: 'stats-runtime-missing' });
+        }
         if (recoveringSettingsActions.has(action)) return recoveringSettingsActions.get(action);
         const panel = state.activeSettings;
         if (!panel) return Promise.resolve({ ok: true, cancelled: true });
@@ -611,6 +691,12 @@ export function createSettingsHost(deps) {
             } finally {
                 panel.asyncState.imagePromptBusy = false;
             }
+        }
+        if (action.startsWith('model-profile:')) {
+            const panel = state.activeSettings;
+            if (!panel) return { ok: false, reason: 'settings-not-open' };
+            return handleModelProfileAction(action, { panel, dialogs: recoveryDialogs, global: options.global || globalThis,
+                persistSettingsDraft, rerenderSettings, isCurrent: () => state.activeSettings === panel });
         }
         const onboardingResult = onboarding.handleAction(action);
         if (onboardingResult) return onboardingResult;
@@ -741,6 +827,7 @@ export function createSettingsHost(deps) {
             if (segment) {
                 noteRecentChange(segment, segment.getAttribute('data-segment-path'));
                 controller.setValue(segment.getAttribute('data-segment-path'), segment.getAttribute('data-segment-value'));
+                persistImmediateField(segment.getAttribute('data-segment-path'));
                 return;
             }
             const action = event.target.closest('[data-action]');
@@ -867,6 +954,7 @@ export function createSettingsHost(deps) {
             if (path) {
                 if (target.tagName === 'TEXTAREA') updateCharCounts(root, path, target.value);
                 controller.setValue(path, target.value, { liveInput: true });
+                persistImmediateField(path, { debounce: true });
                 return;
             }
             const statusAvatarChar = target.getAttribute('data-status-avatar-char');
@@ -995,9 +1083,18 @@ export function createSettingsHost(deps) {
                     editor.state.importChoices[importId] = target.value; return;
                 }
             }
+            const profileKind = target?.getAttribute?.('data-model-profile-select');
+            if (profileKind) {
+                // 下拉选中即切换：写入草稿并落盘，后台任务随即改用新预设。
+                if (!state.activeSettings) return;
+                setModelProfileSelection(state.activeSettings, profileKind, target.value);
+                if (target.value) controller.invoke(`model-profile:apply:${profileKind}`);
+                return;
+            }
             const modelSync = event.target && event.target.getAttribute ? event.target.getAttribute('data-model-sync') : '';
             if (modelSync) {
                 controller.setValue(modelSync, event.target.value);
+                persistImmediateField(modelSync);
                 return;
             }
             // 角色学院 / 声线下拉：交给动作层写草稿并保存（input 监听不处理 SELECT）。
@@ -1011,10 +1108,18 @@ export function createSettingsHost(deps) {
                 : charSelect.hasAttribute('data-char-voice-pitch') ? 'pitch'
                     : charSelect.hasAttribute('data-char-voice-speed') ? 'speed'
                         : charSelect.hasAttribute('data-char-voice-tts') ? 'tts'
-                            : charSelect.hasAttribute('data-char-voice-ttsVolume') ? 'ttsVolume' : '';
+                            : charSelect.hasAttribute('data-char-voice-ttsVolume') ? 'ttsVolume'
+                                : charSelect.hasAttribute('data-char-voice-ttsStyle') ? 'ttsStyle' : '';
             if (voiceField) {
                 const voiceChar = charSelect.getAttribute(voiceField === 'pack' ? 'data-char-voice' : `data-char-voice-${voiceField}`) || '';
                 controller.invoke(`char-voice:${voiceField}:${encodeURIComponent(voiceChar)}:${encodeURIComponent(charSelect.value || '')}`);
+                return;
+            }
+            const creatureChar = charSelect ? charSelect.getAttribute('data-char-creature') : null;
+            if (creatureChar) {
+                const creatureField = charSelect.getAttribute('data-creature-field') || '';
+                const creatureValue = charSelect.type === 'checkbox' ? String(charSelect.checked) : charSelect.value || '';
+                controller.invoke(`char-creature:${creatureField}:${encodeURIComponent(creatureChar)}:${encodeURIComponent(creatureValue)}`);
                 return;
             }
             // 角色立绘高度：输完（失焦或回车）才保存，打字途中不重绘。
@@ -1077,6 +1182,7 @@ export function createSettingsHost(deps) {
             if (event.target && event.target.type === 'range' && !/^readerSettings\.(typewriter\.sound|statusHud\.position)\./.test(path || '')) return;
             if (!path) return;
             controller.setValue(path, target.value, { liveInput: target.tagName !== 'SELECT' && target.type !== 'color' });
+            persistImmediateField(path);
         });
         // 点下拉菜单（⋯、＋）以外的地方，把开着的菜单收起。
         root.addEventListener('click', (event) => {

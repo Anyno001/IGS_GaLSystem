@@ -1,5 +1,12 @@
 # 发布说明与核验边界
 
+## v0.37.12
+
+- 以内测 v0.37.12（`cd0c89f9`）为准，按 `2daa4728..cd0c89f9` 的 app/loader 差异逐文件同步（426 项，删除 `fx-beast-parts.js`）；保留发布版自有的 `build-loader.js`、`loader-version.test.js`、`app/docs/*`，不带入 `fx-shot.mjs`、`shot.sh`；`build-local-package.js` 的仓库改为 `Anyno001/IGS_GaLSystem`。
+- 新增等待小游戏扩展：`loader/igs-wait-games.js` 与 `loader/等待小游戏 v0.37.12.json`（自包含，需先启用主体）。
+- 启动器源码未变（去 CR 后与 v0.36.111 导入件一致），导入件 `loader/酒馆助手脚本-沉浸式Galgame系统（自动更新） v0.37.12.json`。
+- 验证：loader-version 与 wait-stage 系列定向测试通过；`gate:wait-stage:main-frontend-does-not-import-the-game-pack` 为既有基线红。发布版本机缺 `@kobalab/majiang-*`，麻将相关测试在内测目录运行（源码一致）。真实酒馆与手机未验收。只推送 main，不创建标签。
+
 ## v0.36.116
 
 - 修复 Live2D 管理器打不开：`reader-host.js` 漏导入 `draftEffectiveAssets`，点开即报 ReferenceError。只改这一处与版本号，启动器未变，无需重新导入。

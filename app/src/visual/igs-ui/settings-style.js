@@ -155,6 +155,7 @@ ${THEMED.map(([value, palette]) => `${themeSelector(value)}::before{opacity:${pa
 .igs-switch.is-on{color:var(--igs-settings-ink);background:var(--igs-settings-highlight)}
 .igs-switch.is-on i{background:var(--igs-settings-accent)}
 .igs-switch.is-on i:after{left:14px;background:var(--igs-settings-on-accent)}
+.igs-switch[disabled]{opacity:.5;cursor:not-allowed;pointer-events:none}
 .igs-source-filter{grid-column:1/-1;padding:14px 16px 16px;border:0;border-radius:var(--igs-settings-radius-control);background:var(--igs-settings-surface);display:flex;flex-direction:column;gap:14px;min-width:0;max-width:100%;box-sizing:border-box}
 .igs-source-filter-title{font-size:13px;line-height:20px;font-weight:600;letter-spacing:.04em;color:var(--igs-settings-ink)}
 .igs-source-filter-note{font-size:11px;line-height:16px;font-weight:400;color:var(--igs-settings-ink-4);overflow-wrap:anywhere}
@@ -164,6 +165,11 @@ ${THEMED.map(([value, palette]) => `${themeSelector(value)}::before{opacity:${pa
 .igs-reader-text-effect-options>.igs-settings-field{min-width:0}
 .igs-settings-grid[data-reader-pane="dialog"] .igs-gradient-veil-settings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 14px;min-width:0}
 .igs-source-filter textarea{min-height:76px}
+.igs-stats-custom-row{align-items:center;text-align:center}
+.igs-stats-custom-row>.igs-mood-word-list{justify-content:center}
+.igs-stats-custom-row .igs-btn-mgr-icon{min-width:28px;min-height:28px;font:inherit;font-size:16px;line-height:1;color:var(--igs-settings-ink-2)}
+[data-stats-prompt] .igs-settings-full>textarea{width:100%;box-sizing:border-box;border:0;border-bottom:1px solid color-mix(in srgb,var(--igs-settings-ink) 16%,transparent);background:var(--igs-settings-field);color:var(--igs-settings-ink);border-radius:var(--igs-settings-radius-control);padding:8px 10px;font:inherit;font-size:13px;line-height:1.55;font-family:ui-monospace,Consolas,monospace;min-height:132px;resize:vertical;outline:none}
+[data-stats-prompt] .igs-settings-full>textarea:focus{border-bottom-color:var(--igs-settings-accent);background:var(--igs-settings-highlight)}
 [data-image-prompt-panel]{min-width:0}
 .igs-settings-actions,[data-image-prompt-panel] .igs-image-prompt-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
 .igs-settings-actions>.igs-settings-action{flex:0 0 auto;white-space:nowrap}

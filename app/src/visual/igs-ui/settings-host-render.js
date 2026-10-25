@@ -13,7 +13,7 @@ import { countEnabledPerformance, performanceGroupCounts, renderPerformancePage,
 import { renderWorldviewRow } from './worldview-fields.js';
 import { renderQualityRow } from './render-quality-fields.js';
 import { isGeneratedAssetUrl, normalizeGeneratedLibrary } from '../../scene/asset-match.js';
-import { createOutfitResolver } from '../../scene/character-outfits.js';
+import { createOutfitResolver, isBuiltinNudeOutfit } from '../../scene/character-outfits.js';
 import { readDefaultOutfit, pickOutfitSprite } from '../../scene/character-appearance.js';
 import { renderEventCgList } from './settings-event-cg.js';
 import { CHARACTER_ADD_MENU, renderDnaCandidateBar, renderDnaOnlyCharacterList, kindModelPicker, checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupList, renderMoodReviewList, renderPinnedButtons, renderShortcutSettings, renderSceneAssetList, renderGeneratedAssetPane, countGeneratedWaiting, renderStageShakeSettings, renderChatShowSettings, renderSystemRoleSettings, renderSystemRoleAdvanced, renderWeatherFxSettings, renderCustomFontManager, renderTemplate, rangeInput, secretInput, segmentedInput, selectInput, textInput, textareaInput, numberInput, hiddenAttr, modelPicker, tableMultiSelect } from './settings-fields.js';
@@ -29,6 +29,7 @@ import { getReaderModeIcon } from './icons.js';
 import { renderPromptKindsPanel } from './settings-prompt-kinds.js';
 import { renderImagePromptPanel } from './settings-image-prompt-view.js';
 import { renderArtistLibrary, renderArtistSelector } from './settings-artist-library.js';
+import { renderModelProfileRow } from './settings-model-profiles.js';
 import { normalizeSettingsTheme, renderSettingsThemeSwitch } from './settings-theme.js';
 import { fontOptionsWith, loadCustomFonts, registerCustomFonts } from '../../media/custom-fonts.js';
 import { DIALOG_FONT_OPTIONS, PROMPT_RULE_OFF_HINT, PROMPT_RULE_PRESET_HINT, scenePromptRuleOutfitHint, SETTINGS_PANEL_REQUIRED_SELECTORS, SETTINGS_PANEL_TAB_CONTRACT } from './reader-host-constants.js';
@@ -42,6 +43,9 @@ import { isStatusHudPhone, renderStatusHudPositionField, statusHudPositionDevice
 import { renderSectionResetButton, sectionResetPlaceholders } from './settings-sections.js';
 import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLabel } from '../../generated-images/image-job-log.js';
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
+import { CREATURE_DISPLAY_RANGE, normalizeCreatureDisplaySettings } from '../../scene/creature-profile.js';
+import { normalizeStatsSettings } from '../../scene/stats/stat-settings.js';
+import { renderStatsArchive, renderStatsBuildFields, renderStatsMappingFields, renderStatsPromptFields } from './stats-settings-fields.js';
 import { resolveWorldview } from '../../scene/worldview.js';
 import { applyFxWorldview } from '../../scene/fx-era.js';
 import { loadAssetFoldersFor } from './asset-folders.js';
@@ -53,7 +57,7 @@ import { dialogSkinLabel, getDialogSkinChoices } from './dialog-skin-catalog.js'
 import { DIALOG_SKIN_XIANXIA_INK } from './dialog-theme-xianxia.js';
 import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_HOUSES, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { VOICE_BARK_FREQUENCIES, normalizeVoiceBarkSettings } from './voice-bark.js';
-import { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_CUSTOM_METHODS, TTS_CUSTOM_RESPONSES, TTS_PROVIDERS, TTS_RATES, TTS_RESPONSE_FORMATS, TTS_TRANSPORTS, findSystemVoice, listSystemVoices, normalizeTtsSettings, systemVoiceOptions, ttsApiVoiceList, ttsMixedContentRisk } from './tts.js';
+import { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_CUSTOM_METHODS, TTS_CUSTOM_RESPONSES, TTS_PROVIDERS, TTS_RATES, TTS_RESPONSE_FORMATS, TTS_THOUGHT_VOLUMES, TTS_TRANSPORTS, TTS_VOICE_MAX, findSystemVoice, listSystemVoices, normalizeTtsSettings, systemVoiceOptions, ttsApiVoiceList, ttsMixedContentRisk, ttsNarratorVoiceOptions } from './tts.js';
 import { normalizeBilingualSettings } from './bilingual-text.js';
 import { HORROR_DREAD_CAP_LABELS, HORROR_DREAD_LEVELS, normalizeHorrorDreadCap } from './horror-dread.js';
 import { DIALOG_SKIN_HORROR_GORE, DIALOG_SKIN_HORROR_PSYCH } from './dialog-theme-horror.js';
@@ -184,6 +188,43 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
         const reader = draft.readerSettings;
 
         const advancedOpen = (key) => (isOpenKey(key) ? ' open' : '');
+
+        // 数值系统页：总开关关闭时下方整块隐藏，只留一行说明（§10）。
+        const statsValues = memo(() => {
+            const stats = normalizeStatsSettings(bridge.stats);
+            let chat = null;
+            try { chat = typeof options.statsChat === 'function' && !idx ? options.statsChat() : null; } catch (error) { chat = null; }
+            const chatReady = Boolean(stats.enabled && chat && chat.hasChat && !chat.blocked);
+            const chatNote = !chat || !chat.hasChat ? '打开一个聊天后可以在这里启用。'
+                : chat.blocked ? `本聊天的数值存档无法读取（${chat.blocked}），已停止写入，原存档保留。`
+                    : chat.enabled ? '本聊天已启用。暂停后数值冻结、不结算，存档保留。' : '本聊天尚未启用数值系统。';
+            return {
+                statsToggle: checkbox('bridge.stats.enabled', stats.enabled, '启用数值系统'),
+                statsOffNoteHidden: hiddenAttr(stats.enabled),
+                statsHidden: hiddenAttr(!stats.enabled),
+                autoSkillField: checkbox('bridge.stats.autoSkill', stats.autoSkill, '自动判断检定技能（关闭后不做先掷后写）'),
+                intimacyField: checkbox('bridge.stats.intimacyGate', stats.intimacyGate, '亲密门槛（好感与信任不够时角色会拒绝）'),
+                registerField: field('bridge.stats.register', '重要角色登记', selectInput('bridge.stats.register', stats.register, [['auto', '自动'], ['manual', '仅手动']])),
+                hudLabelField: field('bridge.stats.hudLabel', '好感条右侧', selectInput('bridge.stats.hudLabel', stats.hudLabel, [['stage', '阶段名'], ['number', '数字'], ['both', '两者']])),
+                barsFields: checkbox('bridge.stats.bars.stamina', stats.bars.stamina, '体力')
+                    + checkbox('bridge.stats.bars.money', stats.bars.money, '金钱')
+                    + checkbox('bridge.stats.bars.stress', stats.bars.stress, '压力'),
+                pushField: checkbox('bridge.stats.push.enabled', stats.push.enabled, '同步到数据库表格（需要数据库插件）'),
+                statsPromptFields: renderStatsPromptFields(stats, advancedOpen),
+                statsMappingFields: renderStatsMappingFields((() => {
+                    if (!stats.push.enabled || idx || typeof options.statsMappings !== 'function') return null;
+                    try { return options.statsMappings(stats.push.mappings); } catch (error) { return { ok: false, reason: 'stats-push-read-failed', detail: String(error && error.message || error) }; }
+                })(), advancedOpen, { pushEnabled: stats.push.enabled }),
+                statsArchiveFields: renderStatsArchive((() => {
+                    try { return typeof options.statsArchive === 'function' && !idx ? options.statsArchive() : null; } catch (error) { return null; }
+                })(), advancedOpen),
+                statsChatNote: esc(chatNote),
+                statsChatEnableHidden: hiddenAttr(!chatReady || chat.enabled),
+                statsChatDisableHidden: hiddenAttr(!chatReady || !chat.enabled),
+                statsBuildFields: renderStatsBuildFields(stats.build, advancedOpen, { worldview: resolveWorldview(worldviewAssets) }),
+                statsBuildHidden: hiddenAttr(!chatReady || chat.enabled),
+            };
+        });
 
         const parseValues = memo(() => ({
                 advancedFilterOpen: advancedOpen('source-filter'),
@@ -330,10 +371,12 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 autoLlmPromptAssetField: field('bridge.autoIllustration.llm.prompts.asset', '素材补全规划', autoTextarea('bridge.autoIllustration.llm.prompts.asset', auto.llm.prompts.asset, '清空即恢复内置提示词')),
                 autoLlmPromptAssetSoftField: field('bridge.autoIllustration.llm.prompts.assetSoft', '素材补全规划 · 温和重试', autoTextarea('bridge.autoIllustration.llm.prompts.assetSoft', auto.llm.prompts.assetSoft, '清空即恢复内置提示词')),
                 autoLlmContextField: field('bridge.autoIllustration.llm.contextFloors', '参考前文楼层数', numberInput('bridge.autoIllustration.llm.contextFloors', auto.llm.contextFloors, 0, 3)),
-                autoNaiTransportField: field('bridge.autoIllustration.nai.transport', '传输方式', selectInput('bridge.autoIllustration.nai.transport', auto.nai.transport, [['direct', '浏览器直连'], ['st-proxy', '酒馆CORS代理（需开启enableCorsProxy）']])),
+                autoNaiTransportField: field('bridge.autoIllustration.nai.transport', '传输方式', selectInput('bridge.autoIllustration.nai.transport', auto.nai.transport, [['direct', '浏览器直连'], ['st-proxy', '酒馆CORS代理（需开启enableCorsProxy）'], ['auto', '自动（酒馆代理已开启时经酒馆转发）']])),
                 autoNaiEndpointField: field('bridge.autoIllustration.nai.endpoint', 'NAI API 地址', textInput('bridge.autoIllustration.nai.endpoint', auto.nai.endpoint, '留空使用官方，或填写中转生图接口')),
                 autoNaiKeyField: field('bridge.autoIllustration.nai.apiKey', 'API Key', secretInput('bridge.autoIllustration.nai.apiKey', auto.nai.apiKey, '填写官方或中转服务的 Key')),
                 autoNaiModelField: field('bridge.autoIllustration.nai.model', '模型', modelPicker('bridge.autoIllustration.nai.model', auto.nai.model, asyncState.naiModels, 'fetch-nai-models', 'nai-diffusion-4-5-full')),
+                modelProfileImageRow: renderModelProfileRow('image', asyncState.modelProfiles),
+                modelProfileLlmRow: renderModelProfileRow('llm', asyncState.modelProfiles),
                 autoNaiModelsMessage: esc(asyncState.naiModelsMessage || ''),
                 autoNaiSizeField: field('bridge.autoIllustration.nai.size', '尺寸', textInput('bridge.autoIllustration.nai.size', auto.nai.size, '832x1216')),
                 autoNaiStepsField: field('bridge.autoIllustration.nai.steps', '步数', numberInput('bridge.autoIllustration.nai.steps', auto.nai.steps, 1, 50)),
@@ -583,6 +626,22 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
           ${field('bridge.sceneAssets.spriteEnhance.size', '增强大小', selectInput('bridge.sceneAssets.spriteEnhance.size', spriteEnhance.size ?? 0.8, [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].map((n) => [n, `${n}px`])))}` : ''}
         </div>
         </div></details></div>`;
+            // 非人角色整组设置：总开关关闭时其余项置灰，档案保留。
+            const creatureDisplay = normalizeCreatureDisplaySettings(reader.creatureDisplay);
+            const creatureAutoOn = normalizeAutoIllustrationSettings(bridge.autoIllustration).assets.creatureAutoProfile;
+            const creatureOff = !creatureDisplay.enabled;
+            const creatureScaleField = (key, label) => field(`readerSettings.creatureDisplay.${key}`, label, numberInput(`readerSettings.creatureDisplay.${key}`, creatureDisplay[key], CREATURE_DISPLAY_RANGE.min, CREATURE_DISPLAY_RANGE.max, creatureOff));
+            const creatureSettingsCard = `<div class="igs-source-filter igs-perf-group"><details data-advanced="creature-system"${advancedOpen('creature-system')}><summary><b>非人角色</b><span class="igs-perf-brief">体型缩放 · 巨型 · 自动建档</span></summary><div class="igs-perf-group-body">
+        ${checkbox('readerSettings.creatureDisplay.enabled', creatureDisplay.enabled, '启用非人角色')}
+        ${checkbox('bridge.autoIllustration.assets.creatureAutoProfile', creatureAutoOn, '战斗对手自动建档', creatureOff)}
+        ${checkbox('readerSettings.creatureDisplay.giantFill', creatureDisplay.giantFill, '巨型铺满舞台', creatureOff)}
+        <div class="igs-source-filter-grid">
+          ${creatureScaleField('small', '小型缩放 %')}
+          ${creatureScaleField('medium', '中型缩放 %')}
+          ${creatureScaleField('large', '大型缩放 %')}
+        </div>
+        <div class="igs-settings-row"><button type="button" class="igs-settings-action" data-page="kinds">非人画师串（画师与模型页）</button></div>
+        </div></details></div>`;
             const charactersPane = () => `<div class="igs-settings-section">
         <div class="igs-settings-section-head">
           <div class="igs-settings-subhead">角色立绘</div>
@@ -613,8 +672,9 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                     '如AI未按标签输出，可改回聊天末尾。每条演出写法可单独指定位置。'),
                 // 按需注入（promptAdaptive）不再公开：配置键与已存值保留，默认仍为开。
                 promptAdvanced: renderPromptEntryFields(sceneAssets, { reader: draft.readerSettings, report: getLastPromptReport(), isOpen: isOpenKey }),
+                get wardrobeSelectToggle() { return idx ? '' : selectLink('wardrobe', Object.keys(scopedEntries('wardrobe')).filter((name) => !isBuiltinNudeOutfit(name)).length); },
                 get wardrobeSection() { return checkbox('bridge.sceneAssets.wardrobeAutoFlow', sceneAssets.wardrobeAutoFlow !== false, '自动流程（新建后自动写提示词、生成参考图）')
-                    + (idx ? '' : renderWardrobe(scopedEntries('wardrobe'), { sceneAssets, resolveUrl: resolveGenerated, scopeTag, focus: asyncState.wardrobeFocus || '', lead: scopeFilterBar('wardrobe') })); },
+                    + (idx ? '' : renderWardrobe(scopedEntries('wardrobe'), { sceneAssets, resolveUrl: resolveGenerated, scopeTag, focus: asyncState.wardrobeFocus || '', lead: scopeFilterBar('wardrobe'), select: assetSelect('wardrobe') })); },
                 get eventCgSection() { return idx ? '' : renderEventCgList(scopedEntries('eventCgs'), { resolveUrl: resolveGenerated, scopeTag }); },
                 get moodSection() { return checkbox('bridge.sceneAssets.moodAutoClassify', sceneAssets.moodAutoClassify === true, '自动归类（用备用模型）')
                     + (asyncState.moodAutoStatus ? `<div class="igs-source-filter-note" data-mood-auto-status>${esc(asyncState.moodAutoStatus)}</div>` : '')
@@ -633,7 +693,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                     assetScopeBar,
                 },
                 panes: {
-                    chars: () => `<div class="igs-settings-grid" data-scene-settings-pane="assets">${charactersSettingsCard}<div class="igs-source-filter">${charactersPane()}</div></div>`,
+                    chars: () => `<div class="igs-settings-grid" data-scene-settings-pane="assets">${charactersSettingsCard}${creatureSettingsCard}<div class="igs-source-filter">${charactersPane()}</div></div>`,
                     scenes: () => assetPane(scenesPane()),
                     // 索引模式不读待确认（会清掉已确认的记录、读生成素材），页面只留外框。
                     review: () => assetPane(idx ? '' : reviewPane()),
@@ -651,7 +711,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 PUBLIC_READER_MODES.map((id) => [id, getReaderModeLabel(id), getReaderModeIcon(id)]),
                 '打开方式',
             ),
-        )}</div>`;
+        )}</div>${bridge.openMode === 'embedded' ? field('readerSettings.embeddedHeight', '内嵌高度', selectInput('readerSettings.embeddedHeight', reader.embeddedHeight ?? 1, [[0.8, '矮'], [1, '标准'], [1.25, '高'], [1.5, '更高']])) : ''}`;
         const getReaderValues = memo(() => {
         const sceneEnabled = !!(bridge.sceneAssets && bridge.sceneAssets.enabled);
         const classicDialog = reader.dialogSkin === DIALOG_SKIN_WESTERN_CLASSIC;
@@ -714,6 +774,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             toolbarScaleField: field('readerSettings.toolbarScale', '工具栏大小', selectInput('readerSettings.toolbarScale', reader.toolbarScale, [20, 40, 60, 80, 100, 120, 140, 160, 180, 200].map((n) => [n, `${n}%`]))),
             inputPlacementField: field('readerSettings.inputPlacement', '输入框位置', selectInput('readerSettings.inputPlacement', reader.inputPlacement === 'float' ? 'float' : 'dialog', [['dialog', '在对话框里'], ['float', '悬浮上方']])),
             toolbarDockField: field('readerSettings.toolbarDock', '工具栏位置', selectInput('readerSettings.toolbarDock', reader.toolbarDock || 'top', [['float', '紧贴对话框'], ['top', '顶部固定']])),
+            resumePromptField: field('readerSettings.resumePrompt', '续读提示', selectInput('readerSettings.resumePrompt', reader.resumePrompt === 'simple' ? 'simple' : 'title', [['title', '主界面样式'], ['simple', '简易弹窗']])),
             toolbarSplitField: field('readerSettings.toolbarSplit', '按钮分布', selectInput('readerSettings.toolbarSplit', reader.toolbarSplit || 'split', [['split', '顶栏+对话框下'], ['top', '全在顶栏'], ['dialog', '全在对话框下']])),
             toolbarPlateField: field('readerSettings.toolbarPlate', '工具栏底板', selectInput('readerSettings.toolbarPlate', reader.toolbarPlate || 'off', [['blur', '模糊（毛玻璃）'], ['solid', '清晰（实色）'], ['off', '关闭（无底板）']])),
             dialogBarAlignField: reader.toolbarSplit === 'top' ? '' : field('readerSettings.dialogBarAlign', '对话框下按钮位置', selectInput('readerSettings.dialogBarAlign', reader.dialogBarAlign || 'auto', [['auto', '自动'], ['left', '靠左'], ['center', '居中'], ['right', '靠右']])),
@@ -757,7 +818,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 `<div class="igs-source-filter-note">声线可在「角色 › 角色设定」中选择；未选择时按DNA中的性别分配。</div>`,
             ].join('') : '',
             ttsToggle: checkbox('readerSettings.tts.enabled', tts.enabled, '台词朗读（TTS）'),
-            ttsControls: tts.enabled ? renderTtsControls(tts, { bilingual: normalizeBilingualSettings(reader.bilingual).enabled, voicesMessage: asyncState.ttsVoicesMessage || '' }) : '',
+            ttsControls: tts.enabled ? renderTtsControls(tts, { bilingual: normalizeBilingualSettings(reader.bilingual).enabled, voicesMessage: asyncState.ttsVoicesMessage || '', narratorVoicesMessage: asyncState.ttsNarratorVoicesMessage || '' }) : '',
             stageShakeToggle: checkbox('readerSettings.stageShake.enabled', stageShake.enabled, '画面震动'),
             stageShakeSettings: stageShake.enabled ? renderStageShakeSettings(stageShake) : '',
             systemRoleFields: renderSystemRoleSettings(systemRole, {
@@ -898,6 +959,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             return pageTabs() + renderTemplate(getPageTemplate(page), sceneValues().values);
         case 'parse':
             return pageTabs() + renderTemplate(getPageTemplate(page), parseValues());
+        case 'stats':
+            return pageTabs() + renderTemplate(getPageTemplate(page), statsValues());
         case 'source':
         case 'kinds':
         case 'llm':
@@ -924,6 +987,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 chars: sceneOn ? `${sizeOf(assets.characters)}个角色` : '素材模式未开',
                 scenes: `${sizeOf(assets.scenes)}个背景`,
                 ai: sources[normalizeImageSourceMode(imageApi.mode)] || '',
+                stats: normalizeStatsSettings(bridge.stats).enabled ? '已开启' : '未开启',
                 data: '备份 · 日志',
             };
             const storage = (options.global || globalThis).localStorage;
@@ -1103,11 +1167,76 @@ const TTS_FORMAT_HINTS = Object.freeze({
         endpoint: '',
         model: '会替换请求里的 {{model}}',
         voice: '会替换请求里的 {{voice}}',
-        note: '自定义请求：请求地址、请求头、请求体里可以写 {{text}} {{voice}} {{speed}} {{lang}} {{model}}（也可用 {{key}} 代入 API Key）。占位符写在引号里，文字会自动转义；{{speed}} 是数字。',
+        note: '自定义请求：请求地址、请求头、请求体里可以写 {{text}} {{voice}} {{speed}} {{lang}} {{model}} {{style}}（也可用 {{key}} 代入 API Key）。占位符写在引号里，文字会自动转义；{{speed}} 是数字。',
     },
 });
 
-function renderTtsControls(tts, { bilingual = false, voicesMessage = '' } = {}) {
+// 一套接口的连接项（台词接口与旁白独立接口共用）：格式、传输、地址、Key、模型及各格式的附加项。
+function renderTtsApiFields(api, apiPath) {
+    const format = api.format;
+    const hint = TTS_FORMAT_HINTS[format] || TTS_FORMAT_HINTS.openai;
+    const parts = [
+        field(apiPath('format'), '接口格式', selectInput(apiPath('format'), format, TTS_API_FORMATS)),
+        field(apiPath('transport'), '传输方式', selectInput(apiPath('transport'), api.transport, TTS_TRANSPORTS)),
+    ];
+    if (format !== 'custom') parts.push(field(apiPath('endpoint'), '接口地址', textInput(apiPath('endpoint'), api.endpoint, hint.endpoint)));
+    if (format !== 'gpt-sovits') parts.push(field(apiPath('apiKey'), 'API Key', secretInput(apiPath('apiKey'), api.apiKey, format === 'openai' ? '本地服务可留空' : '')));
+    if (format !== 'gpt-sovits') parts.push(field(apiPath('model'), '模型', textInput(apiPath('model'), api.model, hint.model)));
+    if (format === 'openai') {
+        parts.push(
+            field(apiPath('responseFormat'), '音频格式', selectInput(apiPath('responseFormat'), api.responseFormat, TTS_RESPONSE_FORMATS)),
+            checkbox(apiPath('sendSpeed'), api.sendSpeed, '发送语速（接口不认 speed 时关掉）'),
+        );
+    }
+    if (format === 'fish' || format === 'minimax') parts.push(checkbox(apiPath('sendSpeed'), api.sendSpeed, '发送语速'));
+    if (format === 'minimax') parts.push(checkbox(apiPath('sendEmotion'), api.sendEmotion, '发送情绪'));
+    if (format === 'custom') {
+        parts.push(
+            field(apiPath('customMethod'), '请求方法', selectInput(apiPath('customMethod'), api.customMethod, TTS_CUSTOM_METHODS)),
+            field(apiPath('customUrl'), '请求地址', textInput(apiPath('customUrl'), api.customUrl, 'https://example.com/tts?text={{text}}')),
+            field(apiPath('customHeaders'), '请求头（JSON）', textareaInput(apiPath('customHeaders'), api.customHeaders, '{"Authorization": "Bearer {{key}}"}')),
+            field(apiPath('customBody'), '请求体（JSON）', textareaInput(apiPath('customBody'), api.customBody, '{"text": "{{text}}", "voice": "{{voice}}", "speed": {{speed}}}')),
+            field(apiPath('customResponse'), '响应类型', selectInput(apiPath('customResponse'), api.customResponse, TTS_CUSTOM_RESPONSES)),
+        );
+        if (api.customResponse !== 'audio') parts.push(field(apiPath('customPath'), '音频字段路径', textInput(apiPath('customPath'), api.customPath, '如 data.audio')));
+    }
+    // 页面是 https、接口是 http 的非本机地址：浏览器会直接拦掉请求。
+    if (ttsMixedContentRisk(api)) parts.push('<div class="igs-source-filter-note igs-tts-warning">当前页面是 https，浏览器会拦截 http 开头的接口地址。请改用「酒馆 CORS 代理」传输方式，或把接口换成 https。</div>');
+    return parts;
+}
+
+// 旁白：风格描述与独立接口（开启后旁白用自己的一套接口与声音，不受主来源影响）。
+function renderTtsNarratorFields(tts, { voicesMessage = '' } = {}) {
+    const base = 'readerSettings.tts';
+    const narrator = tts.narratorApi;
+    const apiPath = (key) => `${base}.narratorApi.${key}`;
+    const parts = [
+        field(`${base}.narratorStyle`, '旁白风格', textareaInput(`${base}.narratorStyle`, tts.narratorStyle, '例：沉稳的说书人，语速平缓，娓娓道来')),
+        '<div class="igs-source-filter-note">风格描述用于 OpenAI 兼容接口（以 instructions 发送，需 gpt-4o-mini-tts 等支持的模型）与自定义请求（{{style}}）；系统语音及其他格式不生效。</div>',
+        checkbox(apiPath('enabled'), narrator.enabled, '旁白使用独立接口'),
+    ];
+    if (narrator.enabled) {
+        const hint = TTS_FORMAT_HINTS[narrator.format] || TTS_FORMAT_HINTS.openai;
+        parts.push(...renderTtsApiFields(narrator, apiPath));
+        // 拉取过音色列表就用下拉；已存的值不在列表里时标「（不可用）」，没有列表时保留文本框。
+        const items = ttsNarratorVoiceOptions(tts);
+        if (items.length) {
+            if (narrator.voice && !items.some(([id]) => id === narrator.voice)) items.push([narrator.voice, `${narrator.voice}（不可用）`]);
+            parts.push(field(apiPath('voice'), '旁白声音', selectInput(apiPath('voice'), narrator.voice, [['', '未选择']].concat(items))));
+        } else {
+            parts.push(field(apiPath('voice'), '旁白声音', textInput(apiPath('voice'), narrator.voice, hint.voice)));
+        }
+        if (['openai', 'fish', 'minimax'].includes(narrator.format)) {
+            parts.push('<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-fetch-voices-narrator">获取音色列表</button>');
+            if (voicesMessage) parts.push(`<div class="igs-source-filter-note">${esc(voicesMessage)}</div>`);
+        }
+        parts.push(checkbox(apiPath('chunk'), narrator.chunk, '长句分段先播（超过 60 字按句切开，第一段先念）'));
+    }
+    parts.push('<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-preview-narrator">试听旁白</button>');
+    return parts;
+}
+
+function renderTtsControls(tts, { bilingual = false, voicesMessage = '', narratorVoicesMessage = '' } = {}) {
     const base = 'readerSettings.tts';
     const rates = TTS_RATES.map((v) => [v, v === 1 ? '正常' : `${v}×`]);
     const parts = [
@@ -1115,12 +1244,17 @@ function renderTtsControls(tts, { bilingual = false, voicesMessage = '' } = {}) 
         checkbox(`${base}.narration`, tts.narration, '朗读旁白'),
         checkbox(`${base}.nsfw`, tts.nsfw, 'NSFW场景也朗读'),
         checkbox(`${base}.sustain`, tts.sustain, '翻页不打断（上一句念完再念下一句）'),
+        checkbox(`${base}.moodStyle`, tts.moodStyle, '情绪写入风格描述'),
+        '<div class="igs-source-filter-note">开启后台词与心里话的情绪、耳语会写成一句中文描述，随角色风格一起作为风格发送；仅 OpenAI 兼容接口与自定义请求（{{style}}）生效。</div>',
         // 双语台词：读译文用中文声音；读原文时系统语音按原文语言换日文 / 英文声音。
         bilingual ? field(`${base}.bilingual`, '双语台词', segmentedInput(`${base}.bilingual`, tts.bilingual, TTS_BILINGUAL_MODES, '双语台词朗读')) : '',
         field(`${base}.volume`, '音量', rangeInput(`${base}.volume`, tts.volume, '朗读音量')),
         field(`${base}.rate`, '语速', selectInput(`${base}.rate`, tts.rate, rates)),
+        field(`${base}.thoughtVolume`, '心里话音量', selectInput(`${base}.thoughtVolume`, tts.thoughtVolume, TTS_THOUGHT_VOLUMES)),
+        field(`${base}.thoughtStyle`, '心里话风格', textareaInput(`${base}.thoughtStyle`, tts.thoughtStyle, '例：压低声音，像自言自语')),
     ];
-    const roles = [['female', '女声'], ['male', '男声'], ['narrator', '旁白']];
+    // 旁白开了独立接口时，旁白声音在下面那套接口里填。
+    const roles = [['female', '女声'], ['male', '男声'], ['narrator', '旁白']].filter(([key]) => key !== 'narrator' || !tts.narratorApi.enabled);
     if (tts.provider === 'system') {
         const installed = listSystemVoices();
         const options = systemVoiceOptions(installed, { all: tts.allVoices });
@@ -1137,34 +1271,9 @@ function renderTtsControls(tts, { bilingual = false, voicesMessage = '' } = {}) 
         const format = api.format;
         const hint = TTS_FORMAT_HINTS[format] || TTS_FORMAT_HINTS.openai;
         const apiPath = (key) => `${base}.api.${key}`;
-        parts.push(
-            field(apiPath('format'), '接口格式', selectInput(apiPath('format'), format, TTS_API_FORMATS)),
-            field(apiPath('transport'), '传输方式', selectInput(apiPath('transport'), api.transport, TTS_TRANSPORTS)),
-        );
-        if (format !== 'custom') parts.push(field(apiPath('endpoint'), '接口地址', textInput(apiPath('endpoint'), api.endpoint, hint.endpoint)));
-        if (format !== 'gpt-sovits') parts.push(field(apiPath('apiKey'), 'API Key', secretInput(apiPath('apiKey'), api.apiKey, format === 'openai' ? '本地服务可留空' : '')));
-        if (format !== 'gpt-sovits') parts.push(field(apiPath('model'), '模型', textInput(apiPath('model'), api.model, hint.model)));
-        if (format === 'openai') {
-            parts.push(
-                field(apiPath('responseFormat'), '音频格式', selectInput(apiPath('responseFormat'), api.responseFormat, TTS_RESPONSE_FORMATS)),
-                checkbox(apiPath('sendSpeed'), api.sendSpeed, '发送语速（接口不认 speed 时关掉）'),
-            );
-        }
-        if (format === 'fish' || format === 'minimax') parts.push(checkbox(apiPath('sendSpeed'), api.sendSpeed, '发送语速'));
-        if (format === 'custom') {
-            parts.push(
-                field(apiPath('customMethod'), '请求方法', selectInput(apiPath('customMethod'), api.customMethod, TTS_CUSTOM_METHODS)),
-                field(apiPath('customUrl'), '请求地址', textInput(apiPath('customUrl'), api.customUrl, 'https://example.com/tts?text={{text}}')),
-                field(apiPath('customHeaders'), '请求头（JSON）', textareaInput(apiPath('customHeaders'), api.customHeaders, '{"Authorization": "Bearer {{key}}"}')),
-                field(apiPath('customBody'), '请求体（JSON）', textareaInput(apiPath('customBody'), api.customBody, '{"text": "{{text}}", "voice": "{{voice}}", "speed": {{speed}}}')),
-                field(apiPath('customResponse'), '响应类型', selectInput(apiPath('customResponse'), api.customResponse, TTS_CUSTOM_RESPONSES)),
-            );
-            if (api.customResponse !== 'audio') parts.push(field(apiPath('customPath'), '音频字段路径', textInput(apiPath('customPath'), api.customPath, '如 data.audio')));
-        }
-        // 页面是 https、接口是 http 的非本机地址：浏览器会直接拦掉请求。
-        if (ttsMixedContentRisk(api)) parts.push('<div class="igs-source-filter-note igs-tts-warning">当前页面是 https，浏览器会拦截 http 开头的接口地址。请改用「酒馆 CORS 代理」传输方式，或把接口换成 https。</div>');
+        parts.push(...renderTtsApiFields(api, apiPath));
         for (const [key, label] of roles) parts.push(field(apiPath(key), `${label}声音`, textInput(apiPath(key), api[key], key === 'narrator' ? '留空用女声' : hint.voice)));
-        parts.push(field(apiPath('voices'), '可选声音', textInput(apiPath('voices'), api.voices, '逗号分隔，给角色单独指定时用；可写「声音名#标题」')));
+        parts.push(field(apiPath('voices'), '可选声音', textInput(apiPath('voices'), api.voices, `逗号分隔，最多 ${TTS_VOICE_MAX} 个，给角色单独指定时用；可写「声音名#标题」`)));
         if (format === 'openai' || format === 'fish' || format === 'minimax') {
             parts.push('<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-fetch-voices">获取音色列表</button>');
             if (voicesMessage) parts.push(`<div class="igs-source-filter-note">${esc(voicesMessage)}</div>`);
@@ -1176,6 +1285,7 @@ function renderTtsControls(tts, { bilingual = false, voicesMessage = '' } = {}) 
             `<div class="igs-source-filter-note">${esc(hint.note)}浏览器直连被跨域拦住时，改用「酒馆 CORS 代理」（需在酒馆 config.yaml 打开 enableCorsProxy）。</div>`,
         );
     }
+    if (tts.narration) parts.push(...renderTtsNarratorFields(tts, { voicesMessage: narratorVoicesMessage }));
     parts.push(field(`${base}.lexicon`, '读音替换', textareaInput(`${base}.lexicon`, tts.lexicon, '每行一条：原词=读法\n例：雫=shizuku\n例：Λ=兰姆达')));
     parts.push('<button type="button" class="igs-settings-action igs-settings-inline-action" data-action="tts-preview">试听</button>');
     parts.push('<div class="igs-source-filter-note">开启后不再播放语气音；角色声音在「角色 › 角色设定」指定。</div>');
