@@ -47,7 +47,7 @@ import { audioBusContext, busInput, parkAudioBus, resumeAudioBus, unparkAudioBus
 import { isStagePaused, markStageActive, watchStagePause } from './stage-pause.js';
 import { scheduleFontGuard } from './font-guard.js';
 import { createReaderAutoPlay } from './reader-auto-play.js';
-import { decideTts, guessTtsLine, isTtsSpeaking, listSystemVoices, normalizeTtsSettings, replayTts, setTtsErrorHandler, speakTtsLine, stopTts } from './tts.js';
+import { cancelPendingTts, decideTts, guessTtsLine, isTtsSpeaking, listSystemVoices, normalizeTtsSettings, replayTts, rerollTts, setTtsErrorHandler, speakTtsLine, stopTts } from './tts.js';
 import { resolveRegionCrop } from './stage-snapshot.js';
 import { playUiSfx } from './ui-sfx.js';
 import { parseHtmlCardMarker } from '../../scene/html-cards.js';
@@ -84,7 +84,7 @@ import { checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupL
 import { renderAssetReviewPanel } from './asset-review-panel.js';
 import { ensureEmbeddedHost, findEmbeddedHost, hideEmbeddedSourceText, hideStorySpan, isEmbeddedEditTrigger, isStoryHidden, resolveEmbeddedHostParent, restoreEmbeddedSourceText, restoreStorySpan, storyLines } from './embedded-reader-runtime.js';
 import { createReaderSourceCache } from './reader-source-cache.js';
-import { prepareReaderFloor, stripWrappingQuotes } from './reader-floor-plan.js';
+import { nextTtsHintOf, prepareReaderFloor, stripWrappingQuotes } from './reader-floor-plan.js';
 import { prepareReaderFloorAssets } from './reader-floor-assets.js';
 import { createReaderTableData } from '../../data/shujuku/reader-table-data.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
@@ -2319,6 +2319,9 @@ export function createIgsReaderHost(options = {}) {
         if (normalizedAction === 'tts-replay') {
             return replayTts();
         }
+        if (normalizedAction === 'tts-reroll') {
+            return rerollTts();
+        }
         if (normalizedAction === 'regen') {
             return generateOrRegenerate();
         }
@@ -2805,6 +2808,9 @@ export function createIgsReaderHost(options = {}) {
         if (!resumeKind(last, ids, current.index)) return;
         const far = readingProgress.getFarthest();
         const unread = far ? ids.filter((id) => id > far.id).length : 0;
+        // 正文已先渲染、朗读可能已开口：提示盖上前先停，选「最新一层」后这一页重新朗读。
+        stopTts();
+        cancelPendingTts(current.dom && current.dom.overlay, options.autoPlayTimers || globalThis, { forget: true });
         // 默认用主界面样式（继续 / 最新一层）；设置里可改回简易弹窗。
         if (current.snapshot?.readerSettings?.resumePrompt !== 'simple') {
             current.titleGate = createTitleGate({ coverTurn: nextTitleCoverTurn((options.global || globalThis).localStorage), resume: { label: positionLabel(last) } });
@@ -2813,7 +2819,11 @@ export function createIgsReaderHost(options = {}) {
         }
         const message = `上次读到 ${positionLabel(last)}${unread ? `，后面还有 ${unread} 楼没读` : ''}。\n接着上次阅读的地方，还是阅读最新一层？`;
         const resume = await pageModal.confirm(message, { okLabel: '继续上次', cancelLabel: '最新一层' });
-        if (!resume || state.activeReader !== current || current.progressArmed) return;
+        if (state.activeReader !== current || current.progressArmed) return;
+        if (!resume) {
+            updateMountedReader(current.snapshot);
+            return;
+        }
         await jumpToPosition({ pos: last });
     }
 
@@ -4219,12 +4229,16 @@ export function createIgsReaderHost(options = {}) {
             },
             content: {
                 speaker: resolvedSpeaker,
+                // 台词、心里话的说话人主名（别名、酒馆用户名已解析），朗读按它查角色声音；旁白与系统角色为空。
+                speakerKey: resolvedSpeaker && (textType === 'dialogue' || textType === 'thought') ? prepared.keyOf(resolvedSpeaker) : '',
                 spriteCharacter,
                 spriteMood,
                 spriteOutfit,
                 spriteLeft,
                 spriteBackArt,
                 statusEmotion: bubbleMood,
+                // 台词朗读提前生成下一页用：下一页的类型、说话人与情绪（取分页计划里现成的值，不重算）。
+                nextTtsHint: nextTtsHintOf(prepared.pages[normalizedIndex + 1], prepared.keyOf),
                 textType,
                 text: currentText,
                 fullText: text,
