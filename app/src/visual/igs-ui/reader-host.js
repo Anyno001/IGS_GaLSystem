@@ -12,7 +12,7 @@ import { createSettingsHost } from './settings-host.js';
 import { createRecoveryNotice } from './recovery-notice.js';
 import { handleSettingsAction } from './settings-actions.js';
 import { normalizeBridgeConfig, normalizeReaderSettings } from './settings-host-normalize.js';
-import { extractSceneDirectives, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers, classifySceneKey, resolveCharacterKey, setCharacterNameFallback, lookupAssetValue } from '../../scene/scene-directives.js';
+import { extractSceneDirectives, resolveLatestSceneDirective, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers, classifySceneKey, resolveCharacterKey, setCharacterNameFallback, lookupAssetValue } from '../../scene/scene-directives.js';
 
 import { recordOutfitReview, dropConfirmedOutfitReview, removeOutfitReview, storyOutfitSourceHash } from '../../scene/outfit-review-store.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
@@ -47,7 +47,7 @@ import { audioBusContext, busInput, parkAudioBus, resumeAudioBus, unparkAudioBus
 import { isStagePaused, markStageActive, watchStagePause } from './stage-pause.js';
 import { scheduleFontGuard } from './font-guard.js';
 import { createReaderAutoPlay } from './reader-auto-play.js';
-import { cancelPendingTts, decideTts, guessTtsLine, isTtsSpeaking, listSystemVoices, normalizeTtsSettings, replayTts, rerollTts, setTtsErrorHandler, speakTtsLine, stopTts } from './tts.js';
+import { cancelPendingTts, decideTts, guessTtsLine, isTtsSpeaking, listSystemVoices, normalizeTtsSettings, prefetchTtsFloor, replayTts, rerollTts, setTtsErrorHandler, speakTtsLine, stopTts } from './tts.js';
 import { resolveRegionCrop } from './stage-snapshot.js';
 import { playUiSfx } from './ui-sfx.js';
 import { parseHtmlCardMarker } from '../../scene/html-cards.js';
@@ -84,7 +84,7 @@ import { checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupL
 import { renderAssetReviewPanel } from './asset-review-panel.js';
 import { ensureEmbeddedHost, findEmbeddedHost, hideEmbeddedSourceText, hideStorySpan, isEmbeddedEditTrigger, isStoryHidden, resolveEmbeddedHostParent, restoreEmbeddedSourceText, restoreStorySpan, storyLines } from './embedded-reader-runtime.js';
 import { createReaderSourceCache } from './reader-source-cache.js';
-import { nextTtsHintOf, prepareReaderFloor, stripWrappingQuotes } from './reader-floor-plan.js';
+import { createFloorSourceLocator, lastBefore, nextTtsHintOf, prepareReaderFloor, stripWrappingQuotes } from './reader-floor-plan.js';
 import { prepareReaderFloorAssets } from './reader-floor-assets.js';
 import { createReaderTableData } from '../../data/shujuku/reader-table-data.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
@@ -233,6 +233,8 @@ export function createIgsReaderHost(options = {}) {
     const progressRuntime = { navigating: false, offered: new Set(), pulled: new Set(), pushed: new Map(), newFloorToastAt: 0 };
     const PROGRESS_NAV_ACTIONS = new Set(['prev', 'next', 'first-page', 'last-page', 'prev-turn', 'next-turn', 'resume-reading', 'turn-first', 'turn-latest', 'skip-read', 'quick-load']);
     let turnIndexPanel = null;
+    // 最近一次列出的楼（含隐藏楼）：回想里查某楼是否隐藏、往前追溯继承的 NSFW 场景用。
+    let lastTurnList = [];
     let generationStripRemount = false;
     // 对话框顶边的生成细线：手动 / 自动出图共用，代替原来常驻的「生图中」提示。
     const generationStrip = createGenerationStrip({
@@ -415,6 +417,9 @@ export function createIgsReaderHost(options = {}) {
         onClose: () => closeReader(),
     });
     let pendingReplyMessage = null;
+    // 最近一次分页的楼层（整楼预载朗读用）；ttsFloorToken 换楼即作废上一轮预载。
+    let ttsFloorPlan = null;
+    let ttsFloorToken = 0;
     // 小游戏脚本可能比阅读器晚装上：装上或卸掉都要重排一次工具栏里的「小游戏」。
     const offWaitGamePack = subscribeWaitStageGamePack((pack) => {
         const current = state.activeReader;
@@ -1361,6 +1366,7 @@ export function createIgsReaderHost(options = {}) {
                 return;
             }
             exitEmbeddedLoading();
+            prefetchFloorTts(current, message.id);
         } catch (error) {
             if (canReplace()) {
                 current.turnOffset = previous.turnOffset;
@@ -1368,6 +1374,19 @@ export function createIgsReaderHost(options = {}) {
                 showReplyFailure(current, 'read');
             }
         }
+    }
+
+    // 新楼层写完后整楼预载朗读（设置「新楼层预载全楼」，默认关）：按阅读器分页与下一页提示同一套构造，缓存键与实际朗读一致。
+    function prefetchFloorTts(current, messageId) {
+        const plan = ttsFloorPlan;
+        const readerSettings = current && current.snapshot && current.snapshot.readerSettings;
+        if (!plan || !readerSettings || Number(plan.messageId) !== Number(messageId)) return;
+        const token = ++ttsFloorToken;
+        const { segments, pages, keyOf } = plan.prepared;
+        const list = segments.map((segment, index) => ({ segment, hint: nextTtsHintOf(pages[index], keyOf) }));
+        prefetchTtsFloor(list, readerSettings.tts, readerSettings._sceneAssets, {
+            alive: () => token === ttsFloorToken && state.activeReader === current,
+        }).catch(() => {});
     }
 
     // 玩家点「加载下一楼」：之后 #chat 的任何变动（含别的插件改按钮）都会让观察器版本号前进，
@@ -2559,6 +2578,7 @@ export function createIgsReaderHost(options = {}) {
         if (typeof options.listTurns !== 'function') return [];
         try {
             const turns = await options.listTurns();
+            if (Array.isArray(turns)) lastTurnList = turns;
             return Array.isArray(turns) ? turns : [];
         } catch (error) {
             return [];
@@ -2676,14 +2696,16 @@ export function createIgsReaderHost(options = {}) {
             avatarOf: (name) => backlogAvatarOf(name, overlay.ownerDocument),
             currentPage: () => (state.activeReader ? Number(state.activeReader.index) || 0 : -1),
             ttsOn: () => Boolean(state.activeReader && normalizeTtsSettings(state.activeReader.snapshot?.readerSettings?.tts).enabled),
+            isTurnHidden: (turnId) => isTurnHidden(turnId),
             canSpeak: (line) => {
                 const readerSettings = state.activeReader?.snapshot?.readerSettings || {};
-                const plan = decideTts({}, { key: '', textType: line.textType, speaker: line.speaker, text: line.text }, readerSettings.tts, { sceneAssets: readerSettings._sceneAssets, voices: listSystemVoices(), record: false });
+                const plan = decideTts({}, { key: '', textType: line.textType, speaker: line.speaker, text: line.text, nsfw: line.nsfw === true }, readerSettings.tts, { sceneAssets: readerSettings._sceneAssets, voices: listSystemVoices(), record: false });
                 return Boolean(plan && !plan.skip);
             },
             speak: (line) => {
                 const readerSettings = state.activeReader?.snapshot?.readerSettings || {};
-                return speakTtsLine({ key: '', textType: line.textType, speaker: line.speaker, text: line.text }, readerSettings.tts, readerSettings._sceneAssets);
+                // 原样返回 { ok, done, cancel }：done 在念完 / 被掐掉 / 失败时 resolve 为 { completed, cancelled, failed }。
+                return speakTtsLine({ key: '', textType: line.textType, speaker: line.speaker, text: line.text, nsfw: line.nsfw === true }, readerSettings.tts, readerSettings._sceneAssets);
             },
             currentId:() => (state.activeReader ? currentTurnMessageId(state.activeReader) : null),
             onJump: (target) => (state.activeReader ? jumpToPosition(target) : null),
@@ -2702,25 +2724,68 @@ export function createIgsReaderHost(options = {}) {
         return turnIndexPanel.open(overlay);
     }
 
+    // 该楼是否被隐藏（/hide 或总结插件隐藏的旧楼，阅读器照样能读）；查不到按未隐藏。
+    function isTurnHidden(turnId) {
+        const id = Number(turnId);
+        const turn = lastTurnList.find((item) => Number(item && item.id) === id);
+        return Boolean(turn && turn.isHidden);
+    }
+
+    // 回想用的 NSFW 判定，口径同阅读器：页首之前最近的 [igs-scene] 标签说了算；本楼一个场景标签都没有时，向前最多 3 楼找最近的场景状态。
+    function backlogNsfwAt(turn, source) {
+        const scenes = extractSceneDirectives(source).directives.filter((d) => d.type === 'scene');
+        let inherited = false;
+        if (!scenes.length) {
+            const index = lastTurnList.findIndex((item) => Number(item && item.id) === Number(turn && turn.id));
+            for (let step = 1; index > 0 && step <= 3 && index - step >= 0; step += 1) {
+                const previous = lastTurnList[index - step];
+                const found = resolveLatestSceneDirective(extractSceneDirectives(getMessagePrimaryText((previous && previous.raw) || previous) || '').directives);
+                if (found) { inherited = found.nsfw === true; break; }
+            }
+        }
+        return (offset) => {
+            const own = offset >= 0 ? lastBefore(scenes, offset, false) : null;
+            return own && own.scene ? own.nsfw === true : inherited;
+        };
+    }
+
     // 回想：按阅读器同一套分页拆出这一楼的每一页，page 与阅读器页号对应（点一句可跳回那页）。
+    // 每行带 nsfw（该页所在场景是否 NSFW）与 hidden（该楼是否被隐藏）。
     function backlogLinesOf(turn) {
         const current = state.activeReader;
         const readerSettings = (current && current.snapshot && current.snapshot.readerSettings) || {};
+        let extracted = {};
         let segments = [];
         try {
-            segments = buildIgsTextPayload(turn && (turn.raw || turn), {
+            extracted = buildIgsTextPayload(turn && (turn.raw || turn), {
                 sourceFilter: current && current.payload && current.payload.sourceFilter,
                 virtualRegex: current && current.payload && current.payload.virtualRegex,
                 visibleText: turn && turn.visibleText,
                 sceneAssets: readerSettings._sceneAssets,
                 sentencePaging: readerSettings._sentencePaging,
                 dialogueSentencePaging: readerSettings._dialogueSentencePaging,
-            }).textSegments || [];
+            }) || {};
+            segments = extracted.textSegments || [];
         } catch (_) { segments = []; }
-        return segments
+        const pages = segments
             .map((seg) => stripSceneDirectivesInline(String(seg || '').replace(/[\u200B-\u200C\u2060-\u2064]/g, '')).trim())
-            .filter(Boolean)
-            .map((seg, page) => ({ ...guessTtsLine(seg), page }));
+            .filter(Boolean);
+        const hidden = Boolean(turn && turn.isHidden);
+        let nsfwAt = () => false;
+        let locator = null;
+        try {
+            const source = String(extracted.markerLayoutSource || getMessagePrimaryText(turn && (turn.raw || turn)) || '');
+            nsfwAt = backlogNsfwAt(turn, source);
+            locator = createFloorSourceLocator(source);
+        } catch (_) { locator = null; }
+        let held = -1;
+        return pages.map((seg, page) => {
+            if (locator) {
+                const found = locator.segment(seg, held < 0 ? 0 : held + 1);
+                if (found >= 0) held = found;
+            }
+            return { ...guessTtsLine(seg), page, hidden, nsfw: nsfwAt(held) };
+        });
     }
 
     // 回想头像：状态栏头像优先，没有就裁默认立绘的脸；都没有返回 null（面板显示姓名首字）。
@@ -3803,6 +3868,7 @@ export function createIgsReaderHost(options = {}) {
             return floor;
         });
         const { text, segments } = prepared;
+        ttsFloorPlan = { messageId: payload.messageId, prepared };
         if (!segments.length) return { content: { segments: [] } };
         const normalizedIndex = Math.max(0, Math.min(segments.length - 1, Number(index) || 0));
         const segmentImageSlots = Array.isArray(payload.segmentImageSlots) && payload.segmentImageSlots.length
