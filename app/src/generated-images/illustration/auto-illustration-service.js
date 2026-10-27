@@ -321,6 +321,14 @@ export function createAutoIllustrationService(deps) {
         return null;
     }
 
+    // 灵动 CG 写词的附加信息：User 名（User立绘优先，其次酒馆用户名）与本图是否按 NSFW 出图（需已开 NSFW）。
+    const cgHintsFor = (s, nsfw) => ({ nsfw: nsfw === true && s.nsfwEnabled === true,
+        userName: String(readSceneAssets().userCharacter || messageHost.getUserName?.() || '').trim() });
+    // 本楼是否 NSFW 场景；没写场景标签时继承最近一个带标签的楼，与规划同一判定。
+    const floorNsfw = (text, messageId) => {
+        const numbered = numberParagraphs(text);
+        return numbered.scenes.length ? numbered.isNsfw : inheritedNsfw(messageId);
+    };
     function inheritedNsfw(messageId) {
         const texts = typeof messageHost.readPreviousAiTexts === 'function' ? messageHost.readPreviousAiTexts(messageId, 5) : [];
         for (let i = texts.length - 1; i >= 0; i -= 1) {
@@ -608,6 +616,7 @@ export function createAutoIllustrationService(deps) {
                 description: `完善本楼第 ${request.slot} 个 CG 生成点的完整画面提示词。保留该生成点的剧情、人物和衣装，按本次输出映射交付。\n${request.description || request.scene || text}`,
                 outputs: { slotIds: [request.slot] },
                 writingRequirements: cgWritingRequirements(settings(signal), cgSize(settings(signal)), 'cg'),
+                cgHints: cgHintsFor(settings(signal), floorNsfw(text, floor.messageId)),
                 signal: signal || recoveryController.signal, shouldStart: () => targetStillLive(floor) });
             if (!written?.ok) return written || { ok: false, reason: 'cg-write-pending' };
             const entries = written.captions || [written];
@@ -826,6 +835,7 @@ export function createAutoIllustrationService(deps) {
                     description: `${user}\n本次允许 slotid 为 1 到 ${decision.want}；不得改用其他编号。`,
                     systemPrompt: CG_TEMPLATE_PLANNER_SYSTEM,
                     writingRequirements: cgWritingRequirements(s, cgSize(s), decision.kind),
+                    cgHints: cgHintsFor(s, decision.kind === 'nsfw'),
                 });
                 plan = written;
                 if (written.ok) {
@@ -993,23 +1003,86 @@ export function createAutoIllustrationService(deps) {
         return { all, retry: all.filter((slot) => slot.status !== 'done' || !hasSlotImage(slot)) };
     }
 
+    // 自动出图有没有画完：等待层要等这一楼的 CG 落到成功、失败或确定不画，才把「下一楼」亮出来。
+    const floorWatch = new Map();
+    function floorEntry(messageId) {
+        const id = Number(messageId);
+        let entry = floorWatch.get(id);
+        if (!entry) {
+            entry = { settled: false, result: null, waiters: [] };
+            floorWatch.set(id, entry);
+        }
+        return entry;
+    }
+    function cgWatchStatus(result) {
+        const reason = result && result.reason;
+        if (reason === 'done') return { status: 'done' };
+        if (reason === 'disabled' || reason === 'not-eligible' || reason === 'not-selected'
+            || reason === 'body-too-short' || reason === 'already-decided' || reason === 'nothing-missing' || reason === 'stale') {
+            return { status: 'none' };
+        }
+        if (result && result.ok === false) return { status: 'failed' };
+        return { status: 'none' };
+    }
+    function settleFloorWatch(messageId, result) {
+        const entry = floorEntry(messageId);
+        entry.started = true;
+        entry.settled = true;
+        entry.result = cgWatchStatus(result);
+        const waiters = entry.waiters.splice(0);
+        waiters.forEach((waiter) => waiter(entry.result));
+    }
+    function beginFloorWatch(messageId) {
+        const entry = floorEntry(messageId);
+        entry.started = true;
+        entry.settled = false;
+        entry.result = null;
+    }
+    function floorCgStatus(messageId) {
+        const entry = floorWatch.get(Number(messageId));
+        if (!entry || !entry.started) return null;
+        if (!entry.settled) return { status: 'running' };
+        return entry.result;
+    }
+    function whenFloorSettled(messageId) {
+        const id = Number(messageId);
+        if (!Number.isInteger(id) || id < 0) return Promise.resolve({ status: 'none' });
+        const entry = floorEntry(id);
+        if (entry.settled) return Promise.resolve(entry.result);
+        return new Promise((resolve) => entry.waiters.push(resolve));
+    }
+    function watchAutomaticFloor(messageId, job) {
+        beginFloorWatch(messageId);
+        Promise.resolve(job).then(
+            (result) => settleFloorWatch(messageId, result),
+            () => settleFloorWatch(messageId, { reason: 'error' }),
+        );
+    }
+
     // backfill：翻到旧楼时补 CG。和自动出图一样掷过场概率、看字数、跳过已经判定过的楼，只是放开最新楼的限制。
     async function processMessage(messageId, { manual = false, backfill = false } = {}) {
+        const watch = !manual && !backfill;
         const s = settings();
-        if (!s.nsfwEnabled && !s.interludeEnabled) return { ok: true, reason: 'disabled' };
+        if (!s.nsfwEnabled && !s.interludeEnabled) {
+            if (watch) settleFloorWatch(messageId, { ok: true, reason: 'disabled' });
+            return { ok: true, reason: 'disabled' };
+        }
         if (backfill && !s.backfillOldFloors) return { ok: true, reason: 'disabled' };
         // 手动（工具栏）可画旧楼：续读停在哪一楼就画哪一楼；自动出图仍只认最新楼。
         const floor = withAnyFloor(messageHost.readFloor(messageId), manual || backfill);
         if (!floor || !floor.isAi || !(floor.isLatest || floor.anyFloor) || !floor.chatId || !floor.text.trim()) {
+            if (watch) settleFloorWatch(messageId, { ok: true, reason: 'not-eligible' });
             return { ok: true, reason: 'not-eligible' };
         }
         const key = floorKeyOf(floor);
         if (locks.has(key)) {
+            if (watch) watchAutomaticFloor(messageId, locks.get(key));
             if (!manual && !backfill && runningFloors.has(key)
                 && runningFloors.get(key) !== stripIllustrationMarkers(floor.text))
                 pendingFloors.set(key, true);
             return locks.get(key);
         }
+        if (watch) beginFloorWatch(messageId);
         const job = (async () => {
             let current = floor, config = s, result;
             do {
@@ -1039,6 +1112,7 @@ export function createAutoIllustrationService(deps) {
             })
             .finally(() => { locks.delete(key); runningFloors.delete(key); pendingFloors.delete(key); });
         locks.set(key, job);
+        if (watch) watchAutomaticFloor(messageId, job);
         return job;
     }
 
@@ -1275,6 +1349,7 @@ export function createAutoIllustrationService(deps) {
         const written = await imageBackendMethod(nai, 'writePrompt')({ ...task, imagePromptTask: 'cg', description,
             outputs: { slotIds: [1] },
             writingRequirements: cgWritingRequirements(s, size, nsfw ? 'nsfw' : 'cg'),
+            cgHints: cgHintsFor(s, nsfw),
             ...(!template && context.length && { characterContext: context }),
             signal: guarded.signal, shouldStart: guarded.shouldStart });
         if (!written?.ok) return { ok: false, ...written, error: written?.error || 'CG 写词失败' };
@@ -1320,7 +1395,7 @@ export function createAutoIllustrationService(deps) {
 
     return {
         standaloneCgStatus, paintStandaloneCg,
-        processMessage, getIllustrationUrl, clearIllustration, clearFloorIllustrations, rerollSlot, rerollFloor,
+        processMessage, floorCgStatus, whenFloorSettled, getIllustrationUrl, clearIllustration, clearFloorIllustrations, rerollSlot, rerollFloor,
         preflightConsistency, redrawConsistency, acceptConsistency, cancelConsistency, describeConsistency,
         start() {
             stopped = false;
@@ -1336,6 +1411,10 @@ export function createAutoIllustrationService(deps) {
         stop() {
             stopped = true; recoveryController.abort();
             states.clear();
+            for (const id of [...floorWatch.keys()]) {
+                const entry = floorWatch.get(id);
+                if (entry && !entry.settled) settleFloorWatch(id, { reason: 'disabled' });
+            }
             consistency.cancel();
             pendingFloors.clear();
             if (offRendered) { offRendered(); offRendered = null; }

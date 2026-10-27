@@ -151,8 +151,14 @@ test('gate:wait-stage:mahjong-toolbar-carries-the-back-and-next-floor-buttons', 
     assert.equal(tools.querySelector('[aria-label="返回阅读"]').hidden, false);
     const next = tools.querySelector('.is-next');
     assert.equal(next.hidden, true);
-    push({ back: '', next: true, nextBusy: false });
+    push({ back: '', next: true, nextBusy: true, nextText: '生图中' });
     assert.equal(next.hidden, false);
+    assert.equal(next.disabled, true);
+    assert.equal(next.querySelector('span').textContent, '生图中');
+    assert.equal(next.getAttribute('aria-label'), 'CG 还在生成');
+    next.fire('click');
+    assert.deepEqual(calls, ['back'], 'CG 还在生成时不进入下一楼');
+    push({ back: '', next: true, nextBusy: false, nextText: '下一楼' });
     assert.equal(tools.querySelector('[aria-label="返回阅读"]').hidden, true);
     next.fire('click');
     assert.deepEqual(calls, ['back', 'next']);
@@ -187,6 +193,8 @@ test('gate:wait-stage:mahjong-felt-is-one-canvas-without-the-diagonals', async (
 
 test('gate:wait-stage:mahjong-table-has-nothing-that-shakes-on-phones', () => {
     assert.doesNotMatch(MAHJONG_STYLE, /perspective\(|rotateX|rotate3d/, '牌区不做 3D 倾斜：每手重绘都要重新透视采样，手机上牌和计分板会抖');
+    assert.doesNotMatch(MAHJONG_STYLE, /igs-mj-glow|animation:[^;}]*infinite/, '牌桌上不循环改透明度：按钮一闪，整屏模糊就会每一帧重画');
+    assert.match(MAHJONG_STYLE, /backdrop-filter:none/, '麻将铺满时关掉等待层的整屏模糊');
     const outside = MAHJONG_STYLE.replace(/@media \(hover:hover\)\{[^{}]*\{[^{}]*\}\}/g, '');
     assert.doesNotMatch(outside, /:hover[^{]*\{[^}]*transform/, '悬停上浮只给有鼠标的设备，触屏点完会粘在手指底下');
     for (const name of ['igs-mj-say', 'igs-mj-act']) {
@@ -301,6 +309,21 @@ test('gate:wait-stage:mahjong-penalty-takes-everyone-tied-last-or-busted', () =>
     assert.deepEqual(withMe.strip, ['凛'], '玩家不画，同罚的角色照罚');
     assert.match(withMe.description, /玩家（主角）和凛并列垫底，由第一名的绫来惩罚他们/);
     assert.match(withMe.caption, /绫罚你和凛/);
+    const table = penaltyBrief({
+        targets: ['凛'],
+        punisher: '绫',
+        present: ['你', '绫', '凛', '咲'],
+        request: '罚她学猫叫',
+        nsfw: true,
+        outfits: { 绫: '校服', 凛: '礼服', 咲: '泳装' },
+    });
+    assert.deepEqual(table.characters, ['绫', '凛', '咲']);
+    assert.deepEqual(table.strip, ['凛']);
+    assert.deepEqual(table.outfits, { 绫: '校服', 凛: '礼服', 咲: '泳装' });
+    assert.match(table.description, /受惩罚的是凛/);
+    assert.match(table.description, /旁观的是咲/);
+    assert.match(table.description, /最大化地细化/);
+    assert.match(table.description, /不要另画一张意思相近的图/);
 });
 
 test('gate:wait-stage:mahjong-sound-uses-the-host-bus-and-remembers-mute', () => {

@@ -1,5 +1,6 @@
 // 等待过场里的小游戏。这段不进 Gal 前端主体，只由独立导入脚本登记后才会玩。
 import { MAHJONG_STYLE, startMahjong } from './wait-stage-mahjong.js';
+import { SCMJ_STYLE } from './wait-stage-scmj.js';
 import { SNAKE_STYLE, startSnake } from './wait-stage-snake.js';
 import { LUDO_STYLE, startLudo } from './wait-stage-ludo.js';
 import { TILES_STYLE, startTiles } from './wait-stage-tiles.js';
@@ -10,7 +11,7 @@ export const WAIT_STAGE_GAMES = Object.freeze(['rps', 'mahjong', 'tiles', 'snake
 
 export const WAIT_STAGE_GAME_LABELS = Object.freeze({
     rps: '猜拳',
-    mahjong: '立直麻将',
+    mahjong: '麻将',
     tiles: '消消乐',
     snake: '贪吃蛇',
     ludo: '飞行棋',
@@ -22,7 +23,7 @@ export const WAIT_STAGE_GAME_LABELS = Object.freeze({
 // 选游戏卡片：一句玩法 + 线描图标（24×24，描边取 currentColor），颜色跟随皮肤。
 export const WAIT_STAGE_GAME_CARDS = Object.freeze({
     rps: { sub: '石头剪刀布', icon: '<circle cx="6.5" cy="17.5" r="3"/><circle cx="17.5" cy="17.5" r="3"/><path d="M8.6 15.4 18 4M15.4 15.4 6 4"/>' },
-    mahjong: { sub: '日麻对局', icon: '<rect x="5.5" y="3" width="13" height="18" rx="2.5"/><path d="M12 6.5v11M8.8 9.6h6.4v4.2H8.8Z"/>' },
+    mahjong: { sub: '立直或成都', icon: '<rect x="5.5" y="3" width="13" height="18" rx="2.5"/><path d="M12 6.5v11M8.8 9.6h6.4v4.2H8.8Z"/>' },
     tiles: { sub: '情绪符号三消', icon: '<rect x="3" y="8" width="10" height="12" rx="2.2"/><rect x="11" y="4" width="10" height="12" rx="2.2"/><path d="M16 13.2c-2.4-1.6-3-3-2.2-3.9.7-.8 1.7-.6 2.2.2.5-.8 1.5-1 2.2-.2.8.9.2 2.3-2.2 3.9Z"/>' },
     snake: { sub: '越吃越长', icon: '<path d="M3.5 18.5c3 0 3-5 6-5s3 5 6 5 3.4-4.4 4.6-7.6"/><circle cx="20.4" cy="8.6" r="2.2"/>' },
     ludo: { sub: '四色飞行棋', icon: '<rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8.6" cy="8.6" r=".9"/><circle cx="12" cy="12" r=".9"/><circle cx="15.4" cy="15.4" r=".9"/>' },
@@ -214,7 +215,7 @@ export const WAIT_STAGE_GAME_STYLE_TEXT = `
 .igs-ws-board,.igs-ws-card img,.igs-ws-game{animation:none!important;}
 .igs-ws-game,.igs-ws-game-mark{transition:none!important;}
 }
-` + MAHJONG_STYLE + TILES_STYLE + SNAKE_STYLE + LUDO_STYLE;
+` + MAHJONG_STYLE + SCMJ_STYLE + TILES_STYLE + SNAKE_STYLE + LUDO_STYLE;
 
 const GAME_STYLE_ID = 'igs-wait-games-style';
 
