@@ -82,6 +82,7 @@ import { onDlcFxChange } from '../../scene/fx-registry.js';
 import { cloneData, esc, firstDefined, firstNonEmptyString, firstRenderableText, clampNumber, normalizeBoolean, normalizeFiniteIndex, normalizeFiniteNumber, normalizeNullableNumber, normalizeOpacity, toHex } from './reader-value-utils.js';
 import { checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupList, renderMoodReviewList, renderPinnedButtons, renderSceneAssetList, renderGeneratedAssetPane, countGeneratedWaiting, renderStageShakeSettings, renderChatShowSettings, renderSystemRoleSettings, renderWeatherFxSettings, renderTemplate, rangeInput, secretInput, segmentedInput, selectInput, textInput, textareaInput, numberInput, disabledAttr, hiddenAttr, modelPicker, tableMultiSelect } from './settings-fields.js';
 import { renderAssetReviewPanel } from './asset-review-panel.js';
+import { revertProfileWrite } from '../../scene/profile-write.js';
 import { ensureEmbeddedHost, findEmbeddedHost, hideEmbeddedSourceText, hideStorySpan, isEmbeddedEditTrigger, isStoryHidden, resolveEmbeddedHostParent, restoreEmbeddedSourceText, restoreStorySpan, storyLines } from './embedded-reader-runtime.js';
 import { createReaderSourceCache } from './reader-source-cache.js';
 import { createFloorSourceLocator, lastBefore, nextTtsHintOf, prepareReaderFloor, stripWrappingQuotes } from './reader-floor-plan.js';
@@ -5195,6 +5196,7 @@ export function createIgsReaderHost(options = {}) {
         }
         renderAssetReviewPanel(container, items.map((item) => ({
             ...item,
+            busy: reviewRecoveries.has(item.key),
             previewUrl: typeof service.resolveUrl === 'function' ? service.resolveUrl(item.url) : item.url,
         })), {
             onResolve: completeGeneratedReview,
@@ -5253,6 +5255,11 @@ export function createIgsReaderHost(options = {}) {
         }
         if (result?.ok && !result.alreadyHandled && picked !== 'retry') {
             imageNotice('success', aliasName ? `已把「${ask.word}」归入「${aliasName}」` : picked === 'sprite' ? '衣装和对应立绘已入库' : '衣装已入库衣柜');
+        }
+        // 失败的候选会退回待确认、面板重新弹出；不提示原因就像点了没生效。
+        if (result && result.ok === false && result.reason !== 'stale-target') {
+            const why = result.error || result.reason || '未返回具体原因';
+            imageNotice('error', result.saved ? `「${ask.word}」已入库衣柜，立绘未完成：${why}` : `「${ask.word}」入库未完成：${why}`);
         }
         if (state.activeReader) syncAssetReviewAfterRender(state.activeReader, state.activeReader.snapshot);
         return result;
@@ -5326,7 +5333,10 @@ export function createIgsReaderHost(options = {}) {
     }
 
     function completeGeneratedReview(item, status, name) {
-        if (reviewRecoveries.has(item.key)) return reviewRecoveries.get(item.key);
+        if (reviewRecoveries.has(item.key)) {
+            writeToastSafe('正在入库，图片保存完成后自动继续');
+            return reviewRecoveries.get(item.key);
+        }
         const scope = resolveAssetScope(getSillyTavernContext(options.global || globalThis)).key;
         const chatId = options.getCurrentChatId?.();
         const job = recoverOperation(async () => {
@@ -5337,9 +5347,33 @@ export function createIgsReaderHost(options = {}) {
                 && options.getCurrentChatId?.() === chatId
                 && resolveAssetScope(getSillyTavernContext(options.global || globalThis)).key === scope,
             onRecover: ({ attempt }) => { if (attempt === 1) writeToastSafe('正在自动完成素材入库'); },
-        }).finally(() => reviewRecoveries.delete(item.key));
+        }).finally(() => {
+            reviewRecoveries.delete(item.key);
+            if (state.activeReader) rerenderActiveReader();
+        });
         reviewRecoveries.set(item.key, job);
         return job;
+    }
+
+    // 丢弃立绘时：写词阶段存过 DNA 或新衣装、且之后没再改过，就问一句是否一并清空。
+    async function offerProfileRevert(write) {
+        if (!write?.character) return;
+        const { bridge } = resolveBridgeConfigSnapshot({ mode: 'default' });
+        const root = state.activeSettings?.draft?.bridge?.sceneAssets || bridge.sceneAssets || {};
+        const library = write.owner ? root.cards?.[write.owner] || {} : root;
+        const plan = revertProfileWrite(library, write);
+        if (!plan.changed) return;
+        const parts = [plan.dna && 'DNA', plan.outfit && `衣装「${plan.outfit}」`].filter(Boolean).join('与');
+        const confirmed = await pageModal.confirm(`是否一并清空生成这张图时写入的「${write.character}」${parts}？`,
+            { okLabel: '一并清空', cancelLabel: '保留' });
+        if (!confirmed) return;
+        const done = mutateSceneLibrary((assets) => {
+            const live = revertProfileWrite(assets, write);
+            if (!live.changed) return { ok: false };
+            Object.assign(assets, live.patch);
+            return { ok: true };
+        }, { character: write.character });
+        writeToastSafe(done && done.ok !== false ? `已清空「${write.character}」本次写入的${parts}` : '资料清空未完成，原资料保持不变');
     }
 
     async function resolveGeneratedReview(item, status, name) {
@@ -5382,6 +5416,8 @@ export function createIgsReaderHost(options = {}) {
             if (!result?.ok || service.getRecord?.(item.key)?.status !== 'library') {
                 const failure = result?.ok === false ? result
                     : { ok: false, reason: 'DNA_ADOPTION_CONFLICT' };
+                // 入库核验的报错走 alert 回调；面板入口没有弹窗，必须提示出来，否则看起来像点了没反应。
+                writeToastSafe(adoptionError || failure.error || '素材入库未完成，原资料保持不变');
                 return failure;
             }
             if (activeSettings) rerenderSettings();
@@ -5411,6 +5447,7 @@ export function createIgsReaderHost(options = {}) {
             if (!added || added.ok === false) return added || { ok: false, reason: 'save-failed' };
             writeToastSafe(`已放入场景素材「${added.name}」`);
         }
+        if (status === 'discarded' && item.profileWrite) await offerProfileRevert(item.profileWrite);
         let updated;
         try { updated = typeof service.setStatus === 'function' ? await service.setStatus(item.key, status) : { ok: false }; }
         catch (error) { updated = { ok: false }; }

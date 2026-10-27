@@ -74,6 +74,7 @@ import { isImageSeed } from '../../generated-images/image-seed.js';
 import { readDefaultOutfit, outfitSpriteSlots, setOutfitSprite, pickOutfitSprite, prepareInitialDefaultOutfitSelection } from '../../scene/character-appearance.js';
 import { inspectOutfitImages } from '../../media/outfit-image-availability.js';
 import { prepareOutfitAdoption, prepareOutfitDnaSave } from '../../scene/outfit-identity.js';
+import { revertProfileWrite } from '../../scene/profile-write.js';
 import { resolveCharacterKey } from '../../scene/scene-directives.js';
 
 import { normalizeCharacterHouses } from './magic-house.js';
@@ -166,17 +167,19 @@ function hasSpriteAdoptionEvidence(record) {
         || record?.promptTask?.mode === 'dna_template');
 }
 
-async function readSpriteAdoptionRecord(service, imageId, record) {
+async function readSpriteAdoptionRecord(service, imageId, record, { waitMs = 20000 } = {}) {
     if (!hasSpriteAdoptionEvidence(record)) return { ok: true, record };
+    const readable = stored => stored?.dataUrl && stored.id === imageId && stored.type === 'sprite';
+    const deadline = Date.now() + waitMs;
     try {
-        const stored = await service.readStoredImage?.(imageId);
-        if (!stored?.dataUrl || stored.id !== imageId || stored.type !== 'sprite'
-            || !stored.promptRecipe || !stored.sentPrompt
-            || (record.promptRecipe?.outfitMode === 'template'
-                && (stored.promptRecipe.outfitMode !== 'template' || !stored.outfitSnapshot))
-            || (record.dnaCandidates !== undefined && stored.dnaCandidates === undefined)) {
-            return { ok: false, reason: 'DNA_ADOPTION_INVALID', error: '候选图片或身份资料无法权威回读，原资料保持不变' };
+        let stored = await service.readStoredImage?.(imageId);
+        // 刚生成的图可能还在写入酒馆文件夹：等写完再入库，不让用户反复点。
+        while (!readable(stored) && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 800));
+            stored = await service.readStoredImage?.(imageId);
         }
+        if (!readable(stored))
+            return { ok: false, reason: 'DNA_ADOPTION_INVALID', error: '图片仍在保存，请稍后再入库' };
         // 内存结果不能补齐权威存储已丢失的旁路，否则删除候选后仍可能建档。
         return { ok: true, record: { ...stored, imageId,
             ...(record.ok !== undefined && { ok: record.ok }),
@@ -1304,12 +1307,10 @@ export async function handleSettingsAction(action, ctx) {
             const bound = bindGeneratedSprite(sceneAssets, target?.name || name, `igs-gen:${record.imageId}`, { replace: true });
             if (!bound.ok) return rerenderSettings();
             const sourceName = record.identityContext?.[0]?.characterKey || record.name;
-            if (hasSpriteAdoptionEvidence(record)) {
-                const sourceTarget = spriteAdoptionTarget(settingsState, sourceName);
-                if (sourceTarget.name !== bound.name || sourceTarget.owner !== target.owner)
-                    return generatedOperationFailure(dialogs, globalObj, '候选身份与目标角色不匹配，原资料保持不变。', 'DNA_TEMPLATE_BINDING');
-            }
-            const adoption = prepareSpriteIdentityAdoption(sceneAssets, bound.name, record.imageId, record,
+            const sourceTarget = hasSpriteAdoptionEvidence(record) ? spriteAdoptionTarget(settingsState, sourceName) : null;
+            // 入库时改了名字：图照存，生成时那个角色的身份和衣装资料不套到新名字上。
+            const renamed = sourceTarget && (sourceTarget.name !== bound.name || sourceTarget.owner !== target.owner);
+            const adoption = renamed ? { ok: true, patch: {} } : prepareSpriteIdentityAdoption(sceneAssets, bound.name, record.imageId, record,
                 { sourceName, hadDefault: Boolean(previousCharacters[bound.name]?.['默认']),
                     ...outfitAdoptionReadOptions(settingsState, target) });
             if (!adoption.ok) return generatedAdoptionFailure(dialogs, globalObj, adoption);
@@ -2144,13 +2145,13 @@ export async function handleSettingsAction(action, ctx) {
         for (const item of result.items || []) {
             if (!item.ok || !item.imageId || item.promptRecipe?.outfitMode !== 'template') continue;
             const authoritative = await readSpriteAdoptionRecord(service, item.imageId, item);
-            if (!authoritative.ok) return failed(authoritative.error);
+            if (!authoritative.ok) continue;
             if (!targetUnchanged()) return failed('候选回读期间角色、衣装或作用域已变化，原资料保持不变');
             const record = authoritative.record;
-            const selected = record.outfitSnapshot?.characters?.filter(c => c.characterKey === name);
-            if (selected?.length !== 1 || (outfitMode && selected[0].name !== outfitName))
-                return failed('衣装候选与当前角色或服装不匹配，原资料保持不变');
             verifiedSprites.add(`igs-gen:${item.imageId}`);
+            // 衣装资料对不上的那张只放图，不登记衣装。
+            const selected = record.outfitSnapshot?.characters?.filter(c => c.characterKey === name);
+            if (selected?.length !== 1 || (outfitMode && selected[0].name !== outfitName)) continue;
             adoptedRecords.push({ item, record, selected });
         }
         if (!targetUnchanged()) return failed('本次角色身份、衣装或目标图槽已变化，生成图片保留');
@@ -2167,8 +2168,8 @@ export async function handleSettingsAction(action, ctx) {
             if (Object.keys(adoption.patch).length) {
                 const candidate = selected[0];
                 const signature = JSON.stringify([candidate.name, candidate.description]);
-                if (candidateDescription !== undefined && candidateDescription !== signature)
-                    return failed('同批衣装候选说明不一致，原资料保持不变');
+                // 同批只登记第一份衣装说明，后面不同的不覆盖、也不中断。
+                if (candidateDescription !== undefined && candidateDescription !== signature) continue;
                 candidateDescription = signature;
                 mergedAssets = { ...mergedAssets, ...adoption.patch };
                 Object.assign(outfitPatch, adoption.patch);
@@ -2262,6 +2263,24 @@ export async function handleSettingsAction(action, ctx) {
         const service = options.generatedAssets;
         if (!service || typeof service.setStatus !== 'function') {
             return { ok: false, reason: 'generated-assets-unavailable' };
+        }
+        // 写词阶段存过 DNA 或新衣装、且之后没再改过：问一句是否一并清空。
+        let record;
+        try { record = await service.readRecord?.(key); } catch { record = null; }
+        const write = record?.profileWrite;
+        if (write?.character) {
+            const root = settingsState.draft.bridge?.sceneAssets || {};
+            const library = write.owner ? root.cards?.[write.owner] : root;
+            const plan = library ? revertProfileWrite(library, write) : { changed: false };
+            if (plan.changed) {
+                const parts = [plan.dna && 'DNA', plan.outfit && `衣装「${plan.outfit}」`].filter(Boolean).join('与');
+                if (await dialogs.confirm(`是否一并清空生成这张图时写入的「${write.character}」${parts}？`)) {
+                    const previous = captureAdoptionFields(library, Object.keys(plan.patch), { clone: true });
+                    Object.assign(library, plan.patch);
+                    const persisted = persistGeneratedLibrary(persistSettingsDraft);
+                    if (operationFailed(persisted)) restoreAdoptionFields(library, previous);
+                }
+            }
         }
         let status;
         try {
@@ -4705,6 +4724,8 @@ export async function handleSettingsAction(action, ctx) {
             const next = { ...open, [key]: !open[key] };
             // 演出写法列表同一时间只展开一条。
             if (key.startsWith('prompt-entry-') && next[key]) for (const other of Object.keys(next)) if (other !== key && other.startsWith('prompt-entry-')) next[other] = false;
+            // 世界书筛选同一时间只展开一本书。
+            if (key.startsWith('perf-wi-') && next[key]) for (const other of Object.keys(next)) if (other !== key && other.startsWith('perf-wi-')) next[other] = false;
             settingsState.asyncState.advancedOpen = next;
         }
         return rerenderSettings();
