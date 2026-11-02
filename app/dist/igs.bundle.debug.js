@@ -126785,9 +126785,9 @@ __igsRegister("src/visual/igs-ui/combat-enemy-atlas.js", function(module, export
 const { createTavernImageFiles } = require("src/media/tavern-image-files.js");
 const { isImagePath, normalizeImagePath } = require("src/media/image-identity.js");
 const { esc } = require("src/visual/igs-ui/reader-value-utils.js");
-const REPOSITORY = 'Anyno001/Immersive-Galgame-System-AnyNo001';
-// 图集所在的固定发布 tag。仓库里 app/assets/combat-enemy-atlas/ 必须在该 tag 下存在。
-const ENEMY_ATLAS_TAG = 'v0.39.0';
+const REPOSITORY = 'Anyno001/IGS_GaLSystem';
+// 图集所在的固定发布提交（发布仓库不推 tag）。仓库里 app/assets/combat-enemy-atlas/ 必须在该提交下存在。
+const ENEMY_ATLAS_TAG = '9390c0edecf115aad56d2ee7a61b931115acf28a';
 const ENEMY_ATLAS_STORAGE_KEY = 'igs-combat-enemy-atlas';
 const ENEMY_ATLAS_COLS = 6;
 // 三张图集各自的行数，与 v0.39 保持一致。
