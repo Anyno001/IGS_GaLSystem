@@ -59,6 +59,33 @@ function growSkills(skills, random, changes) {
     return next;
 }
 
+// NPC 成长：打过勾的技能同样掷 d100，成长概率减半（另掷一次对半），幅度与主角相同；没有勾的角色不消耗随机数。
+// skillValueOf(state, 名, 技能) 取当前值（含已有成长）；没有它时只清勾。
+function growNpcSkills(state, random, changes, skillValueOf) {
+    let characters = state.characters;
+    for (const [name, character] of Object.entries(state.characters)) {
+        const growth = character.skillGrowth;
+        if (!growth || !Object.values(growth).some((entry) => entry && entry.marked)) continue;
+        const next = {};
+        for (const [skill, entry] of Object.entries(growth)) {
+            if (!entry || !entry.marked) { next[skill] = entry; continue; }
+            const bonus = Number(entry.bonus) || 0;
+            let gained = 0;
+            if (typeof skillValueOf === 'function') {
+                const from = Number(skillValueOf(state, name, skill)) || 0;
+                if (rollOver(from, random).passed && random() < 0.5) {
+                    const to = Math.min(Math.max(SKILL_MAX, from), from + rollDie(10, random));
+                    gained = to - from;
+                    if (gained > 0) changes.push({ source: 'daily', target: name, key: skill, from, to, note: '成长' });
+                }
+            }
+            next[skill] = { ...entry, bonus: bonus + Math.max(0, gained), marked: false };
+        }
+        characters = { ...characters, [name]: { ...character, skillGrowth: next } };
+    }
+    return characters === state.characters ? state : { ...state, characters };
+}
+
 function coolCharacters(characters, day, days, changes) {
     const next = {};
     for (const [name, character] of Object.entries(characters)) {
@@ -75,38 +102,47 @@ function pushBarChanges(from, to, changes, note) {
     }
 }
 
-// 日结算：体力恢复（熬夜后只到 70）、生命 +15、压力 −10、技能成长、好感冷却、每日上限清零。
-export function settleDay(state, { random, changes = [] } = {}) {
+// 日结算：体力恢复（熬夜后只到 70）、压力 −10、技能成长、好感冷却、每日上限清零。
+// 生命不随过夜恢复（合并计划 Q4）：只有回复标签与战斗结果改变伤势。
+export function settleDay(state, { random, changes = [], skillValueOf } = {}) {
     const day = state.clock.day + 1;
     const { bars } = state.protagonist;
     const nextBars = {
         ...bars,
         stamina: Math.max(bars.stamina, state.clock.stayedUp ? 70 : 100),
-        health: clamp(bars.health + 15, 0, 100),
         stress: clamp(bars.stress - 10, 0, 100),
     };
     pushBarChanges(bars, nextBars, changes, '日结算');
     let next = withBars(state, nextBars);
-    next = withSkills(next, growSkills(next.protagonist.skills, random, changes));
+    next = grow(next, random, changes, skillValueOf);
     next = { ...next, characters: coolCharacters(next.characters, day, 1, changes) };
-    return withClock(next, { day, floorsSinceDay: 0, stayedUp: false });
+    return withClock(next, { day, floorsSinceDay: 0, stayedUp: false, challenges: 0 });
 }
 
-// 时间跳跃：体力、生命回满；冷却最多扣到阶段下限；成长只掷一次。天数已在解析时限到 30 天。
-export function settleSkip(state, days, { random, changes = [] } = {}) {
+// 成长次数累计进 protagonist.growth（D&D 资历档由它推出，v2 §4.2）。
+function grow(state, random, changes, skillValueOf) {
+    const before = changes.length;
+    const next = withSkills(state, growSkills(state.protagonist.skills, random, changes));
+    const gained = changes.slice(before).filter((c) => c.note === '成长').length;
+    const hero = gained ? { ...next, protagonist: { ...next.protagonist, growth: (Number(next.protagonist.growth) || 0) + gained } } : next;
+    return growNpcSkills(hero, random, changes, skillValueOf);
+}
+
+// 时间跳跃：体力回满；冷却最多扣到阶段下限；成长只掷一次。天数已在解析时限到 30 天。
+export function settleSkip(state, days, { random, changes = [], skillValueOf } = {}) {
     const day = state.clock.day + days;
     const { bars } = state.protagonist;
-    const nextBars = { ...bars, stamina: 100, health: 100 };
+    const nextBars = { ...bars, stamina: 100 };
     pushBarChanges(bars, nextBars, changes, `跳过${days}天`);
     let next = withBars(state, nextBars);
-    next = withSkills(next, growSkills(next.protagonist.skills, random, changes));
+    next = grow(next, random, changes, skillValueOf);
     next = { ...next, characters: coolCharacters(next.characters, day, days, changes) };
-    return withClock(next, { day, floorsSinceDay: 0, stayedUp: false });
+    return withClock(next, { day, floorsSinceDay: 0, stayedUp: false, challenges: 0 });
 }
 
 // 软跨天：连续 30 楼没有跨天时只清零每日上限，不恢复、不成长，天数不变（易错点 D2）。
 export function settleSoftDay(state) {
     const { day } = state.clock;
     const characters = Object.fromEntries(Object.entries(state.characters).map(([name, c]) => [name, resetDaily(c, day)]));
-    return withClock({ ...state, characters }, { floorsSinceDay: 0 });
+    return withClock({ ...state, characters }, { floorsSinceDay: 0, challenges: 0 });
 }

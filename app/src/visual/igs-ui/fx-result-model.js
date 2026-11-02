@@ -43,9 +43,16 @@ function reel(label, value, sub, outcome = '') {
     };
 }
 
+// 数值系统的 D&D 检定带 die: 20，换成 d20 骰面；sub 由引擎给出时照用。
+function dieOf(source) {
+    return Number(source && source.die) === 20 ? 20 : 0;
+}
+
 function side(part, outcome) {
     const source = part && typeof part === 'object' ? part : {};
-    return { ...reel(`${source.name || ''}·${source.attribute || ''}`, source.roll, `目标${source.target ?? ''} · ${source.tier || ''}`, outcome), who: String(source.name || '') };
+    const sub = source.sub ? String(source.sub) : `目标${source.target ?? ''} · ${source.tier || ''}`;
+    const die = dieOf(source);
+    return { ...reel(`${source.name || ''}·${source.attribute || ''}`, source.roll, sub, outcome), who: String(source.name || ''), ...(die ? { die } : {}) };
 }
 
 // 骰池：每颗骰一个滚轮，面数写进 die 让展示层换骰面外形；合计与成败放进结论。
@@ -91,7 +98,8 @@ export function buildResultFxPlan(detail) {
         };
     }
     if (detail.kind === 'check') {
-        const face = reel('1d100', detail.roll, `需≤${detail.threshold}`);
+        const die = dieOf(detail);
+        const face = { ...reel(die ? 'd20' : '1d100', detail.roll, detail.sub ? String(detail.sub) : `需≤${detail.threshold}`), ...(die ? { die } : {}) };
         if (face.value === null) return null;
         return {
             type: 'dice',
@@ -121,6 +129,23 @@ export function buildResultFxPlan(detail) {
         };
     }
     if (detail.kind === 'pool') return poolPlan(detail);
+    // d20 检定：骰面 1–20，副行写加值与 DC，结论沿用大成功 / 成功 / 失败 / 大失败。
+    if (detail.kind === 'd20') {
+        const die = Number(detail.die);
+        const bonus = Number(detail.bonus);
+        if (!Number.isInteger(die) || die < 1 || die > 20 || !Number.isFinite(bonus)) return null;
+        const face = { ...reel('1d20', die, `${bonus >= 0 ? '+' : ''}${bonus} · DC ${detail.dc ?? ''}`), die: 20 };
+        return {
+            type: 'dice',
+            title: `${detail.actor || ''}·${detail.attribute || ''}`,
+            reels: [face],
+            verdict: `${String(detail.outcome || '')} · 总值 ${detail.total ?? die + bonus}`,
+            tone: toneOfTier(detail.tier, detail.success === true),
+            tier: tierKeyOf(detail.tier, detail.success === true),
+            rollMs: RESULT_FX_ROLL_MS,
+            holdMs: RESULT_FX_HOLD_MS,
+        };
+    }
     return null;
 }
 

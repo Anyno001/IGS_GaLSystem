@@ -1,4 +1,6 @@
 import { normalizePhoneWallpaper } from './my-phone.js';
+import { normalizeNaiEffort } from '../../generated-images/nai-effort.js';
+import { normalizeNaiCloudQueue } from '../../generated-images/nai-cloud-queue-settings.js';
 import { normalizeCreatureDisplaySettings } from '../../scene/creature-profile.js';
 import { normalizePromptEntry } from '../../scene/prompt-entries.js';
 import { isPackSwitchPath } from '../../scene/fx-packs.js';
@@ -34,6 +36,16 @@ export function normalizePerformanceSettings(value) {
 }
 
 export function normalizeSettingsValue(path, value) {
+    const cloudPrefix = 'bridge.autoIllustration.nai.cloudQueue.';
+    if (path.startsWith(cloudPrefix)) {
+        const key = path.slice(cloudPrefix.length);
+        return normalizeNaiCloudQueue({ [key]: value })[key];
+    }
+    if (path === 'bridge.autoIllustration.nai.effort') return normalizeNaiEffort(value);
+    if (path === 'bridge.autoIllustration.nai.minIntervalMs') {
+        const n = value === '' || value == null ? NaN : Number(value);
+        return Number.isFinite(n) ? Math.max(0, Math.min(60000, Math.round(n))) : 2000;
+    }
     if (path === 'readerMode' || path === 'bridge.openMode' || path === 'bridge.imageApi.mode' || path === 'bridge.imageApi.externalAdapter' || path === 'readerSettings.imgMode') {
         return String(value || '');
     }
@@ -63,6 +75,7 @@ export function normalizeSettingsValue(path, value) {
             || (path.startsWith('readerSettings.') && isPackSwitchPath(path.slice('readerSettings.'.length)))
             || /^readerSettings\.(liveFx|audienceFx|innerFx|feedFx)\.(enabled|muteOnNsfw|ambient|useThought|interact|followTheme)$/.test(path)
             || path === 'readerSettings.liveFx.blockHostile'
+            || path === 'readerSettings.liveFx.darkAll'
             || /^readerSettings\.feedFx\.platforms\.[a-z]+\.enabled$/.test(path)
             || path === 'readerSettings.feedFx.storm.enabled'
             || path === 'readerSettings.cameraPackFx.sound'
@@ -81,6 +94,8 @@ export function normalizeSettingsValue(path, value) {
         if (/^readerSettings\.creatureDisplay\.(enabled|giantFill)$/.test(path) || path === 'readerSettings.battleFx.creature') return !(value === false || value === 'false' || value === 0 || value === '0');
         const creatureScale = path.match(/^readerSettings\.creatureDisplay\.(small|medium|large)$/);
         if (creatureScale) return normalizeCreatureDisplaySettings({ [creatureScale[1]]: value })[creatureScale[1]];
+        if (/^readerSettings\.logReader\.(on|userAvatar|chip|chain)$/.test(path)) return value === true || value === 'true' || value === 1 || value === '1';
+        if (/^readerSettings\.logReader\.(perTap|veil|density)$/.test(path)) return Number(value);
         if (path === 'readerSettings.comicMode.palette') return value === 'color' ? 'color' : 'mono';
         if (path === 'readerSettings.comicMode.line') return ['thin', 'medium', 'bold'].includes(value) ? value : 'medium';
         if (path === 'readerSettings.comicMode.inputStyle') return value === 'plain' ? 'plain' : 'comic';

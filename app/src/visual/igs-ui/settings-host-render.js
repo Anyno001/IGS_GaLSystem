@@ -1,4 +1,5 @@
 import { readLive2dConfig } from './live2d-config.js';
+import { NAI_QUEUE_REFERENCE_ENDPOINT } from '../../generated-images/nai-cloud-queue-settings.js';
 import { renderLive2dLibrary } from './live2d-panel.js';
 // 设置器的快照与各页 HTML：只读草稿和异步状态生成标记，不碰 DOM；挂载、事件和保存在 settings-host.js。
 import { DIALOG_SKIN_MERMAID, MERMAID_TONES, normalizeMermaidAccent, normalizeMermaidTone } from './dialog-theme-mermaid.js';
@@ -14,12 +15,13 @@ import { renderWorldviewRow } from './worldview-fields.js';
 import { renderQualityRow } from './render-quality-fields.js';
 import { isGeneratedAssetUrl, normalizeGeneratedLibrary } from '../../scene/asset-match.js';
 import { createOutfitResolver, isBuiltinNudeOutfit } from '../../scene/character-outfits.js';
-import { readDefaultOutfit, pickOutfitSprite } from '../../scene/character-appearance.js';
+import { readVisibleDefaultOutfit, pickOutfitSprite } from '../../scene/character-appearance.js';
 import { renderEventCgList } from './settings-event-cg.js';
 import { CHARACTER_ADD_MENU, renderDnaCandidateBar, renderDnaOnlyCharacterList, kindModelPicker, checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupList, renderMoodReviewList, renderPinnedButtons, renderShortcutSettings, renderSceneAssetList, renderGeneratedAssetPane, countGeneratedWaiting, renderStageShakeSettings, renderChatShowSettings, renderSystemRoleSettings, renderSystemRoleAdvanced, renderWeatherFxSettings, renderCustomFontManager, renderTemplate, rangeInput, secretInput, segmentedInput, selectInput, textInput, textareaInput, numberInput, hiddenAttr, modelPicker, tableMultiSelect } from './settings-fields.js';
 import { NSFW_COUNT_MAX, CONSISTENCY_MODEL_OPTIONS, normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { describeLlmReady } from '../../generated-images/illustration/caption-writer.js';
 import { normalizeImageSourceMode, mergeLegacyNaiSettings } from '../../generated-images/image-backend.js';
+import { isNaiMediumModel, resolveNaiEffortSettings, supportsNaiEffort } from '../../generated-images/nai-effort.js';
 import { getSettingsShellTemplate, renderSettingsNav } from './settings-shell.js';
 import { EVENTCG_TEMPLATE, SCENE_HEAD_TEMPLATE, WARDROBE_TEMPLATE, getPageTemplate } from './settings-tabs.js';
 import { PAGE_PERFORMANCE_GROUPS, SETTINGS_CATEGORIES, categoryLabel, categoryOfPage, currentSettingsPage, defaultPageOfCategory, pageLabel, pagesOfCategory } from './settings-pages.js';
@@ -46,7 +48,15 @@ import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLa
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
 import { CREATURE_DISPLAY_RANGE, normalizeCreatureDisplaySettings } from '../../scene/creature-profile.js';
 import { normalizeStatsSettings } from '../../scene/stats/stat-settings.js';
-import { renderStatsArchive, renderStatsBuildFields, renderStatsMappingFields, renderStatsPromptFields } from './stats-settings-fields.js';
+import { ORIGIN_CREDIT, ORIGIN_DEFAULT_NAME, ORIGIN_MODS, ORIGIN_MOD_LABELS, ORIGIN_PERSONALITIES, ORIGIN_REPO_URL, normalizeOriginSettings } from './origin-settings.js';
+import { originChatStatus } from './origin-attach.js';
+import { rulesetOptions } from '../../scene/stats/rulesets/index.js';
+import { COMBAT_DIFFICULTY_KEYS, COMBAT_RULES } from '../../combat/rules.js';
+import {
+    COMBAT_KIND_LABELS, COMBAT_PANEL_SKINS, COMBAT_PANEL_SKIN_LABELS, COMBAT_PRESET_DAILY_ONLY, COMBAT_PRESET_PATH, DAILY_COOLDOWN_CHOICES, DAILY_STAKES, DAILY_STAKE_LABELS,
+    BATTLE_MODES, BATTLE_MODE_LABELS, BATTLE_MODE_PATH, battleModeOf, normalizeCombatExpansionSettings,
+} from './combat-settings.js';
+import { buildStatsPageValues } from './stats-settings-fields.js';
 import { resolveWorldview } from '../../scene/worldview.js';
 import { applyFxWorldview } from '../../scene/fx-era.js';
 import { loadAssetFoldersFor } from './asset-folders.js';
@@ -56,7 +66,7 @@ import { loadMoodReview } from '../../scene/mood-review-store.js';
 import { CLASSIC_DIALOG_THEME_DEFAULTS, DIALOG_SKIN_GRADIENT_VEIL, DIALOG_SKIN_WESTERN_CLASSIC, isIllustratedDialogSkin, supportsDialogAutoHeight } from './classic-dialog-skin.js';
 import { dialogSkinLabel, getDialogSkinChoices } from './dialog-skin-catalog.js';
 import { DIALOG_SKIN_XIANXIA_INK } from './dialog-theme-xianxia.js';
-import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_HOUSES, normalizeMagicAccent, normalizeMagicHouse } from './dialog-theme-css-skins.js';
+import { DIALOG_SKIN_MAGIC_ACADEMY, MAGIC_HOUSES, magicHouseChoices, magicHouseFor, normalizeMagicAccent } from './dialog-theme-css-skins.js';
 import { VOICE_BARK_FREQUENCIES, normalizeVoiceBarkSettings } from './voice-bark.js';
 import { TTS_API_FORMATS, TTS_BILINGUAL_MODES, TTS_CACHE_LIMIT, TTS_THOUGHT_BILINGUAL_MODES, TTS_CUSTOM_METHODS, TTS_CUSTOM_RESPONSES, TTS_PROVIDERS, TTS_RATES, TTS_RESPONSE_FORMATS, TTS_TRANSPORTS, TTS_VOICE_MAX, findSystemVoice, hasNaturalSystemVoice, listSystemVoices, normalizeTtsSettings, parseVoicePool, systemVoiceOptions, ttsApiVoiceOptions, ttsMixedContentRisk, ttsNarratorVoiceOptions, ttsVoiceEntries } from './tts.js';
 import { normalizeBilingualSettings } from './bilingual-text.js';
@@ -203,40 +213,108 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
 
         const advancedOpen = (key) => (isOpenKey(key) ? ' open' : '');
 
-        // 数值系统页：总开关关闭时下方整块隐藏，只留一行说明（§10）。
+        // 战斗页：三选一由 battleFx / combatExpansion 两个字段推出，各方式的设置只在选中时显示。
+        const combatValues = memo(() => {
+            const cx = normalizeCombatExpansionSettings(reader && reader.combatExpansion);
+            const mode = battleModeOf(reader);
+            const p = 'readerSettings.combatExpansion';
+            const bp = 'readerSettings.battleFx';
+            const fx = (reader && reader.battleFx) || {};
+            return {
+                battleModeField: field(BATTLE_MODE_PATH, '战斗方式', segmentedInput(BATTLE_MODE_PATH, mode, BATTLE_MODES.map((k) => [k, BATTLE_MODE_LABELS[k]]), '战斗方式')),
+                battleOffNoteHidden: hiddenAttr(mode !== 'off'),
+                battleStoryHidden: hiddenAttr(mode !== 'story'),
+                battleCardHidden: hiddenAttr(mode !== 'card'),
+                battleStoryFields: checkbox(`${bp}.letterbox`, fx.letterbox, '战斗时加电影黑边') + checkbox(`${bp}.dash`, fx.dash, '出手冲刺'),
+                combatDailyHidden: hiddenAttr(mode !== 'card' || cx.kind === 'combat'),
+                combatDailyFields: field(`${p}.daily.perDay`, '每个游戏日次数', selectInput(`${p}.daily.perDay`, cx.daily.perDay, [1, 2, 3].map((n) => [n, `${n}次`])))
+                    + field(`${p}.daily.cooldownFloors`, '两次之间至少间隔', selectInput(`${p}.daily.cooldownFloors`, cx.daily.cooldownFloors, DAILY_COOLDOWN_CHOICES.map((n) => [n, n ? `${n}楼` : '不限'])))
+                    + field(`${p}.daily.stake`, '失败代价', segmentedInput(`${p}.daily.stake`, cx.daily.stake, DAILY_STAKES.map((k) => [k, DAILY_STAKE_LABELS[k]]), '失败代价'))
+                    + checkbox(`${p}.daily.allowEscape`, cx.daily.allowEscape, '允许放弃'),
+                combatFields: field(`${p}.kind`, '对决类型', segmentedInput(`${p}.kind`, cx.kind, Object.entries(COMBAT_KIND_LABELS), '对决类型'))
+                    + field(COMBAT_PRESET_PATH, '预设', segmentedInput(COMBAT_PRESET_PATH, cx.kind === 'daily' ? COMBAT_PRESET_DAILY_ONLY : '', [[COMBAT_PRESET_DAILY_ONLY, '仅日常挑战']], '预设'))
+                    + field(`${p}.difficulty`, '难度', selectInput(`${p}.difficulty`, cx.difficulty, COMBAT_DIFFICULTY_KEYS.map((k) => [k, COMBAT_RULES.difficulty[k].label])))
+                    + field(`${p}.reportDetail`, '战报详略', segmentedInput(`${p}.reportDetail`, cx.reportDetail, [['brief', '简略'], ['normal', '标准']], '战报详略'))
+                    + field(`${p}.skin`, '面板皮肤', segmentedInput(`${p}.skin`, cx.skin, COMBAT_PANEL_SKINS.map((k) => [k, COMBAT_PANEL_SKIN_LABELS[k]]), '面板皮肤')),
+            };
+        });
+
+        // 数值系统页：总开关关闭时下方整块隐藏；模板变量由 buildStatsPageValues 生成（§10）。
         const statsValues = memo(() => {
             const stats = normalizeStatsSettings(bridge.stats);
             let chat = null;
             try { chat = typeof options.statsChat === 'function' && !idx ? options.statsChat() : null; } catch (error) { chat = null; }
-            const chatReady = Boolean(stats.enabled && chat && chat.hasChat && !chat.blocked);
-            const chatNote = !chat || !chat.hasChat ? '打开一个聊天后可以在这里启用。'
-                : chat.blocked ? `本聊天的数值存档无法读取（${chat.blocked}），已停止写入，原存档保留。`
-                    : chat.enabled ? '本聊天已启用。暂停后数值冻结、不结算，存档保留。' : '本聊天尚未启用数值系统。';
+            const archive = (() => {
+                try { return typeof options.statsArchive === 'function' && !idx ? options.statsArchive() : null; } catch (error) { return null; }
+            })();
+            const mappings = (() => {
+                if (!stats.push.enabled || idx || typeof options.statsMappings !== 'function') return null;
+                try { return options.statsMappings(stats.push.mappings); } catch (error) { return { ok: false, reason: 'stats-push-read-failed', detail: String(error && error.message || error) }; }
+            })();
+            return buildStatsPageValues({
+                stats, chat, archive, mappings, advancedOpen,
+                combatOn: Boolean(reader && reader.combatExpansion && reader.combatExpansion.enabled === true),
+                worldview: resolveWorldview(worldviewAssets),
+            });
+        });
+
+        // 随身系统页：总开关关闭时下方整块隐藏，只留一行说明。本聊天状态由宿主 options.originChat() 给出（没接引擎时为 null）。
+        // 「备用模型预设」下拉：副 LLM 类型的模型预设；已选的预设被删时保留一项提示，运行时回落当前连接。
+        const originProfileChoices = (selected) => {
+            const profiles = asyncState.modelProfiles;
+            const list = profiles && Array.isArray(profiles.list) ? profiles.list.filter((item) => item.kind === 'llm') : [];
+            const choices = [['', '「备用模型」页当前连接'], ...list.map((item) => [item.id, item.name])];
+            if (selected && !list.some((item) => item.id === selected)) choices.push([selected, profiles && profiles.status === 'loading' ? '读取中…' : '预设已删除（按当前连接）']);
+            return choices;
+        };
+        const originValues = memo(() => {
+            const origin = normalizeOriginSettings(bridge.origin);
+            let chat = null;
+            // 宿主没给 originChat 时读接入点登记的引擎（origin-attach.js）。
+            try { chat = idx ? null : typeof options.originChat === 'function' ? options.originChat() : originChatStatus(); } catch (error) { chat = null; }
+            const llmSource = (bridge.autoIllustration && bridge.autoIllustration.llm && bridge.autoIllustration.llm.source) || 'tavern';
+            const chatReady = Boolean(origin.enabled && chat && chat.hasChat && !chat.blocked);
+            const chatNote = !chat || !chat.hasChat ? '打开一个聊天后可以在这里暂停或恢复。'
+                : chat.blocked ? `本聊天的系统存档无法读取（${chat.blocked}），已停止写入，原存档保留。`
+                    : chat.paused ? '本聊天已暂停：系统退出剧情，不派任务、不计时，存档保留。' : '本聊天正在运行。暂停后时限冻结，恢复时顺延。';
+            const intField = (key, label, min, max, note) => field(`bridge.origin.${key}`, label, numberInput(`bridge.origin.${key}`, origin[key], min, max), note);
             return {
-                statsToggle: checkbox('bridge.stats.enabled', stats.enabled, '启用数值系统'),
-                statsOffNoteHidden: hiddenAttr(stats.enabled),
-                statsHidden: hiddenAttr(!stats.enabled),
-                autoSkillField: checkbox('bridge.stats.autoSkill', stats.autoSkill, '自动判断检定技能（关闭后不做先掷后写）'),
-                intimacyField: checkbox('bridge.stats.intimacyGate', stats.intimacyGate, '亲密门槛（好感与信任不够时角色会拒绝）'),
-                registerField: field('bridge.stats.register', '重要角色登记', selectInput('bridge.stats.register', stats.register, [['auto', '自动'], ['manual', '仅手动']])),
-                hudLabelField: field('bridge.stats.hudLabel', '好感条右侧', selectInput('bridge.stats.hudLabel', stats.hudLabel, [['stage', '阶段名'], ['number', '数字'], ['both', '两者']])),
-                barsFields: checkbox('bridge.stats.bars.stamina', stats.bars.stamina, '体力')
-                    + checkbox('bridge.stats.bars.money', stats.bars.money, '金钱')
-                    + checkbox('bridge.stats.bars.stress', stats.bars.stress, '压力'),
-                pushField: checkbox('bridge.stats.push.enabled', stats.push.enabled, '同步到数据库表格（需要数据库插件）'),
-                statsPromptFields: renderStatsPromptFields(stats, advancedOpen),
-                statsMappingFields: renderStatsMappingFields((() => {
-                    if (!stats.push.enabled || idx || typeof options.statsMappings !== 'function') return null;
-                    try { return options.statsMappings(stats.push.mappings); } catch (error) { return { ok: false, reason: 'stats-push-read-failed', detail: String(error && error.message || error) }; }
-                })(), advancedOpen, { pushEnabled: stats.push.enabled }),
-                statsArchiveFields: renderStatsArchive((() => {
-                    try { return typeof options.statsArchive === 'function' && !idx ? options.statsArchive() : null; } catch (error) { return null; }
-                })(), advancedOpen),
-                statsChatNote: esc(chatNote),
-                statsChatEnableHidden: hiddenAttr(!chatReady || chat.enabled),
-                statsChatDisableHidden: hiddenAttr(!chatReady || !chat.enabled),
-                statsBuildFields: renderStatsBuildFields(stats.build, advancedOpen, { worldview: resolveWorldview(worldviewAssets) }),
-                statsBuildHidden: hiddenAttr(!chatReady || chat.enabled),
+                originToggle: checkbox('bridge.origin.enabled', origin.enabled, '启用随身系统'),
+                originOffNoteHidden: hiddenAttr(origin.enabled),
+                originHidden: hiddenAttr(!origin.enabled),
+                originChatNote: esc(chatNote),
+                originWorldText: esc(chat && chat.world ? chat.world : '未设定'),
+                originWorldHidden: hiddenAttr(!chatReady),
+                originResumeHidden: hiddenAttr(!chatReady || !chat.paused),
+                originPauseHidden: hiddenAttr(!chatReady || chat.paused),
+                originFreqField: intField('freq', '任务频率（回合）', 1, 10, '每隔几回合最多派发一个任务'),
+                originTaskSourceField: field('bridge.origin.taskSource', '任务来源', selectInput('bridge.origin.taskSource', origin.taskSource, [['auto', '自动'], ['direction', '按指定方向'], ['manual', '只手写']])),
+                originLimitMinField: intField('limitMin', '时限下限（回合）', 0, 99, '0表示不强制时限'),
+                originLimitMaxField: intField('limitMax', '时限上限（回合）', 0, 99),
+                originBlockField: checkbox('bridge.origin.blockWhenUnfinished', origin.blockWhenUnfinished, '上一个主线或支线未完成时不派发新任务'),
+                originPunishField: checkbox('bridge.origin.punishEvent', origin.punishEvent, '任务失败时触发剧情惩罚事件'),
+                originAchieveField: checkbox('bridge.origin.achieveOn', origin.achieveOn, '启用成就系统'),
+                originRewardPrefField: field('bridge.origin.rewardPref', '奖励偏好', textInput('bridge.origin.rewardPref', origin.rewardPref, '例如：多给道具、偏情感向')),
+                originPenaltyPrefField: field('bridge.origin.penaltyPref', '惩罚偏好', textInput('bridge.origin.penaltyPref', origin.penaltyPref, '例如：不动好感度、惩罚偏物质')),
+                originShopRefreshField: intField('shopRefresh', '商城更新间隔', 0, 99),
+                originGachaRefreshField: intField('gachaRefresh', '奖池更新间隔', 0, 99),
+                originDrawCostField: intField('drawCost', '单次抽奖积分', 0, 99999),
+                originModFields: ORIGIN_MODS.map((id) => checkbox(`bridge.origin.mods.${id}`, origin.mods[id], ORIGIN_MOD_LABELS[id])).join(''),
+                originSysNameField: field('bridge.origin.sysName', '系统名', textInput('bridge.origin.sysName', origin.sysName, ORIGIN_DEFAULT_NAME)),
+                originPersonalityField: field('bridge.origin.personality', '人格腔调', selectInput('bridge.origin.personality', origin.personality, ORIGIN_PERSONALITIES.map((name) => [name, name]))),
+                originFourthWallField: intField('fourthWall', '第四面墙几率（%）', 0, 100),
+                originPersonaTextField: field('bridge.origin.personaText', '自定义人格', textareaInput('bridge.origin.personaText', origin.personaText, '填写后覆盖上面的人格腔调'), '留空使用人格腔调'),
+                originBindToField: field('bridge.origin.bindTo', '系统绑定对象', textInput('bridge.origin.bindTo', origin.bindTo, '宿主')),
+                originRpChatField: field('bridge.origin.rpChat', '反串私聊', selectInput('bridge.origin.rpChat', origin.rpChat, [['auto', '随正文生成'], ['manual', '仅手动生成']])),
+                originAutoEconField: checkbox('bridge.origin.autoEcon', origin.autoEcon, '允许角色自主使用系统（购买、抽奖、使用道具）'),
+                originChatToStoryField: checkbox('bridge.origin.chatToStory', origin.chatToStory, '宿主与系统的对话结果写入剧情'),
+                originRouteField: field('bridge.origin.route', '系统请求', selectInput('bridge.origin.route', origin.route, [['tavern', '跟随酒馆当前连接'], ['llm', '使用备用模型']])),
+                originModelField: field('bridge.origin.llmProfile', '备用模型预设', selectInput('bridge.origin.llmProfile', origin.llmProfile, originProfileChoices(origin.llmProfile))),
+                originRouteNote: esc(origin.route === 'llm' && !origin.llmProfile && llmSource !== 'openai' ? '「备用模型」页的来源为酒馆当前API，系统请求仍跟随酒馆当前连接。' : '派发任务、刷新商城与奖池、系统对话与私聊都按这里的分配发送请求；预设在「备用模型」页存取。'),
+                originModelHidden: hiddenAttr(origin.route !== 'llm'),
+                originLegacyHidden: hiddenAttr(!(chatReady && chat.legacy)),
+                originKeepFloorsField: intField('keepFloors', '保留楼数', 0, 9999, '0表示全部保留'),
+                originCredit: `${esc(ORIGIN_CREDIT)}　<a class="igs-origin-credit-link" href="${esc(ORIGIN_REPO_URL)}" target="_blank" rel="noopener noreferrer">${esc(ORIGIN_REPO_URL)}</a>`,
             };
         });
 
@@ -286,6 +364,11 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
         const imageValues = memo(() => {
             const sourceMode = normalizeImageSourceMode(imageApi.mode);
             const auto = normalizeAutoIllustrationSettings(mergeLegacyNaiSettings(bridge.autoIllustration, imageApi));
+            const effectiveNai = resolveNaiEffortSettings(auto.nai);
+            const medium = isNaiMediumModel(effectiveNai.model);
+            const directMedium = isNaiMediumModel(auto.nai.model);
+            const hasEffortModel = directMedium || [auto.nai.model, auto.consistencyModel,
+                ...['cgModel', 'spriteModel', 'backgroundModel', 'itemModel'].map(key => imageApi[key])].some(supportsNaiEffort);
             const sourceNotes = {
                 nai: '用 NAI 生成剧情 CG、立绘与背景。',
                 dbgen: '提示词与 Key 由数据库生图插件管理。',
@@ -392,18 +475,23 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 autoLlmJailbreakTailField: field('bridge.autoIllustration.llm.jailbreakTail', '尾部附加词', autoTextarea('bridge.autoIllustration.llm.jailbreakTail', auto.llm.jailbreakTail, '每次写词请求最后插入')),
                 autoLlmContextField: field('bridge.autoIllustration.llm.contextFloors', '参考前文楼层数', numberInput('bridge.autoIllustration.llm.contextFloors', auto.llm.contextFloors, 0, 3)),
                 autoNaiTransportField: field('bridge.autoIllustration.nai.transport', '传输方式', selectInput('bridge.autoIllustration.nai.transport', auto.nai.transport, [['direct', '浏览器直连'], ['st-proxy', '酒馆CORS代理（需开启enableCorsProxy）'], ['auto', '自动（酒馆代理已开启时经酒馆转发）']])),
+                autoNaiIntervalField: field('bridge.autoIllustration.nai.minIntervalMs', '生图最小间隔（毫秒）', numberInput('bridge.autoIllustration.nai.minIntervalMs', auto.nai.minIntervalMs, 0, 60000), '同一密钥上次请求结束后再等待，默认 2000 毫秒；0 为不额外等待。仅作用于本页内置 NAI，生成与局部重绘共用。'),
+                autoNaiCloudQueueFields: checkbox('bridge.autoIllustration.nai.cloudQueue.enabled', auto.nai.cloudQueue.enabled, '启用云端队列')
+                    + field('bridge.autoIllustration.nai.cloudQueue.endpoint', '队列服务地址', textInput('bridge.autoIllustration.nai.cloudQueue.endpoint', auto.nai.cloudQueue.endpoint, NAI_QUEUE_REFERENCE_ENDPOINT), '默认使用智绘姬公共队列，留空也恢复该地址；这不是 NAI 生图接口。共用密钥的人须使用同一节点。仅发送密钥的 SHA-256 标识和随机排队编号，不发送密钥原文、提示词或图片。')
+                    + field('bridge.autoIllustration.nai.cloudQueue.timeoutMs', '排队最长等待（毫秒）', numberInput('bridge.autoIllustration.nai.cloudQueue.timeoutMs', auto.nai.cloudQueue.timeoutMs, 10000, 900000), '默认 180000（3 分钟），不占用生图超时。队列不可用时停止本次生成。智绘姬公共节点源码的锁仅有效 15 秒且不能续租；慢图或未接队列的其它请求仍可能触发 429。'),
                 autoNaiEndpointField: field('bridge.autoIllustration.nai.endpoint', 'NAI API 地址', textInput('bridge.autoIllustration.nai.endpoint', auto.nai.endpoint, '留空使用官方，或填写中转生图接口')),
                 autoNaiKeyField: field('bridge.autoIllustration.nai.apiKey', 'API Key', secretInput('bridge.autoIllustration.nai.apiKey', auto.nai.apiKey, '填写官方或中转服务的 Key')),
                 autoNaiModelField: field('bridge.autoIllustration.nai.model', '模型', modelPicker('bridge.autoIllustration.nai.model', auto.nai.model, asyncState.naiModels, 'fetch-nai-models', 'nai-diffusion-4-5-full')),
+                autoNaiEffortField: hasEffortModel ? field('bridge.autoIllustration.nai.effort', 'V5 Full 档位', selectInput('bridge.autoIllustration.nai.effort', directMedium ? 'medium' : auto.nai.effort, [['high', 'High（原档位）'], ['medium', 'Medium（14 步省算力）']], directMedium), directMedium ? '当前直接选择了 Medium 专模；要切回 High，请先把模型选为 nai-diffusion-5-full。' : '仅对实际使用的 V5 Full 及其局部重绘生效。Medium 固定 14 步和 Euler Ancestral；其它型号仍用原参数，切回 High 保留原设置。') : '',
                 modelProfileImageRow: renderModelProfileRow('image', asyncState.modelProfiles),
                 modelProfileLlmRow: renderModelProfileRow('llm', asyncState.modelProfiles),
                 autoNaiModelsMessage: esc(asyncState.naiModelsMessage || ''),
                 autoNaiSizeField: field('bridge.autoIllustration.nai.size', '尺寸', textInput('bridge.autoIllustration.nai.size', auto.nai.size, '832x1216')),
-                autoNaiStepsField: field('bridge.autoIllustration.nai.steps', '步数', numberInput('bridge.autoIllustration.nai.steps', auto.nai.steps, 1, 50)),
+                autoNaiStepsField: field('bridge.autoIllustration.nai.steps', '步数', numberInput('bridge.autoIllustration.nai.steps', effectiveNai.steps, 1, 50, medium)),
                 autoNaiScaleField: field('bridge.autoIllustration.nai.scale', 'CFG', numberInput('bridge.autoIllustration.nai.scale', auto.nai.scale, 0, 10, false, 'any')),
                 consistencyStrengthField: field('bridge.autoIllustration.consistencyStrength', '一致性重绘强度', numberInput('bridge.autoIllustration.consistencyStrength', auto.consistencyStrength, 0.1, 1, false, '0.05'), '0.1–1，越低越保留原图'),
                 consistencyModelField: field('bridge.autoIllustration.consistencyModel', '一致性重绘模型', selectInput('bridge.autoIllustration.consistencyModel', auto.consistencyModel, CONSISTENCY_MODEL_OPTIONS)),
-                autoNaiSamplerField: field('bridge.autoIllustration.nai.sampler', '采样器', textInput('bridge.autoIllustration.nai.sampler', auto.nai.sampler, 'k_euler_ancestral')),
+                autoNaiSamplerField: field('bridge.autoIllustration.nai.sampler', '采样器', textInput('bridge.autoIllustration.nai.sampler', effectiveNai.sampler, 'k_euler_ancestral', 'text', medium)),
             };
             const grid = (...items) => {
                 const body = items.filter(Boolean).join('');
@@ -565,7 +653,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 lead: scopeFilterBar('characters'),
                 renderList: (subset) => renderCharacterAssetList(subset, charListOptions),
                 thumbOf: (name, moods) => {
-                    const selected = readDefaultOutfit(sceneAssets, name);
+                    const selected = readVisibleDefaultOutfit(sceneAssets, name);
                     const sprite = selected.ok && pickOutfitSprite(selected.entry, '平和', sceneAssets);
                     return resolveGenerated(sprite?.url || firstUrl(Object.values(moods || {}).concat([(sceneAssets.statusAvatars || {})[name]])));
                 },
@@ -784,7 +872,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                     ? `<div class="igs-source-filter-note igs-card-skin-note">当前角色卡在主界面选定了「${esc(dialogSkinLabel(worldviewAssets.dialogSkin))}」，阅读这张卡时以此为准，上方选项仅对其他角色卡生效。<button type="button" class="igs-settings-action" data-action="card-dialog-skin-clear">跟随上方</button></div>`
                     : ''); },
             get gradientVeilFields() { return gradientVeilDialog ? '<div class="igs-gradient-veil-settings">' + field('readerSettings.gradientVeil.color', '黑幕颜色', colorInput('readerSettings.gradientVeil.color', reader.gradientVeil.color)) + field('readerSettings.gradientVeil.heightPercent', '渐变高度', selectInput('readerSettings.gradientVeil.heightPercent', reader.gradientVeil.heightPercent, [30, 40, 50, 60, 70].map((n) => [n, `${n}%`]))) + field('readerSettings.gradientVeil.opacity', '最大不透明度', selectInput('readerSettings.gradientVeil.opacity', reader.gradientVeil.opacity, [.4, .55, .7, .85, 1].map((n) => [n, `${Math.round(n * 100)}%`]))) + field('readerSettings.gradientVeil.speakerStyle', '姓名样式', selectInput('readerSettings.gradientVeil.speakerStyle', reader.gradientVeil.speakerStyle, [['default', '默认风格'], ['plain-text', '纯文字']])) + '</div>' : ''; },
-            get magicHouseField() { return reader.dialogSkin === DIALOG_SKIN_XIANXIA_INK ? field('readerSettings.xianxiaSpeaker', '姓名排布', selectInput('readerSettings.xianxiaSpeaker', reader.xianxiaSpeaker === 'center' ? 'center' : 'left', [['left', '左侧落款'], ['center', '居中（名字+剑气下划线）']])) : reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY ? field('readerSettings.magicHouse', resolveWorldview(bridge.sceneAssets) === 'magic' ? '学院配色' : '配色', selectInput('readerSettings.magicHouse', normalizeMagicHouse(reader.magicHouse), MAGIC_HOUSES.map((house) => [house.id, house.label]))) + (MAGIC_HOUSES.find((house) => house.id === normalizeMagicHouse(reader.magicHouse)).custom ? field('readerSettings.magicAccent', '装饰颜色', colorInput('readerSettings.magicAccent', normalizeMagicAccent(reader.magicAccent))) : '') : reader.dialogSkin === DIALOG_SKIN_HORROR_GORE || reader.dialogSkin === DIALOG_SKIN_HORROR_PSYCH ? field('readerSettings.horrorDreadCap', '恐怖强度上限', selectInput('readerSettings.horrorDreadCap', normalizeHorrorDreadCap(reader.horrorDreadCap), HORROR_DREAD_LEVELS.map((n) => [n, HORROR_DREAD_CAP_LABELS[n]]))) : ''; },
+            get magicHouseField() { return reader.dialogSkin === DIALOG_SKIN_XIANXIA_INK ? field('readerSettings.xianxiaSpeaker', '姓名排布', selectInput('readerSettings.xianxiaSpeaker', reader.xianxiaSpeaker === 'center' ? 'center' : 'left', [['left', '左侧落款'], ['center', '居中（名字+剑气下划线）']])) : reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY ? field('readerSettings.magicHouse', resolveWorldview(bridge.sceneAssets) === 'magic' ? '学院配色' : '配色', selectInput('readerSettings.magicHouse', magicHouseFor(reader.magicHouse, resolveWorldview(bridge.sceneAssets)), magicHouseChoices(resolveWorldview(bridge.sceneAssets)).map((house) => [house.id, house.label]))) + (MAGIC_HOUSES.find((house) => house.id === magicHouseFor(reader.magicHouse, resolveWorldview(bridge.sceneAssets))).custom ? field('readerSettings.magicAccent', '装饰颜色', colorInput('readerSettings.magicAccent', normalizeMagicAccent(reader.magicAccent))) : '') : reader.dialogSkin === DIALOG_SKIN_HORROR_GORE || reader.dialogSkin === DIALOG_SKIN_HORROR_PSYCH ? field('readerSettings.horrorDreadCap', '恐怖强度上限', selectInput('readerSettings.horrorDreadCap', normalizeHorrorDreadCap(reader.horrorDreadCap), HORROR_DREAD_LEVELS.map((n) => [n, HORROR_DREAD_CAP_LABELS[n]]))) : ''; },
             get classicDialogWidthPercentField() { return classicDialog ? field('readerSettings.classicDialogWidthPercent', '电脑端宽度', selectInput('readerSettings.classicDialogWidthPercent', reader.classicDialogWidthPercent, [60, 70, 80, 90, 100].map((n) => [n, `${n}%`]))) : ''; },
             // 「自适应」是 dialogAutoHeight 的入口（字少变矮），选它时高度比例保持不变；选具体比例即关掉自适应。
             get skinDialogScaleField() { return classicDialog || illustratedDialog ? field('readerSettings.skinDialogScale', '对话框高度', selectInput('readerSettings.skinDialogScale', reader.dialogAutoHeight === true && supportsDialogAutoHeight(reader.dialogSkin) ? 'auto' : reader.skinDialogScale, SKIN_DIALOG_SCALE_OPTIONS.map((n) => [n, n === 1 ? '原尺寸' : `${Math.round(n * 100)}%`]).concat(supportsDialogAutoHeight(reader.dialogSkin) ? [['auto', '自适应']] : []))) : ''; },
@@ -992,6 +1080,10 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             return pageTabs() + renderTemplate(getPageTemplate(page), parseValues());
         case 'stats':
             return pageTabs() + renderTemplate(getPageTemplate(page), statsValues());
+        case 'combat':
+            return pageTabs() + renderTemplate(getPageTemplate(page), combatValues());
+        case 'origin':
+            return pageTabs() + renderTemplate(getPageTemplate(page), originValues());
         case 'source':
         case 'kinds':
         case 'llm':
@@ -1019,6 +1111,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 scenes: `${sizeOf(assets.scenes)}个背景`,
                 ai: sources[normalizeImageSourceMode(imageApi.mode)] || '',
                 stats: normalizeStatsSettings(bridge.stats).enabled ? '已开启' : '未开启',
+                combat: BATTLE_MODE_LABELS[battleModeOf(reader)],
+                origin: normalizeOriginSettings(bridge.origin).enabled ? '已开启' : '未开启',
                 data: '备份 · 日志',
             };
             const storage = (options.global || globalThis).localStorage;

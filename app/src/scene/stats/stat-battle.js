@@ -1,17 +1,19 @@
-// 战斗整场速算（§6A）与打工检定（§4.2 work）。胜负、伤势、战利品由脚本决定；逐招动作由 AI 正文决定。
-import { rollStatCheck } from './stat-rng.js';
-import { applyBarDirective, checkModifiers, workIncomeTier } from './stat-bars.js';
+// 战斗整场速算（§6A、v2 §7.3）与打工检定（§4.2 work）。胜负、伤势、战利品由脚本决定；逐招动作由 AI 正文决定。
+// 掷骰走检定引擎：CoC 为对抗（主角反击时同级攻击方胜），D&D 为攻击检定对 AC、闪避为敏捷豁免。
+import { applyBarDirective, walletBalance, workIncomeTier } from './stat-bars.js';
 import { applyKeyEvent } from './stat-favor-events.js';
 import { matchSkill } from './stat-skill-match.js';
 import { DEFAULT_SPECIAL_SKILLS, clamp, withBars, withCharacter, withSkills } from './stat-state.js';
+import { COMBAT_SKILLS, DODGE_SKILLS } from './stat-registry.js';
+import { settleChallenge } from './stat-challenge.js';
+import { PROTAGONIST, bestCombatSkill, createEngine, profileOf, resolveCheck } from './stat-engine.js';
 
+export { COMBAT_SKILLS, DODGE_SKILLS };
 export const ENEMY_TABLE = Object.freeze({
-    杂兵: Object.freeze({ value: 35, rounds: 1, hurt: '轻伤', loot: '少量' }),
-    精英: Object.freeze({ value: 55, rounds: 2, hurt: '中伤', loot: '普通' }),
-    头目: Object.freeze({ value: 75, rounds: 3, hurt: '重伤', loot: '昂贵' }),
+    杂兵: Object.freeze({ value: 35, rounds: 1, hurt: '轻伤', loot: '少量', attack: 3, ac: 12, save: 12 }),
+    精英: Object.freeze({ value: 55, rounds: 2, hurt: '中伤', loot: '普通', attack: 5, ac: 14, save: 14 }),
+    头目: Object.freeze({ value: 75, rounds: 3, hurt: '重伤', loot: '昂贵', attack: 7, ac: 16, save: 16 }),
 });
-export const COMBAT_SKILLS = Object.freeze(['格斗', '射击', '法术', '力量', '敏捷']);
-export const DODGE_SKILLS = Object.freeze(['闪避', '敏捷']);
 export const DEFEAT_MONEY_LOSS = 0.2;
 const WIN_STAMINA = Object.freeze({ 大胜: -5, 胜: -10, 险胜: -15 });
 const DEFEAT_STAMINA = -30;
@@ -27,17 +29,6 @@ export function bestSkill(skills, names) {
     return best || { name: names[0], value: 50 };
 }
 
-function target(value, shift) {
-    return clamp(Math.round(value + shift), 1, 99);
-}
-
-// 一次对抗：双方各掷 d100 比成功等级，等级高者胜；同级判主角负（与 dice-check 默认平局规则一致）。
-function contest(mine, foe, mods, random) {
-    const me = rollStatCheck(mine, mods, random);
-    const enemy = rollStatCheck(foe, {}, random);
-    return { roll: me.roll, tier: me.tier, foeRoll: enemy.roll, foeTier: enemy.tier, win: me.level > enemy.level };
-}
-
 function outcomeOf(wins, rounds, dodged) {
     if (wins === rounds && dodged) return '大胜';
     if (wins === rounds || wins * 2 > rounds) return '胜';
@@ -45,30 +36,63 @@ function outcomeOf(wins, rounds, dodged) {
     return '败';
 }
 
-// 杂兵掷 1 次、精英 2 次、头目 3 次对抗，闪避单独掷一次；数量每多一个给 1 颗惩罚骰（最多 2），队友参战给 1 颗奖励骰。
-export function resolveBattle(state, { tier, count = 1, ally = null }, random) {
+// 敌人一方：已有角色卡的 NPC，D&D 的 AC 取 10 + 敏捷修正；CoC 用卡里最高的战斗技能对抗；否则按档位值。
+function foeProfile(engine, state, enemy, foeName) {
+    const sheet = foeName ? engine.sheets[foeName] : null;
+    if (sheet) {
+        if (engine.ruleset.ID === 'dnd5e') {
+            const dex = Number(profileOf(engine, state, foeName, '敏捷').value) || 50;
+            return { profile: null, ac: 10 + engine.ruleset.modOf(dex), save: enemy.save };
+        }
+        const profile = ['格斗', '射击', '武艺', '剑术', '魔法', '力量'].map((skill) => profileOf(engine, state, foeName, skill)).sort((a, b) => b.value - a.value)[0];
+        return { profile, ac: enemy.ac, save: enemy.save };
+    }
+    return { profile: { kind: 'skill', value: enemy.value, learned: true, attributeValue: enemy.value, rank: '普通人', entry: { attribute: '力量' } }, ac: enemy.ac, save: enemy.save };
+}
+
+// CoC：每回合主角最佳战斗技能对敌人对抗，同级算主角（反击方）胜；闪避单独掷一次。
+function cocRound(engine, state, attack, foe, mods, random) {
+    const me = resolveCheck(engine, state, { actor: PROTAGONIST, skill: attack.name, edge: mods.edge, ally: mods.ally }, random);
+    const enemy = engine.ruleset.resolve(foe.profile, { difficulty: '普通', edge: 0 }, engine.ruleset.rawRoll(random, 0));
+    const winner = engine.ruleset.contest(me, enemy, { tieWinner: 'left' });
+    return { roll: me.roll, tier: me.tier, foeRoll: enemy.roll, foeTier: enemy.tier, win: winner === 'left' };
+}
+
+// D&D：每回合主角攻击检定对敌人 AC；闪避为一次敏捷豁免，DC 按敌人档。
+function dndRound(engine, state, attack, foe, mods, random) {
+    const bonus = engine.ruleset.bonusOf(profileOf(engine, state, PROTAGONIST, attack.name));
+    const net = Math.sign(mods.edge + (mods.ally ? 1 : 0));
+    const r = engine.ruleset.attack(bonus, foe.ac, engine.ruleset.rawRoll(random), net);
+    return { roll: r.roll, tier: r.hit ? (r.crit ? '大成功' : '命中') : '未命中', total: r.total, ac: foe.ac, win: r.hit };
+}
+
+// 杂兵 1 回合、精英 2 回合、头目 3 回合；敌人每多一个给 1 颗惩罚骰 / 劣势，队友参战给奖励骰 / 优势。
+export function resolveBattle(state, { tier, count = 1, ally = null, foe: foeName = null }, random, engine = createEngine()) {
     const enemy = ENEMY_TABLE[tier];
-    const skills = state.protagonist.skills;
-    const attack = bestSkill(skills, COMBAT_SKILLS);
-    const dodgeSkill = bestSkill(skills, DODGE_SKILLS);
-    const base = checkModifiers(state.protagonist.bars);
-    const mods = { bonus: ally ? 1 : 0, penalty: base.penalty + Math.min(2, Math.max(0, count - 1)) };
-    const rounds = Array.from({ length: enemy.rounds }, () => contest(target(attack.value, base.targetShift), enemy.value, mods, random));
-    const dodge = rollStatCheck(target(dodgeSkill.value, base.targetShift), mods, random);
+    const attack = bestCombatSkill(engine, state);
+    const dodgeSkill = bestCombatSkill(engine, state, DODGE_SKILLS);
+    const mods = { edge: -Math.min(2, Math.max(0, count - 1)), ally: Boolean(ally) };
+    const foe = foeProfile(engine, state, enemy, foeName);
+    const dnd = engine.ruleset.ID === 'dnd5e';
+    const rounds = Array.from({ length: enemy.rounds }, () => (dnd ? dndRound(engine, state, attack, foe, mods, random) : cocRound(engine, state, attack, foe, mods, random)));
+    const dodge = resolveCheck(engine, state, { actor: PROTAGONIST, skill: dnd ? '敏捷' : dodgeSkill.name, edge: mods.edge, ally: mods.ally }, random);
+    const dodged = dnd ? dodge.total >= foe.save : dodge.success;
     const wins = rounds.filter((r) => r.win).length;
-    return { tier, count, ally, attack: attack.name, rounds, dodge: { roll: dodge.roll, success: dodge.success }, wins, outcome: outcomeOf(wins, rounds.length, dodge.success) };
+    return { tier, count, ally, attack: attack.name, rounds, dodge: { roll: dodge.roll, success: dodged }, wins, outcome: outcomeOf(wins, rounds.length, dodged), ruleset: engine.ruleset.ID };
 }
 
 function shiftBar(bars, key, delta, changes, note) {
     const from = Number(bars[key]) || 0;
-    const to = key === 'money' ? Math.max(0, from + delta) : clamp(from + delta, 0, 100);
+    const to = key === 'money' ? from + delta : clamp(from + delta, 0, 100);
     if (to === from) return bars;
     changes.push({ source: 'battle', target: '主角', key, from, to, note });
     return { ...bars, [key]: to };
 }
 
+// 伤势不再扣主角生命条：只把伤势档记进 flags.battleHurt，交战斗侧写入生命账本。
 function applyBar(bars, directive, ctx, note) {
-    const r = applyBarDirective(bars, directive, ctx.moneyTable);
+    const r = applyBarDirective(bars, directive, ctx.moneyTable, ctx.walletExtra);
+    if (r.hurt) ctx.flags.battleHurt = r.hurt;
     if (r.change) ctx.changes.push({ source: 'battle', target: '主角', key: r.change.key, from: r.change.from, to: r.change.to, note });
     return r.bars;
 }
@@ -80,14 +104,16 @@ function markSkill(state, name) {
 
 // 战败不会死亡：按敌人档受伤、体力 −30、丢失两成金钱；取胜按档消耗体力并拿战利品。并肩取胜算一次「共患难」关键事件。
 export function applyBattle(state, directive, ctx) {
-    const result = resolveBattle(state, directive, ctx.random);
+    const engine = ctx.engine || createEngine();
+    const result = resolveBattle(state, directive, ctx.random, engine);
     const enemy = ENEMY_TABLE[result.tier];
     const note = `战斗${result.outcome}`;
     let bars = state.protagonist.bars;
     if (result.outcome === '败') {
         bars = applyBar(bars, { kind: 'hurt', value: enemy.hurt }, ctx, note);
         bars = shiftBar(bars, 'stamina', DEFEAT_STAMINA, ctx.changes, note);
-        bars = shiftBar(bars, 'money', -Math.floor((Number(bars.money) || 0) * DEFEAT_MONEY_LOSS), ctx.changes, note);
+        // 两成按合并余额算（金钱 + 战斗积分），扣在数值侧金钱上。
+        bars = shiftBar(bars, 'money', -Math.floor(Math.max(0, walletBalance(bars, ctx.walletExtra)) * DEFEAT_MONEY_LOSS), ctx.changes, note);
     } else {
         bars = shiftBar(bars, 'stamina', WIN_STAMINA[result.outcome], ctx.changes, note);
         if (result.outcome === '险胜') bars = applyBar(bars, { kind: 'hurt', value: '轻伤' }, ctx, note);
@@ -96,8 +122,8 @@ export function applyBattle(state, directive, ctx) {
     let next = withBars(state, bars);
     if (result.outcome !== '败') next = markSkill(next, result.attack);
     if (result.ally && result.outcome !== '败' && next.characters[result.ally]) {
-        const charm = Number(next.protagonist.skills.魅力?.value) || 50;
-        const { character, result: ev } = applyKeyEvent(next.characters[result.ally], '共患难', { charm, random: ctx.random });
+        const roll = () => resolveCheck(engine, next, { actor: PROTAGONIST, skill: '魅力', toward: result.ally }, ctx.random);
+        const { character, result: ev } = applyKeyEvent(next.characters[result.ally], '共患难', { roll, random: ctx.random });
         if (ev.success) ctx.changes.push({ source: 'battle', target: result.ally, key: '好感', from: ev.gate, to: ev.gate + 1, note: '共患难突破' });
         ctx.events.push({ target: result.ally, ...ev });
         next = withCharacter(next, result.ally, character);
@@ -109,11 +135,11 @@ export function applyBattle(state, directive, ctx) {
 
 // 打工：按工作内容匹配技能，匹配不上用最高的特有属性；成功等级决定收入档，大失败没有收入。
 export function applyWork(state, directive, ctx) {
+    const engine = ctx.engine || createEngine();
     const skills = state.protagonist.skills;
     const matched = matchSkill(directive.value, { skills: Object.keys(skills) }).skill;
     const skill = matched || bestSkill(skills, DEFAULT_SPECIAL_SKILLS).name;
-    const base = checkModifiers(state.protagonist.bars);
-    const check = rollStatCheck(target(Number(skills[skill]?.value) || 50, base.targetShift), { penalty: base.penalty }, ctx.random);
+    const check = resolveCheck(engine, state, { actor: PROTAGONIST, skill }, ctx.random);
     const income = workIncomeTier(check.tier);
     const note = `打工${check.tier}`;
     let bars = state.protagonist.bars;
@@ -126,12 +152,12 @@ export function applyWork(state, directive, ctx) {
     return next;
 }
 
-// 一楼最多一场战斗、一次打工。
+// 一楼最多一场战斗、一次打工、一场日常挑战。
 export function settleCombat(state, directives, ctx) {
     let next = state;
     const battle = directives.find((d) => d.kind === 'battle');
     const work = directives.find((d) => d.kind === 'work');
     if (battle) next = applyBattle(next, battle, ctx);
     if (work) next = applyWork(next, work, ctx);
-    return next;
+    return settleChallenge(next, directives, ctx);
 }

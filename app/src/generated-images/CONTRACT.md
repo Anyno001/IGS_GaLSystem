@@ -113,6 +113,18 @@
 - 标记放在完整结构和整行段落结束后，独占一行，不拆对白、心理话、其他括号指令、HTML 或代码块；`<content>` 内的点不能挪到容器外。未闭合结构没有安全落点时跳过，不强行把标记写入半截标签。
 - 同一结构内的多个锚点保留原锚句顺序、槽号及图片绑定。旧标记重新规划前先规范布局，再剥离标记；模型规划、图片生成与来源插件接口保持原样。
 
+## NAI5 Full Medium
+
+- `bridge.autoIllustration.nai.effort` 为 `high` / `medium`，缺省与旧模型预设为 high。`nai-effort.js` 统一按最终用途模型转换，不修改持久化的原步数、采样器和生图间隔。
+- V5 Full Medium 实际发送 `nai-diffusion-5-full-medium`，infill 使用 `nai-diffusion-5-full-medium-inpainting`；固定 14 步及 `k_euler_ancestral`，省略 `cfg_rescale` 和 `skip_cfg_above_sigma`。显式 Medium 专模也遵守此约束；其它型号沿用原请求形状。
+- 设置器按主模型显示生效参数并锁定 Medium 的步数与采样器，切回 High 恢复原值；分用途覆盖先于档位转换。实际请求和快照、计时统一记录实际模型，不通过换提示词模拟省算力。真实效果与消耗未验证。
+
+## NAI 生图间隔
+
+- `bridge.autoIllustration.nai.minIntervalMs` 默认 2000 毫秒，范围 0–60000；0 不额外等待。同密钥的一项生成或 infill 实际结束后，下一项遵守最小间隔；不同密钥可并行，当前运行实例外的请求不受控。
+- 等待中取消不发请求、不制造新的完成时间；在途取消仍等发送实际结束才释放凭据。上游发送和 429 重试预算从实际开始发送计时，不包括本机排队和间隔。
+- 通过既有 NAI 设置、模型预设与即时保存入口配置，不把间隔字段发送给 NAI。外部生图插件沿用自身调度。后续云端队列与 Medium 的协议对照及分批计划见 `docs/NAI_GENERATION_CONTROLS.md`。
+
 ## 职责
 
 - 管理生图 provider。
@@ -131,6 +143,7 @@
 - 正文字数门槛（`illustration/floor-body-length.js`）：自动插图与素材补全自动触发时，先按 `bridge.sourceFilter`（和阅读器同一套正文保留 / 排除标签，`scene/message-source.js` 的 `readerBodyText`）取出正文；台词 / 心理只数台词本身，指令和空白不算。不足 `MIN_AUTO_IMAGE_BODY_CHARS`（50）字返回 `body-too-short`，日志写一行原因，不记成已处理（楼层「继续」写长后下次渲染照常处理）；手动生成不受限。
 - 素材补全（`illustration/asset-generation-service.js`）：场景素材模式开启且对应开关打开时，最新 AI 楼层出现素材库匹配不上的场景或无名角色 → 副 LLM 写内容 tag（`asset-prompt.js`）→ NAI 生成（立绘 V5 走原生透明底，其余模型浅灰底 + `media/alpha-matte.js` 抠图）→ 存为本聊天临时素材，状态 `review`，等待楼层结束时由阅读器询问用户加入素材库 / 仅本聊天 / 丢弃。
 - 物品图（`illustration/item-image-service.js`，设置 `bridge.itemImages`，默认关闭）：关闭时入口短路，不读表、不联网。候选 = 本楼 `[igs-fx:item]` 标签物品在前 + 物品表（`data/shujuku/item-catalog.js`）在后，按归一化名称合并；缺图者每层最多 `maxPerFloor`（默认 3）件，串行队列 + 按物品键在途锁，重复事件不重复计费。存入 `igs-generated-assets`，`type: 'item'`、状态 `ready`（不进入素材审核与临时素材列表），按聊天隔离；重画失败保留原图，`discarded` 不自动重补。手动「补全物品图」单次最多 10 件。提示词见 `illustration/item-prompt.js`（副 LLM 失败时仅纯英文名兜底，中文名记失败待重试）；透明底沿用立绘分支。
+- 卡面图（`illustration/card-image-service.js`，卡牌战斗 v2 阶段 4）：只有 `generate({ cardId, name, description })`（构筑面板「生成卡面」按钮）发请求，一次只为一张卡写词、出图各一次；不跟随 `itemImages.enabled`，尺寸跟随 `itemImages.size`。写词沿用物品图提示词与 `imagePrompt.task:'item'`，出图 `imageKind:'item'`，抠图与透明底判定同物品图。存入 `igs-generated-assets`，`type:'card'`、键 `chatId|card|卡ID`、状态 `ready`，按聊天隔离，不写 shujuku。存储与物品图共用 `withTavernGeneratedAssetFiles` 包装：酒馆接口可用时记录随 `igs-asset-records.json` 备份、图片上传到 `user/images/igs-media/`，同一酒馆的其他浏览器可读回；没有酒馆接口时只在本机 IndexedDB。同卡在途复用同一任务，任务串行；换聊天或停止后结果作废、不落库；重画失败保留旧图，成功后删旧图。失败原因只留会话内存（`stateFor(cardId).error`），重试成功清除。`imageUrlFor` / `stateFor` 只读本地：首次取图分页读一次本聊天 ready 记录建索引，图片未载入时后台补载并发 `igs:card-image-updated`；元数据缓存登记名 `card-records`，与物品图共用 `createItemRecordCache`（`owner` 参数区分）。
 
 - 旧格式角色 DNA（`scene/character-dna.js`）进入提示词链：立绘补全按 `triggerWords → identity → defaultAppearance → 副 LLM tag → 模板` 合并，负向插在模板负面词之后；CG 只合并 `triggerWords → identity` 与 DNA `negative`，`defaultAppearance` 只交给 planner 作默认资料。planner 输出 `char: 角色名 | x,y | tags`，旧格式 `char: x,y | tags` 仍可解析；无名角色只在「本张单人且上下文唯一角色」时绑定，否则不注入并上报 warning。数据库生图模式下素材经既有 `meta.userPrompts` 传递合并结果；剧情 CG 使用插件返回的 caption 原样出图，不把 DNA 拼进 char caption。智绘姬链路不变。
 - 素材服务新增 `getEditableImage(imageId)` 与 `saveMatteEdit(imageId, expectedRevision, patch)`，按 revision 原子更新并发出 `matte-edited` 事件。
@@ -178,3 +191,10 @@ Provider 负责发请求和解析返回；Request Builder 负责把通用场景�
 - 停止、销毁和清缓存后不接受旧任务像素或更新事件。外部插件图片保持外部所有权，显示预热复用浏览器 HTTP 缓存，不复制为另一份 Blob 磁盘缓存。
 
 v0.36.44：当前聊天临时素材/物品元数据共用媒体层 `asset-record-cache.js`，记录与仅含键的分页索引共享中央注册表中的所有者预算。同步展示 miss 按需补载，生图前的缺失确认、入库/丢弃/重画必须 fresh 查询完整权威记录；缓存容量只能影响驻留，不能停止补图或把淘汰当缺失。查询失败保留已有引用并暂停该次操作，待确认页的重新读取可恢复当前聊天的暂停补图；手动物品补全可再次点击。聊天切换、清理、销毁以及查询期间的新写入使旧结果失效。CG 状态及缺图 TTL 仍由注册表管理。消息关联保存资源键，读取时解析当前显示 URL，失效则重新向消息/provider 取图。bootstrap 不手动逐个调用服务清缓存。
+
+## NAI 云端队列
+
+- `nai.cloudQueue = { enabled: false, endpoint: "https://st-chatu-novelai-queue.hf.space", timeoutMs: 180000 }`，只在显式开启后联网；按用户要求，缺失、空白或清空地址统一使用智绘姬默认公共节点，自定义地址保留。使用与智绘姬兼容的 join / my-turn / complete / leave 协议，仅发送标准 SHA-256 密钥标识和随机排队身份，不传 Key 原文、Authorization、提示词或图片。
+- 所有内置 NAI 用途与 infill 在本机串行及冷却后统一取号，排队超时与生图超时分离。队列错误、协议缺 token、失锁均停止发送，不回退直发；取消和过期目标退出，迟到加入回执再次退出。日志只报告状态、位置与耗时。
+- 租约保存在单个任务闭包；NAI 真正结束后 complete，取消不先释放忽略 abort 的在途发送，网络状态未知时由服务端过期回收。释放失败保留图片结果。未发过 NAI 的任务不更新本机完成冷却时间。
+- 公开参考服务源码锁仅 15 秒，无续租；发送与重试前确认 token 不能阻止一张慢图超过租约后与他人并发。所有共用者须使用同 Key 和节点，绕过队列的来源仍可能触发 429。真实多人服务验收另行手测，不能用模拟结果保证互斥。

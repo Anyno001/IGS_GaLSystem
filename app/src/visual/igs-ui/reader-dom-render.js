@@ -1,9 +1,10 @@
 import { syncLive2dStage } from './live2d-stage.js';
-import { magicHouseVars } from './dialog-theme-css-skins.js';
+import { magicHouseFor, magicHouseVars } from './dialog-theme-css-skins.js';
 import { mermaidToneVars } from './dialog-theme-mermaid.js';
 import { resolveSpeakerMagicHouse } from './magic-house.js';
 import { normalizeSkinDialogScale } from './dialog-skin-frame.js';
 import { RECORD_ICONS } from './record-icons.js';
+import { normalizeCombatExpansionSettings } from './combat-settings.js';
 import { ORIGINAL_READER_ICONS, ORIGINAL_READER_TOOLBAR_BUTTONS } from './original-reader-source.js';
 import { DIALOG_ONLY_BUTTONS, TOOLBAR_ACTIONS } from './reader-host-constants.js';
 import { normalizeDialogBarAlign, normalizeDialogBarButtons, normalizeToolbarSplit, applySpriteDisplayScale, renderDialogueHtml, resolveActiveTheme, resolveSpriteLayout, spriteHeightLayoutKey } from './settings-normalize.js';
@@ -24,8 +25,11 @@ import { normalizeFxSoundSettings } from './fx-settings.js';
 import { normalizeSpriteMotionSettings, normalizeStageCastSettings } from './stage-direction-settings.js';
 import { applyFxToDom, repositionFxSymbols } from './fx-runtime.js';
 import { applyDanmakuToDom } from './danmaku-runtime.js';
+import { feedMarksForSnapshot } from './feed-extras.js';
 import { applyItemMentionMarkup, itemMentionsOf, renderItemFx, showItemMention } from './fx-item-render.js';
 import { renderBattleFx } from './fx-battle-render.js';
+import { renderGrowthFx } from './combat-growth-fx.js';
+import { renderCheckBadges } from './combat-check-badge.js';
 import { repositionBattleImpacts } from './fx-battle.js';
 import { renderDailyFx } from './fx-daily.js';
 import { enabledPackIds } from './fx-daily-model.js';
@@ -49,6 +53,7 @@ import { applySceneAudio } from './scene-audio.js';
 import { applyBgmNoteToDom } from './bgm-note.js';
 import { isConfessionLine } from './bgm-library.js';
 import { applyTextFxMarkup, armTextFx, disarmTextFx } from './text-fx.js';
+import { dialogTextEffectCss } from './dialog-text-effect.js';
 import { fitBilingualRuby, isBilingualRuby, normalizeBilingualSettings, renderBilingualHtml, resolveBilingualDisplay } from './bilingual-text.js';
 import { getReferenceDialogTypography, preloadDialogFonts, resolveDialogFontMetrics } from './dialog-theme-typography.js';
 import { loadCustomFonts, registerCustomFonts } from '../../media/custom-fonts.js';
@@ -503,6 +508,26 @@ export function applyToolbarState(root, current) {
     if (!ttsConfig.enabled || (ttsConfig.provider !== 'api' && !ttsConfig.narratorApi.enabled)) hiddenSet.add('tts-reroll');
     // 「小游戏」要等独立的小游戏脚本装上才有东西可玩。
     if (!getWaitStageGamePack()) hiddenSet.add('mini-games');
+    // 「人物状态」在卡牌战斗扩展开启时显示；只开数值系统、本聊天为手动建档时也显示（P8c，只有建档页）。用户的排序、隐藏与固定照常生效。
+    const buildEntry = typeof current.buildEntry === 'function' && current.buildEntry() === true;
+    if (!normalizeCombatExpansionSettings(readerSettings.combatExpansion).enabled && !buildEntry) hiddenSet.add('combat-status');
+    // 窄屏阅读模式：列表盖住大半画面，「隐藏对话框」总要放出来，才能看清背景和 CG；「自动播放」也总放出来（一批出完、念完再出下一批）。
+    if (current.logReaderActive) { hiddenSet.delete('hide'); hiddenSet.delete('auto-play'); }
+    // 「连续播放」开关只在窄屏阅读模式出现。
+    if (!current.logReaderActive) hiddenSet.add('log-chain');
+    const chainButton = root.querySelector('#igs-btn-log-chain');
+    if (chainButton) {
+        const on = (readerSettings.logReader || {}).chain !== false;
+        const key = on ? 'on' : 'off';
+        if (chainButton.getAttribute('data-igs-icon') !== key) {
+            chainButton.innerHTML = on ? ORIGINAL_READER_ICONS.chainOn : ORIGINAL_READER_ICONS.chainOff;
+            chainButton.setAttribute('data-igs-icon', key);
+        }
+        const title = on ? '连续播放：开（点一下出一批）' : '连续播放：关（点一下只出一条）';
+        setAttrIfChanged(chainButton, 'title', title);
+        setAttrIfChanged(chainButton, 'aria-label', title);
+        setAttrIfChanged(chainButton, 'aria-pressed', String(on));
+    }
     const embeddedMode = current.snapshot && current.snapshot.mode === 'embedded';
     const defaultChrome = Boolean(root.classList && root.classList.contains('igs-default-reader-chrome'));
     // 默认顶部固定：只有明确选了「紧贴对话框」才是 float。
@@ -787,7 +812,7 @@ export function applyReaderSettingsToDom(root, snapshot, current, refs = {}) {
         const content = snapshot.content || {};
         const byCharacter = readerSettings._worldview === 'magic' && content.textType !== 'narration' && content.textType !== 'system';
         const speaker = byCharacter ? (content.spriteCharacter || content.speaker) : '';
-        const house = resolveSpeakerMagicHouse(readerSettings._sceneAssets, speaker, readerSettings.magicHouse);
+        const house = magicHouseFor(resolveSpeakerMagicHouse(readerSettings._sceneAssets, speaker, readerSettings.magicHouse), readerSettings._worldview);
         for (const [name, value] of Object.entries(magicHouseVars(house, readerSettings.magicAccent))) root.style.setProperty(name, value);
         for (const [name, value] of Object.entries(mermaidToneVars(readerSettings.mermaidTone, readerSettings.mermaidAccent))) root.style.setProperty(name, value);
     }
@@ -979,8 +1004,10 @@ const statusHudKeys = new WeakMap();
 function statusHudKey(root, snapshot, hud, radius) {
     const hudSettings = snapshot && snapshot.readerSettings && snapshot.readerSettings.statusHud;
     const optionsVisible = Boolean(root.classList && root.classList.contains('igs-options-visible'));
+    // 资料菜单的「人物状态」项随扩展开关增减，开关必须进重建签名。
+    const combat = normalizeCombatExpansionSettings(snapshot && snapshot.readerSettings && snapshot.readerSettings.combatExpansion).enabled;
     try {
-        return JSON.stringify([hud || null, hudSettings ? [hudSettings.collapsed, hudSettings.size] : null, optionsVisible, radius]);
+        return JSON.stringify([hud || null, hudSettings ? [hudSettings.collapsed, hudSettings.size] : null, optionsVisible, radius, combat]);
     } catch {
         return '';
     }
@@ -1026,8 +1053,9 @@ export function applyStatusHudToDom(root, snapshot) {
     const hasEmotion = Boolean(hud && hud.emotion);
     const hasLocation = Boolean(hud && hud.location);
     const hasMetrics = Boolean(hud && Array.isArray(hud.metrics) && hud.metrics.length);
+    const heroRows = hud && hud.hero && Array.isArray(hud.hero.metrics) ? hud.hero.metrics.slice(0, 4) : [];
     const grayscaleBars = Boolean(hud && hud.barColor === 'grayscale');
-    const shouldShow = Boolean(hud && hud.enabled && (hud.character || hasLocation));
+    const shouldShow = Boolean(hud && hud.enabled && (hud.character || hasLocation || heroRows.length));
     if (globalThis.__IGS_HUD_DEBUG__) {
         console.log('[HUD-PROBE]', JSON.stringify({ hud: hud ? { enabled: hud.enabled, character: hud.character, emotion: hud.emotion, location: hud.location, avatar: Boolean(hud.avatar), metrics: hud.metrics && hud.metrics.length } : null, hasEmotion, hasLocation, hasMetrics, shouldShow }));
     }
@@ -1041,7 +1069,7 @@ export function applyStatusHudToDom(root, snapshot) {
     if (hud.background === 'dialog' && hasMetrics) host.classList.add('igs-hud-bg-dialog');
     if (root.classList && root.classList.contains('igs-options-visible')) host.classList.add('igs-hud-suppressed');
     // 仅头像/情绪/地点、无 HUD 条时挂修饰类，anchor 恢复加菜单前的列式几何，情绪与头像间距回到旧值；有 HUD 条时保持现状。
-    host.classList.toggle('igs-hud-no-metrics', !hasMetrics);
+    host.classList.toggle('igs-hud-no-metrics', !hasMetrics && !heroRows.length);
     host.classList.toggle('igs-hud-character-emotion-only', Boolean(hud && hud.character && hasEmotion && !hasLocation && !hasMetrics));
     host.classList.toggle('igs-hud-character-emotion-with-metrics', Boolean(hud && hud.character && hasEmotion && hasMetrics));
     if (hudSettings && hudSettings.collapsed) host.classList.add('igs-hud-collapsed');
@@ -1116,8 +1144,10 @@ export function applyStatusHudToDom(root, snapshot) {
     if (!recordMenuOpen) menu.setAttribute('hidden', '');
     // 好感总览入口只在当前 HUD 已有好感度条时出现；数据仍来自状态栏所选表。
     const hasFavorBar = hasMetrics && hud.metrics.some(metric => /好感/.test(String(metric?.label || '')));
-    const items = ['map', 'diary', 'inventory', 'relationships', ...(hasFavorBar ? ['favor'] : [])];
-    for (const [category, label] of items.map(name => [name, ({ map: '地图', diary: '日记', inventory: '物品', relationships: '人际关系', favor: '好感度' })[name]])) {
+    // 「人物状态」项只在卡牌战斗扩展开启时出现。
+    const hasCombat = normalizeCombatExpansionSettings(snapshot && snapshot.readerSettings && snapshot.readerSettings.combatExpansion).enabled;
+    const items = ['map', 'diary', 'inventory', 'relationships', ...(hasFavorBar ? ['favor'] : []), ...(hasCombat ? ['combat'] : [])];
+    for (const [category, label] of items.map(name => [name, ({ map: '地图', diary: '日记', inventory: '物品', relationships: '人际关系', favor: '好感度', combat: '人物状态' })[name]])) {
         const button = doc.createElement('button');
         button.type = 'button';
         button.className = 'igs-hud-entry-item';
@@ -1131,36 +1161,46 @@ export function applyStatusHudToDom(root, snapshot) {
     identity.appendChild(entryAnchor);
     host.appendChild(identity);
 
-    const metrics = doc.createElement('div');
-    metrics.className = 'igs-hud-metrics';
-    const rows = hasMetrics ? hud.metrics.slice(0, 4) : [];
-    for (const metric of rows) {
-        const row = doc.createElement('div');
-        row.className = 'igs-hud-metric';
-        const label = doc.createElement('span');
-        label.className = 'igs-hud-metric-label';
-        label.textContent = metric.label;
-        const track = doc.createElement('div');
-        track.className = 'igs-hud-track';
-        const fill = doc.createElement('div');
-        fill.className = 'igs-hud-fill';
-        const color = STATUS_HUD_COLOR_VARS[metric.colorKey] || STATUS_HUD_COLOR_VARS['slot-1'];
-        fill.style.backgroundImage = grayscaleBars
-            ? 'linear-gradient(90deg, rgba(255,255,255,.46), rgba(255,255,255,.86))'
-            : `linear-gradient(90deg, color-mix(in srgb, ${color} 42%, #ffffff), ${color})`;
-        fill.style.width = `${Math.max(0, Math.min(100, Number(metric.percent) || 0))}%`;
-        // 主题 HUD 用这个变量重绘填充；灰白模式交给主题自己的中性色。
-        fill.style.setProperty('--igs-hud-fill-color', grayscaleBars ? 'var(--igs-hud-fill-neutral,rgba(255,255,255,.8))' : color);
-        track.appendChild(fill);
-        const value = doc.createElement('span');
-        value.className = 'igs-hud-metric-value';
-        value.textContent = metric.display;
-        row.appendChild(label);
-        row.appendChild(track);
-        row.appendChild(value);
-        metrics.appendChild(row);
+    const appendMetricRows = (metrics, rows) => {
+        for (const metric of rows) {
+            const row = doc.createElement('div');
+            row.className = 'igs-hud-metric';
+            const label = doc.createElement('span');
+            label.className = 'igs-hud-metric-label';
+            label.textContent = metric.label;
+            const track = doc.createElement('div');
+            track.className = 'igs-hud-track';
+            const fill = doc.createElement('div');
+            fill.className = 'igs-hud-fill';
+            const color = STATUS_HUD_COLOR_VARS[metric.colorKey] || STATUS_HUD_COLOR_VARS['slot-1'];
+            fill.style.backgroundImage = grayscaleBars
+                ? 'linear-gradient(90deg, rgba(255,255,255,.46), rgba(255,255,255,.86))'
+                : `linear-gradient(90deg, color-mix(in srgb, ${color} 42%, #ffffff), ${color})`;
+            fill.style.width = `${Math.max(0, Math.min(100, Number(metric.percent) || 0))}%`;
+            // 主题 HUD 用这个变量重绘填充；灰白模式交给主题自己的中性色。
+            fill.style.setProperty('--igs-hud-fill-color', grayscaleBars ? 'var(--igs-hud-fill-neutral,rgba(255,255,255,.8))' : color);
+            track.appendChild(fill);
+            const value = doc.createElement('span');
+            value.className = 'igs-hud-metric-value';
+            value.textContent = metric.display;
+            row.appendChild(label);
+            row.appendChild(track);
+            row.appendChild(value);
+            metrics.appendChild(row);
+        }
+    };
+    if (heroRows.length) {
+        const hero = doc.createElement('div');
+        hero.className = 'igs-hud-metrics igs-hud-hero';
+        appendMetricRows(hero, heroRows);
+        host.appendChild(hero);
     }
-    host.appendChild(metrics);
+    if (hasMetrics || !heroRows.length) {
+        const metrics = doc.createElement('div');
+        metrics.className = 'igs-hud-metrics';
+        appendMetricRows(metrics, hasMetrics ? hud.metrics.slice(0, 4) : []);
+        host.appendChild(metrics);
+    }
     const toggle = doc.createElement('button');
     toggle.className = 'igs-icon-btn igs-hud-toggle';
     toggle.setAttribute('data-act', 'toggle-status-hud');
@@ -1414,6 +1454,9 @@ export function syncSpriteTextWait(current, text, { page, pending = false, sched
 }
 
 const ROOT_TOGGLED_CLASSES = new Set(['igs-default-reader-chrome', 'igs-gradient-veil-active', 'igs-scene-nsfw']);
+// 盖住舞台的面板（资料 / 地图 / 战斗 / 卡组构筑共用 igs-record-screen-open，楼层目录用 igs-turn-index-open）自己挂在根节点上的开关类，
+// 不在快照里；整串改写类名时必须原样保留，否则面板打开期间一次重渲染就会让工具栏、对话层、状态栏重新露出来。
+const PANEL_OPEN_CLASSES = Object.freeze(['igs-record-screen-open', 'igs-turn-index-open']);
 
 export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     const comicActive = isComicModeActive(snapshot.readerSettings);
@@ -1430,6 +1473,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
     // applyReaderSettingsToDom 随后还会 toggle 这两个类：先按同样条件带上，免得每次翻页先删后加、整页样式失效。
     if (snapshot.mode !== 'embedded' && snapshot.readerSettings.toolbarDock !== 'float') rootClasses.push('igs-toolbar-top');
     if (snapshot.readerSettings.cinemaBars === true) rootClasses.push('igs-cinema-bars');
+    if (root.classList) for (const name of PANEL_OPEN_CLASSES) if (root.classList.contains(name)) rootClasses.push(name);
     const rootClassName = rootClasses.join(' ');
     if (root.className !== rootClassName) root.className = rootClassName;
     root.setAttribute('data-igs-igs-ui', 'true');
@@ -1942,25 +1986,10 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         }
         applyDialogTextSize(textEl, snapshot.readerSettings.fontSize);
         textEl.style.fontWeight = snapshot.readerSettings.dialogFontWeight == null ? '' : String(snapshot.readerSettings.dialogFontWeight);
-        const textEffect = snapshot.readerSettings.dialogTextEffect;
-        const effectColor = snapshot.readerSettings.dialogTextEffectColor;
-        const effectStrength = Number(snapshot.readerSettings.dialogTextEffectStrength);
-        const effectSize = Number(snapshot.readerSettings.dialogTextEffectSize);
-        if ((textEffect === 'outline' || textEffect === 'shadow')
-            && /^#[0-9a-fA-F]{6}$/.test(effectColor)
-            && Number.isFinite(effectStrength) && Number.isFinite(effectSize)) {
-            const rgb = [1, 3, 5].map((index) => parseInt(effectColor.slice(index, index + 2), 16)).join(',');
-            const ink = `rgba(${rgb},${Math.max(5, Math.min(50, effectStrength)) / 100})`;
-            const size = Math.max(0.4, Math.min(2, effectSize));
-            // 先绘制描边再绘制填充：内侧半圈由原字色盖住，描边只在字形外侧可见。
-            textEl.style.paintOrder = textEffect === 'outline' ? 'stroke fill' : '';
-            textEl.style.webkitTextStroke = textEffect === 'outline' ? `${size * 2}px ${ink}` : '';
-            textEl.style.textShadow = textEffect === 'shadow' ? `0 ${size * 1.25}px ${size * 2.5}px ${ink}` : 'none';
-        } else {
-            textEl.style.paintOrder = '';
-            textEl.style.webkitTextStroke = '';
-            textEl.style.textShadow = '';
-        }
+        const textEffect = dialogTextEffectCss(snapshot.readerSettings);
+        textEl.style.paintOrder = textEffect.paintOrder;
+        textEl.style.webkitTextStroke = textEffect.stroke;
+        textEl.style.textShadow = textEffect.shadow || (textEffect.stroke ? 'none' : '');
         textEl.style.marginTop = '';
         textEl.style.paddingTop = '';
         const isNarration = textType === 'narration';
@@ -2039,16 +2068,23 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         playSfx: () => playCameraImpactSfx(normalizeFxSoundSettings(snapshot.readerSettings && snapshot.readerSettings.fxSound)),
     });
     const fxTheme = resolveActiveTheme(snapshot);
+    // 社区手机里牵涉到在场角色的新帖：该角色头顶冒一个漫符（已有陪衬反应符号的角色不重复）。
+    const feedMarks = feedMarksForSnapshot(snapshot, { userName: ctx.userName, speakerKey: castSpeakerKey, members: castFxTargets.map((t) => t.character) })
+        .filter((mark) => !castReactMarks.some((m) => m.character === mark.character));
     const fxResult = applyFxToDom(root, snapshot, {
         sprite: fxSprite,
         cast: castFxTargets,
-        castMarks: castReactMarks,
+        castMarks: feedMarks.length ? [...castReactMarks, ...feedMarks] : castReactMarks,
         resolveAssetUrl,
         theme: fxTheme,
         userName: ctx.userName,
     });
     // 获得物品演出：默认关闭；图片只读本聊天本地缓存，同页重绘不重播。
     renderItemFx(root, snapshot, { resolveItemImage: ctx.resolveItemImage, chatId: ctx.chatId, theme: fxTheme });
+    // 卡牌战斗成长演出：只播已入库的成长事件，同页重绘不重播。
+    renderGrowthFx(root, snapshot);
+    // 正文 d20 判定徽记：只显示程序复算结果，本页常驻，换页撤下。
+    renderCheckBadges(root, snapshot);
     // 战斗演出：默认关闭；只读 igs-fx:battle / hit 标签，不显示数值。
     renderBattleFx(root, snapshot, {
         chatId: ctx.chatId,
@@ -2057,10 +2093,14 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
         cast: castFxTargets,
         resolveAssetUrl,
     });
-    const dailyFxResult = renderDailyFx(root, snapshot, { onPhoto: ctx.onDailyPhoto, sprite: fxSprite, cast: castFxTargets });
+    // 照片记下拍摄时场景是否 NSFW，锁屏壁纸只用明确不是 NSFW 的照片。
+    const onDailyPhoto = typeof ctx.onDailyPhoto === 'function'
+        ? (photo) => ctx.onDailyPhoto({ ...photo, nsfw: Boolean(snapshot.content && (snapshot.content.sceneNsfw === true || snapshot.content.cgNsfw === true)) })
+        : ctx.onDailyPhoto;
+    const dailyFxResult = renderDailyFx(root, snapshot, { onPhoto: onDailyPhoto, sprite: fxSprite, cast: castFxTargets });
     // 弹幕：直播间 / 观众弹幕 / 内心弹幕，默认全关，全关时不建层。
     // userName 为用户角色名：直播主播名与之相同时自动切主播视角。
-    applyDanmakuToDom(root, snapshot, { autoPlay: Boolean(current && current.autoPlay && current.autoPlay.enabled), sprite: fxSprite, resolveAssetUrl, userName: ctx.userName, chatId: ctx.chatId, onLivePortraitMove: ctx.onLivePortraitMove });
+    applyDanmakuToDom(root, snapshot, { autoPlay: Boolean(current && current.autoPlay && current.autoPlay.enabled), sprite: fxSprite, resolveAssetUrl, userName: ctx.userName, chatId: ctx.chatId, onLivePortraitMove: ctx.onLivePortraitMove, albumWallUrl: ctx.albumWallUrl });
     applyHtmlCardToDom(root, snapshot.content, ctx);
     applyChatToDom(root, snapshot, ctx);
     const effectLayer = root.querySelector('#igs-effect-layer');
@@ -2337,6 +2377,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 || event.target.closest('#igs-dialog-bar')
                 || event.target.closest('#igs-gen-strip')
                 || event.target.closest('#igs-missed-hint')
+                || event.target.closest('#igs-stats-chip')
                 || event.target.closest('#igs-ctrl-bar')
                 || event.target.closest('#igs-settings')
             )) {

@@ -7,8 +7,11 @@ export const STAMINA_EVENTS = Object.freeze(['轻', '中', '重', '熬夜', '受
 export const MONEY_FLOWS = Object.freeze(['收入', '花费']);
 export const MONEY_TIERS = Object.freeze(['少量', '普通', '昂贵', '巨额']);
 export const HURT_TIERS = Object.freeze(['轻伤', '中伤', '重伤']);
+// 伤势档占最大生命的百分比；伤势只交给战斗账本记录，不再扣数值侧生命条。
+export const HURT_PCT = Object.freeze({ 轻伤: 15, 中伤: 30, 重伤: 50 });
 export const ENEMY_TIERS = Object.freeze(['杂兵', '精英', '头目']);
 export const KEY_EVENTS = Object.freeze(['约会', '告白', '共患难']);
+export const ROLL_DIFFICULTIES = Object.freeze(['简单', '普通', '困难', '极难']);
 
 // 维度类标签：英文名与中文名都映射到规范维度名。
 export const DIM_KINDS = Object.freeze({ trust: '信任', 信任: '信任', know: '了解', 了解: '了解', desire: '欲望', 欲望: '欲望' });
@@ -24,6 +27,7 @@ const SYNONYMS = Object.freeze({
     hurt: { 擦伤: '轻伤', 轻: '轻伤', 中: '中伤', 重: '重伤' },
     enemy: { 小怪: '杂兵', 喽啰: '杂兵', 强敌: '精英', boss: '头目', 首领: '头目' },
     event: { 表白: '告白', 患难: '共患难', 并肩作战: '共患难' },
+    difficulty: { 容易: '简单', 一般: '普通', 中等: '普通', 难: '困难', 较难: '困难', 很难: '极难', 极其困难: '极难', 不可能: '极难' },
 });
 
 const NUMERIC = /[0-9０-９+＋\-－%％]/;

@@ -176,15 +176,25 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
             return { ok: false, reason: 'missing-readable-input' };
         },
 
-        async typeAndSend(text) {
+        // matches 可选：未派发时按稳定身份认领回执（如战报 ID）。酒馆落楼前可能经正则 / 宏改写正文。
+        // 派发后认领基线之后的首条新用户楼，兼容数据库整体改写正文；仍受聊天身份和用户楼过滤约束。
+        async typeAndSend(text, { matches } = {}) {
             const before = getChatMessageEntries(globalObject);
             const afterId = before.reduce((last, entry) => Math.max(last, Number(entry.id)), -1);
             const chat = getSillyTavernContext(globalObject);
             const chatId = chat?.getCurrentChatId?.() ?? chat?.chatId;
             let dispatched = false;
+            const claims = (body) => {
+                if (dispatched) return true;
+                if (typeof matches === 'function') {
+                    try { return matches(body) === true; } catch (error) { return false; }
+                }
+                return body.trim() === String(text).trim();
+            };
             const receipt = () => getChatMessageEntries(globalObject).find(entry => Number(entry.id) > afterId
                 && (entry.message?.is_user || entry.message?.role === 'user')
-                && String(entry.message?.mes ?? entry.message?.text ?? '').trim() === String(text).trim());
+                // 酒馆聊天楼正文在 mes；TavernHelper.getChatMessages 的行正文在 message。
+                && claims(String(entry.message?.mes ?? entry.message?.message ?? entry.message?.text ?? '')));
             const observed = () => {
                 const received = receipt();
                 if (received) return { completed: true, value: { ok: true, sent: true, messageId: received.id } };
@@ -201,16 +211,21 @@ export function createTavernHelperAdapter(globalObject = globalThis.window || gl
                 if (received) return { ok: true, sent: true, messageId: received.id };
                 if (dispatched) return { ok: false, reason: 'host-send-awaiting-receipt' };
                 const helper = getTavernHelper(globalObject);
+                // 派发成功不等于已落楼：只有聊天里出现可认领的新用户楼才算发送成功，否则交给 observe 等回执。
+                const settled = () => {
+                    const landed = receipt();
+                    return landed ? { ok: true, sent: true, messageId: landed.id } : { ok: false, reason: 'host-send-awaiting-receipt' };
+                };
                 if (helper && typeof helper.typeAndSend === 'function') {
                     dispatched = true;
                     const result = await helper.typeAndSend(text);
                     if (result?.sent === false) dispatched = false;
                     if (result === false || result?.ok === false) return result || { ok: false, reason: 'host-send-pending' };
-                    return { ok: true, via: 'TavernHelper' };
+                    return settled();
                 }
                 const result = sendViaHostDom(globalObject, text);
                 dispatched = result.ok || result.reason === 'host-dom-send-failed';
-                return result;
+                return result.ok ? settled() : result;
             }, { global: globalObject, initialDelayMs: 500, observe: observed, passiveObservation: true,
                 waitFor: () => ({ message: dispatched
                     ? '消息已交给酒馆，正在读取原消息的发送回执；确认后自动继续，本条消息保持单次发送。'
@@ -707,7 +722,19 @@ function pickCurrentMessage(messages) {
     return readable[readable.length - 1] || null;
 }
 
-function isTurnCandidate(message) {
+// 只有聊天数据、没有 DOM 时的楼层标记，供 isTurnCandidate / isReadableTurn 判定，与阅读器口径一致。
+export function chatMessageFlags(message, id = null) {
+    if (!message || typeof message !== 'object') return null;
+    return {
+        isUser: isUserMessage(message, null),
+        isSystem: isSystemMessage(message, null),
+        isHidden: isHiddenMessage(message, id, null, null),
+        raw: message,
+    };
+}
+
+// 阅读器的「当前楼」：最新一条非用户、非系统、未隐藏的楼。
+export function isTurnCandidate(message) {
     return Boolean(
         message
         && !message.isSystem
@@ -719,7 +746,7 @@ function isTurnCandidate(message) {
 // 阅读器翻楼用：/hide 或数据库、总结插件隐藏的旧楼只是不发给模型，剧情照样能读；
 // 用户楼和旁白、注释这类真正的系统消息仍跳过。酒馆把隐藏也记成 is_system，所以只看旁白标记。
 const NON_STORY_SYSTEM_TYPES = new Set(['narrator', 'comment']);
-function isReadableTurn(message) {
+export function isReadableTurn(message) {
     if (!message || message.isUser) return false;
     const raw = message.raw && typeof message.raw === 'object' ? message.raw : null;
     if (!raw) return !message.isSystem || message.isHidden;

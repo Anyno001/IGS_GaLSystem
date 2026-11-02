@@ -1,8 +1,8 @@
 import { characterDnaNeedsViews } from '../../scene/character-dna.js';
 import { resolveSpriteAsset } from '../../scene/asset-match.js';
 import { esc } from './reader-value-utils.js';
-import { BUILTIN_NUDE_OUTFIT, OUTFIT_RESET, isBuiltinNudeOutfit, resolveWardrobePrompt } from '../../scene/character-outfits.js';
-import { readDefaultOutfit, outfitSpriteSlots, pickOutfitSprite, resolveCharacterAppearance } from '../../scene/character-appearance.js';
+import { BUILTIN_NUDE_OUTFIT, OUTFIT_RESET, isBuiltinNudeOutfit, isOutfitHidden, resolveWardrobePrompt } from '../../scene/character-outfits.js';
+import { readDefaultOutfit, readVisibleDefaultOutfit, outfitSpriteSlots, pickOutfitSprite, resolveCharacterAppearance } from '../../scene/character-appearance.js';
 import { characterPromptRecovery } from '../../generated-images/illustration/character-prompt-task.js';
 import { promptProvenance } from '../../generated-images/generation-prompt.js';
 
@@ -285,8 +285,11 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
 export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, builtinImageSource = true, isOpen = () => false }) {
     const map = plain(outfits);
     const names = Object.keys(map);
-    const selected = readDefaultOutfit(sceneAssets, charName);
+    const stored = readDefaultOutfit(sceneAssets, charName);
+    // 默认那套在本卡隐藏时，「（默认）」标在实际顶替它的那套上。
+    const selected = readVisibleDefaultOutfit(sceneAssets, charName);
     const defaultName = selected.ok ? selected.outfitName : '';
+    const hidden = (name) => isOutfitHidden(sceneAssets, charName, name);
     const active = names.includes(activeOutfit) ? activeOutfit : names.includes(defaultName) ? defaultName : names[0] || '';
     const target = active;
     const c = encSeg(charName);
@@ -295,6 +298,7 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
     );
     const tabs = names.map((name) => {
         const filled = Object.keys(outfitSpriteSlots(map[name])).length;
+        if (hidden(name)) return tab(name, esc(name) + '（本卡隐藏）' + formBadges(map[name]), `<span class="igs-outfit-tab-count">${filled}</span>`, '这套服装在本卡不显示，也不列入 AI 可用服装');
         return tab(name, esc(name) + (name === defaultName ? '（默认）' : '') + formBadges(map[name]), `<span class="igs-outfit-tab-count">${filled}</span>`, `AI 写法：[igs-char:${charName}|表情|${name}|对白]`);
     }).join('');
     const o = encSeg(target);
@@ -324,9 +328,10 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
         + `</span>`;
     const menu = target
         ? renderRowMenu([
-            target !== defaultName && Object.keys(outfitSpriteSlots(map[target])).length
+            target !== (stored.ok ? stored.outfitName : '') && !hidden(target) && Object.keys(outfitSpriteSlots(map[target])).length
                 ? menuItem(`scene-set-default-outfit:${c}:${o}`, '设为默认') : '',
             menuItem(`ui-toggle-open:${encSeg(metaKey)}`, isOpen(metaKey) ? '收起服装设置' : '服装设置（衣柜、别名…）'),
+            menuItem(`scene-hide-outfit:${c}:${o}`, hidden(target) ? '在本卡恢复显示' : '在本卡隐藏这套'),
             menuItem(`scene-rename-outfit:${c}:${o}`, '重命名这套'),
             menuItem(`scene-remove-outfit:${c}:${o}`, '删除这套', ' is-danger'),
         ], `「${target}」的操作`)
@@ -517,6 +522,10 @@ export const OUTFIT_SETTINGS_STYLE_TEXT = `
 .igs-char-info-row.is-block{flex-direction:column;align-items:stretch;gap:6px;padding-top:6px;border-top:1px solid var(--igs-settings-line)}
 .igs-char-info-row>.igs-mood-word-list,.igs-char-info-value{flex:1;min-width:0}
 .igs-char-info-value{display:flex;align-items:center;gap:6px}
+.igs-char-name-color-row input[type="color"]{width:42px;height:30px;padding:2px;border:0;border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-field);cursor:pointer}
+.igs-char-name-color-row input[type="color"]::-webkit-color-swatch-wrapper{padding:0}
+.igs-char-name-color-row input[type="color"]::-webkit-color-swatch{border:0;border-radius:var(--igs-settings-radius-small)}
+.igs-char-name-color-row .igs-char-name-color-auto{font-size:11px;color:var(--igs-settings-ink-4)}
 .igs-char-info-label{flex:0 0 72px;font-size:12px;color:var(--igs-settings-ink-3)}
 .igs-char-info-row.igs-char-height-row{margin-bottom:6px}
 .igs-char-info-row.igs-char-height-row>.igs-asset-move{flex:0 0 76px;width:76px;cursor:text}

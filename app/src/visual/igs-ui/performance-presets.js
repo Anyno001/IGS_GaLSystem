@@ -2,7 +2,7 @@
 // tier 表示从哪一档开始开启：1 轻量、2 推荐、3 全开。
 export const PERFORMANCE_FEATURES = Object.freeze([
     Object.freeze({ key: 'typewriter', label: '打字机', group: 'text', tier: 1 }),
-    Object.freeze({ key: 'clickWaitMark', label: '句末等待符号', group: 'text', tier: 1 }),
+    Object.freeze({ key: 'clickWaitMark', label: '提示符号', group: 'text', tier: 1 }),
     Object.freeze({ key: 'textFx', label: '行内文字效果', group: 'text', tier: 2 }),
     Object.freeze({ key: 'sceneTransition', label: '转场', group: 'stage', tier: 1 }),
     Object.freeze({ key: 'timeTint', label: '环境滤镜', group: 'stage', tier: 2 }),
@@ -22,7 +22,6 @@ export const PERFORMANCE_FEATURES = Object.freeze([
     Object.freeze({ key: 'itemFx', label: '获得物品', group: 'story', tier: 2 }),
     Object.freeze({ key: 'fxTags', label: '演出标签', group: 'story', tier: 2 }),
     Object.freeze({ key: 'dailyFx', label: '日常演出', group: 'special', tier: 2 }),
-    Object.freeze({ key: 'battleFx', label: '战斗', group: 'special', tier: 3 }),
     Object.freeze({ key: 'chatShow', label: '线上交流', group: 'special', tier: 3 }),
     Object.freeze({ key: 'liveFx', label: '直播间', group: 'special', tier: 3 }),
     Object.freeze({ key: 'feedFx', label: '手机社区', group: 'special', tier: 3 }),

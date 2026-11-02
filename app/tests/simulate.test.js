@@ -463,6 +463,10 @@ async function createReplyWaitHarness(mode = 'fullscreen') {
     const chat = document.createElement('div');
     chat.id = 'chat';
     document.body.appendChild(chat);
+    const stop = document.createElement('button');
+    stop.id = 'mes_stop';
+    stop.style.display = 'none';
+    document.body.appendChild(stop);
     const messages = new Map();
     let currentMessage;
     let read = () => currentMessage;
@@ -474,6 +478,7 @@ async function createReplyWaitHarness(mode = 'fullscreen') {
         messages.set(id, currentMessage);
         return currentMessage;
     };
+    put(90, '旧楼正文。');
     put(100, '当前楼正文。');
     const listeners = new Map();
     const eventSource = {
@@ -498,7 +503,9 @@ async function createReplyWaitHarness(mode = 'fullscreen') {
     const vn = bootstrapIGS({ global: globalObject, autoAttachMagicWand: false, hostAdapter: {
         getCurrentMessage: async () => read(),
         getMessageById: async (id) => messages.get(Number(id)),
+        listMessages: async () => [...messages.values()],
         typeAndSend: async () => {
+            stop.style.display = 'block';
             eventSource.emit('generation_started', 'normal', {}, false);
             return send();
         },
@@ -514,12 +521,68 @@ async function createReplyWaitHarness(mode = 'fullscreen') {
         await flush();
     };
     return {
-        vn, document, controller, put, fire, flush, eventSource,
+        vn, document, controller, put, fire, flush, eventSource, stop,
         wait: () => document.querySelector('.igs-waitstage'),
         mutate: () => mutations.forEach((handler) => handler([{ target: chat, addedNodes: [currentMessage.element], removedNodes: [] }])),
         readWith: (fn) => { read = fn; },
         sendWith: (fn) => { send = fn; },
     };
+}
+
+for (const mode of ['fullscreen', 'web', 'mobile', 'pc', 'embedded']) {
+    for (const floor of [90, 100]) test(`等待页菜单：${mode} 设置和目录可用，回看第 ${floor} 楼不被生成拉回`, async () => {
+        const h = await createReplyWaitHarness(mode);
+        try {
+            assert.equal((await h.controller.submit('继续。')).ok, true);
+            assert.ok(h.wait());
+            const click = (node) => {
+                assert.ok(node);
+                node.dispatchEvent({ type: 'click', target: node });
+            };
+            click(h.wait().querySelector('[data-igs-waitstage-settings]'));
+            assert.ok(h.document.querySelector('#igs-unified-settings'));
+            click(h.document.querySelector('.igs-settings-close'));
+            assert.ok(h.wait(), '关设置继续等待');
+            click(h.wait().querySelector('[data-igs-waitstage-directory]'));
+            await h.flush();
+            let panel = h.document.querySelector('#igs-turn-index');
+            assert.ok(panel);
+            assert.notEqual(panel.parentNode.style.display, 'none', '目录挂在未隐藏的宿主上');
+            const close = h.document.createElement('button');
+            close.setAttribute('data-ti-act', 'close');
+            panel.dispatchEvent({ type: 'click', target: close });
+            await h.flush();
+            assert.ok(h.wait(), '关目录继续等待');
+            click(h.wait().querySelector('[data-igs-waitstage-directory]'));
+            await h.flush();
+            panel = h.document.querySelector('#igs-turn-index');
+            const target = h.document.createElement('button');
+            target.setAttribute('data-ti-act', 'floor');
+            target.setAttribute('data-ti-value', floor);
+            panel.dispatchEvent({ type: 'click', target });
+            await h.flush();
+            assert.equal(h.vn.getState().igsUi.activeReader.snapshot.messageId, floor);
+            assert.equal(h.wait(), null, '切楼后收起等待层');
+            h.put(floor === 100 ? 100 : 101, '新楼生成完成。');
+            h.mutate();
+            await h.flush();
+            assert.equal(h.wait(), null, '后续 token 不盖回等待层');
+            h.stop.style.display = 'none';
+            h.eventSource.emit('generation_ended');
+            await h.fire(800);
+            assert.equal(h.vn.getState().igsUi.activeReader.snapshot.messageId, floor, '生成结束不抢回阅读位置');
+            if (floor === 100) {
+                assert.equal(h.vn.getState().igsUi.activeReader.snapshot.content.fullText, '当前楼正文。', '同楼重新生成也保持原阅读快照');
+                await h.controller.invokeAction('turn-index');
+                await h.flush();
+                const latest = h.document.createElement('button');
+                latest.setAttribute('data-ti-act', 'latest');
+                h.document.querySelector('#igs-turn-index').dispatchEvent({ type: 'click', target: latest });
+                await h.flush();
+                assert.equal(h.vn.getState().igsUi.activeReader.snapshot.content.fullText, '新楼生成完成。', '主动点最新后可读取同楼的新内容');
+            }
+        } finally { h.vn.destroy(); }
+    });
 }
 
 // 严格仿 NAI 官方：只认 /ai/generate-image、Bearer Key 与 V4 请求体，返回 zip 包的 PNG。
@@ -1388,6 +1451,28 @@ test('gate:simulation:outfit-scene-bound-expires-after-scene-change', async () =
         assert.equal(content().displayText, '回到学校了。');
         assert.equal(content().spriteOutfit, '小林海斗·初始衣装');
         assert.equal(content().spriteImage, 'https://example.com/base-joy.png');
+    } finally {
+        vn.destroy();
+    }
+});
+
+test('酒馆主界面没进对话：阅读器不开并提醒进入对话，设置器照常打开', async () => {
+    const document = createFakeDocument();
+    const toasts = [];
+    const global = { document, localStorage: createMemoryStorage({}),
+        toastr: { warning: (text) => toasts.push(text) },
+        SillyTavern: { getContext: () => ({ name2: 'SillyTavern System', getCurrentChatId: () => undefined }) } };
+    let read = 0;
+    const vn = bootstrapIGS({ global, autoAttachMagicWand: false,
+        hostAdapter: { getCurrentMessage: async () => { read += 1; return { id: 1, text: '你好。' }; }, typeAndSend: async () => ({ ok: true }) } });
+    try {
+        const opened = await vn.openLatestAvailable('pc');
+        assert.equal(opened.reason, 'no-chat');
+        assert.equal(read, 0);
+        assert.deepEqual(toasts, ['当前无法启用阅读器，请进入对话后再生成。']);
+        assert.equal(vn.getState().igsUi.activeReader, null);
+        const settings = vn.openSettings({});
+        assert.notEqual(settings && settings.ok, false);
     } finally {
         vn.destroy();
     }

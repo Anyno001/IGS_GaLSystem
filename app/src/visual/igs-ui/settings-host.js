@@ -49,6 +49,10 @@ import { previewStatusHudPosition } from './status-hud-position-fields.js';
 import { listSystemVoices, onSystemVoicesChanged } from './tts.js';
 import { normalizeBuild } from '../../scene/stats/stat-build.js';
 import { refreshStatsBuildStatus } from './stats-settings-fields.js';
+import { BATTLE_MODE_PATH, COMBAT_PRESET_PATH, checkCombatExpansionReady, planBattleMode, planCombatPreset } from './combat-settings.js';
+import { createEnemyAtlasManager, getEnemyAtlas, setEnemyAtlas } from './combat-enemy-atlas.js';
+import { probeCombatTableSupport } from '../../data/shujuku/combat-tables.js';
+import { originChatStatus, runAttachedOriginOp } from './origin-attach.js';
 
 // 设置页改角色的某一项时，按这些字段里有没有这个角色名判断它在本卡还是全局。
 const ASSET_CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
@@ -198,7 +202,7 @@ export function createSettingsHost(deps) {
         const snapshot = buildSettingsSnapshot(state.activeSettings);
         state.activeSettings.snapshot = snapshot;
         updateMountedSettings(snapshot);
-        if (['source', 'llm'].includes(state.activeSettings.asyncState.page)) {
+        if (['source', 'llm', 'origin'].includes(state.activeSettings.asyncState.page)) {
             ensureModelProfilesLoaded(state.activeSettings, { global: options.global || globalThis, onChange: (panel) => { if (state.activeSettings === panel) rerenderSettings(); } });
         }
         return {
@@ -504,6 +508,52 @@ export function createSettingsHost(deps) {
             setPath(draft, 'readerSettings.dialogAutoHeight', value === 'auto');
             return editOptions.liveInput ? { ok: true } : rerenderSettings();
         }
+        // 「战斗」页三选一：虚拟 path，拆成 battleFx / combatExpansion 两个字段；选卡牌战斗走同一套开启前检查，不通过则退回原选项。
+        if (path === BATTLE_MODE_PATH) {
+            const plan = planBattleMode(value, value === 'card' ? checkCombatExpansionReady({
+                api: (options.global || globalThis).AutoCardUpdaterAPI || null,
+                autoIllustration: draft.bridge && draft.bridge.autoIllustration,
+            }) : null);
+            for (const [writePath, writeValue] of plan.writes) setPath(draft, writePath, writeValue);
+            if (!plan.ok && plan.message) showSettingsNotice(plan.message);
+            rerenderSettings();
+            return plan.ok ? { ok: true } : { ok: false, reason: plan.reason, missing: plan.missing };
+        }
+        // 「仅日常挑战」预设：虚拟 path，写对决类型与日常字段的缺省值。
+        if (path === COMBAT_PRESET_PATH) {
+            const plan = planCombatPreset(value);
+            for (const [writePath, writeValue] of plan.writes) setPath(draft, writePath, writeValue);
+            rerenderSettings();
+            return { ok: plan.ok };
+        }
+        // 卡牌战斗开启前检查数据库表与副 LLM；通过后数值系统一并打开，战斗开着时数值系统不能单独关。
+        if (path === 'readerSettings.combatExpansion.enabled' && value === true) {
+            const ready = checkCombatExpansionReady({
+                api: (options.global || globalThis).AutoCardUpdaterAPI || null,
+                autoIllustration: draft.bridge && draft.bridge.autoIllustration,
+            });
+            if (!ready.ok) {
+                setPath(draft, path, false);
+                showSettingsNotice(ready.message);
+                return { ok: false, reason: ready.reason, missing: ready.missing };
+            }
+            setPath(draft, 'bridge.stats.enabled', true);
+        }
+        if (path === 'bridge.stats.enabled' && value !== true && draft.readerSettings && draft.readerSettings.combatExpansion && draft.readerSettings.combatExpansion.enabled === true) {
+            setPath(draft, path, true);
+            showSettingsNotice('卡牌战斗开启时数值系统不能单独关闭');
+            rerenderSettings();
+            return { ok: false, reason: 'stats-combat-locked' };
+        }
+        if (path === 'bridge.stats.enabled' && value === true) {
+            const api = (options.global || globalThis).AutoCardUpdaterAPI || null;
+            const support = probeCombatTableSupport(api);
+            if (!support.ok) {
+                setPath(draft, path, false);
+                showSettingsNotice(api ? `数据库不支持数值系统所需的表：缺少 ${support.missing.join('、')}` : '未检测到数据库（shujuku），无法开启数值系统');
+                return { ok: false, reason: support.reason, missing: support.missing };
+            }
+        }
         materializeStatsBuild(draft, path);
         setPath(draft, path, normalizeSettingsValue(path, value));
         if (path === 'readerSettings.skinDialogScale') setPath(draft, 'readerSettings.dialogAutoHeight', false);
@@ -630,15 +680,108 @@ export function createSettingsHost(deps) {
         return result;
     }
 
+    const STATS_ATTRIBUTES = ['健康', '力量', '敏捷', '理智', '观察', '魅力'];
+    async function runStatsOp(spec) {
+        const op = typeof options.statsOp === 'function' ? options.statsOp : null;
+        if (!op) return { ok: false, reason: 'stats-runtime-missing' };
+        const [kind, raw = ''] = spec.split(/:(.*)/s);
+        const name = raw ? decodeURIComponent(raw) : '';
+        let result;
+        try {
+            if (kind === 'generate' || kind === 'backfill' || kind === 'backup') result = await op(kind);
+            else if (kind === 'skill-attr') {
+                const attribute = await settingsDialogs.choose(`「${name}」归入哪项属性？`, STATS_ATTRIBUTES.map((value) => ({ value, label: value })));
+                result = attribute ? await op('skill', 'edit', name, { attribute }) : { ok: true, cancelled: true };
+            } else if (kind === 'skill-rename') {
+                const to = String((await settingsDialogs.prompt(`把「${name}」改名为：`, name)) || '').trim();
+                result = to && to !== name ? await op('skill', 'edit', name, { name: to }) : { ok: true, cancelled: true };
+            } else if (kind === 'skill-merge') {
+                const to = String((await settingsDialogs.prompt(`把「${name}」合并到哪项技能（填技能名）：`, '')) || '').trim();
+                result = to ? await op('skill', 'merge', name, { to }) : { ok: true, cancelled: true };
+            } else if (kind === 'skill-remove') {
+                result = await settingsDialogs.confirm(`删除剧情技能「${name}」？主角已有的数值保留。`) ? await op('skill', 'remove', name) : { ok: true, cancelled: true };
+            } else if (kind === 'sheet-edit') {
+                const text = String((await settingsDialogs.prompt(`修改「${name}」的一项数值，格式：项目 档位（如「话术 精通」「敏捷 出众」）。技能档：未学、入门、熟练、精通、大师；属性档：很弱、偏弱、普通、出众、顶尖。`, '')) || '').trim();
+                const [skill, tier] = text.split(/\s+/);
+                result = skill && tier ? await op('sheet', 'edit', name, { skill, tier }) : { ok: true, cancelled: true };
+            } else if (kind === 'sheet-regen') {
+                result = await settingsDialogs.confirm(`重新生成「${name}」的数值？手改过的内容会被覆盖。`) ? await op('sheet', 'regen', name) : { ok: true, cancelled: true };
+            } else if (kind === 'sheet-remove') {
+                result = await settingsDialogs.confirm(`删除「${name}」的角色卡？之后按普通人参与检定。`) ? await op('sheet', 'remove', name) : { ok: true, cancelled: true };
+            } else result = { ok: false, reason: 'stats-op-unknown' };
+        } catch (error) {
+            result = { ok: false, reason: 'stats-op-threw', thrown: error };
+        }
+        if (result && result.ok === false && result.reason && !result.cancelled && typeof settingsDialogs.alert === 'function') {
+            const text = { 'stats-no-model': '没有可用的辅助模型，请先在自动插图设置里接好写词模型。', 'stats-generating': '正在生成回复，结束后再试。', 'stats-sheet-edit-invalid': '格式不对，请写成「项目 档位」。' }[result.reason];
+            if (text) await settingsDialogs.alert(text);
+        }
+        if (state.activeSettings) rerenderSettings();
+        return result || { ok: false };
+    }
+
+    // 随身系统存档区操作（重算、清空）与本聊天暂停 / 恢复：交给宿主 options.originOp，结束后重绘。引擎未接入时返回 origin-engine-missing。
+    async function runOriginOp(kind) {
+        // 宿主没给 originOp 时走接入点登记的引擎（origin-attach.js）；也没登记时返回 origin-engine-missing。
+        const op = typeof options.originOp === 'function' ? options.originOp : runAttachedOriginOp;
+        let result;
+        try {
+            if (kind === 'recalc') result = await op('recalc');
+            else if (kind === 'reset') result = await settingsDialogs.confirm('清空本聊天的随身系统存档？任务、积分、属性与记录都会移除。') ? await op('reset') : { ok: true, cancelled: true };
+            else if (kind === 'pause' || kind === 'resume' || kind === 'import') result = await op(kind);
+            else if (kind === 'world') {
+                const current = (typeof options.originChat === 'function' ? options.originChat() : originChatStatus()) || {};
+                const next = await settingsDialogs.prompt('本聊天的世界名或简述', current.world || '');
+                result = next === null ? { ok: true, cancelled: true } : await op('world', next);
+            }
+            else result = { ok: false, reason: 'origin-op-unknown' };
+        } catch (error) {
+            result = { ok: false, reason: 'origin-op-threw', thrown: error };
+        }
+        if (result && result.ok === false && result.reason && !result.cancelled && typeof settingsDialogs.alert === 'function') {
+            const text = (typeof result.text === 'string' && result.text.trim())
+                || { 'origin-engine-missing': '随身系统尚未就绪，请打开一个聊天后再试。', busy: '系统正在处理上一项请求，请稍后再试。', disabled: '请先开启随身系统。' }[result.reason];
+            if (text) await settingsDialogs.alert(text);
+        }
+        if (state.activeSettings) rerenderSettings();
+        return result || { ok: false };
+    }
+
     const recoveringSettingsActions = new Map();
     function handleSettingsAction(action) {
+        if (String(action).startsWith('origin-op:')) return runOriginOp(String(action).slice('origin-op:'.length));
+        if (action === 'origin-chat-pause') return runOriginOp('pause');
+        if (action === 'origin-chat-resume') return runOriginOp('resume');
         if (String(action).startsWith('live2d-edit:')) return Promise.resolve(openLive2dManager?.(decodeURIComponent(String(action).slice('live2d-edit:'.length))));
         // 数值系统提示词「恢复默认」：清空覆盖值，规范化后回到默认模板（§9）。
         if (String(action).startsWith('stats-prompt-reset:')) {
             const id = String(action).slice('stats-prompt-reset:'.length);
-            if (!/^[a-z]+$/.test(id)) return Promise.resolve({ ok: false, reason: 'stats-prompt-unknown' });
+            if (!/^[a-zA-Z]+$/.test(id)) return Promise.resolve({ ok: false, reason: 'stats-prompt-unknown' });
             return Promise.resolve(updateSettingsValue(`bridge.stats.prompts.${id}`, ''));
         }
+        // 敌人图集：只在用户点击时才下载或删除；管理器首次使用时才创建。
+        if (action === 'combat-enemy-atlas-download' || action === 'combat-enemy-atlas-remove') {
+            const atlas = getEnemyAtlas() || setEnemyAtlas(createEnemyAtlasManager({ globalObject: options.global || globalThis }));
+            const job = action === 'combat-enemy-atlas-download' ? atlas.download() : atlas.remove();
+            return Promise.resolve(job).then((result) => { if (state.activeSettings) rerenderSettings(); return result; });
+        }
+        // 失效提示词提醒「知道了」：之后不再显示。
+        if (action === 'stats-prompt-stale-ack') return Promise.resolve(updateSettingsValue('bridge.stats.staleNoticeSeen', true));
+        // 建档方式（快速 / 手动等）：交给运行时，结束后重绘。
+        if (String(action).startsWith('stats-build-mode:')) {
+            let result;
+            try {
+                result = typeof options.statsChatAction === 'function'
+                    ? options.statsChatAction('mode', { mode: String(action).slice('stats-build-mode:'.length) })
+                    : { ok: false, reason: 'stats-runtime-missing' };
+            } catch (error) {
+                result = { ok: false, reason: 'stats-chat-action-threw', thrown: error };
+            }
+            if (state.activeSettings) rerenderSettings();
+            return Promise.resolve(result || { ok: false, reason: 'stats-runtime-missing' });
+        }
+        // 数值 v2 存档区操作（角色卡、剧情技能、补全、旧版备份）：交给运行时，结束后重绘。
+        if (String(action).startsWith('stats-op:')) return runStatsOp(String(action).slice('stats-op:'.length));
         // 适配版表格模板下载（§8C）。
         // 推送映射「确认映射」：给当前模板指纹写一个空覆盖，之后不再提示「新的表格模板」（§8B 第 5 条）。
         if (String(action).startsWith('stats-mapping-confirm:')) {
@@ -649,10 +792,9 @@ export function createSettingsHost(deps) {
             return Promise.resolve(updateSettingsValue(`bridge.stats.push.mappings.${fp}`, existing && typeof existing === 'object' ? { ...existing } : {}));
         }
         if (action === 'stats-template-download') {
-            let result;
-            try { result = downloadStatsTemplate((options.global || globalThis).document); }
-            catch (error) { result = { ok: false, reason: 'stats-template-download-threw', thrown: error }; }
-            return Promise.resolve(result);
+            return Promise.resolve()
+                .then(() => downloadStatsTemplate((options.global || globalThis).document))
+                .catch((error) => ({ ok: false, reason: 'stats-template-download-threw', thrown: error }));
         }
         // 数值系统「本聊天」启用 / 暂停：直接交给运行时，结果重绘后反映到按钮与状态说明。
         if (action === 'stats-chat-enable' || action === 'stats-chat-disable' || action === 'stats-chat-enable-build') {
@@ -1195,6 +1337,11 @@ export function createSettingsHost(deps) {
             const charHouse = charSelect ? charSelect.getAttribute('data-char-house') : null;
             if (charHouse) {
                 controller.invoke(`char-house:${encodeURIComponent(charHouse)}:${encodeURIComponent(charSelect.value || '')}`);
+                return;
+            }
+            const charNameColor = charSelect ? charSelect.getAttribute('data-char-name-color') : null;
+            if (charNameColor) {
+                controller.invoke(`char-name-color:${encodeURIComponent(charNameColor)}:${encodeURIComponent(charSelect.value || '')}`);
                 return;
             }
             // 声音库条目：改完（失焦或回车）才保存。

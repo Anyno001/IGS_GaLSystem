@@ -1,6 +1,7 @@
 import { normalizeEmotionList } from './stage-shake-runtime.js';
 import { normalizeFaceBox } from './live-face.js';
 import { normalizeFanMedalMap, normalizeLiveCustomLines } from './live-chatter.js';
+import { normalizeLiveSkinSettings } from './live-skin.js';
 
 // 弹幕三件套，各自一个顶层开关以便挂进演出档位：
 // liveFx 直播间（掏出手机看 B 站直播）、audienceFx 观众弹幕（HUD 下方小手机，点开看）、innerFx 内心弹幕（情绪触发的纯演出）。
@@ -27,9 +28,10 @@ export const INNER_DANMAKU_STYLES = Object.freeze(['burst', 'fly']);
 export const INNER_DANMAKU_STYLE_LABELS = Object.freeze({ burst: '爆发', fly: '横飞' });
 // 直播间形态：phone 掏出手机看竖屏直播（原样式，默认）；full 直接铺满舞台的全屏直播。
 export const LIVE_LAYOUTS = Object.freeze(['phone', 'full']);
-// 全屏直播的台词：subtitle 底部直播字幕（默认）；dialog 沿用对话框。旁白位置：above 字幕上方（默认）；name 左上名牌下方；dialog 退回极简对话框。
+// 全屏直播的台词：subtitle 平台自动字幕（默认）；dialog 沿用对话框。
+// 旁白位置：chat 进评论区、钉在最新一条（默认）；above 字幕位置；name 左上名牌下方；dialog 退回极简对话框。
 export const LIVE_FULL_TEXTS = Object.freeze(['subtitle', 'dialog']);
-export const LIVE_NARRATION_POSITIONS = Object.freeze(['above', 'name', 'dialog']);
+export const LIVE_NARRATION_POSITIONS = Object.freeze(['chat', 'above', 'name', 'dialog']);
 // 直播弹幕：roll 左下角列表向上翻滚（默认）；fly 沿轨道横飞穿过画面；both 两者同时。
 export const LIVE_CHAT_MODES = Object.freeze(['roll', 'fly', 'both']);
 // 直播弹幕字号（小/中/大≈14/16/19px，倍率相对中档）与密度（路人节奏、横飞在飞上限）。
@@ -80,7 +82,9 @@ export function normalizeLiveFxSettings(value) {
         muteOnNsfw: src.muteOnNsfw !== false,
         layout: pick(LIVE_LAYOUTS, src.layout, 'phone'),
         fullText: pick(LIVE_FULL_TEXTS, src.fullText, 'subtitle'),
-        narrationPos: pick(LIVE_NARRATION_POSITIONS, src.narrationPos, 'above'),
+        narrationPos: pick(LIVE_NARRATION_POSITIONS, src.narrationPos, 'chat'),
+        // 自动字幕偶尔错一个同音字、打完后自己改回（默认关）。
+        ccTypos: src.ccTypos === true,
         // 弹幕防挡脸：横飞弹幕层在主播脸部挖一个柔边洞（默认开）。
         faceGuard: src.faceGuard !== false,
         // 仅屏蔽内置路人词池中的攻击性弹幕；AI 与用户自定义弹幕不受影响。
@@ -102,6 +106,8 @@ export function normalizeLiveFxSettings(value) {
         interact: src.interact !== false,
         // 手机里立绘的取景（「调整立绘」编辑）：x / y 为屏幕宽高的百分比偏移，zoom 为百分比缩放。
         portrait: normalizeLivePortrait(src.portrait),
+        // 暗网直播间皮肤：默认子风格、终端配色、所有直播固定暗网、直播提示词里平台栏的写法。
+        ...normalizeLiveSkinSettings(src),
     };
 }
 

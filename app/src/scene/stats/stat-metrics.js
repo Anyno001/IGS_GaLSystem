@@ -2,9 +2,14 @@
 // 输出与 status-hud-model 的 extractStatusHudMetrics 同形（label / percent / display / colorKey），
 // 与 character-metrics 的 lookup 同形（{ metrics, stages }），视觉层只换数据源、不换样式。
 import { stageOf } from './stat-favor.js';
+import { DEFAULT_MONEY_TABLE, walletBalance } from './stat-bars.js';
 
 const DIM_COLOR = Object.freeze({ 好感: 'favor', 信任: 'trust', 了解: 'know', 欲望: 'desire' });
-const BAR_LABEL = Object.freeze({ health: '生命', stamina: '体力', stress: '压力' });
+const BAR_LABEL = Object.freeze({ health: '生命', stamina: '体力', stress: '压力', money: '金钱' });
+// 状态栏条色沿用现有 slot 色板：生命红、体力绿、金钱黄、压力紫。
+const BAR_COLOR = Object.freeze({ health: 'slot-5', stamina: 'slot-2', money: 'slot-3', stress: 'slot-4' });
+// 金钱没有上限：条长按「巨额」档位折算，数字照实显示。
+const MONEY_FULL = DEFAULT_MONEY_TABLE.巨额;
 
 // 条长只表示正向程度：负值按 0 画，数字与阶段名照实显示。
 export function percentOfDim(value) {
@@ -39,27 +44,53 @@ export function characterStatMetrics(character, { hudLabel = 'stage', nsfw = fal
     return out;
 }
 
-export function protagonistStatMetrics(bars, { enabledBars = { stamina: true, stress: true } } = {}) {
+// 主角生命条取战斗 vitals（{hp, maxHp, down}），显示「当前/最大」；没有 vitals 就不出生命条。体力、压力仍按生活条。
+// 金钱条只在 enabledBars.money 明确为真时出，显示合并余额（数值侧金钱 + walletExtra 战斗积分）。
+export function protagonistStatMetrics(bars, { enabledBars = { stamina: true, stress: true }, vitals = null, walletExtra = 0 } = {}) {
     const out = [];
-    for (const key of ['health', 'stamina', 'stress']) {
-        if (key !== 'health' && enabledBars[key] === false) continue;
+    if (vitals && Number(vitals.maxHp) > 0) {
+        const hp = vitals.down ? 0 : Math.max(0, Math.round(Number(vitals.hp) || 0));
+        const max = Math.round(Number(vitals.maxHp));
+        out.push({ label: BAR_LABEL.health, percent: Math.max(0, Math.min(100, Math.round((hp / max) * 100))), display: `${hp}/${max}`, colorKey: BAR_COLOR.health, sourceUid: 'igs-stats' });
+    }
+    for (const key of ['stamina', 'stress']) {
+        if (enabledBars[key] === false) continue;
         const v = Math.round(Number(bars && bars[key]) || 0);
-        out.push({ label: BAR_LABEL[key], percent: Math.max(0, Math.min(100, v)), display: String(v), colorKey: key, sourceUid: 'igs-stats' });
+        out.push({ label: BAR_LABEL[key], percent: Math.max(0, Math.min(100, v)), display: String(v), colorKey: BAR_COLOR[key], sourceUid: 'igs-stats' });
+    }
+    if (enabledBars.money === true) {
+        const wallet = Math.round(walletBalance(bars, walletExtra));
+        out.push({ label: BAR_LABEL.money, percent: Math.max(0, Math.min(100, Math.round((wallet / MONEY_FULL) * 100))), display: String(wallet), colorKey: BAR_COLOR.money, sourceUid: 'igs-stats' });
     }
     return out;
 }
 
 // 与 createCharacterMetricsLookup 同形；未登记的名字返回空，调用方可按原逻辑退回表格。
-export function createStatsMetricsLookup(state, { resolve = (name) => name, hudLabel = 'stage', nsfw = false } = {}) {
+// sheets：聊天级 NPC 角色卡（v2 §9.3）；有卡时返回 sheet 段：资历、擅长项、是否待定。
+export function createStatsMetricsLookup(state, { resolve = (name) => name, hudLabel = 'stage', nsfw = false, sheets = null, engine = null } = {}) {
     return (name) => {
         const key = state && resolve(String(name || '').trim());
         const c = key && state.characters[key];
         if (!c) return { metrics: [], stages: [] };
-        return {
+        const out = {
             metrics: characterStatMetrics(c, { hudLabel, nsfw }),
             stages: [{ label: '关系阶段', value: stageOf(c.dims.好感).name }],
         };
+        if (sheets) out.sheet = sheetSummary(key, sheets[key], engine);
+        return out;
     };
+}
+
+function sheetSummary(name, sheet, engine) {
+    if (!sheet) return { name, missing: true };
+    const strong = Object.entries(sheet.skills || {}).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([skill, v]) => {
+        if (engine && engine.ruleset.ID === 'dnd5e') {
+            const prof = v >= 75 ? '专精' : v >= 50 ? '熟练' : '';
+            return `${skill}${prof ? ` ${prof}` : ''}`;
+        }
+        return `${skill} ${Math.round(v)}`;
+    });
+    return { name, rank: sheet.rank || '普通人', strong, provisional: Object.keys(sheet.provisional || {}).length > 0 };
 }
 
 // 数值系统开启时 IGS 为唯一真值（易错点 H3）：已登记角色只用 IGS 数据，未登记的人才退回表格 lookup。
@@ -73,6 +104,17 @@ export function preferStatsLookup(statsLookup, tableLookup) {
         if (own && own.metrics && own.metrics.length) return own;
         try { return table(name) || empty(); } catch (error) { return empty(); }
     };
+}
+
+// 状态栏常驻主角区：状态栏关着（model.enabled 为假）时什么都不加；说话人是主角时已由叠加换成主角条，不再重复；其余情况（旁白、其他角色）在最前加一块。
+export function composeStatsHud(model, { lookup, heroLookup, heroBlock, speaker } = {}) {
+    if (!model || model.enabled !== true) return model;
+    const shown = overlayStatsMetrics(model, lookup, speaker);
+    if (!heroBlock || !Array.isArray(heroBlock.metrics) || !heroBlock.metrics.length) return shown;
+    let own = null;
+    try { own = speaker && typeof heroLookup === 'function' ? heroLookup(speaker) : null; } catch (error) { own = null; }
+    if (own) return shown;
+    return { ...shown, hero: { name: heroBlock.name, metrics: heroBlock.metrics } };
 }
 
 // 状态栏模型叠加（易错点 H3）：已登记角色的 HUD 条换成 IGS 数值，关系文字仍沿用表格；未登记或 lookup 出错时原样返回。

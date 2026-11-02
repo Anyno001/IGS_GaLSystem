@@ -8,6 +8,7 @@ import { collectGrammarBlocks } from './tag-grammar.js';
 import { COMIC_TONE_KINDS, COMIC_TONE_LABELS } from './comic-settings.js';
 import { MANGA_BACK_ALL_KINDS, MANGA_BACK_LABELS } from './manga-back.js';
 import { normalizeClashFxSettings } from '../../scene/clash-actions.js';
+import { LOG_PERCENTS } from './log-reader-settings.js';
 
 const encSeg = (value) => encodeURIComponent(String(value == null ? '' : value));
 
@@ -86,9 +87,8 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
         + checkbox(`${p}.titleCard.onTime`, s.titleCard.onTime, '时间变化时显示'));
     const favor = featureRow(more, 'favor', `${p}.favorToast.enabled`, s.favorToast.enabled, '数值变化提示', '好感等升降');
     const itemFx = featureRow(more, 'item-fx', `${p}.itemFx.enabled`, s.itemFx.enabled, '获得物品演出', '', checkbox(`${p}.itemFx.mention`, s.itemFx.mention, '正文里点亮已获得的物品名'));
-    const battleFx = featureRow(more, 'battle-fx', `${p}.battleFx.enabled`, s.battleFx.enabled, '战斗演出', '', checkbox(`${p}.battleFx.letterbox`, s.battleFx.letterbox, '战斗时加电影黑边') + checkbox(`${p}.battleFx.dash`, s.battleFx.dash, '出手冲刺'));
     // 非人演出跟随战斗演出：总开关关闭时置灰，不另计入档位。
-    const battleCreature = perfItem(more, 'battle-creature', checkbox(`${p}.battleFx.creature`, s.battleFx.creature, '非人演出', !s.battleFx.enabled));
+    const battleCreature = perfItem(more, 'battle-creature', checkbox(`${p}.battleFx.creature`, s.battleFx.creature, '非人演出', !s.battleFx.enabled), { hint: s.battleFx.enabled ? '' : '需在「战斗」页选择「剧情演出」' });
     const resultFx = featureRow(more, 'result-fx', `${p}.resultFx.enabled`, s.resultFx.enabled, '选项检定掷骰');
     const tags = featureRow(more, 'fx-tags', `${p}.fxTags.enabled`, s.fxTags.enabled, '来电、通知、回忆等演出', '', grid(FX_TAG_KINDS.filter((kind) => kind !== 'clash').map((kind) => checkbox(`${p}.fxTags.${kind}`, s.fxTags[kind], FX_TAG_LABELS[kind])).join('') + checkbox(`${p}.fxTags.emergency`, s.fxTags.emergency, '紧急求助') + checkbox(`${p}.fxTags.spam`, s.fxTags.spam, '垃圾短信样式'))
         + (s.fxTags.call ? field(`${p}.fxTags.callSprite`, '语音通话画面', segmentedInput(`${p}.fxTags.callSprite`, s.fxTags.callSprite, [['split', '分屏'], ['avatar', '头像小窗'], ['hide', '隐藏'], ['show', '照常显示']], '语音通话画面')) : ''));
@@ -110,9 +110,24 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
         + (s.comicMode.inkMode === 'custom' ? field(`${p}.comicMode.inkColor`, '自选描边色', colorInput(`${p}.comicMode.inkColor`, s.comicMode.inkColor)) : '')
         + field(`${p}.comicMode.gap`, '离头部', segmentedInput(`${p}.comicMode.gap`, s.comicMode.gap, [['near', '近'], ['medium', '中'], ['far', '远']], '离头部'))
         + checkbox(`${p}.comicMode.tail`, s.comicMode.tail, '对话泡尾巴')
+        + checkbox(`${p}.comicMode.scrubber`, s.comicMode.scrubber, '页码进度条（拖动跳页）')
         + field(`${p}.comicMode.inputStyle`, '输入框', segmentedInput(`${p}.comicMode.inputStyle`, s.comicMode.inputStyle, [['comic', '漫画框'], ['plain', '对话框']], '输入框'))
         + perfSubhead('泡的外形 · 触发情绪')
         + toneWords(COMIC_TONE_KINDS));
+    const lr = s.logReader;
+    const logReader = featureRow(more, 'log-reader', `${p}.logReader.on`, lr.on, '窄屏阅读模式', '手机与内嵌长屏改为对话列表', field(`${p}.logReader.avatarShape`, '头像样式', segmentedInput(`${p}.logReader.avatarShape`, lr.avatarShape, [['card', '圆角方'], ['circle', '圆形'], ['break', '破框']], '头像样式'))
+        + field(`${p}.logReader.perTap`, '每次显示', segmentedInput(`${p}.logReader.perTap`, lr.perTap, [[1, '1条'], [2, '2条'], [3, '3条'], [4, '4条'], [5, '5条']], '每次显示'))
+        + field(`${p}.logReader.reveal`, '文字出现', segmentedInput(`${p}.logReader.reveal`, lr.reveal, [['flow', '流水展开'], ['type', '打字机'], ['fade', '整句淡入']], '文字出现'))
+        + field(`${p}.logReader.emotion`, '情绪符号', segmentedInput(`${p}.logReader.emotion`, lr.emotion, [['once', '播一遍'], ['loop', '循环'], ['off', '关闭']], '情绪符号'))
+        + field(`${p}.logReader.edge`, '离边距离', segmentedInput(`${p}.logReader.edge`, lr.edge, [['flush', '贴边'], ['normal', '标准'], ['wide', '宽松']], '离边距离'))
+        + field(`${p}.logReader.moodSize`, '情绪大小', segmentedInput(`${p}.logReader.moodSize`, lr.moodSize, [['l', '大'], ['m', '中'], ['s', '小']], '情绪大小'))
+        + field(`${p}.logReader.veil`, '渐变高度', selectInput(`${p}.logReader.veil`, lr.veil, LOG_PERCENTS.map((n) => [n, `${n}%`])))
+        + field(`${p}.logReader.density`, '渐变浓度', selectInput(`${p}.logReader.density`, lr.density, LOG_PERCENTS.map((n) => [n, `${n}%`])))
+        + field(`${p}.logReader.userSide`, 'User位置', segmentedInput(`${p}.logReader.userSide`, lr.userSide, [['same', '与角色同侧'], ['right', '靠右']], 'User位置'))
+        + checkbox(`${p}.logReader.chain`, lr.chain, '连续播放（关闭后点一下只出一条）')
+        + checkbox(`${p}.logReader.scrubber`, lr.scrubber, '页码进度条（拖动跳页）')
+        + checkbox(`${p}.logReader.chip`, lr.chip, '名字后显示情绪')
+        + checkbox(`${p}.logReader.userAvatar`, lr.userAvatar, '显示User头像'));
     const mangaBack = featureRow(more, 'manga-back', `${p}.mangaBack.enabled`, s.mangaBack.enabled, '漫画背景与特效', '花背景、气场、石化', MANGA_BACK_ALL_KINDS.map((kind) => renderWordListField(`mangaBack.words.${kind}`, MANGA_BACK_LABELS[kind], s.mangaBack.words[kind])).join(''));
     const crowd = featureRow(more, 'crowd-fx', `${p}.crowdFx.enabled`, s.crowdFx.enabled, '人群氛围', '人多的地点', checkbox(`${p}.crowdFx.react`, s.crowdFx.react, '正文写到鼓掌、欢呼时整群反应'));
     const notifyCenter = featureRow(more, 'notify-center', `${p}.notifyCenter.enabled`, s.notifyCenter.enabled, '通知中心', '攒下没点开的消息');
@@ -123,5 +138,5 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
     const dlc = dlcDefs.length
         ? perfItem(more, 'dlc-fx', `<span>扩展演出（DLC）</span>`, { hint: `${dlcDefs.length}个`, detail: grid(dlcDefs.map((def) => checkbox(`${p}.dlcFx.${def.kind}`, dlcOff[def.kind] !== false, def.label)).join('')) })
         : '';
-    return { style, manga, heartbeat, flash, title, favor, itemFx, battleFx, battleCreature, resultFx, tags, clash, innerDemon, dlc, sound, comic, mangaBack, crowd, notifyCenter };
+    return { style, manga, heartbeat, flash, title, favor, itemFx, battleCreature, resultFx, tags, clash, innerDemon, dlc, sound, comic, logReader, mangaBack, crowd, notifyCenter };
 }

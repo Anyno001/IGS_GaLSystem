@@ -1,7 +1,7 @@
 import { extractSceneDirectives } from '../../scene/scene-directives.js';
 import { getMessagePrimaryText } from '../../scene/message-source.js';
-import { createOutfitResolver, isBuiltinNudeOutfit, outfitsOfCharacter } from '../../scene/character-outfits.js';
-import { outfitSpriteSlots, readDefaultOutfit } from '../../scene/character-appearance.js';
+import { createOutfitResolver, isBuiltinNudeOutfit, outfitsOfCharacter, visibleOutfitsOf } from '../../scene/character-outfits.js';
+import { outfitSpriteSlots, readVisibleDefaultOutfit } from '../../scene/character-appearance.js';
 import { moodFallbackChain, moodPresetWords } from '../../scene/mood-groups.js';
 import { HEAD_ASPECT, resolveSpriteHead } from './fx-anchor.js';
 import {
@@ -120,9 +120,10 @@ export function collectWaitStageCast(sceneAssets, options = {}) {
         .map((name) => String(name || '').trim()).filter(Boolean)));
     const cast = [];
     for (const name of names) {
-        const { outfits } = outfitsOfCharacter(assets.characterOutfits, assets.characterAliases, name);
+        const found = outfitsOfCharacter(assets.characterOutfits, assets.characterAliases, name);
+        const outfits = visibleOutfitsOf(assets, found.key || name, found.outfits);
         const keys = Object.keys(outfits || {});
-        const preferred = readDefaultOutfit(assets, name);
+        const preferred = readVisibleDefaultOutfit(assets, name);
         const lead = preferred.ok ? preferred.outfitName : (keys.find((key) => !isNudeOutfit(key, outfits[key])) || '');
         const wardrobe = [];
         for (const key of [lead, ...keys.filter((key) => key !== lead)]) {
@@ -603,23 +604,35 @@ export function createWaitStageRuntime(options = {}) {
             actions.appendChild(backButton);
             actions.appendChild(nextButton);
             body.appendChild(actions);
-            if (onClose && !opts.embedded) {
-                const closeButton = doc.createElement('button');
-                closeButton.type = 'button';
-                closeButton.className = 'igs-ws-close';
-                closeButton.title = '关闭';
-                closeButton.setAttribute('aria-label', '关闭');
-                closeButton.setAttribute('data-igs-waitstage-close', '1');
-                closeButton.innerHTML = ORIGINAL_READER_ICONS.close;
-                closeButton.addEventListener('click', (event) => {
-                    event.stopPropagation();
-                    if (root !== openedRoot) return;
-                    // 主动来玩时只收起这一层回到阅读；等回复时才交给宿主关阅读器。
+            const tools = mountNode(doc, 'igs-ws-tools');
+            tools.setAttribute('aria-label', '等待页菜单');
+            tools.setAttribute('role', 'group');
+            const closeCallback = onClose && !opts.embedded
+                ? () => {
                     if (play) closeRoot();
                     else onClose();
+                }
+                : null;
+            for (const [action, label, icon, callback] of [
+                ['directory', '目录', ORIGINAL_READER_ICONS.firstTurn, options.onDirectory],
+                ['settings', '设置', ORIGINAL_READER_ICONS.settings, options.onSettings],
+                ['close', '关闭', ORIGINAL_READER_ICONS.close, closeCallback],
+            ]) {
+                if (typeof callback !== 'function') continue;
+                const button = doc.createElement('button');
+                button.type = 'button';
+                button.className = 'igs-ws-chip';
+                button.innerHTML = `<span aria-hidden="true">${icon}</span>`;
+                button.title = label;
+                button.setAttribute('aria-label', label);
+                button.setAttribute(`data-igs-waitstage-${action}`, '1');
+                button.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    if (root === openedRoot) callback(openedRoot);
                 });
-                root.appendChild(closeButton);
+                tools.appendChild(button);
             }
+            if (tools.children.length) root.appendChild(tools);
             root.appendChild(body);
             host.appendChild(root);
             syncGameAttr();

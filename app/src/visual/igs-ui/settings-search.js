@@ -10,7 +10,7 @@ const MAX_RESULTS = 8;
 // 演出开关的口语说法：用户搜的往往不是界面原文（「打字音」「黑边」「卡」）。
 const FEATURE_ALIASES = Object.freeze({
     打字机: ['打字', '逐字', '打字音', '一个字一个字'],
-    句末等待符号: ['等待', '箭头', '翻页提示'],
+    提示符号: ['句末等待符号', '等待', '箭头', '翻页提示', '旁白符号'],
     行内文字效果: ['字效', '抖动', '吼叫', '特效文字'],
     转场: ['过渡', '淡入', '换场'],
     环境滤镜: ['调色', '夜晚', '变暗', '滤镜'],
@@ -56,6 +56,7 @@ const EXTRA_ENTRIES = Object.freeze([
     { id: 'consistency-strength', label: '一致性重绘强度', aliases: ['强度', '角色一致性', '重绘', 'strength'], page: 'source', path: 'bridge.autoIllustration.consistencyStrength' },
     { id: 'my-phone', label: '我的手机', group: 'special', open: ['perf-my-phone'], aliases: ['手机壳', '机型', '壁纸', '铃声', '手机外观', '壳色', '折叠屏', '刘海屏', '平板'] },
     { id: 'comic-mode', label: '漫画演出模式', group: 'stage', open: ['perf-comic-mode'], path: 'readerSettings.comicMode.enabled', aliases: ['漫画', '对话泡', '气泡', '竖排', '黑白', '漫画模式', '吹き出し'] },
+    { id: 'log-reader', label: '窄屏阅读模式', group: 'text', open: ['perf-log-reader'], path: 'readerSettings.logReader.on', aliases: ['窄屏', '手机阅读', '对话列表', '列表模式', 'log', '回想式', '头像', '破框', '流水展开', '每次显示'] },
     { id: 'cinema-bars', label: '电影黑边', group: 'stage', open: [], path: 'readerSettings.cinemaBars', aliases: ['黑边', '宽银幕', '上下黑条'] },
     { id: 'cg-hold', label: '日常CG停留', group: 'rhythm', open: [], path: 'readerSettings.cgHoldPages', aliases: ['cg', '插图', '停留', '几页'] },
     { id: 'render-quality', label: '画质 / 省电模式', aliases: ['卡', '卡顿', '发热', '耗电', '低画质', '省电', '掉帧'], page: 'dash' },
@@ -67,7 +68,8 @@ const EXTRA_ENTRIES = Object.freeze([
     { id: 'creature-system', label: '非人角色', aliases: ['怪物', '妖怪', '妖魔', '魔物', '兽人', '半人形', '体型缩放', '巨型', '自动建档', '战斗对手', '临时档案'], page: 'chars', open: ['creature-system'], path: 'readerSettings.creatureDisplay.enabled' },
     { id: 'clash-fx', label: '立绘碰撞', group: 'story', open: ['perf-clash-fx'], path: 'readerSettings.fxTags.clash', aliases: ['碰撞', '打', '推', '扑', '拥抱', '巴掌', '击掌', '撞'] },
     { id: 'inner-demon', label: '心魔黑影', group: 'stage', open: [], path: 'readerSettings.innerDemon.enabled', aliases: ['心魔', '另一个自己', '人格分裂', '第二人格', '黑影', '自我对话'] },
-    { id: 'battle-dash', label: '出手冲刺', group: 'special', open: ['perf-battle-fx'], path: 'readerSettings.battleFx.dash', aliases: ['冲刺', '出手', '战斗'] },
+    { id: 'battle-dash', label: '出手冲刺', page: 'combat', path: 'readerSettings.battleFx.dash', aliases: ['冲刺', '出手', '战斗'] },
+    { id: 'battle-letterbox', label: '战斗时加电影黑边', page: 'combat', path: 'readerSettings.battleFx.letterbox', aliases: ['黑边', '战斗', '战斗演出'] },
     { id: 'creature-battle-fx', label: '非人演出', group: 'special', open: [], path: 'readerSettings.battleFx.creature', aliases: ['怪物演出', '威吓', '群怪', '收服', '狂暴', '战斗'] },
     { id: 'creature-framing', label: '非人角色取景与情绪档', aliases: ['半身', '全身', '半人形', '取景', '情绪档', '四档', '差分'], page: 'chars' },
     { id: 'creature-artist', label: '非人画师串', aliases: ['怪物画师', '分区画师', '画师'], page: 'kinds', open: ['prompt-kind-creature'] },
@@ -91,6 +93,8 @@ const EXTRA_ENTRIES = Object.freeze([
     { id: 'auto-outfit-sprite', label: '新衣装自动入库并生成立绘', aliases: ['服装DNA', '新服装', '自动换装', '衣柜入库'], page: 'kinds', path: 'bridge.autoIllustration.assets.outfitAutoGenerate' },
     { id: 'prompt-rule-inject', label: '自动注入格式规则', aliases: ['格式规则', '规则提示词', '提示词', '注入', '关闭注入', '酒馆预设', '复制提示词', '复制到预设', '复制到酒馆预设', '复制预设'], page: 'rules', path: 'bridge.sceneAssets.promptRuleEnabled' },
     { id: 'fx-prompts', label: '演出写法', aliases: ['演出提示词', '提示词正文', '触发关键词', '关键词', '常驻', '注入位置', '插入深度', '深度', '世界书', '写法'], page: 'rules' },
+    { id: 'combat-expansion', label: '战斗方式', aliases: ['战斗', '卡牌战斗', '战斗演出', '战斗扩展', '回合制', '卡牌', '难度', '战报', '面板皮肤', '副llm', '数据库'], page: 'combat', path: 'readerSettings.__battleMode' },
+    { id: 'origin-system', label: '随身系统', aliases: ['Origin', 'origin', '系统流', '金手指', '任务系统', '积分', '商城', '抽奖', '成就', '背包'], page: 'origin', path: 'bridge.origin.enabled' },
     { id: 'backup-model', label: '备用模型', aliases: ['副llm', '副 llm', '副api', '副 api', '副模型', 'llm', 'openai', '规划模型'], page: 'llm' },
     { id: 'export-config', label: '导出 / 导入配置', aliases: ['备份', '导出素材', '导入素材', '导出本卡素材', '导入素材包', '导出配置', '导入配置', '迁移', '本页诊断', '诊断'], page: 'data' },
 ]);
@@ -125,7 +129,7 @@ const PAGE_ENTRIES = SETTINGS_PAGES.filter(([id]) => id !== 'dash').map(([id, la
 
 export const SETTINGS_SEARCH_INDEX = Object.freeze([
     ...PERFORMANCE_FEATURES
-        .filter((feature) => feature && feature.label && groupTitle(feature.group))
+        .filter((feature) => feature && feature.label && feature.key !== 'battleFx' && groupTitle(feature.group))
         .map((feature) => makeEntry({ id: `perf:${feature.key}`, label: feature.label, group: feature.group, path: `readerSettings.${feature.key}.enabled`, aliases: FEATURE_ALIASES[feature.label] || [] })),
     ...EXTRA_ENTRIES.map(makeEntry),
     ...PAGE_ENTRIES,

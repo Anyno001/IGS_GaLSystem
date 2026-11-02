@@ -1,18 +1,42 @@
 // 数值系统提示词注入段（§9）：每段一个可编辑模板，用户覆盖优先，可单独关闭。
 // 模板变量写错或缺失时原样保留变量名并记诊断，不中断（§9 末条）。
 import { FAVOR_GATES, gateKey, stageOf } from './stat-favor.js';
-import { healthStatus, STAMINA_LOW, STRESS_HIGH } from './stat-bars.js';
+import { healthStatus, walletBalance, STAMINA_LOW, STRESS_HIGH } from './stat-bars.js';
 import { FAVOR_DIRECTIONS, HURT_TIERS, MONEY_TIERS, STAMINA_EVENTS } from './stat-vocab.js';
+import { CHECK_ROLLS_TEMPLATE, checkRollsVars, fillCheckRolls } from '../check-rolls.js';
+import { COC_CHECK_ROLLS_TEMPLATE, cocRollsVars } from './stat-coc-checks.js';
+import { COMBAT_GROWTH_LINES, COMBAT_RULE_HEAD, COMBAT_STORY_LINES, COMBAT_SYNTAX_LINES } from '../combat-prompt.js';
 
-export const STAT_PROMPT_SEGMENTS = Object.freeze(['source', 'protagonist', 'present', 'check', 'tags', 'mandates']);
+export const STAT_PROMPT_SEGMENTS = Object.freeze(['source', 'protagonist', 'skills', 'perception', 'present', 'sheets', 'check', 'dice', 'tags', 'combat', 'party', 'mandates']);
+// 后台请求的提示词（角色卡生成、批量补全）：可编辑，不参与注入开关。
+export const STAT_BACKGROUND_PROMPTS = Object.freeze(['sheetGen', 'backfill']);
+// 用户提示词版本：3 起 roll、rollManual、protagonist 的旧覆盖移进 stalePrompts（模板已改名或改格式）；
+// sheets、sheetGen 在本工作区仍是有效模板（NPC 属性档保留），不在失效清单里。
+export const STAT_PROMPTS_VERSION = 3;
+export const STAT_STALE_PROMPT_KEYS = Object.freeze(['roll', 'rollManual', 'protagonist']);
 
-export const DEFAULT_STAT_PROMPTS = Object.freeze({
+const BASE_PROMPTS = {
     source: '【数值来源】角色关系与主角状态以本段为准；表格里的数值仅作展示，与本段不一致时以本段为准。',
-    protagonist: '【主角状态】生命{{生命}}/100，体力{{体力}}/100，压力{{压力}}/100，金钱{{金钱}}。{{状态描述}}',
+    protagonist: '【主角状态】生命{{生命}}，体力{{体力}}/100，压力{{压力}}/100，金钱{{金钱}}。{{状态描述}}',
+    skills: '【主角技能】{{技能档位}}。未列出的技能按未学。',
+    perception: '【主角感知】{{感知档位}}：据此决定主角能注意到什么，不需要检定。',
     present: '【{{角色}}】关系阶段：{{阶段}}。{{阶段文案}}{{组合描述}}{{突破提示}}{{亲密约束}}',
-    check: '【本轮检定】{{技能}}：1d100={{点数}}，需≤{{目标}}，结果【{{结果}}】。按此结果描写，不得改判。',
-    tags: '【数值标签】正文末尾按需输出以下标签，只写档位，不写任何数字：\n[igs-stat:favor|角色名|{{好感档位}}]\n[igs-stat:trust|角色名|上升/下降]\n[igs-stat:stamina|{{体力档位}}]\n[igs-stat:money|收入/花费|{{金钱档位}}]\n[igs-stat:stress|上升/下降]\n[igs-stat:hurt|{{伤势档位}}]\n[igs-stat:sleep]（入睡）\n[igs-stat:event|角色名|约会/告白/共患难]\n[igs-stat:gift|角色名|礼物类别]\n[igs-stat:skip|7天]（时间跳跃）',
+    sheets: '【{{角色}}的本事】{{资历}}；擅长：{{擅长}}；六维加值：{{六维加值}}。',
+    check: '【本轮检定】{{技能}}{{难度}}：{{明细}}，结果【{{结果}}】。按此结果描写，不得改判。',
+    diceManual: '【检定规则】主角要做有不确定性、失败有后果的事时，写到行动发起处就停，不写结果，在正文末尾写 [igs-stat:roll|技能|难度]，对抗在场角色加 |对抗:角色名，新技能加 |所属属性。难度：简单、普通、困难、极难（少用）。毫无悬念的事不检定。',
+    sheetGen: '你是跑团数值设计。按角色资料给每个角色分配数值，只输出档位词，不输出任何数字。\n属性档：很弱、偏弱、普通、出众、顶尖（非人可用「超凡」），属性写 力量、敏捷、体质、智力、感知、魅力 与 理智。技能档（相对主角同项技能）：生疏、略逊、相当、擅长、精通、大师，相当表示与主角接近，向上依次为擅长、精通、大师，向下为略逊、生疏，完全不会写「未学」。资历：普通人、老手、精英、大师、传奇。\n只列与「普通 / 未学」不同的项。招牌技能最多 3 个，可以是清单外的新技能，并写所属属性（力量、敏捷、体质、智力、感知、魅力之一）。\n只输出 JSON：{"角色名":{"资历":"","属性":{"属性名":"档"},"技能":{"技能名":"档"},"招牌技能":[{"名":"","属性":""}]}}',
+    backfill: '你是跑团数值设计。剧情里出现了新技能，请按角色资料给每个角色补一个技能档位，只输出档位词，不输出任何数字。\n技能档：主角用未学、入门、熟练；其他角色用相对主角同项技能的生疏、略逊、相当、擅长、精通、大师。没有相关经历一律写「未学」。\n只输出 JSON：{"角色名":{"技能名":"档"}}',
+    tags: '【数值标签】正文末尾按需输出以下标签，只写档位，不写任何数字：\n[igs-stat:favor|角色名|{{好感档位}}]\n[igs-stat:trust|角色名|上升/下降]\n[igs-stat:stamina|{{体力档位}}]\n[igs-stat:money|收入/花费|{{金钱档位}}]\n[igs-stat:stress|上升/下降]\n[igs-stat:hurt|{{伤势档位}}]\n[igs-stat:sleep]（入睡）\n[igs-stat:event|角色名|约会/告白/共患难]\n[igs-stat:gift|角色名|礼物类别]\n[igs-stat:skip|7天]（时间跳跃）\n[igs-stat:grow|角色名|技能名]（剧情明确写了苦练、拜师等长期成长时才写，同一角色同一技能一天一次，不写数字）',
     mandates: '【本轮必须写出】{{事项}}',
+};
+
+// dice 段默认就是正文检定模板（骰序、优劣势、在场加值、更正）；combat、party 只在战斗扩展开启时出现。
+export const DEFAULT_STAT_PROMPTS = Object.freeze({
+    ...BASE_PROMPTS,
+    tags: [BASE_PROMPTS.tags, '成长与生命标签（只开数值系统时同样结算）：', ...COMBAT_GROWTH_LINES].join('\n'),
+    dice: CHECK_ROLLS_TEMPLATE,
+    combat: [COMBAT_RULE_HEAD, ...COMBAT_STORY_LINES, '', '语法要求：', ...COMBAT_SYNTAX_LINES].join('\n'),
+    party: '【主角团状态】主角与最近一场并肩作战的同伴此刻的状态，战斗留下的伤势会带到下一场。正文对伤势与体力的描写与此一致，不写具体数值：\n{{同伴}}',
 });
 
 export const DEFAULT_STAGE_TEXT = Object.freeze({
@@ -37,10 +61,17 @@ export function fillTemplate(template, vars, diagnostics = []) {
     });
 }
 
-export function describeProtagonist(bars, { shortfall = false } = {}) {
+// 生命显示「当前/最大」，取战斗 vitals；读不到显示「未知」。
+export function vitalsText(vitals) {
+    if (!vitals || !(Number(vitals.maxHp) > 0)) return '未知';
+    return `${vitals.down ? 0 : Math.round(Number(vitals.hp) || 0)}/${Math.round(Number(vitals.maxHp))}`;
+}
+
+export function describeProtagonist(bars, { shortfall = false, vitals = null } = {}) {
     const notes = [];
-    const health = healthStatus(bars.health);
-    if (health !== '正常') notes.push(`主角处于${health}状态`);
+    const health = healthStatus(vitals);
+    if (health === '倒下') notes.push('主角已倒下，无法行动');
+    else if (health !== '正常') notes.push(`主角处于${health}状态`);
     if (bars.stamina < STAMINA_LOW) notes.push('主角很疲惫，动作迟缓');
     if (bars.stress > STRESS_HIGH) notes.push('主角压力很大，容易烦躁');
     if (shortfall) notes.push('主角买不起刚才想买的东西，请写出钱不够');
@@ -76,7 +107,10 @@ function intimacyNote(character, { nsfw, intimacyGate }) {
     return '尚未到亲密阶段，如涉及亲密行为，她会拒绝或回避。';
 }
 
-// opts：{ prompts, disabled, stageText, present, check, mandates, shortfall, nsfw, intimacyGate }
+// opts：{ prompts, disabled, stageText, present, check, mandates, shortfall, nsfw, intimacyGate, vitals,
+//         walletExtra（战斗侧积分，与金钱合并显示）, skillsLine, perceptionLine, sheetLines: [{ name, rank, strong, bonus }], manualRoll,
+//         dice: D&D 正文检定输入（check-rolls 的 checkRollsVars 入参），cocDice: CoC 正文检定输入（cocRollsVars 入参）,
+//         combatOn, partyLines }
 export function buildStatsPrompt(state, opts = {}) {
     const diagnostics = [];
     const prompts = { ...DEFAULT_STAT_PROMPTS, ...(opts.prompts || {}) };
@@ -87,9 +121,11 @@ export function buildStatsPrompt(state, opts = {}) {
     const push = (id, text) => { if (!disabled.has(id) && text) parts.push({ id, text }); };
     push('source', fillTemplate(prompts.source, {}, diagnostics));
     push('protagonist', fillTemplate(prompts.protagonist, {
-        生命: bars.health, 体力: bars.stamina, 压力: bars.stress, 金钱: bars.money,
-        状态描述: describeProtagonist(bars, { shortfall: opts.shortfall }),
+        生命: vitalsText(opts.vitals), 体力: bars.stamina, 压力: bars.stress, 金钱: walletBalance(bars, opts.walletExtra),
+        状态描述: describeProtagonist(bars, { shortfall: opts.shortfall, vitals: opts.vitals }),
     }, diagnostics));
+    if (opts.skillsLine) push('skills', fillTemplate(prompts.skills, { 技能档位: opts.skillsLine }, diagnostics));
+    if (opts.perceptionLine) push('perception', fillTemplate(prompts.perception, { 感知档位: opts.perceptionLine }, diagnostics));
     const present = (opts.present || []).filter((name) => state.characters[name]);
     if (present.length) {
         push('present', present.map((name) => {
@@ -101,24 +137,43 @@ export function buildStatsPrompt(state, opts = {}) {
             }, diagnostics);
         }).join('\n'));
     }
+    const sheets = (opts.sheetLines || []).filter((s) => s && s.name && present.includes(s.name));
+    if (sheets.length) {
+        push('sheets', sheets.map((s) => fillTemplate(prompts.sheets, { 角色: s.name, 资历: s.rank || '普通人', 擅长: s.strong || '无特别擅长', 六维加值: s.bonus || '由前端按其强弱估算' }, diagnostics)).join('\n'));
+    }
     if (opts.check) {
         const ck = opts.check;
-        push('check', fillTemplate(prompts.check, { 技能: ck.skill, 点数: ck.roll, 目标: ck.threshold ?? ck.target, 结果: ck.outcome || ck.tier }, diagnostics));
+        const threshold = ck.threshold ?? ck.target;
+        push('check', fillTemplate(prompts.check, {
+            技能: ck.skill, 难度: ck.difficulty && ck.difficulty !== '普通' ? `（${ck.difficulty}）` : '',
+            明细: ck.detail || `1d100=${ck.roll}，需≤${threshold}`, 点数: ck.roll, 目标: threshold, 结果: ck.outcome || ck.tier,
+        }, diagnostics));
     }
+    const dice = [];
+    if (!opts.check && opts.manualRoll) dice.push(fillTemplate(prompts.diceManual, {}, diagnostics));
+    // 用户没覆盖 dice 段时，CoC 用百分骰模板，其余用 d20 模板。
+    const cocVars = opts.cocDice ? cocRollsVars(opts.cocDice) : null;
+    const d20Vars = !cocVars && opts.dice ? checkRollsVars(opts.dice) : null;
+    if (cocVars) dice.push(fillCheckRolls(opts.prompts && opts.prompts.dice ? prompts.dice : COC_CHECK_ROLLS_TEMPLATE, cocVars));
+    else if (d20Vars) dice.push(fillCheckRolls(prompts.dice, d20Vars));
+    if (dice.length) push('dice', dice.join('\n'));
     push('tags', fillTemplate(prompts.tags, {
         好感档位: FAVOR_DIRECTIONS.join('/'), 体力档位: STAMINA_EVENTS.join('/'), 金钱档位: MONEY_TIERS.join('/'), 伤势档位: HURT_TIERS.join('/'),
     }, diagnostics));
+    if (opts.combatOn) push('combat', fillTemplate(prompts.combat, {}, diagnostics));
+    const party = (opts.partyLines || []).filter(Boolean);
+    if (opts.combatOn && party.length) push('party', fillTemplate(prompts.party, { 同伴: party.join('\n') }, diagnostics));
     const mandates = (opts.mandates || []).filter(Boolean);
     if (mandates.length) push('mandates', fillTemplate(prompts.mandates, { 事项: mandates.join('；') }, diagnostics));
     return { content: parts.map((p) => p.text).join('\n'), segments: parts, diagnostics };
 }
 
 // 强制事项（§9）：由上一楼结算标记推出。
-export function mandatesFromFlags(flags = {}, bars = {}) {
+export function mandatesFromFlags(flags = {}, vitals = null) {
     const out = [];
     if (flags.battle) out.push(`刚才的战斗结果为【${flags.battle.outcome}】，按此写出战斗结局，不得改判`);
     if (flags.work) out.push(`刚才的工作结果为【${flags.work.tier}】${flags.work.income ? `，收入档位${flags.work.income}` : '，没有收入'}`);
     if (flags.forcedRest) out.push('主角体力耗尽，写出主角昏睡或休息');
-    if (Number(bars.health) <= 0) out.push('主角昏迷，写出被救、被俘或醒来的情节');
+    if (healthStatus(vitals) === '倒下') out.push('主角已倒下，写出被救、被俘或醒来的情节');
     return out;
 }

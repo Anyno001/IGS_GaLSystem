@@ -93,9 +93,10 @@ const IMAGE_SOURCE_TEMPLATE = `
     <div class="igs-settings-sub" data-image-source="nai"{{sourceNaiHidden}}>
       <div class="igs-source-filter-grid">
         {{autoNaiEndpointField}}{{autoNaiKeyField}}
-        {{autoNaiModelField}}{{autoNaiSizeField}}
-        {{autoNaiTransportField}}
+        {{autoNaiModelField}}{{autoNaiEffortField}}{{autoNaiSizeField}}
+        {{autoNaiTransportField}}{{autoNaiIntervalField}}
       </div>
+      <div class="igs-settings-sub">{{autoNaiCloudQueueFields}}</div>
       {{modelProfileImageRow}}
       <div class="igs-settings-sub" data-image-feature="nai-transparency"{{sourceBuiltinHidden}}>
         {{naiSpriteTransparentField}}
@@ -395,53 +396,176 @@ const EVENTCG_TEMPLATE = `
 
 export { RULES_TEMPLATE, WARDROBE_TEMPLATE, EVENTCG_TEMPLATE, SCENE_HEAD_TEMPLATE, PARSE_TEMPLATE, BACKUP_TEMPLATE };
 
-// 数值系统：总开关在最上；关闭时下方整块隐藏，只留一行说明。
-const STATS_TEMPLATE = `
-<div class="igs-settings-grid" data-settings-pane="stats">
+// 战斗：最上面三选一决定战斗方式；各方式的设置只在选中时显示。
+const COMBAT_TEMPLATE = `
+<div class="igs-settings-grid" data-settings-pane="combat">
   <div class="igs-source-filter">
-    <div class="igs-source-filter-title">数值系统</div>
-    <div class="igs-settings-row">{{statsToggle}}</div>
-    <div class="igs-source-filter-note"{{statsOffNoteHidden}}>开启后，好感、技能、体力与金钱由脚本掷骰结算，AI 只报告发生了什么。每个聊天第一次使用时可以选择是否启用。</div>
+    <div class="igs-source-filter-title">战斗</div>
+    <div class="igs-settings-row">{{battleModeField}}</div>
+    <div class="igs-source-filter-note"{{battleOffNoteHidden}}>战斗不触发演出与面板。</div>
   </div>
-  <div class="igs-settings-sub"{{statsHidden}}>
+  <div class="igs-settings-sub"{{battleStoryHidden}}>
     <div class="igs-source-filter">
-      <div class="igs-source-filter-title">规则</div>
-      <div class="igs-settings-section">{{autoSkillField}}{{intimacyField}}</div>
-      <div class="igs-source-filter-grid">{{registerField}}{{hudLabelField}}</div>
+      <div class="igs-settings-section">{{battleStoryFields}}</div>
+      <div class="igs-source-filter-note">数值系统开启时，由数值系统速算胜负与伤势。</div>
     </div>
+  </div>
+  <div class="igs-settings-sub"{{battleCardHidden}}>
     <div class="igs-source-filter">
-      <div class="igs-source-filter-title">生活条</div>
-      <div class="igs-settings-section">{{barsFields}}</div>
+      <div class="igs-source-filter-note">开启条件：已安装数据库（shujuku），并在自动插图设置里接好写词模型（副 LLM）。开启后数值系统随之启用。</div>
+      <div class="igs-source-filter-grid">{{combatFields}}</div>
     </div>
+  </div>
+  <div class="igs-settings-sub"{{combatDailyHidden}}>
     <div class="igs-source-filter">
-      <div class="igs-source-filter-title">同步到表格</div>
-      <div class="igs-settings-section">{{pushField}}</div>
-      {{statsMappingFields}}
-      <div class="igs-source-filter-note">表格里的数值只作展示；在表格里改动的数值会在下一次同步时被覆盖。</div>
-      <div class="igs-source-filter-note">推荐导入「IGS 数值系统适配版」表格模板：填表 AI 不再改好感与属性，导入后无需配置。</div>
-      <div class="igs-settings-row">
-        <button class="igs-settings-action" data-action="stats-template-download" type="button">下载适配版表格模板</button>
-      </div>
-    </div>
-    <div class="igs-source-filter">{{statsPromptFields}}</div>
-    <div class="igs-source-filter">
-      <div class="igs-source-filter-title">存档</div>
-      {{statsArchiveFields}}
-    </div>
-    <div class="igs-source-filter">
-      <div class="igs-source-filter-title">本聊天</div>
-      <div class="igs-source-filter-note" data-result="stats-chat">{{statsChatNote}}</div>
-      <div{{statsBuildHidden}}>{{statsBuildFields}}</div>
-      <div class="igs-settings-row">
-        <button class="igs-settings-action" data-action="stats-chat-enable" type="button"{{statsChatEnableHidden}}>快速开始（默认数值）</button>
-        <button class="igs-settings-action" data-action="stats-chat-disable" type="button"{{statsChatDisableHidden}}>本聊天暂停（数值冻结）</button>
-      </div>
+      <div class="igs-source-filter-title">日常挑战</div>
+      <div class="igs-source-filter-note">剧情里成败攸关的事用卡牌对决处理，每个游戏日的次数与间隔楼数在这里限制。选「仅日常挑战」时，提示词里不再写战斗标签。</div>
+      <div class="igs-source-filter-grid">{{combatDailyFields}}</div>
     </div>
   </div>
 </div>
 `.trim();
 
+// 数值系统：总开关在最上；关闭时下方整块隐藏。版面按「只懂 RPG」的玩家排：我的角色、玩法、其他角色、高级。
+const STATS_TEMPLATE = `
+<div class="igs-settings-grid" data-settings-pane="stats">
+  <div class="igs-source-filter">
+    <div class="igs-source-filter-title">数值系统</div>
+    <div class="igs-settings-row">{{statsToggle}}</div>
+    <div class="igs-source-filter-note">好感、技能、体力和金钱由脚本掷骰决定，AI只负责把结果写进剧情。</div>
+    <div class="igs-source-filter-note"{{statsCombatNoteHidden}}>卡牌战斗开启中，数值系统随之启用，不能单独关闭。</div>
+  </div>
+  <div class="igs-settings-sub"{{statsHidden}}>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">我的角色（本聊天）</div>
+      <div class="igs-source-filter-note" data-result="stats-chat">{{statsChatNote}}</div>
+      <div class="igs-settings-row"{{statsStartHidden}}>
+        <button class="igs-settings-action" data-action="stats-chat-enable" type="button">快速开始</button>
+        <button class="igs-settings-action" data-action="stats-build-mode:manual" type="button">自己建卡</button>
+      </div>
+      <div{{statsMainBuildHidden}}>{{statsMainBuildFields}}</div>
+      <div{{statsHeroHidden}}>
+        {{statsHeroCard}}
+        <div class="igs-settings-row">
+          <button class="igs-settings-action" data-action="stats-chat-disable" type="button">暂停本聊天</button>
+        </div>
+      </div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">玩法</div>
+      <div class="igs-source-filter-grid">{{diceFeelField}}{{storyCheckField}}</div>
+      <div class="igs-settings-section">{{optionChanceField}}{{checkFxField}}{{intimacyField}}</div>
+      <div class="igs-source-filter-grid">{{favorModeField}}</div>
+      <div class="igs-source-filter-note">状态栏主角区显示</div>
+      <div class="igs-settings-section">{{barsFields}}</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">其他角色</div>
+      <div class="igs-source-filter-grid">{{sheetGenField}}</div>
+      <div class="igs-source-filter-note">新角色的数值与新技能的补全由辅助模型给出档位，脚本换算成数值；需要在自动插图设置里接好写词模型。</div>
+      <div class="igs-settings-row">
+        <button class="igs-settings-action" data-action="stats-op:generate" type="button">为缺数值的角色生成</button>
+        <button class="igs-settings-action" data-action="stats-op:backfill" type="button">补全新技能</button>
+      </div>
+    </div>
+    <details class="igs-settings-sub igs-settings-advanced" data-advanced="stats-more"{{statsMoreOpen}}>
+      <summary>高级</summary>
+      <div class="igs-source-filter">
+        <div class="igs-source-filter-title">同步到数据库表格</div>
+        <div class="igs-settings-section">{{pushField}}</div>
+        {{statsMappingFields}}
+        <div class="igs-source-filter-note">表格里的数值只作展示；在表格里改动的数值会在下一次同步时被覆盖。</div>
+        <div class="igs-source-filter-note">推荐导入「IGS数值系统适配版」表格模板：填表AI不再改好感与属性，导入后无需配置。</div>
+        <div class="igs-settings-row">
+          <button class="igs-settings-action" data-action="stats-template-download" type="button">下载适配版表格模板</button>
+        </div>
+      </div>
+      <div class="igs-source-filter">{{statsPromptFields}}</div>
+      <div class="igs-source-filter">
+        <div class="igs-source-filter-title">存档与记录</div>
+        {{statsArchiveFields}}
+      </div>
+      <div class="igs-source-filter">
+        <div class="igs-source-filter-title">其他选项</div>
+        <div class="igs-source-filter-grid">{{newChatField}}{{hudLabelField}}{{registerField}}{{backfillField}}</div>
+        <div class="igs-settings-section">{{autoSkillField}}</div>
+        <div class="igs-source-filter-note">骰子手感中，百分骰对应CoC第七版，二十面骰对应D&D第五版；切换后从下一次检定起生效，已有数值按新规则换算显示，存档不变。</div>
+      </div>
+      <div class="igs-source-filter"{{statsBuildAdvancedHidden}}>
+        <div class="igs-source-filter-title">建档方式</div>
+        {{statsBuildModeField}}{{statsBuildFields}}
+      </div>
+    </details>
+  </div>
+</div>
+`.trim();
+
+// 随身系统（Origin 系统移植）：总开关在最上；关闭时下方整块隐藏，只留一行说明。署名在页面底部。
+const ORIGIN_TEMPLATE = `
+<div class="igs-settings-grid" data-settings-pane="origin">
+  <div class="igs-source-filter">
+    <div class="igs-source-filter-title">随身系统</div>
+    <div class="igs-settings-row">{{originToggle}}</div>
+    <div class="igs-source-filter-note"{{originOffNoteHidden}}>开启后，阅读器左上角出现随身系统入口，系统会在剧情中派发任务、结算积分，并提供背包、商城、抽奖与成就。</div>
+  </div>
+  <div class="igs-settings-sub"{{originHidden}}>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">本聊天</div>
+      <div class="igs-source-filter-note" data-result="origin-chat">{{originChatNote}}</div>
+      <div class="igs-settings-row"{{originWorldHidden}}><span class="igs-origin-world">当前世界：{{originWorldText}}</span><button class="igs-settings-action" data-action="origin-op:world" type="button">修改</button></div>
+      <div class="igs-settings-row">
+        <button class="igs-settings-action" data-action="origin-chat-resume" type="button"{{originResumeHidden}}>恢复本聊天</button>
+        <button class="igs-settings-action" data-action="origin-chat-pause" type="button"{{originPauseHidden}}>暂停本聊天</button>
+      </div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">任务</div>
+      <div class="igs-source-filter-grid">{{originFreqField}}{{originTaskSourceField}}</div>
+      <div class="igs-source-filter-grid">{{originLimitMinField}}{{originLimitMaxField}}</div>
+      <div class="igs-settings-section">{{originBlockField}}{{originPunishField}}{{originAchieveField}}</div>
+      <div class="igs-source-filter-grid">{{originRewardPrefField}}{{originPenaltyPrefField}}</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">商城与抽奖</div>
+      <div class="igs-source-filter-grid">{{originShopRefreshField}}{{originGachaRefreshField}}{{originDrawCostField}}</div>
+      <div class="igs-source-filter-note">更新间隔以回合计，0表示不自动更新。</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">模块</div>
+      <div class="igs-settings-section">{{originModFields}}</div>
+      <div class="igs-source-filter-note">关闭的模块不显示页签，也不写入提示词。</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">系统人格</div>
+      <div class="igs-source-filter-grid">{{originSysNameField}}{{originPersonalityField}}{{originFourthWallField}}</div>
+      <div class="igs-settings-full">{{originPersonaTextField}}</div>
+      <div class="igs-source-filter-grid">{{originBindToField}}{{originRpChatField}}</div>
+      <div class="igs-settings-section">{{originAutoEconField}}{{originChatToStoryField}}</div>
+      <div class="igs-source-filter-note">绑定对象填「宿主」时系统为用户派发任务；填角色名时系统归该角色，用户旁观，对话页改为角色与系统的私聊。</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">模型</div>
+      <div class="igs-source-filter-grid">{{originRouteField}}<div class="igs-settings-sub"{{originModelHidden}}>{{originModelField}}</div></div>
+      <div class="igs-source-filter-note">{{originRouteNote}}</div>
+    </div>
+    <div class="igs-source-filter">
+      <div class="igs-source-filter-title">存档</div>
+      <div class="igs-source-filter-grid">{{originKeepFloorsField}}</div>
+      <div class="igs-source-filter-note">逐楼存档只保留最近若干个回复楼，更早的楼合并为一份底稿；底稿之前的楼切换回复、编辑或重算都不再影响系统数值。</div>
+      <div class="igs-settings-row">
+        <button class="igs-settings-action" data-action="origin-op:recalc" type="button">按全部楼层重算</button>
+        <button class="igs-settings-action" data-action="origin-op:reset" type="button">清空本聊天存档</button>
+        <button class="igs-settings-action" data-action="origin-op:import" type="button"{{originLegacyHidden}}>导入原版存档</button>
+      </div>
+      <div class="igs-source-filter-note">重算按当前规则从底稿之后（未合并时从第一楼）起补账；清空后任务、积分、属性与记录都会移除。</div>
+    </div>
+  </div>
+  <div class="igs-origin-credit">{{originCredit}}</div>
+</div>
+`.trim();
+
 const PAGE_TEMPLATES = Object.freeze({
+    origin: ORIGIN_TEMPLATE,
     style: READER_DIALOG_TEMPLATE,
     text: READER_TEXT_TEMPLATE,
     'ui-reader': READER_UI_READER_TEMPLATE,
@@ -462,6 +586,7 @@ const PAGE_TEMPLATES = Object.freeze({
     rules: RULES_TEMPLATE,
     parse: PARSE_TEMPLATE,
     stats: STATS_TEMPLATE,
+    combat: COMBAT_TEMPLATE,
     data: BACKUP_TEMPLATE,
     logs: IMAGE_LOGS_TEMPLATE,
 });

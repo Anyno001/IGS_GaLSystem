@@ -4,7 +4,7 @@ import { prefersReducedMotion } from './reduced-motion.js';
 import { filterFxByKinds } from '../../scene/fx-directives.js';
 import { cancelDlcFx, hasDlcFx, syncDlcFx } from './dlc-fx-runtime.js';
 import { resolveCharacterKey } from '../../scene/scene-directives.js';
-import { resolveStatusAvatar } from '../../data/shujuku/status-hud-model.js';
+import { normalizeStatusHudSettings, resolveStatusAvatar } from '../../data/shujuku/status-hud-model.js';
 import {
     FX_FEATURE_KEYS,
     FX_HOLD_SCALE,
@@ -55,16 +55,20 @@ const CUTIN_HEAD_SPAN = 2.4;
 
 // 纯函数：按头部标定（相对原图）算出 background-size（占分格宽度 %）与 background-position（%），
 // 让头部落在分格中心。只做 CSS 换算，不读像素。aspect 为原图高宽比，缺失时按常见立绘 1.6。
-export function resolveCutinCrop(head, aspect, ratio = CUTIN_RATIO) {
+// focus 可选：{ span, line } 改放大倍数与纵向对焦点（头顶 0 → 下巴 1），并把位置夹在图像覆盖分格的范围内；不传时结果与旧版一致。
+export function resolveCutinCrop(head, aspect, ratio = CUTIN_RATIO, focus = null) {
     const h = head && Number(head.w) > 0 ? head : FALLBACK_HEAD;
     const a = Number(aspect) > 0 ? Number(aspect) : 1.6;
-    const k = 1 / (Math.max(0.02, Number(h.w)) * CUTIN_HEAD_SPAN);
+    const span = focus && Number(focus.span) > 0 ? Number(focus.span) : CUTIN_HEAD_SPAN;
+    const line = focus && Number(focus.line) >= 0 ? Number(focus.line) : 0.5;
+    const k = 1 / (Math.max(0.02, Number(h.w)) * span);
     const imgH = k * a;
     const px = Math.abs(1 - k) < 1e-6 ? 50 : ((0.5 - Number(h.x) * k) / (1 - k)) * 100;
-    const centerY = Number(h.top) * imgH + Number(h.w) * k * HEAD_ASPECT / 2;
+    const centerY = Number(h.top) * imgH + Number(h.w) * k * HEAD_ASPECT * line;
     const py = Math.abs(ratio - imgH) < 1e-6 ? 50 : ((ratio / 2 - centerY) / (ratio - imgH)) * 100;
     const round = (n) => Math.round(n * 100) / 100;
-    return { size: round(k * 100), x: round(px), y: round(py) };
+    const fit = (n) => (focus ? Math.min(100, Math.max(0, n)) : n);
+    return { size: round(k * 100), x: round(fit(px)), y: round(fit(py)) };
 }
 const RANGE_ATTRS = Object.freeze(['data-igs-fx-era', 'data-igs-fx-flashback', 'data-igs-fx-dream', 'data-igs-fx-letterbox', 'data-igs-fx-whisper', 'data-igs-fx-movie', 'data-igs-fx-lightsoff', 'data-igs-fx-umbrella', 'data-igs-fx-call', 'data-igs-fx-call-remote', 'data-igs-fx-call-sprite', 'data-igs-fx-call-split', 'data-igs-fx-motion', 'data-igs-fx-busy', 'data-igs-fx-presentation', 'data-igs-fx-eat', 'data-igs-fx-state', 'data-igs-fx-state-level']);
 // 进食分镜的立绘动作：挂在 #igs-stage-motion 上，时长与 fx-eat-style 的动画一致。
@@ -151,6 +155,46 @@ export function diffFavorMetrics(baseline, character, metrics) {
     return changes;
 }
 
+const favorFloorKey = (messageId, character) => `favor-floor:${messageId}:${character}`;
+
+// 数值系统结算反馈（igs:stats-fx）：复用页面飘字的 igs-fx-favor 样式。只在状态栏开着时由阅读器调用；
+// 好感与页面差分飘字去重，关系阶段只给当前说话人，成长不限人。返回播放的行数。
+export function playStatsFeedback(root, fx, options = {}) {
+    if (!root || !fx) return { played: 0 };
+    const settings = normalizeFxReaderSettings(options.readerSettings);
+    if (!settings.favorToast.enabled) return { played: 0 };
+    const layers = ensureFxLayers(root);
+    if (!layers) return { played: 0 };
+    const state = getState(root, options);
+    const speaker = text(options.speaker);
+    const lines = [];
+    for (const t of fx.toasts || []) {
+        if (!t || !text(t.target) || !markOnce(state.memory, favorFloorKey(fx.messageId, text(t.target)))) continue;
+        const up = t.delta > 0;
+        lines.push({ up, text: t.text === '♥' || t.text === '♡' ? `${t.target} ${t.text}` : `${t.target} 好感 ${up ? '↑ +' : '↓ '}${t.delta}` });
+    }
+    for (const g of fx.growth || []) lines.push({ up: true, text: `${g.target ? `${g.target}的` : ''}${g.skill}成长 +${g.gain}` });
+    for (const sh of fx.stages || []) {
+        if (speaker && text(sh.target) === speaker) lines.push({ up: true, text: `${sh.target}：${sh.from} → ${sh.to}` });
+    }
+    if (!lines.length) return { played: 0 };
+    const life = Math.round(FX_LIFETIME_MS.favor * (FX_HOLD_SCALE[settings.fxStyle.hold] || 1));
+    const stack = persistent(layers.front, layers.doc, 'igs-fx-favor-stack');
+    for (const line of lines) {
+        const el = node(layers.doc, 'igs-fx-favor', line.text);
+        el.setAttribute('data-dir', line.up ? 'up' : 'down');
+        spawn(state, stack, el, life);
+    }
+    return { played: lines.length };
+}
+
+// 阅读器入口：状态栏关着时数值反馈一律丢弃，什么都不显示；开着时照常播放。
+export function playStatsFeedbackWithHud(root, fx, options = {}) {
+    const settings = options.readerSettings;
+    if (!settings || !normalizeStatusHudSettings(settings.statusHud).enabled) return { played: 0 };
+    return playStatsFeedback(root, fx, options);
+}
+
 export function resetFavorBaseline() {
     favorBaseline.clear();
 }
@@ -202,6 +246,8 @@ export function planPageFx(snapshot, memory, baseline = favorBaseline, normalize
 
     if (settings.favorToast.enabled && content.statusHud && content.statusHud.character) {
         for (const change of diffFavorMetrics(baseline, content.statusHud.character, content.statusHud.metrics)) {
+            // 同一楼同一角色的好感只飘一次（与 igs:stats-fx 的飘字共用记忆）。
+            if (change.label === '好感' && messageId != null && !markOnce(memory, favorFloorKey(messageId, change.character))) continue;
             effects.push({ type: 'favor', ...change });
         }
     }
@@ -275,7 +321,7 @@ function setFlag(el, name, on, value = '1') {
 function getState(root, options) {
     let state = states.get(root);
     if (!state) {
-        state = { memory: createFxMemory(), timers: new Set(), sounds: [], pageKey: '', busy: 0, rangeBusy: false, busyOn: false, presentation: 0, presentationOn: false, motion: null, accent: null, callStart: null, timerKey: '', pipSig: '', pipLast: null, split: null, video: null, ring: null, logKey: '', callLog: new Map() };
+        state = { memory: createFxMemory(), timers: new Set(), sounds: [], pageKey: '', busy: 0, rangeBusy: false, busyOn: false, presentation: 0, presentationOn: false, notice: 0, noticeOn: false, motion: null, accent: null, callStart: null, timerKey: '', pipSig: '', pipLast: null, split: null, video: null, ring: null, logKey: '', callLog: new Map() };
         states.set(root, state);
     }
     state.schedule = typeof options.schedule === 'function' ? options.schedule : (fn, ms) => setTimeout(fn, ms);
@@ -304,6 +350,25 @@ function syncPresentation(state) {
     if (on === state.presentationOn || !state.motion) return;
     state.presentationOn = on;
     setFlag(state.motion, 'data-igs-fx-presentation', on);
+}
+
+function syncNotice(state) {
+    const on = state.notice > 0;
+    if (on === state.noticeOn || !state.motion) return;
+    state.noticeOn = on;
+    setFlag(state.motion, 'data-igs-fx-notice', on);
+}
+
+// 顶部通知卡（短信、广告、外卖、留言、加好友）：在场期间暂隐左上状态栏，右上工具栏只留关闭键。
+function spawnNotice(state, layer, el, lifeMs) {
+    spawn(state, layer, el, lifeMs);
+    state.notice += 1;
+    syncNotice(state);
+    track(state, () => {
+        state.notice = Math.max(0, state.notice - 1);
+        syncNotice(state);
+    }, lifeMs);
+    return el;
 }
 
 function spawn(state, layer, el, lifeMs, busy = false, presentation = false) {
@@ -339,6 +404,8 @@ function clearTransients(state, layers) {
     state.busy = 0;
     state.presentation = 0;
     syncPresentation(state);
+    state.notice = 0;
+    syncNotice(state);
     if (layers.motion && typeof layers.motion.removeAttribute === 'function') layers.motion.removeAttribute(EAT_MOTION_ATTR);
     for (const layer of [layers.stage, layers.front]) {
         if (!layer) continue;
@@ -688,12 +755,12 @@ function playEffect(effect, ctx) {
         el.appendChild(node(doc, 'igs-fx-notify-text', effect.text));
         // 广告只会发到手机上：古代带着随身手机也套广告样式。
         if ((!ctx.ancient || ctx.snapshot.readerSettings._carryPhone === true) && spamAllowed(ctx.snapshot.readerSettings)) applySpamCard(doc, el, effect);
-        spawn(state, layers.front, el, life);
+        spawnNotice(state, layers.front, el, life);
         sound(state, ctx.notifySound || (ctx.ancient ? 'notify-ancient' : 'notify'), plan.sound, options);
     } else if (effect.type === 'delivery') {
         // 外卖 / 快递：顶部配送卡片；下单只响通知音，送到时按门铃「叮咚」。
         const el = renderDeliveryCard(doc, effect, ctx.worldSkin || '');
-        spawn(state, layers.front, el, life);
+        spawnNotice(state, layers.front, el, life);
         sound(state, effect.stage === 'order' ? 'notify' : 'doorbell', plan.sound, options);
     } else if (effect.type === 'nickname') {
         const el = node(doc, 'igs-fx-nick-card');
@@ -716,7 +783,7 @@ function playEffect(effect, ctx) {
         head.appendChild(node(doc, 'igs-fx-voicemail-sender', effect.sender ? `${effect.sender} 的语音留言` : '语音留言'));
         el.appendChild(head);
         el.appendChild(node(doc, 'igs-fx-voicemail-text', effect.text));
-        spawn(state, layers.front, el, life);
+        spawnNotice(state, layers.front, el, life);
         sound(state, 'notify', plan.sound, options);
     } else if (effect.type === 'contact') {
         // 「已添加好友」卡片：只播放演出，不写线上聊天联系人（那是用户持久化设置）。
@@ -725,7 +792,7 @@ function playEffect(effect, ctx) {
         el.appendChild(callFace(doc, effect.name, resolveAvatar(effect.name, snapshot, options)));
         el.appendChild(node(doc, 'igs-fx-notify-sender', effect.name));
         el.appendChild(node(doc, 'igs-fx-notify-text', '已添加为好友'));
-        spawn(state, layers.front, el, life);
+        spawnNotice(state, layers.front, el, life);
         sound(state, 'notify', plan.sound, options);
     } else if (effect.type === 'cutin') {
         // 本期只支持当前说话人：写了别的角色或没有立绘时不播放，不用占位图。
@@ -1092,7 +1159,8 @@ function playPageClashes(ctx, settings) {
     const userName = text(options.userName);
     const fx = content.fx || {};
     const list = pageClashes(fx.clashes, content.displayText, {
-        auto: config.auto,
+        // 回忆、梦境页不自动识别：那不是此刻的人在动手；写了 clash 标签照常播。
+        auto: config.auto && fx.flashback !== true && fx.dream !== true,
         people: Object.keys(assets.characters || {}).map((key) => ({ key, aliases: (assets.characterAliases || {})[key], gender: characterDnaGender(assets, key) })),
         onStage,
         userNames: userName ? [userName] : [],
@@ -1223,6 +1291,12 @@ export function applyFxToDom(root, snapshot, options = {}) {
     if (castMarks.length && state.castMarkKey !== plan.pageKey) {
         const targets = new Map((Array.isArray(options.cast) ? options.cast : []).filter(Boolean).map((t) => [t.character, t]));
         for (const mark of castMarks) {
+            // 说话人本人看到社区新帖：mark.speaker 为真时落在说话人立绘上（不带陪衬目标）。
+            if (mark && mark.speaker === true && options.sprite && options.sprite.url) {
+                playEffect({ type: 'symbol', kind: mark.kind }, ctx);
+                castPlayed.push(`castSymbol:${mark.character}:${mark.kind}`);
+                continue;
+            }
             const castTarget = mark && targets.get(mark.character);
             if (!castTarget || !castTarget.url) continue;
             playEffect({ type: 'symbol', kind: mark.kind, castTarget }, ctx);
@@ -1257,6 +1331,7 @@ export function cancelFxEffects(root) {
     const layers = root ? findFxLayers(root) : null;
     if (!layers) return Boolean(state);
     for (const name of RANGE_ATTRS) layers.motion.removeAttribute(name);
+    layers.motion.removeAttribute('data-igs-fx-notice');
     for (const layer of [layers.stage, layers.front]) {
         if (!layer) continue;
         for (const el of Array.from(layer.querySelectorAll('.igs-fx-transient'))) el.remove();
