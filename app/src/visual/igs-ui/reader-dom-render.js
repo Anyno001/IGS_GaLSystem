@@ -976,6 +976,7 @@ const STATUS_HUD_LOCATION_ICON = '<svg viewBox="0 0 24 24" width="16" height="16
 const STATUS_HUD_COLOR_VARS = Object.freeze({
     trust: 'var(--igs-hud-bar-trust,#4ab3da)',
     like: 'var(--igs-hud-bar-like,#ee83b6)',
+    cold: 'var(--igs-hud-bar-cold,#6a8fc4)',
     know: 'var(--igs-hud-bar-know,#e8a355)',
     'slot-1': 'var(--igs-hud-bar-1,#57aaee)',
     'slot-2': 'var(--igs-hud-bar-2,#55c795)',
@@ -1588,6 +1589,12 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             removeImageLoadingSpinner(bg);
             removeImageEmptyPlaceholder(bg);
         }
+    }
+    // 挂 CG 的页记下本页普通场景背景，战斗面板打开时由样式换上（没有场景图时换成空底色），不显示 CG。
+    if (bg && bg.style && typeof bg.style.setProperty === 'function') {
+        const backdropUrl = cgActive ? resolveAssetUrl(snapshot.content.sceneBackdrop) : '';
+        if (cgActive) bg.style.setProperty('--igs-combat-backdrop', backdropUrl ? `url("${backdropUrl.replace(/"/g, '&quot;')}")` : 'none');
+        else bg.style.removeProperty('--igs-combat-backdrop');
     }
     if (!cgActive && bg && bg.style && typeof bg.style.removeProperty === 'function') {
         bg.style.removeProperty('filter');
