@@ -98,7 +98,7 @@ import { createCombatStoryContext } from '../host/combat-story-context.js';
 import { applyCombatRuleModifiers, combatExpansionEnabled, combatCooldownFloorsOf, combatGrammarEnabled, findPendingCombatReport, resolveChallengePromptSegment, resolveCombatNarrationSegment, resolveCombatPartySegment, resolveCombatPromptRule } from '../scene/combat-prompt.js';
 import { mergeCheckInputs, resolveCheckRollsSegment } from '../scene/check-rolls.js';
 
-const IGS_VERSION = '0.39.25';
+const IGS_VERSION = '0.39.27';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 
@@ -483,6 +483,7 @@ export function bootstrapIGS(options = {}) {
             if (kind === 'sheet') return rt.sheetOp(op, name, payload);
             if (kind === 'skill') return rt.skillOp(op, name, payload);
             if (kind === 'hero') return rt.heroOp(op, name, payload);
+            if (kind === 'relation') return rt.relationOp(op, name, payload);
             if (kind === 'generate') return rt.generateSheets(name ? [name] : null);
             if (kind === 'backfill') return rt.runBackfill();
             if (kind === 'backup') return rt.dropBackup();
@@ -541,6 +542,15 @@ export function bootstrapIGS(options = {}) {
         readCardWorldbook: (names) => (typeof illustrationMessageHost.readCardWorldbook === 'function'
             ? illustrationMessageHost.readCardWorldbook(names) : []),
         getCurrentChatId: () => (typeof illustrationMessageHost.getChatId === 'function' ? illustrationMessageHost.getChatId() : ''),
+        readTtsFloor: id => illustrationMessageHost.readFloor?.(id),
+        onTtsFloorReady: handler => illustrationMessageHost.onImageFloorReady?.(id => handler(illustrationMessageHost.readFloor(id))),
+        onTtsFloorInvalidated: handler => {
+            const offs = ['CHAT_CHANGED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_DELETED'].map(name => illustrationMessageHost.on(name, handler));
+            offs.push(illustrationMessageHost.on('GENERATION_STARTED', (type, params, dryRun) => {
+                if (dryRun !== true && type !== 'quiet' && type !== 'impersonate') handler();
+            }));
+            return () => offs.forEach(off => off?.());
+        },
         imageJobLog,
         getUnifiedSettings: getUnifiedSettingsSnapshot,
         // 配置每次写入（保存、从酒馆文件恢复）都加一；阅读器翻页据此复用上次整理好的配置。
@@ -551,6 +561,8 @@ export function bootstrapIGS(options = {}) {
         getCombatSession: () => combatServices.getSession(),
         getChallengeHistory: () => (typeof combatServices.challengeHistory === 'function' ? combatServices.challengeHistory() : null),
         getChallengeQuota: (messageId) => (typeof combatServices.challengePromptQuota === 'function' ? combatServices.challengePromptQuota(messageId) : null),
+        getIntimateGate: (messageId) => combatServices.intimateGate(messageId),
+        isIntimatePrepared: () => combatServices.intimatePrepared(),
         getCombatLedger: () => combatServices.getLedger(),
         ensureCombatTables: () => combatServices.ensureTables(),
         writeCombatManualInit: (name, manual, writeOptions) => Promise.resolve(combatServices.writeManualInit(name, manual, writeOptions)).then((written) => {
@@ -1192,6 +1204,7 @@ export function bootstrapIGS(options = {}) {
             } catch (error) { /* 扫描失败按没有冷却处理 */ }
         }
         if (quota && quota.ok === true) extras.challengeOpen = true;
+        try { if (combatServices.intimatePrepared() === true) extras.intimateOn = true; } catch (error) { /* 判断失败按未开启处理 */ }
         return extras;
     }
 

@@ -1,3 +1,5 @@
+import { createTtsFloorPreloader } from './tts-floor-preloader.js';
+import { prepareTtsFloorPlan, ttsPageHint, ttsPageWhisper } from './tts-floor-plan.js';
 import { recoverOperation, linkRecoverySignals, wakeRecoveringOperations } from '../../storage/automatic-recovery.js';
 import { applyOperationEdits } from '../../storage/operation-edits.js';
 import { appendInputDraft } from '../../host/input-channel.js';
@@ -19,6 +21,9 @@ import { cancelGrowthFx } from './combat-growth-fx.js';
 import { cancelCheckBadges, checksByPage } from './combat-check-badge.js';
 import { syncCombatResume } from './combat-resume-button.js';
 import { probeCombatStart, resolveCombatEntry, sessionMatchesEntry, syncCombatEntry, unfinishedCombatState } from './combat-entry.js';
+import { syncIntimateLaunch } from './intimate-launch-button.js';
+import { computeIntimateFloorGate, pageIsIntimateRise } from './intimate-floor.js';
+import { INTIMATE_DUEL_MOOD, INTIMATE_DUEL_MOOD_STRONG, advanceIntimateDuel, getIntimateDuel, getIntimateGate, setIntimateDuel, setIntimateGate } from '../../scene/intimate-duel.js';
 import { createRecoveryNotice } from './recovery-notice.js';
 import { handleSettingsAction } from './settings-actions.js';
 import { normalizeBridgeConfig, normalizeReaderSettings } from './settings-host-normalize.js';
@@ -59,7 +64,7 @@ import { audioBusContext, busInput, parkAudioBus, resumeAudioBus, unparkAudioBus
 import { isStagePaused, markStageActive, watchStagePause } from './stage-pause.js';
 import { scheduleFontGuard } from './font-guard.js';
 import { createReaderAutoPlay } from './reader-auto-play.js';
-import { cancelPendingTts, decideTts, guessTtsLine, isTtsSpeaking, listSystemVoices, normalizeTtsSettings, prefetchTtsFloor, replayTts, rerollTts, setTtsErrorHandler, setTtsGenderAsker, speakTtsLine, stopTts } from './tts.js';
+import { cancelPendingTts, decideTts, guessTtsLine, isTtsSpeaking, listSystemVoices, normalizeTtsSettings, replayTts, rerollTts, setTtsErrorHandler, setTtsGenderAsker, speakTtsLine, stopTts } from './tts.js';
 import { resolveRegionCrop } from './stage-snapshot.js';
 import { playUiSfx } from './ui-sfx.js';
 import { parseHtmlCardMarker } from '../../scene/html-cards.js';
@@ -69,6 +74,7 @@ import { resolveReaderSpriteAsset } from './reader-sprite-asset.js';
 import { normalizeSpriteMotionSettings, normalizeStageCastSettings } from './stage-direction-settings.js';
 import { normalizeFxSoundSettings } from './fx-settings.js';
 import { playBattleSfx } from './fx-battle-sfx.js';
+import { playFxSfx } from './fx-sfx.js';
 import { SPRITE_BACK_MOOD } from './sprite-turn.js';
 import { isReactMoodHit } from '../../scene/react-mood.js';
 
@@ -76,7 +82,7 @@ import { clearCastDom } from './stage-cast-render.js';
 import { combatPortraitNames, hasGroupSuffix, sameFoeName, splitFoeNames } from '../../scene/creature-battle.js';
 import { foeIsDown } from './creature-battle-model.js';
 import { CREATURE_FOE_SLOTS, composeCreatureStage, creatureProfileOf, isGiantCreature, resolveCreatureFoes } from './creature-layout.js';
-import { createOutfitResolver, fuzzyOutfitName, normalizeWardrobe, spriteIdentity } from '../../scene/character-outfits.js';
+import { BUILTIN_NUDE_OUTFIT, createOutfitResolver, fuzzyOutfitName, normalizeWardrobe, spriteIdentity } from '../../scene/character-outfits.js';
 import { isStrictBackgroundMatch, normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
 import { clearCurrentCg } from '../../generated-images/illustration/clear-current-cg.js';
 import { floorKeyOf } from '../../media/illustration-store.js';
@@ -99,7 +105,7 @@ import { renderAssetReviewPanel } from './asset-review-panel.js';
 import { revertProfileWrite } from '../../scene/profile-write.js';
 import { ensureEmbeddedHost, findEmbeddedHost, hideEmbeddedSourceText, hideStorySpan, isEmbeddedEditTrigger, isStoryHidden, resolveEmbeddedHostParent, restoreEmbeddedSourceText, restoreStorySpan, storyLines } from './embedded-reader-runtime.js';
 import { createReaderSourceCache } from './reader-source-cache.js';
-import { createFloorSourceLocator, lastBefore, nextTtsHintOf, prepareReaderFloor, stripWrappingQuotes } from './reader-floor-plan.js';
+import { createFloorSourceLocator, lastBefore, prepareReaderFloor, stripWrappingQuotes } from './reader-floor-plan.js';
 import { prepareReaderFloorAssets } from './reader-floor-assets.js';
 import { createReaderTableData } from '../../data/shujuku/reader-table-data.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
@@ -498,9 +504,21 @@ export function createIgsReaderHost(options = {}) {
         onDirectory: (root) => openTurnIndex(undefined, { host: root.parentNode, fromWait: !waitStage.isPlaying() }),
     });
     let pendingReplyMessage = null;
-    // 最近一次分页的楼层（整楼预载朗读用）；ttsFloorToken 换楼即作废上一轮预载。
-    let ttsFloorPlan = null;
-    let ttsFloorToken = 0;
+    const ttsFloorPreloader = createTtsFloorPreloader({
+        onFloorReady: options.onTtsFloorReady,
+        onInvalidated: options.onTtsFloorInvalidated,
+        prepare: floor => {
+            const unified = resolveRenderConfig(state.activeReader?.mode);
+            const readerSettings = normalizeReaderSettingsCached(unified.readerSettings, unified.bridge.vnTheme);
+            attachBridgeReaderExtras(readerSettings, unified.bridge);
+            const tts = normalizeTtsSettings(readerSettings.tts);
+            if (!tts.enabled || !tts.api.prefetchFloor || (tts.provider !== 'api' && !tts.narratorApi.enabled)) return null;
+            const userName = String(getSillyTavernContext(options.global || globalThis)?.name1 || '');
+            return { readerSettings, userName, prepared: prepareTtsFloorPlan(floor, readerSettings, {
+                sourceFilter: unified.bridge.sourceFilter, virtualRegex: unified.bridge.virtualRegex, userName, readFloor: options.readTtsFloor,
+            }) };
+        },
+    });
     // 小游戏脚本可能比阅读器晚装上：装上或卸掉都要重排一次工具栏里的「小游戏」。
     const offWaitGamePack = subscribeWaitStageGamePack((pack) => {
         const current = state.activeReader;
@@ -587,6 +605,7 @@ export function createIgsReaderHost(options = {}) {
     const offSettingsUpdated = typeof options.onSettingsUpdated === 'function'
         ? options.onSettingsUpdated(() => {
             renderConfigCache = null;
+            ttsFloorPreloader.refresh();
             floorAssetPlan = { key: '', reader: null, urls: [] };
             if (!state.activeReader) return;
             if (state.activeSettings) readerStaleBehindSettings = true;
@@ -1301,6 +1320,7 @@ export function createIgsReaderHost(options = {}) {
 
     function getState() {
         return {
+            ttsPreload: ttsFloorPreloader.getProgress(),
             activeReader: state.activeReader ? {
                 mode: state.activeReader.mode,
                 index: state.activeReader.index,
@@ -1323,6 +1343,7 @@ export function createIgsReaderHost(options = {}) {
     }
 
     function destroy() {
+        ttsFloorPreloader.dispose();
         readerRecoveryController.abort();
         recoveryNotice.dispose();
         state.activeSettings?.recoveryController?.abort();
@@ -1552,7 +1573,6 @@ export function createIgsReaderHost(options = {}) {
                 return;
             }
             exitEmbeddedLoading();
-            prefetchFloorTts(current, message.id);
         } catch (error) {
             if (canReplace()) {
                 current.turnOffset = previous.turnOffset;
@@ -1560,19 +1580,6 @@ export function createIgsReaderHost(options = {}) {
                 showReplyFailure(current, 'read');
             }
         }
-    }
-
-    // 新楼层写完后整楼预载朗读（设置「新楼层预载全楼」，默认关）：按阅读器分页与下一页提示同一套构造，缓存键与实际朗读一致。
-    function prefetchFloorTts(current, messageId) {
-        const plan = ttsFloorPlan;
-        const readerSettings = current && current.snapshot && current.snapshot.readerSettings;
-        if (!plan || !readerSettings || Number(plan.messageId) !== Number(messageId)) return;
-        const token = ++ttsFloorToken;
-        const { segments, pages, keyOf } = plan.prepared;
-        const list = segments.map((segment, index) => ({ segment, hint: nextTtsHintOf(pages[index], keyOf) }));
-        prefetchTtsFloor(list, readerSettings.tts, readerSettings._sceneAssets, {
-            alive: () => token === ttsFloorToken && state.activeReader === current,
-        }).catch(() => {});
     }
 
     // 玩家点「加载下一楼」：之后 #chat 的任何变动（含别的插件改按钮）都会让观察器版本号前进，
@@ -3193,7 +3200,16 @@ ${row.key}`;
     }
 
     function logTtsLine(row) {
-        return { key: '', textType: row.kind === 'narr' ? (row.thought ? 'thought' : 'narration') : row.thought ? 'thought' : 'dialogue', speaker: row.speaker, text: row.text, nsfw: row.nsfw };
+        const snapshot = state.activeReader?.snapshot;
+        const floor = snapshot?.[preparedFloorKey];
+        const rs = snapshot?.readerSettings || {};
+        const page = floor?.pages[row.index];
+        return {
+            ...ttsPageHint(page, floor?.keyOf, rs),
+            key: '', textType: row.kind === 'narr' ? (row.thought ? 'thought' : 'narration') : row.thought ? 'thought' : 'dialogue',
+            speaker: row.speaker, text: row.text, nsfw: row.nsfw, context: floor?.text || '', spriteTags: rs._tempSpriteTags,
+            whisper: ttsPageWhisper(page, rs),
+        };
     }
 
     // 没开朗读、或这一行按设置不念（旁白关了、User 不念等）时不出 ▶。
@@ -4508,7 +4524,13 @@ ${row.key}`;
             return floor;
         });
         const { text, segments } = prepared;
-        ttsFloorPlan = { messageId: payload.messageId, prepared };
+        queueMicrotask(() => {
+            const current = state.activeReader;
+            if (mediaHostDisposed || current?.snapshot?.[preparedFloorKey] !== prepared || current.awaitingReply || current.streamPhase === 'streaming') return;
+            const floor = options.readTtsFloor?.(payload.messageId);
+            const identity = `${chatId}|${payload.messageId}|${floor?.swipeId || 0}`;
+            ttsFloorPreloader.startPrepared(prepared, readerSettings, { identity, userName });
+        });
         if (!segments.length) return { content: { segments: [] } };
         const normalizedIndex = Math.max(0, Math.min(segments.length - 1, Number(index) || 0));
         const segmentImageSlots = Array.isArray(payload.segmentImageSlots) && payload.segmentImageSlots.length
@@ -4758,7 +4780,11 @@ ${row.key}`;
                     noteFormGender(name, entry && entry.form ? entry.form.gender : '');
                     return outfit;
                 };
-                const wantedOutfit = spriteChar ? outfitFor(spriteChar) : '';
+                const duel = getIntimateDuel();
+                const duelOn = Boolean(duel && spriteChar && canonicalName(sceneAssets, spriteChar) === canonicalName(sceneAssets, duel.partner));
+                const duelNude = duelOn && duel.stage >= 2 && Boolean(outfitMap && outfitMap[canonicalName(sceneAssets, spriteChar)] && Object.hasOwn(outfitMap[canonicalName(sceneAssets, spriteChar)], BUILTIN_NUDE_OUTFIT));
+                if (duelOn) spriteMood = duel.stage >= 1 ? (INTIMATE_DUEL_MOOD_STRONG.find((word) => floorAssets.sprite(spriteChar, word, outfitFor(spriteChar)).quality === 'exact') || INTIMATE_DUEL_MOOD) : INTIMATE_DUEL_MOOD;
+                const wantedOutfit = spriteChar ? (duelNude ? BUILTIN_NUDE_OUTFIT : outfitFor(spriteChar)) : '';
                 const outfitWhy = { outfitSource: (outfitTrace && outfitTrace.source) || '', outfitReason: (outfitTrace && outfitTrace.reason) || '', outfitOffset };
                 // 模型按剧情原始情绪取绑定；即使加载失败也不回退普通静态差分。
                 spriteLive2d = resolveCharacterLive2dBinding(readerSettings._live2d, sceneAssets, spriteChar, spriteMood);
@@ -4955,10 +4981,11 @@ ${row.key}`;
                 spriteBackArt,
                 statusEmotion: bubbleMood,
                 // 台词朗读提前生成下一页用：下一页的类型、说话人与情绪（取分页计划里现成的值，不重算）。
-                nextTtsHint: nextTtsHintOf(prepared.pages[normalizedIndex + 1], prepared.keyOf),
+                nextTtsHint: ttsPageHint(prepared.pages[normalizedIndex + 1], prepared.keyOf, readerSettings),
                 textType,
                 text: currentText,
                 fullText: text,
+                ttsWhisper: ttsPageWhisper(page, readerSettings),
                 displayText,
                 htmlCard,
                 htmlCardPage: htmlCardIndex >= 0,
@@ -5291,6 +5318,7 @@ ${row.key}`;
             getSession: () => (typeof options.getCombatSession === 'function' ? options.getCombatSession() : null),
             // 对阵界面没做选择、或战斗打到一半就关闭（含关闭阅读器）：在入口位置留「返回战斗 / 返回挑战」标签；已发送、已放弃、已托管、已跳过则清除。
             onClose: ({ dismissed }) => {
+                setIntimateDuel(null);
                 const entry = state.combatLastEntry;
                 state.combatReturnKey = dismissed && entry ? entry.key : '';
                 if (state.activeReader) setTimeout(() => { if (state.activeReader) rerenderActiveReader(); }, 0);
@@ -5347,7 +5375,15 @@ ${row.key}`;
             },
             playSfx: (kind) => {
                 const rs = state.activeReader && state.activeReader.snapshot && state.activeReader.snapshot.readerSettings;
-                return playBattleSfx(kind, normalizeFxSoundSettings(rs && rs.fxSound));
+                const sound = normalizeFxSoundSettings(rs && rs.fxSound);
+                return playBattleSfx(kind, sound) || playFxSfx(kind, sound);
+            },
+            getDuelFx: () => {
+                const rs = state.activeReader && state.activeReader.snapshot && state.activeReader.snapshot.readerSettings;
+                return { rhythmSound: !(rs && rs.romanceFx) || rs.romanceFx.rhythmSound !== false };
+            },
+            onDuelProgress: (ratio) => {
+                if (advanceIntimateDuel(ratio) && state.activeReader) setTimeout(() => { if (state.activeReader) rerenderActiveReader(); }, 0);
             },
             // 战斗音乐：面板打开时把本阅读器的配乐临时切到 battle 情绪（沿用 BGM 开关与曲库），关闭后放回原来那首剧情曲。
             setBattleMusic: (overlay, on) => setBgmMoodOverride(overlay, on ? 'battle' : ''),
@@ -5387,6 +5423,9 @@ ${row.key}`;
             // 装备栏与道具的物品图：只读本聊天本地缓存，补载完成后经订阅重绘。
             resolveItemImage: (name) => (options.itemImages && typeof options.itemImages.imageUrlFor === 'function' ? options.itemImages.imageUrlFor(name) : ''),
             subscribeItemImages: (handler) => (typeof options.onItemImageUpdated === 'function' ? options.onItemImageUpdated(handler) : null),
+            // 配色与日记、目录同一份（设置器四套配色）。
+            getTheme: () => readSettingsTheme(),
+            setTheme: (settingsTheme) => saveBridgePatch({ settingsTheme }),
         });
         const domState = {
             root,
@@ -5723,7 +5762,16 @@ ${row.key}`;
         const sourceFilter = current.payload && current.payload.sourceFilter;
         const quota = floor && typeof options.getChallengeQuota === 'function' ? options.getChallengeQuota(Number(messageId)) : null;
         // floorEntry 不看页码：持久会话里有这一楼未打完的战斗时，任意一页都留「返回战斗」，重开阅读器落在首页也能续打。
-        const floorEntry = floor ? resolveCombatEntry({ readerSettings: snapshot.readerSettings, floor, lastPage: true, sourceFilter, challengeQuota: quota }) : null;
+        const intimateOn = Boolean(floor) && typeof options.getIntimateGate === 'function' && options.isIntimatePrepared?.() === true;
+        let intimate = null;
+        if (intimateOn) {
+            const prepared = snapshot[preparedFloorKey];
+            const userName = String((getSillyTavernContext(options.global || globalThis) || {}).name1 || '');
+            const gate = computeIntimateFloorGate({ pages: prepared && prepared.pages, messageId: Number(messageId), userName, assets: snapshot.readerSettings && snapshot.readerSettings._sceneAssets, previous: getIntimateGate(floor.chatId, Number(messageId)) });
+            setIntimateGate(floor.chatId, Number(messageId), gate);
+            try { intimate = options.getIntimateGate(Number(messageId)); } catch (error) { intimate = null; }
+        }
+        const floorEntry = floor ? resolveCombatEntry({ readerSettings: snapshot.readerSettings, floor, lastPage: true, sourceFilter, challengeQuota: quota, intimate }) : null;
         const entry = lastPage ? floorEntry : null;
         state.combatAutoOpened ||= new Set();
         const combatSettings = normalizeCombatExpansionSettings(snapshot.readerSettings && snapshot.readerSettings.combatExpansion);
@@ -5747,6 +5795,11 @@ ${row.key}`;
         probe.returnTag = probe.returnTag || persisted;
         const showTag = persisted ? floorEntry : entry && state.combatReturnKey === entry.key ? entry : null;
         syncCombatEntry(overlay, showTag, { skin, onOpen: () => openCombatPanel(current, showTag), onFail: (r) => notifyCombatOpenFail(r) });
+        const prepared = snapshot[preparedFloorKey];
+        const pageNow = prepared && prepared.pages ? prepared.pages[Number(snapshot.content && snapshot.content.currentIndex) || 0] : null;
+        const launchable = Boolean(intimate) && combatSettings.intimate.launch && intimate.newRise && !intimate.fought && !intimate.ageBlocked && !intimate.launch
+            && !floorEntry && !panelOpen && pageIsIntimateRise(pageNow);
+        syncIntimateLaunch(overlay, launchable ? { skin, onLaunch: () => launchIntimate(current, snapshot, floor, Number(messageId)) } : null);
         // 悬浮「返回战斗」：有未打完的战斗、没有面板开着、原位置没有小标签时显示（小标签与它指向同一件事，不重复）。
         const unfinished = combatSettings.enabled && !showTag && !anyPanelOpen(current.dom)
             ? unfinishedCombatState(typeof options.getCombatSession === 'function' ? options.getCombatSession() : null) : null;
@@ -5779,6 +5832,18 @@ ${row.key}`;
         }
     }
 
+    function launchIntimate(current, snapshot, floor, messageId) {
+        setIntimateGate(floor.chatId, messageId, { ...getIntimateGate(floor.chatId, messageId), launch: true });
+        const entry = resolveCombatEntry({ readerSettings: snapshot.readerSettings, floor, lastPage: true, sourceFilter: current.payload && current.payload.sourceFilter, intimate: options.getIntimateGate(messageId) });
+        if (!entry) return { ok: false, reason: 'combat-entry-missing' };
+        const opened = openCombatPanel(current, entry);
+        state.combatAutoOpened ||= new Set();
+        if (opened && opened.ok === true) state.combatAutoOpened.add(entry.key);
+        else notifyCombatOpenFail(opened);
+        syncIntimateLaunch(current.dom.overlay, null);
+        return opened;
+    }
+
     // 入口卡打开战斗面板失败时的阅读器内提示。
     function notifyCombatOpenFail(result) {
         if (!result || result.ok !== false) return;
@@ -5792,12 +5857,17 @@ ${row.key}`;
         const menu = dom.overlay.querySelector?.('#igs-hud-record-menu');
         if (menu && !menu.hasAttribute('hidden')) menu.setAttribute('hidden', '');
         state.combatLastEntry = entry;
+        setIntimateDuel(entry.intimate ? { partner: options.getIntimateGate?.(entry.messageId)?.partner } : null);
         // 开战标签里的名字先交给面板：对撞过场不等准备完成。
         const preview = entry.kind === 'challenge'
             ? { challenge: true, encounter: entry.event, enemies: [{ name: entry.event, count: 1 }] }
             : { encounter: entry.encounter, enemies: Array.isArray(entry.enemies) ? entry.enemies.map((e) => ({ name: e.name, count: e.count })) : [] };
-        const result = dom.combatController.open(dom.overlay, { messageId: entry.messageId, preview, ...(then ? { then } : {}) });
+        const result = dom.combatController.open(dom.overlay, { messageId: entry.messageId, preview, ...(then ? { then } : {}), ...(entry.intimate ? { duel: true } : {}) });
         if (result && result.ok === true && state.combatReturnKey === entry.key) state.combatReturnKey = '';
+        if (entry.intimate) {
+            if (result && result.ok === true) setTimeout(() => { if (state.activeReader) rerenderActiveReader(); }, 0);
+            else setIntimateDuel(null);
+        }
         return result;
     }
 

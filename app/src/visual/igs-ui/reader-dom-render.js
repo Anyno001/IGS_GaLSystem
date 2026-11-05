@@ -720,19 +720,29 @@ function resolveFrozenDialogHeight(current, snapshot, requestedHeight, win, over
     return px;
 }
 
-// 高度自适应压矮时，三片素材两端按「实际高 ÷ 原高」等比缩小（--igs-slice-k），不被纵向压扁；没开自适应恒为 1。
+// 三片素材两端按「实际高 ÷ 设计高」等比缩放（--igs-slice-k），框被压矮（自适应、内嵌封顶、窗口拖小）
+// 或被长文本撑高时都不纵向拉伸。设计高读主题写的 --igs-slice-h × --igs-skin-scale，不读已被封顶的 max-height。
+// 放大时两端之和不超过框宽一半，免得花纹吃掉正文区。九宫格素材写 --igs-slice-h:0，恒为 1。
 // 改两端宽度不影响布局高度，观察回调不会自激。
 const sliceScaleWatchers = new WeakMap();
 function watchSliceScale(dialog, win) {
-    if (!dialog || !dialog.style || typeof dialog.style.getPropertyValue !== 'function' || typeof dialog.hasAttribute !== 'function') return;
+    if (!dialog || !dialog.style || typeof dialog.style.getPropertyValue !== 'function') return;
     const update = () => {
         let k = 1;
-        if (dialog.hasAttribute('data-igs-auto-h') && win && typeof win.getComputedStyle === 'function') {
-            const full = parseFloat(win.getComputedStyle(dialog).maxHeight);
+        if (win && typeof win.getComputedStyle === 'function') {
+            const style = win.getComputedStyle(dialog);
+            const read = (name) => parseFloat(style.getPropertyValue(name));
+            const scale = read('--igs-skin-scale') > 0 ? read('--igs-skin-scale') : 1;
+            const full = read('--igs-slice-h') * scale;
+            const ends = read('--igs-slice-w') * scale;
             const now = dialog.offsetHeight;
-            if (full > 0 && now > 0) k = Math.max(0.3, Math.min(1, now / full));
+            const width = dialog.offsetWidth;
+            if (full > 0 && now > 0) {
+                k = Math.max(0.3, now / full);
+                if (k > 1 && ends > 0 && width > 0) k = Math.max(1, Math.min(k, (width * 0.5) / ends));
+            }
         }
-        const value = k === 1 ? '' : k.toFixed(3);
+        const value = Math.abs(k - 1) < 0.005 ? '' : k.toFixed(3);
         if (dialog.style.getPropertyValue('--igs-slice-k') === value) return;
         if (value) dialog.style.setProperty('--igs-slice-k', value);
         else dialog.style.removeProperty('--igs-slice-k');
@@ -976,6 +986,7 @@ const STATUS_HUD_LOCATION_ICON = '<svg viewBox="0 0 24 24" width="16" height="16
 const STATUS_HUD_COLOR_VARS = Object.freeze({
     trust: 'var(--igs-hud-bar-trust,#4ab3da)',
     like: 'var(--igs-hud-bar-like,#ee83b6)',
+    grudge: 'var(--igs-hud-bar-grudge,#b3263e)',
     cold: 'var(--igs-hud-bar-cold,#6a8fc4)',
     know: 'var(--igs-hud-bar-know,#e8a355)',
     'slot-1': 'var(--igs-hud-bar-1,#57aaee)',
@@ -2330,6 +2341,13 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
                 if (typeof ctx.closeSettings === 'function') ctx.closeSettings();
                 return;
             }
+            // 窄屏阅读模式的选项页：点左半照常回上一页（prev 会先收起选项、露出列表），不被气泡显隐吞掉。
+            if (root && root.getAttribute && root.getAttribute('data-igs-log-reader') === 'on'
+                && root.classList && root.classList.contains('igs-options-visible')
+                && isBackgroundLeftTap(root, clientX) && typeof ctx.handleReaderAction === 'function') {
+                ctx.handleReaderAction('prev');
+                return;
+            }
             // 最后一页且启用选项气泡时，点击空白处切换气泡显隐（消费本次点击，不翻页）。
             if (typeof ctx.handleBlankClick === 'function' && ctx.handleBlankClick()) return;
             // 漫画模式没有对话框可点：点画面空白处翻页。
@@ -2490,7 +2508,7 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             phone: fxResult.phone === true,
             nsfw: Boolean(content.sceneNsfw),
             posX,
-            whisper: romanceResult.whisper === true,
+            whisper: content.ttsWhisper === true,
             next: Array.isArray(content.segments) ? content.segments[content.currentIndex + 1] : '',
             nextHint: content.nextTtsHint || null,
             // 报幕卡、睁眼、时间跳跃、醒来这类铺满画面的演出播完再念。
