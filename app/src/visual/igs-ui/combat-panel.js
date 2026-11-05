@@ -7,6 +7,7 @@ import { peekSpriteHead, probeSpriteHead, waitSpriteHead } from './fx-anchor.js'
 import { COMBAT_AWAKEN_END, COMBAT_CUTIN_MS, buildAwakenCutin, buildOpeningCutin, buildSkillCutin, preloadCutinFonts } from './combat-cutin.js';
 import { battleSfxKind } from './fx-battle-sfx.js';
 import { KO_FALL_SFX_DELAY_MS, koFallKind, koFallSfx, playKoFall } from './combat-ko-fall.js';
+import { creatureSfxKind } from './creature-battle-model.js';
 import { createCombatLines } from './combat-lines.js';
 import { createIntimateDuelFx } from './intimate-duel-fx.js';
 import { createDuelLowGate } from '../../scene/intimate-duel.js';
@@ -21,7 +22,7 @@ import { enemyArtCell } from './combat-enemy-art.js';
 import { ensureEnemyAtlas } from './combat-enemy-atlas.js';
 import { SEL, canvasFit, canvasGhostWrap, isCanvasSkin } from './combat-skin-canvas.js';
 import { HX_BANNER_MS, HX_WINDUP_MS, hxBanner, hxCallout, hxCanvas, hxClaw, hxGuard, hxHeal, hxHit, hxKo, hxSkin, hxTrail, hxTurnBand, hxWindup } from './combat-hit-fx-skin.js';
-import { COMBAT_STAGE_TIMING, buildStageAwaken, buildStageClash, buildStageSkill, stageFxStyle, updateClashHeroes } from './combat-stage-fx.js';
+import { COMBAT_STAGE_TIMING, buildStageAwaken, buildStageClash, buildStageSkill, stageFxStyle, updateClashFigures, updateClashHeroes } from './combat-stage-fx.js';
 
 // 卡牌战斗面板。挂在 #igs-overlay 直属层（不进 #igs-stage-motion），避免阅读器自己的演出层查到面板内的演出节点。
 // 会话由 options.getSession() 注入；面板只转发动作、渲染快照，不自行结算。
@@ -262,6 +263,17 @@ export function createCombatPanelController(doc, options = {}) {
         const target = Object.values(battle?.units || {}).find((u) => u.name === event.target);
         return target && target.side === 'enemy' ? { ...event, result: 'hit' } : event;
     };
+    // 非人敌人挨打时跟着命中音叫一声，倒下时再出一声消散；人类敌人与宿主没给 creatureVoiceOf 时不出声。
+    const creatureCry = (event, battle) => {
+        if (!event || !['hit', 'crit', 'ko'].includes(event.result) || typeof options.creatureVoiceOf !== 'function') return;
+        const target = Object.values(battle?.units || {}).find((u) => u.name === event.target);
+        if (!target || target.side !== 'enemy') return;
+        let voice = null;
+        try { voice = options.creatureVoiceOf(target.name); } catch (error) { voice = null; }
+        if (!voice) return;
+        later(() => sfx(creatureSfxKind('hurt', voice.size, voice.kind)), 60);
+        if (event.result === 'ko') later(() => sfx(creatureSfxKind('fade', voice.size, voice.kind)), KO_FALL_SFX_DELAY_MS + 250);
+    };
     // 影子卡：画布皮肤的牌套一层同皮肤容器（外层按视口矩形定位，内层按画布缩放），样式与手牌一致；其余皮肤照旧。
     const ghostOf = (el) => {
         const card = cloneCardGhost(el);
@@ -294,6 +306,19 @@ export function createCombatPanelController(doc, options = {}) {
             out[name] = safePortraitUrl(url);
         }
         return out;
+    };
+    // 缺立绘时请宿主按开战楼补发预热（options.requestPortraits(messageId)）；同一场战斗同一组缺图名字只请求一次，宿主侧另有并发与次数去重。
+    let askedPortraits = '';
+    const askMissingPortraits = (cur, portraits) => {
+        if (typeof options.requestPortraits !== 'function') return;
+        const messageId = cur && cur.anchor ? Number(cur.anchor.messageId) : NaN;
+        if (!Number.isSafeInteger(messageId) || messageId < 0) return;
+        const lacking = Object.keys(portraits || {}).filter((name) => !portraits[name]).sort();
+        if (!lacking.length) return;
+        const key = `${cur.combatId || ''}|${lacking.join('、')}`;
+        if (key === askedPortraits) return;
+        askedPortraits = key;
+        try { Promise.resolve(options.requestPortraits(messageId)).catch(() => {}); } catch (error) { /* 补图失败不影响面板。 */ }
     };
     // 手牌卡面只读本地缓存（options.resolveCardImage，按卡 ID），同样只过滤协议；取不到时渲染层用线条 SVG。
     const cardArtFor = (cardId) => {
@@ -388,6 +413,7 @@ export function createCombatPanelController(doc, options = {}) {
         const names = view.battle ? [...view.battle.allies, ...view.battle.enemies].map((u) => u.name)
             : view.lobby ? [...view.lobby.allies.map((a) => a.name), ...view.lobby.enemies.map((e) => e.name)] : [];
         view.portraits = portraitsFor(names);
+        askMissingPortraits(cur, view.portraits);
         const foes = view.battle ? view.battle.enemies : view.lobby ? view.lobby.enemies : [];
         view.enemyArt = challenge ? {} : enemyArtFor(foes, view.portraits, cur.theme);
         // 我方立绘框色调：取立绘探测缓存里的 tint（整幅压到 25×25 后取最亮的不透明像素）；只在取到时追加 tints，未探测的由 probeTints 在绘制后补。
@@ -787,7 +813,17 @@ export function createCombatPanelController(doc, options = {}) {
             return [...l.allies].sort((a, c) => Number(c.id === controlledId) - Number(a.id === controlledId))
                 .map((a) => ({ id: a.id, name: a.name, url: pics[a.name] || '', controllable: Boolean(a.controllable) && !l.challenge, picked: a.id === controlledId }));
         }
-        return [{ name: preview?.hero || '我方', url: '' }];
+        const name = preview?.hero || '我方';
+        return [{ name, url: preview?.hero ? portraitsFor([name])[name] || '' : '' }];
+    }
+
+    function introFoes(view) {
+        const l = view.lobby;
+        const arts = view.enemyArt || {};
+        const src = l ? l.enemies : (preview?.enemies || []);
+        const pics = l ? (view.portraits || {}) : portraitsFor(src.map((e) => e.name));
+        return src.flatMap((e) => Array.from({ length: Math.max(1, Math.min(2, Number(e.count) || 1)) }, () => e)).slice(0, 2)
+            .map((e) => ({ name: e.name, url: pics[e.name] || '', cell: arts[e.name] || enemyArtCell({ name: e.name, tier: e.tier || preview?.tier || 'normal' }) }));
     }
 
     function syncIntro(view) {
@@ -795,6 +831,8 @@ export function createCombatPanelController(doc, options = {}) {
         if (introBuilt && !revealing && !phase) { removeIntro(); return; }
         if (introBuilt) {
             if (view.lobby && !introBuilt.heroesSynced) { introBuilt.heroesSynced = true; updateClashHeroes(doc, introBuilt.root, introHeroes(view)); }
+            // 过场先于名单与立绘画出：每次重绘就地补上已到的立绘（地址没变的框不动）。
+            if (!revealing) updateClashFigures(doc, introBuilt.root, { heroes: introHeroes(view), foes: introFoes(view) });
             syncIntroUi(view);
             return;
         }
@@ -802,12 +840,7 @@ export function createCombatPanelController(doc, options = {}) {
         const layers = stage ? ensureFxLayers(stage) : null;
         if (!layers?.front) return;
         const l = view.lobby;
-        const arts = view.enemyArt || {};
-        const pics = view.portraits || {};
-        const src = l ? l.enemies : (preview?.enemies || []);
-        const foes = src.flatMap((e) => Array.from({ length: Math.max(1, Math.min(2, Number(e.count) || 1)) }, () => e)).slice(0, 2)
-            .map((e) => ({ name: e.name, url: pics[e.name] || '', cell: arts[e.name] || enemyArtCell({ name: e.name, tier: e.tier || preview?.tier || 'normal' }) }));
-        const built = buildStageClash(doc, { skin: skinOf(), width: root.clientWidth, height: root.clientHeight, heroes: introHeroes(view), foes, title: l?.encounter || preview?.encounter || view.encounter || '', low: lowQuality() });
+        const built = buildStageClash(doc, { skin: skinOf(), width: root.clientWidth, height: root.clientHeight, heroes: introHeroes(view), foes: introFoes(view), title: l?.encounter || preview?.encounter || view.encounter || '', low: lowQuality() });
         layers.front.appendChild(built.root);
         cutinNodes.add(built.root);
         built.heroesSynced = Boolean(l);
@@ -1214,7 +1247,7 @@ export function createCombatPanelController(doc, options = {}) {
             const onWave = (event, list) => sfx(battleSfxKind({ ...event, result: list.some((m) => m.kind === 'damage' || m.kind === 'ko') ? 'hit' : 'guard' }, String(skin.worldview || '')));
             const hit = () => {
                 if (my !== token || stage !== host) return;
-                try { applyBattleFxToDom(stage, shown, { ...skin, reducedMotion: reduced(), schedule: fxSchedule, clear: options.clear, onEvent: (event) => sfx(battleSfxKind(koSfxResult(event, cur.battle), String(skin.worldview || ''))) }); } catch (error) { /* 演出失败不影响结算 */ }
+                try { applyBattleFxToDom(stage, shown, { ...skin, reducedMotion: reduced(), schedule: fxSchedule, clear: options.clear, onEvent: (event) => { sfx(battleSfxKind(koSfxResult(event, cur.battle), String(skin.worldview || ''))); creatureCry(event, cur.battle); } }); } catch (error) { /* 演出失败不影响结算 */ }
                 // overkill 战斗里己方出牌的击倒推迟到全部演出放完才显示（鞭尸）。
                 try { landMarks(marks, landing, my, rarity, onWave, !seg.actor && cur.battle.overkill === true, { enemyActs: cur.battle.units?.[seg.actor]?.side === 'enemy' }); } catch (error) { /* 演出失败不影响结算 */ }
             };

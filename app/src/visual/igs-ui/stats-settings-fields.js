@@ -34,6 +34,7 @@ export const STAT_EXTRA_PROMPT_LABELS = Object.freeze({
     sheetGen: '角色卡生成（后台请求）',
     backfill: '新技能补全（后台请求）',
     heroSkills: '主角技能分配（后台请求）',
+    startRelations: '起始关系补填（后台请求）',
 });
 
 // 失效提示词的显示名：只有被新版本弃用的几项（STAT_STALE_PROMPT_KEYS）会进入 stalePrompts。
@@ -91,7 +92,7 @@ export function renderStatsPromptFields(stats, advancedOpen = () => '') {
 }
 
 // 存档区（§10）：当前数值一目了然；技能与变动记录折叠，低频信息不平铺。model 为 statsArchiveModel 的结果。
-const MAPPING_TARGETS = Object.freeze({ stamina: '体力', money: '金钱', stress: '压力', base: '基础属性', special: '特有属性' });
+const MAPPING_TARGETS = Object.freeze({ stamina: '体力', money: '金钱', stress: '压力', base: '基础属性', special: '特有属性', skills: '才艺技能' });
 
 // 骰子手感：面向只懂 RPG 的玩家，底层仍是 bridge.stats.ruleset（coc7 百分骰 / dnd5e 二十面骰），选项来自规则集登记表。
 const DICE_FEEL = Object.freeze({ coc7: '百分骰（结果更看运气）', dnd5e: '二十面骰（属性越高越稳）' });
@@ -236,8 +237,8 @@ export function renderStatsArchive(model, advancedOpen = () => '') {
     const people = model.characters.length
         ? model.characters.map((c) => {
             const dims = Object.entries(c.dims).filter(([k, v]) => k !== '芥蒂' || grudgeTier(v)).map(([k, v]) => `${esc(k)} ${k === '芥蒂' ? esc(grudgeTier(v)) : n(v)}`).join(' · ');
-            return `<div class="igs-settings-field"><span><b>${esc(c.name)}</b>　${esc(c.stage)}　${dims}</span><div class="igs-mood-word-list">`
-                + `<button class="igs-settings-action" data-action="stats-op:relation-set:${esc(encodeURIComponent(c.name))}" type="button">修改</button></div></div>`;
+            return `<div class="igs-settings-field igs-stats-person"><span><b>${esc(c.name)}</b>　${esc(c.stage)}　${dims}</span><div class="igs-mood-word-list">`
+                + `<button class="igs-settings-action" data-action="stats-op:relation-set:${esc(encodeURIComponent(c.name))}|${['好感', '信任', '了解'].map((k) => n(c.dims[k])).join(',')}" type="button">修改</button></div></div>`;
         }).join('')
         : '<div class="igs-source-filter-note">还没有登记的角色。</div>';
     const log = model.log.length
@@ -267,7 +268,10 @@ export function renderStatsArchive(model, advancedOpen = () => '') {
         : '<div class="igs-source-filter-note">还没有生成角色卡。</div>';
     const pending = (model.pendingPeople || []).length ? `<div class="igs-source-filter-note">待生成：${model.pendingPeople.map(esc).join('、')}</div>` : '';
     const backup = model.hasBackup ? '<div class="igs-settings-row"><button class="igs-settings-action" data-action="stats-op:backup" type="button">删除旧版备份</button></div>' : '';
-    return people
+    const importBtn = '<button class="igs-settings-action" data-action="stats-op:relation-import" type="button">从数据库表格导入角色</button>';
+    const fillBtn = '<button class="igs-settings-action" data-action="stats-op:relation-fill" type="button">按人设补填初始关系</button>';
+    const fill = `<div class="igs-settings-row">${importBtn}${fillBtn}</div>`;
+    return fill + people
         + `<details class="igs-settings-sub igs-settings-advanced" data-advanced="stats-sheets"${advancedOpen('stats-sheets')}><summary>角色卡（${n((model.sheets || []).length)} 张）</summary>${pending}${sheets}</details>`
         + `<details class="igs-settings-sub igs-settings-advanced" data-advanced="stats-story-skills"${advancedOpen('stats-story-skills')}><summary>剧情技能（${n((model.story || []).length)} 项）</summary>${story}</details>`
         + `<details class="igs-settings-sub igs-settings-advanced" data-advanced="stats-checks"${advancedOpen('stats-checks')}><summary>检定记录（最近 ${n((model.checks || []).length)} 次）</summary>${checks}</details>`

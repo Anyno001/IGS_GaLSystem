@@ -86,8 +86,11 @@ export const WUXIA_HUD_THEME = Object.freeze({
     placeholder: 'background:linear-gradient(160deg,#5b5852,#2e2c29);color:rgba(236,231,221,.72);',
     placeholderSvg: `fill:none;stroke:${moon('.6')};stroke-width:1.2;`,
     track: `height:${s(9)};border:0;border-radius:0;background:${moon('.16')};${maskOf(WX_BAR)}`,
-    fill: `background:rgb(${MOON_RGB}) !important;border-radius:0;${maskOf(WX_BAR)}`,
+    fill: `background:var(--igs-hud-fill-color) !important;border-radius:0;${maskOf(WX_BAR)}`,
     value: 'font-weight:400;',
+    // 淡彩色板：矿物色掺墨降饱和，同一明度档，墨底上只淡淡分色；好感褪红、信任黛青、了解青瓷、芥蒂暗朱、负好感灰蓝。
+    vars: '--igs-hud-bar-like:#a8676a;--igs-hud-bar-trust:#5f7f96;--igs-hud-bar-know:#6b8f84;--igs-hud-bar-grudge:#8e4a40;--igs-hud-bar-cold:#6f7a8a;'
+        + '--igs-hud-bar-1:#5f7f96;--igs-hud-bar-2:#6b8f84;--igs-hud-bar-3:#9a9a8e;--igs-hud-bar-4:#7f7290;--igs-hud-bar-5:#a0605a;--igs-hud-bar-6:#66718f;',
 });
 
 

@@ -183,6 +183,13 @@ ${THEMED.map(([value, palette]) => `${themeSelector(value)}::before{opacity:${pa
 .igs-tts-inline-control>select{flex:1 1 auto;min-width:0}
 .igs-tts-inline-control>.igs-table-pick{flex:0 0 auto}
 .igs-tts-pool{display:flex;flex-wrap:wrap;gap:6px;max-height:168px;overflow-y:auto}
+.igs-tts-pool-groups{display:flex;flex-direction:column;max-height:240px;overflow-y:auto}
+.igs-tts-pool-groups .igs-tts-pool{max-height:none;overflow:visible}
+.igs-tts-pool-groups>.igs-asset-folder{flex-shrink:0}
+.igs-tts-voice-search{display:flex;flex-direction:column;gap:6px;min-width:0;width:100%}
+.igs-char-voice-main>.igs-tts-voice-search,.igs-tts-inline-control>.igs-tts-voice-search{flex:1;min-width:0}
+.igs-tts-voice-search>input,.igs-tts-voice-search>select{width:100%;min-width:0}
+.igs-tts-voice-search [hidden]{display:none}
 .igs-wi-entries{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:240px;overflow-y:auto}
 .igs-wi-entries>.igs-table-pick{width:100%;flex:0 0 auto;justify-content:flex-start;text-align:left}
 .igs-card-skin-note{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:-6px}
@@ -205,6 +212,13 @@ ${THEMED.map(([value, palette]) => `${themeSelector(value)}::before{opacity:${pa
 .igs-settings-field textarea.igs-image-prompt-text{font-family:inherit;line-height:1.7}
 [data-image-prompt-panel] .igs-image-prompt-preset-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
 @media (max-width:520px){[data-image-prompt-panel] .igs-image-prompt-preset-actions{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* 数值页「同步到数据库表格」的四个模板按钮：两列等宽，文字不折行。 */
+.igs-stats-template-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.igs-stats-template-actions>.igs-settings-action{min-width:0;padding:0 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 数值页「存档与记录」的角色行：名字与数值在左，「修改」在右。 */
+.igs-settings-field.igs-stats-person{flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
+.igs-stats-person>span{min-width:0;line-height:1.5}
+.igs-stats-person>.igs-mood-word-list{flex:none;padding:0}
 [data-image-prompt-panel] .igs-image-prompt-preset-actions>.igs-settings-inline-action,.igs-image-prompt-more>summary{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:100%;min-width:0;height:var(--igs-compact-h);padding:0 10px;line-height:1;cursor:pointer;white-space:nowrap}
 [data-image-prompt-panel] .igs-segmented{height:var(--igs-compact-h);padding:2px}
 [data-image-prompt-panel] .igs-segmented-btn{height:calc(var(--igs-compact-h) - 4px)}
