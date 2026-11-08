@@ -5,14 +5,15 @@ import { hash32 } from '../../combat/random.js';
 import { BUILD_CHOICES, BUILD_MODES, abilityKeyOf } from '../../combat/abilities.js';
 import { STATS_LOG_MAX, createStatsLedger, currentStatsState, ledgerKey } from './stat-ledger.js';
 import { deserializeLedger, sanitizeCatalog, sanitizeLearned } from './stat-persist.js';
+import { LEGACY_SKILL_MAP, mergeLegacyValue } from './stat-registry.js';
 
 export { BUILD_CHOICES, BUILD_MODES };
 
 export const STAT_LOG_CHARACTER = '主角';
 // 正文里与数值相关的标签（igs-stat 与 igs-check）。标签变了，对应楼层记录就不再适用。
 const TAG_PATTERN = /[\[【]\s*igs\s*-?\s*stat\s*[:：][^\]】]*[\]】]|\[igs-check:[^\]\n]*\]/gi;
-const META_KEYS = Object.freeze(['check', 'checks', 'preroll', 'note', 'flags', 'pendingRoll', 'favorMode', 'manual']);
-const TYPE_OF_PREFIX = Object.freeze({ chat: 'chat', skill: 'skill-def', merge: 'skill-merge', sheet: 'sheet', base: 'base', edit: 'base', hero: 'base', queue: 'queue', notified: 'notified', learned: 'learned' });
+const META_KEYS = Object.freeze(['check', 'checks', 'preroll', 'note', 'flags', 'pendingRoll', 'favorMode', 'favorTier', 'strengthRev', 'intimateCost', 'manual', 'bondEvents', 'reviewEvents']);
+const TYPE_OF_PREFIX = Object.freeze({ chat: 'chat', skill: 'skill-def', merge: 'skill-merge', sheet: 'sheet', base: 'base', edit: 'base', hero: 'base', queue: 'queue', notified: 'notified', learned: 'learned', force: 'force', aptitude: 'aptitude', trait: 'trait', counter: 'counter', heronote: 'heronote', romance: 'romance', fame: 'fame', traitinit: 'trait' });
 export const STAT_CHAT_RECORD_TYPES = Object.freeze(Object.values(TYPE_OF_PREFIX));
 // 旧存档的六个属性名 → 战斗六维名（含原样保留的三项），用来从旧百分制属性反推六维倾向。
 const LEGACY_SCORE_NAMES = Object.freeze({ 健康: '体质', 力量: '力量', 敏捷: '敏捷', 理智: '智力', 观察: '感知', 魅力: '魅力' });
@@ -60,10 +61,38 @@ function applyOne(node, path, op) {
     return next;
 }
 
+// 旧技能名（妙手）的主角技能值读出时落到新名：路径 [protagonist, skills, 旧名, …] 改写成新名，不改写存档本身。
+function legacyPath(path) {
+    if (path.length >= 3 && path[0] === 'protagonist' && path[1] === 'skills' && Object.hasOwn(LEGACY_SKILL_MAP, path[2])) return ['protagonist', 'skills', LEGACY_SKILL_MAP[path[2]], ...path.slice(3)];
+    return path;
+}
+
+export function migrateLegacySkills(state) {
+    const skills = isObject(state) && isObject(state.protagonist) ? state.protagonist.skills : null;
+    if (!isObject(skills) || !Object.keys(skills).some((k) => Object.hasOwn(LEGACY_SKILL_MAP, k))) return state;
+    const next = {};
+    for (const [k, v] of Object.entries(skills)) {
+        const name = LEGACY_SKILL_MAP[k] || k;
+        next[name] = Object.hasOwn(next, name) ? mergeLegacyValue(next[name], v, name === k) : v;
+    }
+    return { ...state, protagonist: { ...state.protagonist, skills: next } };
+}
+
 // 把差分套到状态上（浅拷贝沿路径，不改入参）。
 export function applyOps(state, ops) {
     let current = state;
-    for (const op of Array.isArray(ops) ? ops : []) if (op && Array.isArray(op.p)) current = applyOne(current, op.p, op);
+    for (const op of Array.isArray(ops) ? ops : []) {
+        if (!op || !Array.isArray(op.p)) continue;
+        const path = legacyPath(op.p);
+        let write = op;
+        // 旧名改写到新名的写入：新名已有值时取大合并（整条技能，或其中的 value / marked），不让较小的旧值盖掉较大的。
+        if (path !== op.p && Object.hasOwn(op, 'v')) {
+            let node = current;
+            for (const key of path) node = isObject(node) ? node[key] : undefined;
+            if (node !== undefined) write = { ...op, v: mergeLegacyValue(node, op.v, false) };
+        }
+        current = applyOne(current, path, write);
+    }
     return current;
 }
 
@@ -107,9 +136,18 @@ export function chatEntries({ chatEnabled = false, catalog = null, learned = {},
     for (const [name, value] of Object.entries(clean.protagonistBase)) map.set(`base:${name}`, value);
     for (const [name, value] of Object.entries(clean.protagonistEdit)) map.set(`edit:${name}`, value);
     if (clean.heroAssigned) map.set('hero:assigned', true);
+    if (clean.heroSlots) map.set('hero:slots', clean.heroSlots);
+    // 豁免亲密门槛已并入 trait:名（键 forced）；force: 键只在读档时兼容旧记录，不再写。
+    for (const [name, level] of Object.entries(clean.aptitude)) map.set(`aptitude:${name}`, level);
+    for (const [name, marks] of Object.entries(clean.traits)) map.set(`trait:${name}`, marks);
+    for (const [name, n] of Object.entries(clean.counters)) map.set(`counter:${name}`, n);
+    for (const [name, text] of Object.entries(clean.heroNotes)) map.set(`heronote:${name}`, text);
+    for (const name of clean.romanceSeen) map.set(`romance:${name}`, true);
+    if (clean.fameBars.length) map.set('fame:bars', clean.fameBars);
     map.set('queue:skills', clean.queue.skills);
     map.set('queue:people', clean.queue.people);
     map.set('notified:all', clean.notified);
+    if (clean.traitInit.length) map.set('traitinit:all', clean.traitInit);
     for (const [word, skill] of Object.entries(sanitizeLearned(learned).learned)) map.set(`learned:${word}`, skill);
     return map;
 }
@@ -133,7 +171,7 @@ export function diffChatRecords(baseline, entries, { tag = '', createdAt = 0 } =
 
 // 键值表 → 聊天级设置对象（diffChatRecords 的逆过程）。
 export function restoreChat(map) {
-    const raw = { story: [], merged: {}, sheets: {}, protagonistBase: {}, protagonistEdit: {}, heroAssigned: false, queue: { skills: [], people: [] }, notified: [] };
+    const raw = { story: [], merged: {}, sheets: {}, protagonistBase: {}, protagonistEdit: {}, heroAssigned: false, intimacyForced: [], aptitude: {}, traits: {}, counters: {}, heroNotes: {}, romanceSeen: [], fameBars: [], queue: { skills: [], people: [] }, notified: [], traitInit: [] };
     const learned = {};
     let chatEnabled = false;
     let buildMode = null;
@@ -151,8 +189,17 @@ export function restoreChat(map) {
         else if (prefix === 'base') raw.protagonistBase[name] = value;
         else if (prefix === 'edit') raw.protagonistEdit[name] = value;
         else if (prefix === 'hero' && name === 'assigned') raw.heroAssigned = value === true;
+        else if (prefix === 'hero' && name === 'slots') raw.heroSlots = value;
         else if (prefix === 'queue' && (name === 'skills' || name === 'people')) raw.queue[name] = value;
         else if (prefix === 'notified') raw.notified = value;
+        else if (prefix === 'traitinit') raw.traitInit = value;
+        else if (prefix === 'force' && value === true) raw.intimacyForced.push(name);
+        else if (prefix === 'aptitude') raw.aptitude[name] = value;
+        else if (prefix === 'trait') raw.traits[name] = value;
+        else if (prefix === 'heronote') raw.heroNotes[name] = value;
+        else if (prefix === 'counter') raw.counters[name] = value;
+        else if (prefix === 'romance' && value === true) raw.romanceSeen.push(name);
+        else if (prefix === 'fame' && name === 'bars') raw.fameBars = value;
         else if (prefix === 'learned') learned[name] = value;
     }
     return { chatEnabled, buildMode, buildChoices, catalog: sanitizeCatalog(raw), learned: sanitizeLearned(learned).learned };
@@ -174,7 +221,7 @@ export function mergeStatLog(records, { chatId = '', chat = [] } = {}) {
     const restored = restoreChat(chatMap);
     const floors = new Map();
     for (const r of rows) if (r.type === 'floor' && isObject(r.anchor) && isObject(r.payload)) floors.set(r.id, r);
-    const initState = init ? init.payload.state : undefined;
+    const initState = init ? migrateLegacySkills(init.payload.state) : undefined;
     const memo = new Map();
     const stateOf = (id) => {
         const path = [];
@@ -256,7 +303,10 @@ export function normalizeLegacyState(state, prefs = null) {
     const protagonist = state.protagonist;
     const skills = {};
     for (const [name, entry] of Object.entries(isObject(protagonist.skills) ? protagonist.skills : {})) {
-        if (name === SAN_NAME || (!Object.hasOwn(LEGACY_SCORE_NAMES, name) && !SIX.includes(name))) skills[name] = entry;
+        if (name === SAN_NAME || (!Object.hasOwn(LEGACY_SCORE_NAMES, name) && !SIX.includes(name))) {
+            const canon = LEGACY_SKILL_MAP[name] || name;
+            if (canon === name || !Object.hasOwn(protagonist.skills, canon)) skills[canon] = entry;
+        }
     }
     const { health, ...bars } = isObject(protagonist.bars) ? protagonist.bars : {};
     return { ...state, protagonist: { ...protagonist, skills, bars, prefs: isObject(protagonist.prefs) ? protagonist.prefs : prefs } };

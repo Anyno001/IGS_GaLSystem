@@ -48,13 +48,13 @@ import { createExtensionPanel } from '../host/extension-panel.js';
 import { createReaderImageService } from '../generated-images/reader-image-service.js';
 import { createPromptInjector } from '../host/prompt-injector.js';
 import { createStatsRuntime } from './stats-runtime.js';
-import { normalizeStatusHudSettings } from '../data/shujuku/status-hud-model.js';
+import { normalizeStatusHudSettings, resolveStatusHudPicks } from '../data/shujuku/status-hud-model.js';
 import { createWorldRoles } from '../scene/stats/stat-world-roles.js';
 import { createOriginRuntime, originLegacyActive } from './origin-runtime.js';
 import { createModelProfilesStore } from '../storage/model-profiles-file.js';
 import { describeLlmReady } from '../generated-images/illustration/caption-writer.js';
 import { statsFxOf, statsNoticeLines } from '../scene/stats/stat-fx.js';
-import { clearStatsRivals, registerStatsRivals } from '../visual/igs-ui/romance-runtime.js';
+import { setRomanceSeenSink, setStatsRivalProvider } from '../visual/igs-ui/romance-runtime.js';
 import { normalizeStatsSettings } from '../scene/stats/stat-settings.js';
 import { createShujukuClient } from '../data/shujuku/client.js';
 import { parseTables } from '../data/shujuku/table-parser.js';
@@ -64,6 +64,8 @@ import { collectOutfitClues } from '../data/shujuku/outfit-clues.js';
 import { describeStatMappings } from '../data/shujuku/stats-push.js';
 import { buildInitialState } from '../scene/stats/stat-build.js';
 import { createSheetStore } from '../scene/stats/stat-sheet-store.js';
+import { createTraitCodexStore } from './stats-trait-runtime.js';
+import { writeCheckedStorage } from '../storage/checked-storage-write.js';
 import { isBackgroundGenerationActive } from '../host/background-generation.js';
 import { createIllustrationMessageHost } from '../host/illustration-message-host.js';
 import { createSecondaryLlm } from '../host/secondary-llm.js';
@@ -100,7 +102,7 @@ import { createCombatStoryContext } from '../host/combat-story-context.js';
 import { applyCombatRuleModifiers, combatExpansionEnabled, combatCooldownFloorsOf, combatGrammarEnabled, findPendingCombatReport, resolveChallengePromptSegment, resolveCombatNarrationSegment, resolveCombatPartySegment, resolveCombatPromptRule } from '../scene/combat-prompt.js';
 import { mergeCheckInputs, resolveCheckRollsSegment } from '../scene/check-rolls.js';
 
-const IGS_VERSION = '0.39.46';
+const IGS_VERSION = '0.39.72';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 
@@ -466,6 +468,7 @@ export function bootstrapIGS(options = {}) {
         global: globalObject,
         // statsRuntime 在阅读器之后创建，这里按需读取。
         statsLookup: () => (app.statsRuntime && typeof app.statsRuntime.metricsLookup === 'function' ? app.statsRuntime.metricsLookup() : null),
+        statsFavorOverview: () => (app.statsRuntime && typeof app.statsRuntime.favorOverview === 'function' ? app.statsRuntime.favorOverview() : null),
         statsProtagonistLookup: () => (app.statsRuntime && typeof app.statsRuntime.protagonistLookup === 'function' ? app.statsRuntime.protagonistLookup() : null),
         statsChat: () => (app.statsRuntime ? app.statsRuntime.chatStatus() : null),
         statsArchive: () => (app.statsRuntime ? app.statsRuntime.archive() : null),
@@ -487,6 +490,14 @@ export function bootstrapIGS(options = {}) {
             if (kind === 'skill') return rt.skillOp(op, name, payload);
             if (kind === 'hero') return rt.heroOp(op, name, payload);
             if (kind === 'relation') return rt.relationOp(op, name, payload);
+            // 「修改属性」：主角六维底数写进战斗属性表（手改记录覆盖原初始化），剧情与升级加点照常叠加。
+            if (kind === 'attrs') {
+                const heroName = (typeof illustrationMessageHost.getUserName === 'function' && String(illustrationMessageHost.getUserName() || '').trim()) || '主角';
+                const value = { className: String(payload && payload.className || ''), role: payload && payload.role, scores: payload && payload.scores };
+                return Promise.resolve().then(() => combatServices.writeManualInit(heroName, value, { replace: true }))
+                    .then((written) => (written && written.ok === true ? { ok: true } : { ok: false, reason: (written && written.reason) || 'combat-init-write-failed' }),
+                        () => ({ ok: false, reason: 'combat-init-write-failed' }));
+            }
             if (kind === 'generate') return rt.generateSheets(name ? [name] : null);
             if (kind === 'backfill') return rt.runBackfill();
             if (kind === 'backup') return rt.dropBackup();
@@ -503,13 +514,13 @@ export function bootstrapIGS(options = {}) {
                 const mode = (status && (status.buildMode || status.pendingMode)) || null;
                 const built = buildInitialState(payload.build, { worldview: payload.worldview, mode });
                 if (!built.ok) return { ok: false, reason: built.reason };
-                if (!built.manual) return app.statsRuntime.enableForChat({ initial: built.state });
+                if (!built.manual) return app.statsRuntime.enableForChat({ initial: built.state, skillAttributes: built.summary.attributes });
                 // 手动建档：先把主角六维与职业写进战斗表，成功后再启用数值系统。
                 const heroName = (typeof illustrationMessageHost.getUserName === 'function' && String(illustrationMessageHost.getUserName() || '').trim()) || '主角';
                 return Promise.resolve().then(() => combatServices.writeManualInit(heroName, built.manual))
                     .then((written) => (!written || written.ok !== true
                         ? { ok: false, reason: (written && written.reason) || 'combat-init-write-failed' }
-                        : app.statsRuntime.enableForChat({ initial: built.state, buildMode: 'manual' })),
+                        : app.statsRuntime.enableForChat({ initial: built.state, buildMode: 'manual', skillAttributes: built.summary.attributes })),
                     () => ({ ok: false, reason: 'combat-init-write-failed' }));
             }
             return app.statsRuntime.enableForChat();
@@ -841,22 +852,43 @@ export function bootstrapIGS(options = {}) {
         const out = [];
         for (const name of names) {
             if (name === '主角') {
-                out.push({ name, summary: String((c && c.powerUserSettings && c.powerUserSettings.persona_description) || '') });
+                let summary = String((c && c.powerUserSettings && c.powerUserSettings.persona_description) || '').trim();
+                const userName = String((c && c.name1) || '').trim();
+                if (userName) {
+                    try {
+                        const wi = await statsWorldInfo({ description: userName });
+                        if (wi && wi.ok && wi.text) summary = `${summary} ${wi.text}`.trim();
+                    } catch (error) { /* 世界书读不到时只用人设 */ }
+                }
+                out.push({ name, summary });
                 continue;
             }
             const card = cards.find((ch) => ch && ch.name === name);
             let summary = card ? [card.description, card.personality].filter(Boolean).join(' ') : '';
-            if (summary.length < 200) {
-                try {
-                    const wi = await statsWorldInfo({ description: name });
-                    if (wi && wi.ok && wi.text) summary = `${summary} ${wi.text}`.trim();
-                } catch (error) { /* 世界书读不到时只用角色卡 */ }
-            }
+            try {
+                const wi = await statsWorldInfo({ description: name });
+                if (wi && wi.ok && wi.text) summary = `${summary} ${wi.text}`.trim();
+            } catch (error) { /* 世界书读不到时只用角色卡 */ }
             out.push({ name, summary });
         }
         return out;
     };
+    // 剧情注入器的设定条目（含已演完阶段带来的变化）；没装或没开项目时为空。
+    const readPlotSetting = () => {
+        const hosts = [globalObject];
+        try { if (globalObject.parent && globalObject.parent !== globalObject) hosts.push(globalObject.parent); } catch (error) { /* 跨域父窗口 */ }
+        for (const host of hosts) {
+            try {
+                const runtime = host.__plotInjector && host.__plotInjector.runtime;
+                if (!runtime || typeof runtime.entries !== 'function') continue;
+                return runtime.entries().filter((e) => e && e.kind === 'setting' && e.enabled !== false && e.content).map((e) => e.content).join('\n');
+            } catch (error) { /* 注入器未就绪 */ }
+        }
+        return '';
+    };
     const statsSheetStore = createSheetStore(() => storageLike);
+    // 全局特质图鉴：跨聊天、跨角色卡，存一个 localStorage 键。
+    const statsTraitCodexStore = createTraitCodexStore(() => storageLike, writeCheckedStorage);
     // 世界书里有条目的角色按重要角色登记（多人世界书卡里卡名不是角色名）；读不到世界书时返回 null，不记入已查。
     const statsWorldRoles = createWorldRoles({
         lookup: async (name) => {
@@ -869,6 +901,9 @@ export function bootstrapIGS(options = {}) {
         getContext: resolveTavernContext,
         // 随身系统的属性加成（原始值，只读）；originRuntime 在其后创建，这里取用时再读。
         originStats: () => (app.originRuntime && typeof app.originRuntime.rawStats === 'function' ? app.originRuntime.rawStats() : null),
+        userCharacter: () => String((readImageBridge().sceneAssets || {}).userCharacter || ''),
+        characterAliases: () => (readImageBridge().sceneAssets || {}).characterAliases || {},
+        moodGroups: () => (readImageBridge().sceneAssets || {}).moodGroups || null,
         worldRoles: statsWorldRoles,
         readSettings: () => ((getUnifiedSettingsSnapshot() || {}).bridge || {}).stats,
         getPushClient: () => (globalObject.AutoCardUpdaterAPI ? createShujukuClient(globalObject.AutoCardUpdaterAPI) : null),
@@ -882,12 +917,13 @@ export function bootstrapIGS(options = {}) {
             return (prompt) => secondaryLlm.request({ system: prompt.system, user: prompt.user }, llm);
         },
         describePeople: describeStatsPeople,
+        plotSetting: readPlotSetting,
         // 人际关系页与好感总览两处表格里的人物名单（只取名字，数值以 IGS 为准）。
         tablePeople: () => {
             if (!globalObject.AutoCardUpdaterAPI) return [];
             const read = createShujukuClient(globalObject.AutoCardUpdaterAPI).readTables();
             if (!read || read.ok === false) return [];
-            const hudTables = ((getUnifiedSettingsSnapshot() || {}).readerSettings || {}).statusHud?.tables;
+            const hudTables = resolveStatusHudPicks(((getUnifiedSettingsSnapshot() || {}).readerSettings || {}).statusHud, read);
             return [...new Set([...buildRelationshipModel(read).people, ...buildFavorOverviewModel(read, hudTables).people].map((p) => p.name))];
         },
         // 卡牌战斗桥接：生命与六维取自战斗表，数值表读写走战斗的缓存客户端，检定提示词与队伍状态合并下发。
@@ -911,14 +947,13 @@ export function bootstrapIGS(options = {}) {
         },
         combatEnabled: () => combatExpansionEnabled((getUnifiedSettingsSnapshot() || {}).readerSettings),
         sheetStore: statsSheetStore,
+        traitCodexStore: statsTraitCodexStore,
         worldviewOf: () => resolveWorldview(((getUnifiedSettingsSnapshot() || {}).bridge || {}).sceneAssets),
         resumeReply: () => hostAdapter.resumeReply?.(),
         // 掷骰卡（v2 §9.1）：阅读器开着时播放，没开不补播。
         onCheck: ({ detail }) => { try { app.igsUi && typeof app.igsUi.playStatsCheck === 'function' && app.igsUi.playStatsCheck(detail); } catch (error) { /* */ } },
         onNotices: () => { try { app.igsUi && typeof app.igsUi.syncStatsNotices === 'function' && app.igsUi.syncStatsNotices(); } catch (error) { /* */ } },
         onChange: (statsState, entry, info) => {
-            // 换聊天时清掉上一个聊天的吃醋情敌，同名角色不串（§5.3 修罗场联动）。
-            if (info && info.chatChanged) clearStatsRivals();
             events.emit('igs:stats-updated', { state: statsState, entry });
             // 演出数据（P5）：只在本楼有新结算时发出；没有可播内容时 statsFxOf 返回 null，直接跳过。
             if (!entry) return;
@@ -926,8 +961,6 @@ export function bootstrapIGS(options = {}) {
             const fx = statsFxOf(entry, { hudLabel });
             if (!fx) return;
             events.emit('igs:stats-fx', { messageId: entry.messageId, swipeId: entry.swipeId, ...fx });
-            // 吃醋扣过好感的角色登记为修罗场情敌来源；主对象仍只认 romance 第 3 栏。
-            if (fx.jealous && fx.jealous.length) registerStatsRivals(fx.jealous);
             // 成长与战斗结果走阅读器生成细线（不弹窗、不挡画面，§10）；阅读器未打开时 info 级不退回 toastr。
             const notice = app.igsUi && app.igsUi.showImageNotice;
             if (typeof notice === 'function') {
@@ -940,6 +973,9 @@ export function bootstrapIGS(options = {}) {
         },
     });
     app.statsRuntime = statsRuntime;
+    // 修罗场情敌由数值系统实时给出；未启用时返回 null，演出层退回「当过恋爱对象」旧规则。
+    setStatsRivalProvider(() => app.statsRuntime && typeof app.statsRuntime.rivalSet === 'function' ? app.statsRuntime.rivalSet() : null);
+    setRomanceSeenSink((names) => (app.statsRuntime && typeof app.statsRuntime.noteRomanceSeen === 'function' ? app.statsRuntime.noteRomanceSeen(names) : null));
     state.statsSettingsOff = events.on('igs:legacy-settings-updated', () => statsRuntime.sync());
     // 状态栏关闭时阅读器直接丢弃；开启时把好感、成长、阶段变化接到现有飘字。
     state.statsFxOff = events.on('igs:stats-fx', (fx) => { try { app.igsUi && typeof app.igsUi.playStatsFeedback === 'function' && app.igsUi.playStatsFeedback(fx); } catch (error) { /* 反馈出错不影响结算 */ } });

@@ -43,7 +43,7 @@ import { esc, toHex } from './reader-value-utils.js';
 
 import { normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale } from './settings-normalize.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
-import { listStatusHudTables, normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
+import { listStatusHudTables, normalizeStatusHudSettings, resolveStatusHudPicks } from '../../data/shujuku/status-hud-model.js';
 import { isStatusHudPhone, renderStatusHudPositionField, statusHudPositionDevice } from './status-hud-position-fields.js';
 import { renderSectionResetButton, sectionResetPlaceholders } from './settings-sections.js';
 import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLabel } from '../../generated-images/image-job-log.js';
@@ -187,7 +187,15 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             }
             const win = options.global || globalThis;
             const api = win.AutoCardUpdaterAPI || null;
-            const listed = api && !idx ? listStatusHudTables(createShujukuClient(api).readTables()) : { ok: false, reason: 'missing-api', tables: [] };
+            const tableRead = api && !idx ? createShujukuClient(api).readTables() : null;
+            const listed = tableRead ? listStatusHudTables(tableRead) : { ok: false, reason: 'missing-api', tables: [] };
+            const autoTables = statusHud.tablesMode === 'auto';
+            const pickedTables = autoTables ? resolveStatusHudPicks(statusHud, tableRead) : statusHud.tables;
+            const tableNote = !listed.ok ? '数据库插件未就绪' : autoTables ? '自动识别带角色名的数值表与关系表，点选任一表格即改为手动选择。' : '';
+            const tablesFold = `<details class="igs-settings-sub igs-settings-advanced" data-advanced="status-hud-tables"${isOpenKey('status-hud-tables') ? ' open' : ''}><summary>高级：读取的表格</summary>`
+                + field('readerSettings.statusHud.tablesMode', '选择方式', segmentedInput('readerSettings.statusHud.tablesMode', statusHud.tablesMode, [['auto', '自动识别'], ['manual', '手动选择']], '选择方式'))
+                + tableMultiSelect('readerSettings.statusHud.tables', pickedTables, listed.tables, { note: tableNote, emptyText: autoTables && listed.tables.length ? '未识别到角色数值表' : undefined })
+                + '</details>';
             const body = [
                 toggle,
                 '<div class="igs-settings-sub">',
@@ -200,11 +208,11 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 field('readerSettings.statusHud.avatarRadius', '头像圆角', selectInput('readerSettings.statusHud.avatarRadius', statusHud.avatarRadius, [['square', '方角'], ['soft', '微圆角'], ['small', '小圆角'], ['medium', '中圆角'], ['large', '大圆角'], ['circle', '圆形']])),
                 '</div>',
                 renderStatusHudPositionField(statusHud, statusHudPositionDevice(asyncState, win), isStatusHudPhone(win) ? 'mobile' : 'pc'),
-                `<div class="igs-settings-field"><span>显示的表格</span>${tableMultiSelect('readerSettings.statusHud.tables', statusHud.tables, listed.tables, { note: listed.ok ? '' : '数据库插件未就绪' })}</div>`,
                 '<div class="igs-source-filter-grid">',
                 field('readerSettings.statusHud.background', '状态栏背景', segmentedInput('readerSettings.statusHud.background', statusHud.background, [['none', '无背景'], ['dialog', '跟随对话框']], '状态栏背景')),
                 field('readerSettings.statusHud.barColor', 'HUD条配色', segmentedInput('readerSettings.statusHud.barColor', statusHud.barColor, [['color', '彩色'], ['grayscale', '灰白']], 'HUD条配色')),
                 '</div>',
+                tablesFold,
                 '</div>',
             ].join('');
             return `<div class="${sectionClass}" data-status-hud>${body}</div>`;
@@ -295,7 +303,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 try { return options.statsMappings(stats.push.mappings); } catch (error) { return { ok: false, reason: 'stats-push-read-failed', detail: String(error && error.message || error) }; }
             })();
             return buildStatsPageValues({
-                stats, chat, archive, mappings, advancedOpen,
+                stats, chat, archive, mappings, advancedOpen, noteDrafts: asyncState.statsNoteDrafts || null,
                 combatOn: Boolean(reader && reader.combatExpansion && reader.combatExpansion.enabled === true),
                 worldview: resolveWorldview(worldviewAssets),
             });
@@ -538,6 +546,19 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 consistencyModelField: field('bridge.autoIllustration.consistencyModel', '一致性重绘模型', selectInput('bridge.autoIllustration.consistencyModel', auto.consistencyModel, CONSISTENCY_MODEL_OPTIONS)),
                 autoNaiSamplerField: field('bridge.autoIllustration.nai.sampler', '采样器', textInput('bridge.autoIllustration.nai.sampler', effectiveNai.sampler, 'k_euler_ancestral', 'text', medium)),
             };
+            const anchorViewportField = (autoSettings) => {
+                const width = Number(autoSettings.assets.anchoredWidth) || 0;
+                const height = Number(autoSettings.assets.anchoredHeight) || 0;
+                const note = width > 0 && height > 0
+                    ? `已锚定出图 ${width}×${height}。这是按当时窗口比例、不超过 1024×1024 的最大尺寸。全屏生图沿用这个尺寸，再点一次才更新。`
+                    : '还没锚定。点一下按现在的窗口比例，记下不超过 1024×1024 的最大出图尺寸。全屏生图会一直用这个尺寸。';
+                return `<div class="igs-settings-sub" data-image-feature="cg-anchor">`
+                    + `<input type="hidden" data-path="bridge.autoIllustration.assets.anchoredWidth" value="${width}">`
+                    + `<input type="hidden" data-path="bridge.autoIllustration.assets.anchoredHeight" value="${height}">`
+                    + `<div class="igs-source-filter-note">${esc(note)}</div>`
+                    + `<button type="button" class="igs-settings-action" data-action="anchor-cg-viewport">锚定当前宽高</button>`
+                    + `</div>`;
+            };
             const grid = (...items) => {
                 const body = items.filter(Boolean).join('');
                 return body ? `<div class="igs-source-filter-grid">${body}</div>` : '';
@@ -563,7 +584,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                         + `<div class="igs-settings-sub" data-image-feature="background-options"${hiddenAttr(!auto.assets.backgroundEnabled)}>${grid(imageFields.autoAssetBackgroundSizeField, kindModel('background', '背景模型'), imageFields.autoAssetDayFirstField)}</div>`
                         + grid(imageFields.itemImageFields)
                         + grid(kindModel('item', '物品模型')),
-                    cg: imageFields.autoInterludeField
+                    cg: anchorViewportField(auto)
+                        + imageFields.autoInterludeField
                         + `<div class="igs-settings-sub" data-image-feature="interlude"${imageFields.autoInterludeHidden}>${grid(imageFields.autoInterludeProbabilityField, imageFields.autoInterludeMaxField)}</div>`
                         + grid(kindModel('cg', '剧情CG模型'))
                         + `<div class="igs-settings-sub" data-image-feature="backfill"${hiddenAttr(!auto.interludeEnabled && !auto.nsfwEnabled)}>${imageFields.autoBackfillField}<div class="igs-source-filter-note">翻到未出图或出图失败的旧楼层时补画，会消耗生图额度。</div></div>`,
@@ -1122,6 +1144,9 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
         case 'parse':
             return pageTabs() + renderTemplate(getPageTemplate(page), parseValues());
         case 'stats':
+        case 'stats-npc':
+        case 'stats-codex':
+        case 'stats-set':
             return pageTabs() + renderTemplate(getPageTemplate(page), statsValues());
         case 'combat':
             return pageTabs() + renderTemplate(getPageTemplate(page), combatValues());

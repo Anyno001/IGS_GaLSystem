@@ -18,12 +18,14 @@ import { mountMatteEditor } from './sprite-matte-editor-mount.js';
 import { createCanvasImageCodec } from './sprite-matte-editor-view.js';
 import { createInpaintTransaction } from '../../generated-images/illustration/inpaint-transaction.js';
 import { normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
+import { readWindowViewport, resolutionNearCap } from '../../generated-images/illustration/auto-illustration-service.js';
 import { mergeLegacyNaiSettings } from '../../generated-images/image-backend.js';
 import { getSettingsStyleText } from './settings-style.js';
 import { categoryOfPage, currentSettingsPage, defaultPageOfCategory, isSettingsCategory, isSettingsPage, normalizeSettingsPage, openSettingsPage, resolveSettingsPage, resolveSettingsTarget } from './settings-pages.js';
 import { recordSettingsRecent, settingsRecentLabel } from './settings-recent.js';
 import { migrateTables, MIGRATE_BACKUP_KEY } from '../../data/shujuku/table-migrate.js';
 import { downloadStatsTemplate, fetchStatsTemplate, importStatsTemplate, statsTemplateChatDiff, STATS_TEMPLATE_PRESET_NAME } from './stats-template-link.js';
+import { FAME_KINDS, FAME_KIND_NAMES, FAME_PAIR_KIND } from '../../scene/stats/stat-fame.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { VN_THEME_PRESETS } from './reader-host-constants.js';
 import { cloneData } from './reader-value-utils.js';
@@ -50,12 +52,19 @@ import { preserveConfiguredArtists } from '../../generated-images/artist-library
 import { pickImagePromptFile } from './settings-image-prompt-io.js';
 import { previewStatusHudPosition } from './status-hud-position-fields.js';
 import { listSystemVoices, onSystemVoicesChanged } from './tts.js';
-import { normalizeBuild } from '../../scene/stats/stat-build.js';
+import { BUILD_CUSTOM_OPTION, normalizeBuild, pickSummary, validCustomSkillName } from '../../scene/stats/stat-build.js';
+import { BASE_ATTRIBUTES } from '../../scene/stats/stat-state.js';
 import { refreshStatsBuildStatus } from './stats-settings-fields.js';
+import { ABILITY_KEYS, ABILITY_LABELS, MANUAL_BUILD, MANUAL_TOTAL } from '../../combat/abilities.js';
 import { BATTLE_MODE_PATH, COMBAT_PRESET_PATH, checkCombatExpansionReady, planBattleMode, planCombatPreset } from './combat-settings.js';
 import { ensureEnemyAtlas } from './combat-enemy-atlas.js';
 import { probeCombatTableSupport } from '../../data/shujuku/combat-tables.js';
 import { originChatStatus, runAttachedOriginOp } from './origin-attach.js';
+import { resolveSecondaryLlm } from '../../scene/mood-classify.js';
+import { secondaryLlmText } from '../../host/secondary-llm-result.js';
+
+// 「我对TA」备注最多字数（与存档 sanitizeCatalog 一致）。
+const HERO_NOTE_MAX = 40;
 
 // 设置页改角色的某一项时，按这些字段里有没有这个角色名判断它在本卡还是全局。
 const ASSET_CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
@@ -683,14 +692,35 @@ export function createSettingsHost(deps) {
         return result;
     }
 
-    const STATS_ATTRIBUTES = ['健康', '力量', '敏捷', '理智', '观察', '魅力'];
+    // 「按剧情拟写」：取最近正文拼好的请求，调副模型一次，结果只填进输入框草稿，保存才写进存档。
+    async function draftHeroNote(op, name) {
+        if (typeof options.requestSecondaryText !== 'function') return { ok: false, reason: 'stats-no-model' };
+        const req = await op('relation', 'note-prompt', name, {});
+        if (!req || !req.ok) return req || { ok: false };
+        const panel = state.activeSettings;
+        const busy = typeof settingsDialogs.busy === 'function' ? settingsDialogs.busy('正在拟写。') : null;
+        let text = '';
+        try {
+            const raw = await options.requestSecondaryText({ system: req.system, user: req.user }, resolveSecondaryLlm(panel && panel.draft && panel.draft.bridge && panel.draft.bridge.autoIllustration));
+            text = secondaryLlmText(raw).replace(/\s+/g, ' ').trim().replace(/^[「“"']+|[」”"']+$/g, '').slice(0, HERO_NOTE_MAX);
+        } catch (error) {
+            return { ok: false, reason: 'stats-note-failed' };
+        } finally { if (busy) busy.close(); }
+        if (!text) return { ok: false, reason: 'stats-note-failed' };
+        if (state.activeSettings !== panel) return { ok: false, reason: 'settings-closed' };
+        const drafts = panel.asyncState.statsNoteDrafts || (panel.asyncState.statsNoteDrafts = Object.create(null));
+        drafts[name] = text;
+        return { ok: true };
+    }
+
     async function runStatsOp(spec) {
         const op = typeof options.statsOp === 'function' ? options.statsOp : null;
         if (!op) return { ok: false, reason: 'stats-runtime-missing' };
         const [kind, raw = ''] = spec.split(/:(.*)/s);
         // hero-set 的参数是「编码后的技能名|数值」，数值为空表示清除手改。
-        // relation-set 的参数是「编码后的角色名|好感,信任,了解」（当前值，用来预填数字框）。
-        const [namePart, valuePart = ''] = kind === 'hero-set' || kind === 'relation-set' ? raw.split('|') : [raw];
+        // relation-set 的参数是「编码后的角色名|好感,信任,了解[,欲望]」（当前值，用来预填数字框）。
+        // skill-attr 的参数是「编码后的技能名|属性」（来自剧情技能的属性下拉）。
+        const [namePart, valuePart = '', oldPart = ''] = kind === 'hero-slot' || kind === 'hero-set' || kind === 'relation-set' || kind === 'relation-forced' || kind === 'trait' || kind === 'trait-id' || kind === 'skill-attr' || kind === 'skill-tier' ? raw.split('|') : [raw];
         const name = namePart ? decodeURIComponent(namePart) : '';
         let result;
         try {
@@ -702,7 +732,88 @@ export function createSettingsHost(deps) {
                 result = await op('relation', 'import-table', '', {});
                 if (result && result.ok && typeof settingsDialogs.alert === 'function') await settingsDialogs.alert(`已导入：${result.imported.join('、')}`);
             }
+            else if (kind === 'sheet-new') result = await op('generate', name);
+            else if (kind === 'relation-forced') result = await op('relation', 'forced', name, { forced: valuePart === '1' });
+            else if (kind === 'trait') result = await op('relation', 'trait', name, { key: valuePart, on: oldPart === '1' });
+            else if (kind === 'trait-id') result = await op('relation', 'trait-id', name, { id: decodeURIComponent(valuePart), on: oldPart === '1' });
+            else if (kind === 'fame-add') {
+                // 开一条声望：先选性质，再起条名（留空用性质名）。
+                const kindName = await settingsDialogs.choose('选择这条声望的性质：', FAME_KIND_NAMES.map((value) => ({ value, label: `${value}（${FAME_KINDS[value].zero}到${FAME_KINDS[value].full}）` })), FAME_KIND_NAMES[0], { dropdown: true });
+                if (!FAME_KIND_NAMES.includes(kindName)) result = { ok: true, cancelled: true };
+                else {
+                    const raw = await settingsDialogs.prompt(kindName === FAME_PAIR_KIND ? '条名（如「CP粉」），留空则用性质名：' : '条名（如「唯粉」「路人缘」），留空则用性质名：', '');
+                    result = raw == null ? { ok: true, cancelled: true } : await op('relation', 'fame-add', '', { name: String(raw).trim() || kindName, kind: kindName });
+                }
+            }
+            else if (kind === 'fame-remove') {
+                result = await settingsDialogs.confirm(`关闭声望「${name}」？关闭后不再写入提示词，也不再结算；再次开启同名声望时沿用原有数值。`) ? await op('relation', 'fame-remove', name) : { ok: true, cancelled: true };
+            }
+            else if (kind === 'aptitude') {
+                // 参数为「编码后的角色名:档」，主角为「主角」。
+                const [who, level = ''] = raw.split(':');
+                result = await op('relation', 'aptitude', decodeURIComponent(who), { level: decodeURIComponent(level) });
+            }
+            else if (kind === 'note-save') {
+                const drafts = state.activeSettings && state.activeSettings.asyncState.statsNoteDrafts;
+                result = drafts && typeof drafts[name] === 'string' ? await op('relation', 'note', name, { text: drafts[name] }) : { ok: true, cancelled: true };
+                if (result && result.ok && drafts) delete drafts[name];
+            }
+            else if (kind === 'note-draft') result = await draftHeroNote(op, name);
             else if (kind === 'hero-set') result = await op('hero', 'set', name, { value: valuePart });
+            else if (kind === 'skill-tier') result = valuePart ? await op('hero', 'edit', name, { tier: valuePart }) : { ok: true, cancelled: true };
+            else if (kind === 'hero-slot') {
+                // 3+5 换格：valuePart 为新技能，oldPart 为原占格技能；原格有技能时先确认一次，选「自定义…」时再问名字与所属属性。
+                let skill = valuePart ? decodeURIComponent(valuePart) : '';
+                const old = oldPart ? decodeURIComponent(oldPart) : '';
+                let attribute;
+                // 自定义技能（新填的或建卡里已有的）只认同名，不按别名并进内置技能。
+                const draftCustom = normalizeBuild(getPath(state.activeSettings && state.activeSettings.draft, STATS_BUILD_PATH)).custom;
+                let custom = draftCustom.includes(skill);
+                if (!skill) result = { ok: true, cancelled: true };
+                else {
+                    if (skill === BUILD_CUSTOM_OPTION) {
+                        custom = true;
+                        const raw = await settingsDialogs.prompt(`自定义技能名（1–8 字，不含数字和符号）：`, '');
+                        skill = validCustomSkillName(raw == null ? '' : raw) || '';
+                        if (!skill) result = raw == null || !String(raw).trim() ? { ok: true, cancelled: true } : { ok: false, reason: 'stats-build-skill-invalid' };
+                    }
+                    if (skill) {
+                        const sure = !old || await settingsDialogs.confirm(`将「${name.startsWith('strong') ? '擅长' : '比较擅长'}${'一二三四五'[Number(name.replace(/[^0-9]/g, '')) - 1] || ''}」由「${old}」换成「${skill}」？「${old}」会回到未学，「${skill}」按该格起步值重新计算。`);
+                        if (!sure) result = { ok: true, cancelled: true };
+                        else {
+                            result = await op('hero', 'slot', name, { skill, attribute, custom });
+                            if (result && result.reason === 'stats-slot-needs-attribute') {
+                                attribute = await settingsDialogs.choose(`「${skill}」所属的属性：`, BASE_ATTRIBUTES.map((value) => ({ value, label: value })), BASE_ATTRIBUTES[1], { dropdown: true });
+                                result = BASE_ATTRIBUTES.includes(attribute) ? await op('hero', 'slot', name, { skill, attribute, custom }) : { ok: true, cancelled: true };
+                            }
+                        }
+                    }
+                }
+            }
+            else if (kind === 'hero-pick') {
+                // 选擅长技能：读设置草稿里的 8 格（与建卡同一份），确定后写进本聊天。
+                const draftBuild = state.activeSettings && state.activeSettings.draft && state.activeSettings.draft.bridge && state.activeSettings.draft.bridge.stats && state.activeSettings.draft.bridge.stats.build;
+                const picked = pickSummary(draftBuild);
+                result = picked.ok ? await op('hero', 'pick', '', { skills: picked.skills, attributes: picked.attributes, slots: picked.slots }) : { ok: false, reason: picked.errors[0] };
+            }
+            else if (kind === 'hero-attrs') {
+                // 修改属性：六维底数 3–18、合计不超过 72；剧情与升级加的点另算，不受这个上限。
+                const read = await op('hero', 'attrs', '', {});
+                const attrs = read && read.attrs;
+                if (!attrs) result = { ok: false, reason: 'combat-attribute-table-missing' };
+                else {
+                    const values = await settingsDialogs.numbers(`修改属性（单项${MANUAL_BUILD.min}–${MANUAL_BUILD.max}，合计不超过${MANUAL_TOTAL}）`, ABILITY_KEYS.map((key) => ({ key, label: ABILITY_LABELS[key], value: attrs.base[key], min: MANUAL_BUILD.min, max: MANUAL_BUILD.max })), { okLabel: '保存', total: { max: MANUAL_TOTAL, note: (left, total) => (left < 0 ? `超出 ${-left} 点 · 合计 ${total}/${MANUAL_TOTAL}` : `剩余 ${left} 点 · 合计 ${total}/${MANUAL_TOTAL}`) } });
+                    if (!values) result = { ok: true, cancelled: true };
+                    else {
+                        const scores = Object.fromEntries(ABILITY_KEYS.map((key) => [key, Math.round(Number(values[key]))]));
+                        const total = Object.values(scores).reduce((sum, v) => sum + v, 0);
+                        result = total > MANUAL_TOTAL ? { ok: false, reason: 'stats-build-over-total' }
+                            : ABILITY_KEYS.some((key) => !(scores[key] >= MANUAL_BUILD.min && scores[key] <= MANUAL_BUILD.max)) ? { ok: false, reason: 'stats-build-score-range' }
+                                : ABILITY_KEYS.every((key) => scores[key] === attrs.base[key]) ? { ok: true, cancelled: true }
+                                    : await op('attrs', 'set', '', { scores, className: attrs.className, role: attrs.role });
+                    }
+                }
+            }
             else if (kind === 'hero-assign') {
                 result = await op('hero', 'assign', '', {});
                 if (result && result.reason === 'needs-confirm') {
@@ -710,20 +821,53 @@ export function createSettingsHost(deps) {
                 }
             }
             else if (kind === 'skill-attr') {
-                const attribute = await settingsDialogs.choose(`「${name}」归入哪项属性？`, STATS_ATTRIBUTES.map((value) => ({ value, label: value })));
-                result = attribute ? await op('skill', 'edit', name, { attribute }) : { ok: true, cancelled: true };
+                result = valuePart ? await op('skill', 'edit', name, { attribute: valuePart }) : { ok: true, cancelled: true };
             } else if (kind === 'skill-rename') {
                 const to = String((await settingsDialogs.prompt(`把「${name}」改名为：`, name)) || '').trim();
                 result = to && to !== name ? await op('skill', 'edit', name, { name: to }) : { ok: true, cancelled: true };
             } else if (kind === 'skill-merge') {
                 const to = String((await settingsDialogs.prompt(`把「${name}」合并到哪项技能（填技能名）：`, '')) || '').trim();
                 result = to ? await op('skill', 'merge', name, { to }) : { ok: true, cancelled: true };
+            } else if (kind === 'story-tidy') {
+                const busy = typeof settingsDialogs.busy === 'function' ? settingsDialogs.busy('正在整理剧情技能，需要几十秒。') : null;
+                try { result = await op('skill', 'tidy-suggest', ''); } finally { if (busy) busy.close(); }
+                if (result && result.reason === 'stats-tidy-failed') { await settingsDialogs.alert('整理失败，辅助模型未返回结果，可稍后重试。'); result = { ok: true, cancelled: true }; }
+                else if (result && result.ok) {
+                    const items = result.items || [];
+                    if (!items.length) { await settingsDialogs.alert('没有需要整理的剧情技能。'); result = { ok: true, cancelled: true }; }
+                    else {
+                        const choices = items.map((item, i) => ({ value: String(i), label: item.type === 'rename' ? `${item.from} 改名为 ${item.to}` : `${item.from} → ${item.to}`, note: item.reason }));
+                        const picked = await settingsDialogs.pick('整理结果由模型判断，可能把不该合并的技能合在一起，请逐条核对。', choices, choices.map((c) => c.value));
+                        const chosen = Array.isArray(picked) ? picked.map((v) => items[Number(v)]).filter(Boolean) : [];
+                        if (!chosen.length) result = { ok: true, cancelled: true };
+                        else {
+                            result = await op('skill', 'tidy-apply', '', { items: chosen });
+                            if (result && result.ok) await settingsDialogs.alert(`已整理 ${result.applied} 项`);
+                        }
+                    }
+                }
             } else if (kind === 'skill-remove') {
-                result = await settingsDialogs.confirm(`删除剧情技能「${name}」？主角已有的数值保留。`) ? await op('skill', 'remove', name) : { ok: true, cancelled: true };
+                result = await settingsDialogs.confirm(`删除技能「${name}」？主角这项技能改为未学。`) ? await op('skill', 'remove', name) : { ok: true, cancelled: true };
+                // 建卡里的同名自定义技能一并删掉，否则 3+5 下拉里还会列出它。
+                const draft = state.activeSettings && state.activeSettings.draft;
+                const build = result && result.ok && !result.cancelled ? normalizeBuild(getPath(draft, STATS_BUILD_PATH)) : null;
+                if (build && build.custom.includes(name)) {
+                    const customAttrs = { ...build.customAttrs };
+                    delete customAttrs[name];
+                    const picks = Object.fromEntries(Object.entries(build.picks).map(([slot, v]) => [slot, v === name ? '' : v]));
+                    setPath(draft, STATS_BUILD_PATH, { ...build, custom: build.custom.filter((x) => x !== name), customAttrs, picks });
+                    persistSettingsDraft();
+                }
             } else if (kind === 'sheet-edit') {
                 const text = String((await settingsDialogs.prompt(`修改「${name}」的一项数值，格式：项目 档位（如「话术 精通」「敏捷 出众」）。技能档：未学、入门、熟练、精通、大师；属性档：很弱、偏弱、普通、出众、顶尖。`, '')) || '').trim();
                 const [skill, tier] = text.split(/\s+/);
                 result = skill && tier ? await op('sheet', 'edit', name, { skill, tier }) : { ok: true, cancelled: true };
+            } else if (kind === 'trait-fill') {
+                const busy = typeof settingsDialogs.busy === 'function' ? settingsDialogs.busy('正在按人设评定角色特质，角色较多时需要几十秒。') : null;
+                try { result = await op('relation', 'fill-traits', '', {}); } finally { if (busy) busy.close(); }
+                if (result && result.ok && typeof settingsDialogs.alert === 'function') {
+                    await settingsDialogs.alert(!result.asked ? '所有角色都已有特质。' : result.filled.length ? `已补全特质：${result.filled.join('、')}` : '按人设判断，暂无可给出的特质。');
+                }
             } else if (kind === 'relation-fill') {
                 const busy = typeof settingsDialogs.busy === 'function' ? settingsDialogs.busy('正在按人设计算初始关系，角色较多时需要几十秒。') : null;
                 try { result = await op('relation', 'fill-start', '', {}); } finally { if (busy) busy.close(); }
@@ -731,9 +875,10 @@ export function createSettingsHost(deps) {
                     await settingsDialogs.alert(result.filled.length ? `已补填初始关系：${result.filled.join('、')}` : '按人设判断，这些角色与主角都还是陌生关系，数值未改动。');
                 }
             } else if (kind === 'relation-set') {
-                const dims = ['好感', '信任', '了解'];
                 const before = valuePart.split(',').map((v) => (v === '' ? NaN : Number(v)));
-                const values = await settingsDialogs.numbers(`修改「${name}」的关系数值`, dims.map((key, i) => ({ key, label: key, value: Number.isFinite(before[i]) ? before[i] : 0, min: -100, max: 100 })), { okLabel: '保存' });
+                // 第四项是欲望，只有开启 NSFW 后建档的角色才带。
+                const dims = ['好感', '信任', '了解', '欲望'].slice(0, Math.max(3, before.length));
+                const values = await settingsDialogs.numbers(`修改「${name}」的关系数值`, dims.map((key, i) => ({ key, label: key, value: Number.isFinite(before[i]) ? before[i] : 0, min: key === '欲望' ? 0 : -100, max: 100 })), { okLabel: '保存' });
                 // 只提交改动过的项，没改的维度不记手改。
                 const payload = values ? Object.fromEntries(dims.filter((key, i) => values[key] !== before[i]).map((key) => [key, values[key]])) : {};
                 result = Object.keys(payload).length ? await op('relation', 'set', name, payload) : { ok: true, cancelled: true };
@@ -746,7 +891,7 @@ export function createSettingsHost(deps) {
             result = { ok: false, reason: 'stats-op-threw', thrown: error };
         }
         if (result && result.ok === false && result.reason && !result.cancelled && typeof settingsDialogs.alert === 'function') {
-            const text = { 'stats-no-model': '没有可用的辅助模型，请先在自动插图设置里接好写词模型。', 'stats-generating': '正在生成回复，结束后再试。', 'stats-sheet-edit-invalid': '格式不对，请写成「项目 档位」。', 'stats-relation-invalid': '关系数值须为-100到100的整数。', 'stats-relation-missing': '该角色还没有结算记录，下一楼回复后再改。', 'stats-table-none': '数据库表格里没有可导入的新角色。', 'stats-import-no-floor': '本聊天启用数值后还没有结算过回复，下一楼回复后再导入。', 'stats-inactive': '本聊天未启用数值系统。', 'stats-no-ledger': '本聊天还没有数值存档。', 'stats-start-none': '没有需要补填的角色：已登记角色的关系数值都已定过。', 'stats-start-failed': '补填失败，辅助模型的回复无法解析，可稍后重试。', 'stats-chat-changed': '计算期间切换了聊天，未写入。','stats-hero-skill-invalid': '技能值须为1到99的整数。', 'stats-hero-skills-coc-only': '主角技能分配仅适用于CoC规则。', 'stats-hero-skills-busy': '另一个聊天的分配尚未完成。', 'stats-hero-skills-invalid': '分配失败，回复无法解析。', 'stats-hero-skills-empty': '分配失败，回复中没有有效档位。' }[result.reason];
+            const text = { 'stats-no-model': '没有可用的辅助模型，请先在自动插图设置里接好写词模型。', 'stats-generating': '正在生成回复，结束后再试。', 'stats-sheet-edit-invalid': '格式不对，请写成「项目 档位」。', 'stats-relation-invalid': '关系数值须为-100到100的整数。', 'stats-relation-missing': '该角色还没有结算记录，下一楼回复后再改。', 'stats-note-no-text': '还没有可参考的剧情正文。', 'stats-note-failed': '拟写失败，辅助模型未返回结果，可稍后重试。', 'stats-table-none': '数据库表格里没有可导入的新角色。', 'stats-import-no-floor': '本聊天启用数值后还没有结算过回复，下一楼回复后再导入。', 'stats-inactive': '本聊天未启用数值系统。', 'stats-no-ledger': '本聊天还没有数值存档。', 'stats-start-none': '没有需要补填的角色：已登记角色的关系数值都已定过。', 'stats-start-failed': '补填失败，辅助模型的回复无法解析，可稍后重试。', 'stats-chat-changed': '计算期间切换了聊天，未写入。','stats-hero-skill-invalid': '技能值须为1到99的整数。', 'stats-hero-edit-invalid': '格式不对，请写成「技能 档位」或「技能 数值」。', 'stats-hero-edit-attribute': '六维属性不能在这里修改。', 'stats-hero-tier-over-cap': '熟练度不能高于当前成长档位。', 'stats-hero-edit-unknown': '没有这项技能，请在擅长技能八格里选择。', 'stats-build-skill-invalid': '技能名须为1到8个字，不含数字和符号。', 'stats-hero-skills-coc-only': '主角技能分配仅适用于CoC规则。', 'stats-hero-skills-busy': '另一个聊天的分配尚未完成。', 'stats-hero-skills-invalid': '分配失败，回复无法解析。', 'stats-hero-skills-empty': '分配失败，回复中没有有效档位。', 'stats-build-pick-duplicate': '同一项技能只能选一次。', 'stats-build-strong-missing': '擅长技能须选满3项。', 'stats-build-over-total': `六维合计不能超过${MANUAL_TOTAL}。`, 'stats-build-score-range': `每项须在${MANUAL_BUILD.min}到${MANUAL_BUILD.max}之间。`, 'combat-attribute-table-missing': '战斗属性表尚未建立，暂时无法修改属性。', 'combat-init-write-failed': '属性写入失败，请稍后重试。', 'stats-fame-name': '条名须为1到8个字，不含数字和符号。', 'stats-fame-dup': '已有同名的声望。', 'stats-fame-max': '声望最多开三条。', 'stats-fame-kind': '请选择声望的性质。', 'stats-trait-full': '特质已满格，请先摘下一项。', 'stats-trait-refused': '该特质当前无法挂上。', 'stats-trait-initial-failed': '评定失败，辅助模型未返回结果，可稍后重试。', 'stats-trait-busy': '正在复核特质，稍后再试。' }[result.reason];
             if (text) await settingsDialogs.alert(text);
         }
         if (state.activeSettings) rerenderSettings();
@@ -781,7 +926,26 @@ export function createSettingsHost(deps) {
     }
 
     const recoveringSettingsActions = new Map();
+    function anchorCgViewport() {
+        const draft = state.activeSettings && state.activeSettings.draft;
+        if (!draft) return { ok: false, reason: 'settings-not-open' };
+        const live = readWindowViewport(options.global || globalThis);
+        const size = resolutionNearCap(live.width, live.height);
+        if (!size) {
+            showSettingsNotice('没有量到当前宽高');
+            return { ok: false, reason: 'viewport-unavailable' };
+        }
+        const { width, height } = size;
+        setPath(draft, 'bridge.autoIllustration.assets.anchoredWidth', normalizeSettingsValue('bridge.autoIllustration.assets.anchoredWidth', width));
+        setPath(draft, 'bridge.autoIllustration.assets.anchoredHeight', normalizeSettingsValue('bridge.autoIllustration.assets.anchoredHeight', height));
+        rerenderSettings();
+        persistImmediateField('bridge.autoIllustration.assets.anchoredWidth');
+        showSettingsNotice(`已锚定出图 ${width}×${height}`);
+        return { ok: true, width, height };
+    }
+
     function handleSettingsAction(action) {
+        if (action === 'anchor-cg-viewport') return Promise.resolve(anchorCgViewport());
         if (String(action).startsWith('origin-op:')) return runOriginOp(String(action).slice('origin-op:'.length));
         if (action === 'origin-chat-pause') return runOriginOp('pause');
         if (action === 'origin-chat-resume') return runOriginOp('resume');
@@ -813,6 +977,15 @@ export function createSettingsHost(deps) {
             }
             if (state.activeSettings) rerenderSettings();
             return Promise.resolve(result || { ok: false, reason: 'stats-runtime-missing' });
+        }
+        // 变动记录「按时间 / 按角色」：只是界面视图，记在折叠状态里，不进设置。
+        if (String(action).startsWith('stats-log-view:')) {
+            if (state.activeSettings && state.activeSettings.asyncState) {
+                const asyncState = state.activeSettings.asyncState;
+                asyncState.advancedOpen = { ...(asyncState.advancedOpen || {}), 'stats-log-by-role': String(action).endsWith(':role') };
+                rerenderSettings();
+            }
+            return Promise.resolve({ ok: true });
         }
         // 数值 v2 存档区操作（角色卡、剧情技能、补全、旧版备份）：交给运行时，结束后重绘。
         if (String(action).startsWith('stats-op:')) return runStatsOp(String(action).slice('stats-op:'.length));
@@ -1225,6 +1398,13 @@ export function createSettingsHost(deps) {
         root.addEventListener('input', (event) => {
             const target = event.target;
             if (!target || !target.getAttribute) return;
+            // 「我对TA」输入：只记在界面草稿里，点「保存」才写进聊天存档。
+            const statsNote = target.getAttribute('data-stats-note');
+            if (statsNote !== null) {
+                const drafts = state.activeSettings.asyncState.statsNoteDrafts || (state.activeSettings.asyncState.statsNoteDrafts = Object.create(null));
+                drafts[statsNote] = String(target.value || '').slice(0, HERO_NOTE_MAX);
+                return;
+            }
             const voiceSearch = target.getAttribute('data-tts-voice-search');
             if (voiceSearch !== null) {
                 const queries = state.activeSettings.asyncState.ttsVoiceSearch || (state.activeSettings.asyncState.ttsVoiceSearch = Object.create(null));
@@ -1388,6 +1568,23 @@ export function createSettingsHost(deps) {
                 controller.invoke(`stats-op:hero-set:${encodeURIComponent(heroSkill)}|${String(target.value).trim()}`);
                 return;
             }
+            // 「编辑技能」的所属属性、熟练度下拉与新增输入框：同样直接写聊天存档。
+            const skillAttr = target?.getAttribute?.('data-stats-skill-attr');
+            if (skillAttr != null) {
+                controller.invoke(`stats-op:skill-attr:${encodeURIComponent(skillAttr)}|${String(target.value)}`);
+                return;
+            }
+            const skillTier = target?.getAttribute?.('data-stats-skill-tier');
+            if (skillTier != null) {
+                controller.invoke(`stats-op:skill-tier:${encodeURIComponent(skillTier)}|${String(target.value)}`);
+                return;
+            }
+            // 选完之后常驻的 3+5 八格：换格直接写聊天存档。
+            const heroSlot = target?.getAttribute?.('data-stats-hero-slot');
+            if (heroSlot != null) {
+                controller.invoke(`stats-op:hero-slot:${heroSlot}|${encodeURIComponent(String(target.value))}|${encodeURIComponent(target.getAttribute('data-stats-hero-slot-old') || '')}`);
+                return;
+            }
             const artistSelection = target?.getAttribute?.('data-artist-selection');
             if (artistSelection != null) {
                 controller.setArtistSelection(artistSelection, target.value);
@@ -1542,6 +1739,12 @@ export function createSettingsHost(deps) {
                 return;
             }
             const path = event.target && event.target.getAttribute ? event.target.getAttribute('data-path') : '';
+            // 3+5 技能下拉选了「自定义…」：不写草稿，交给弹框流程（取消时重绘恢复原值）。
+            const pickSlot = target?.getAttribute?.('data-stats-pick-slot');
+            if (pickSlot && target.value === BUILD_CUSTOM_OPTION) {
+                controller.invoke(`stats-build-pick-custom:${pickSlot}`);
+                return;
+            }
             if (path) noteRecentChange(target, path);
             if (event.target && event.target.type === 'range' && !/^readerSettings\.(typewriter\.sound|statusHud\.position)\./.test(path || '')) return;
             if (!path) return;
@@ -1634,6 +1837,8 @@ export function createSettingsHost(deps) {
             }
             // 敌人立绘管理折叠时不渲染行：展开时重绘一次补出内容。
             if (key === 'combat-enemy-sprites' && target.open) rerenderSettings({ draftUnchanged: true });
+            // 角色「编辑」折叠（含整张特质候选表）收起时不渲染：展开时重绘一次补出内容。
+            if ((key === 'stats-hero-edit' || key.startsWith('stats-edit-')) && target.open && !target.querySelector('summary ~ *')) rerenderSettings({ draftUnchanged: true });
         }, true);
         root.addEventListener('keydown', (event) => {
             if (onboarding.keydown(event, doc)) return;

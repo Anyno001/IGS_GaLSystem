@@ -38,6 +38,7 @@ import { secondaryLlmText } from '../../host/secondary-llm-result.js';
 
 import { isMarkerDirectiveLine, stripMarkerDirectives } from '../../scene/directive-tags.js';
 import { composeStatsHud, dropUserFavor } from '../../scene/stats/stat-metrics.js';
+import { PROTAGONIST } from '../../scene/stats/stat-engine.js';
 import { readStoryNow, resolveDuePromises } from '../../scene/promise-reminder.js';
 import { normalizeItemImageSettings } from '../../generated-images/illustration/item-image-settings.js';
 import { createCgGalleryPanel } from './cg-gallery-panel.js';
@@ -134,7 +135,7 @@ import { createOriginPageController } from './origin-panel.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { parseTables } from '../../data/shujuku/table-parser.js';
 import { lookupSkillValue } from '../../data/shujuku/skill-table.js';
-import { STATUS_HUD_PHONE_MEDIA, buildStatusHudModel, normalizeStatusHudSettings, resolveStatusAvatar } from '../../data/shujuku/status-hud-model.js';
+import { STATUS_HUD_PHONE_MEDIA, buildStatusHudModel, normalizeStatusHudSettings, resolveStatusAvatar, statusHudUsesTables } from '../../data/shujuku/status-hud-model.js';
 import { readOptionItems } from '../../choices/option-table.js';
 import { buildItemActionText, extractBodyChoices, listPresentNames, normalizeOptionSources, splitQuickActions } from '../../choices/option-sources.js';
 import { buildItemCatalog } from '../../data/shujuku/item-catalog.js';
@@ -1077,7 +1078,7 @@ export function createIgsReaderHost(options = {}) {
         const current = state.activeReader;
         const settings = current && current.snapshot && current.snapshot.readerSettings;
         const statusHud = normalizeStatusHudSettings(settings && settings.statusHud);
-        const shouldSubscribe = Boolean(current) && ((statusHud.enabled && statusHud.tables.length > 0)
+        const shouldSubscribe = Boolean(current) && ((statusHud.enabled && statusHudUsesTables(statusHud))
             || Boolean(settings?._sceneAssets?.enabled && Object.keys(settings._sceneAssets.characterOutfits || {}).length)
             || Boolean(current.payload?.promiseHistory?.length));
         if (!shouldSubscribe) {
@@ -3141,6 +3142,7 @@ export function createIgsReaderHost(options = {}) {
             log.avatars = new Map();
             log.rows = logRowsOf(floor.pages, {
                 keyOf: floor.keyOf, userKey: floor.userKey, inherited: floor.inheritedSceneState,
+                groupOf: (mood) => resolveMoodGroup(mood, rs._sceneAssets && rs._sceneAssets.moodGroups) || mood,
                 showSystemName: normalizeSystemRoleSettings(rs.systemRole).showName,
                 // 聊天页、HTML 卡片页由原渲染接管，列表里留一个重播按钮；没开聊天演出时聊天块照对话框转成文字。
                 solo: (i) => (parseHtmlCardMarker(floor.segments[i]) >= 0 ? '重看卡片' : chatOn && logChatOf(floor, i) && !logChatSystemOnly(logChatOf(floor, i), rs) ? '重播聊天' : ''),
@@ -4447,16 +4449,21 @@ ${row.key}`;
             const statusHud = normalizeStatusHudSettings(settings && settings.statusHud);
             if (!statusHud.enabled) return buildStatusHudModel({ settings: statusHud, character: '', emotion: '', location: '' });
             const sceneAssets = (settings && settings._sceneAssets) || {};
-            const readResult = statusHud.tables.length ? readStatusHudTables() : null;
+            const usesTables = statusHudUsesTables(statusHud);
+            const readResult = usesTables ? readStatusHudTables() : null;
             const info = sceneInfo && typeof sceneInfo === 'object' ? sceneInfo : {};
-            const hud = buildStatusHudModel({ settings: statusHud, sceneAssets, character: speaker, emotion, location: info.location, time: info.time, weather: info.weather, isNarration, readResult, outfitFor, parsedTables: statusHud.tables.length ? tableData.parsed() : [], rowFor: tableData.rowFor });
+            const hud = buildStatusHudModel({ settings: statusHud, sceneAssets, character: speaker, emotion, location: info.location, time: info.time, weather: info.weather, isNarration, readResult, outfitFor, parsedTables: usesTables ? tableData.parsed() : [], rowFor: tableData.rowFor });
             // 数值系统接管时，已登记角色的 HUD 条以 IGS 为准（易错点 H3）。
             const tavernLookup = typeof options.statsLookup === 'function' ? options.statsLookup() : null;
             // 主角说话时显示主角条（生命、体力、压力、金钱），其余角色读好感等人际数值；旁白页不加主角区。
             const protagonistLookup = tavernLookup && typeof options.statsProtagonistLookup === 'function' ? options.statsProtagonistLookup() : null;
             const statsLookup = protagonistLookup ? (name) => protagonistLookup(name) || tavernLookup(name) : tavernLookup;
             const userName = String((getSillyTavernContext(options.global || globalThis) || {}).name1 || '');
-            return withConcreteAvatar(dropUserFavor(composeStatsHud(hud, { lookup: statsLookup, speaker }), speaker, userName));
+            // 「设为User立绘」的角色名常与酒馆用户名不同，也按主角处理。
+            const userCharacter = String(sceneAssets.userCharacter || '').trim();
+            const asHero = Boolean(userCharacter) && (speaker === userCharacter || hud.character === userCharacter);
+            const heroSpeaker = asHero ? PROTAGONIST : speaker;
+            return withConcreteAvatar(dropUserFavor(composeStatsHud(hud, { lookup: statsLookup, speaker: heroSpeaker }), heroSpeaker, userName));
         };
         const readStatusHudTables = () => tableData.read();
         const render = payload.render || {};
@@ -5324,6 +5331,7 @@ ${row.key}`;
             // 数值系统接管已登记角色的人物数值；未接管时返回 null，人际关系页照旧读表格。
             statsLookup: () => (typeof options.statsLookup === 'function' ? options.statsLookup() : null),
             statsProtagonistLookup: () => (typeof options.statsProtagonistLookup === 'function' ? options.statsProtagonistLookup() : null),
+            statsFavorOverview: () => (typeof options.statsFavorOverview === 'function' ? options.statsFavorOverview() : null),
             statsGenerate: (name) => (typeof options.statsOp === 'function' ? options.statsOp('generate', '', name) : null),
             // 背包「使用」（P7c）：有装配定义的回复道具走场外使用；返回 draft 时照旧填草稿。
             useInventoryItem: typeof options.useCombatInventoryItem === 'function' ? (name) => options.useCombatInventoryItem(name) : null,
@@ -6042,6 +6050,7 @@ ${row.key}`;
         if (next.effect === 'close') return current.controller.close();
         if (next.effect === 'settings') return current.controller.openSettings();
         if (next.effect === 'user-char') return generateUserCharFromTitle(current);
+        if (next.effect === 'my-stats') return openStatsFromTitle(current);
         if (next.effect === 'continue') return continueFromTitle(current);
         if (next.effect === 'latest') {
             dropTitleGate(current);
@@ -6066,7 +6075,7 @@ ${row.key}`;
         return null;
     }
 
-    // 主菜单「生成主角立绘」：打开设置的角色页，走和「＋ › 用酒馆用户设定生成主角」同一个动作，进度和结果都在那里看；关掉设置回到主菜单。
+    // 主菜单「我的立绘」：打开设置的角色页，走和「＋ › 用酒馆用户设定生成主角」同一个动作，进度和结果都在那里看；关掉设置回到主菜单。
     async function generateUserCharFromTitle(current) {
         openSettings({ page: 'chars', mode: current.mode });
         const settings = state.activeSettings;
@@ -6074,6 +6083,16 @@ ${row.key}`;
         openSettingsPage(settings, 'chars');
         rerenderSettings();
         return settings.controller.invoke('scene-add-user-char');
+    }
+
+    // 主菜单「我的数值」：打开设置并直接定位到数值系统的「我的角色」子页（stats）；总开关「启用数值系统」就在该页顶部，开关关闭时同样落在这一页。
+    function openStatsFromTitle(current) {
+        openSettings({ page: 'stats', mode: current.mode });
+        const settings = state.activeSettings;
+        if (!settings) return { ok: false, reason: 'settings-not-open' };
+        openSettingsPage(settings, 'stats');
+        rerenderSettings();
+        return { ok: true };
     }
 
     async function continueFromTitle(current) {

@@ -101,10 +101,9 @@ function isSan(engine, skill) {
 // 之后账本值每高出 from 一点，生效值就在 value 上加一点（成长叠加在手改值上，不被覆盖）；账本值低于 from（楼层回退）时不扣，
 // 回到 from 之下仍是 value。清除手改后回到账本值或底数。
 // 未学技能手改时，from 记为不含手改的值（seed：底数或注册表基础值）；首次成功登记进账本的也是 seed，所以登记本身不算成长。
-// 手改只在 CoC 下生效（界面只在 CoC 下提供；切到 D&D 后不带过去）。
 export function heroSkillLevel(engine, owned, skill) {
-    const coc = Boolean(engine && engine.ruleset && engine.ruleset.ID === 'coc7');
-    const edit = coc && engine.protagonistEdit && engine.protagonistEdit[skill];
+    // 手改两种骰子都生效（11-07 起；此前只在 CoC 下生效）。
+    const edit = engine && engine.protagonistEdit && engine.protagonistEdit[skill];
     const own = Number(owned && owned.value) || 0;
     if (edit && Number(edit.value) > 0) return clamp(Math.round(Number(edit.value) + Math.max(0, own - (Number(edit.from) || 0))), 1, 99);
     if (own > 0) return own;
@@ -312,12 +311,13 @@ function rawFor(engine, random, edge, difficulty) {
     return engine.ruleset.rawRoll(random, extra);
 }
 
-// request：{ actor, skill, difficulty, against, opposedSkill, toward, ally, edge, raw, source }
+// request：{ actor, skill, difficulty, against, opposedSkill, toward, ally, edge, floor（技能值下限，特质）, raw, source }
 // against：对抗的 NPC（按对方被动值定难度 / DC）；toward：只取好感修正、不对抗（关键事件）。
 export function resolveCheck(engine, state, request, random) {
     const actor = isProtagonist(request.actor) ? PROTAGONIST : request.actor;
     const skill = request.skill;
-    const profile = profileOf(engine, state, actor, skill);
+    const base = profileOf(engine, state, actor, skill);
+    const profile = request.floor > base.value && base.kind === 'skill' ? { ...base, value: request.floor } : base;
     const toward = request.against || request.toward || null;
     const mods = modifiersOf(engine, state, { actor, skill, toward, ally: request.ally, edge: request.edge });
     const opts = { difficulty: DIFFICULTIES.includes(request.difficulty) ? request.difficulty : '普通', edge: mods.edge, shift: mods.shift, natural: engine.natural };
@@ -368,6 +368,20 @@ export function markGrowth(state, check) {
     // 手改过的技能按不含手改的 seed 登记，否则手改值会被当成账本成长再叠加一次。
     const value = clamp(Math.round(Number(check.seed ?? check.value) || 1), 1, 99);
     return withSkills(state, { ...skills, [check.skill]: { value, marked: true } });
+}
+
+// 关键事件检定按类型选技能（strengthRev ≥ 2 的新楼）：告白、约会用魅力；共患难取主角格斗、剑术、射击、体质中最高者；交心取察言观色与魅力中较高者。旧楼固定用魅力。
+export const KEY_EVENT_SKILLS = Object.freeze({ 告白: ['魅力'], 约会: ['魅力'], 共患难: ['格斗', '剑术', '射击', '体质'], 交心: ['察言观色', '魅力'] });
+export function keyEventSkill(engine, state, event, rev = 0) {
+    const names = Number(rev) >= 2 && KEY_EVENT_SKILLS[event] ? KEY_EVENT_SKILLS[event] : ['魅力'];
+    if (names.length === 1) return names[0];
+    let best = null;
+    for (const name of names) {
+        const p = profileOf(engine, state, PROTAGONIST, name);
+        const score = engine.ruleset.ID === 'dnd5e' ? engine.ruleset.bonusOf(p) : p.value;
+        if (!best || score > best.score) best = { name, score };
+    }
+    return best.name;
 }
 
 // NPC 参与检定（对抗的对手、正文检定的一方）时，用到的技能打成长勾；只收已登记角色的非属性技能。
@@ -437,7 +451,7 @@ export function displayActor(actor, userName = '') {
 export function checkLine(check, userName = '') {
     const who = displayActor(check.actor, userName);
     const diff = check.difficulty && check.difficulty !== '普通' ? `（${check.difficulty}）` : '';
-    return `元叙事：${who}发起了【${check.skill}】检定${diff}，${check.detail}，【${check.outcome}】。`;
+    return `检定结果：${who}发起了【${check.skill}】检定${diff}，${check.detail}，【${check.outcome}】。`;
 }
 
 export function contestLine(result, userName = '') {
@@ -446,7 +460,7 @@ export function contestLine(result, userName = '') {
     const ln = displayActor(l.actor, userName);
     const rn = displayActor(r.actor, userName);
     const verdict = result.winner === 'left' ? `${ln}胜出` : result.winner === 'right' ? `${rn}胜出` : '双方僵持';
-    return `元叙事：${ln}以【${l.skill}】对抗${rn}的【${r.skill}】，${l.detail} / ${r.detail}，结果：${verdict}（${l.outcome} vs ${r.outcome}）。`;
+    return `对抗结果：${ln}以【${l.skill}】对抗${rn}的【${r.skill}】，${l.detail} / ${r.detail}，结果：${verdict}（${l.outcome} 对 ${r.outcome}）。`;
 }
 
 // 掷骰卡明细（fx-result-model 的 check / contest 结构）。

@@ -2,11 +2,12 @@
 // 掷骰走检定引擎：CoC 为对抗（主角反击时同级攻击方胜），D&D 为攻击检定对 AC、闪避为敏捷豁免。
 import { applyBarDirective, walletBalance, workIncomeTier } from './stat-bars.js';
 import { applyKeyEvent } from './stat-favor-events.js';
+import { extraGatesOf } from './stat-traits.js';
 import { matchSkill } from './stat-skill-match.js';
 import { DEFAULT_SPECIAL_SKILLS, clamp, withBars, withCharacter, withSkills } from './stat-state.js';
 import { COMBAT_SKILLS, DODGE_SKILLS } from './stat-registry.js';
 import { settleChallenge } from './stat-challenge.js';
-import { PROTAGONIST, bestCombatSkill, createEngine, profileOf, resolveCheck } from './stat-engine.js';
+import { PROTAGONIST, bestCombatSkill, createEngine, keyEventSkill, profileOf, resolveCheck } from './stat-engine.js';
 
 export { COMBAT_SKILLS, DODGE_SKILLS };
 export const ENEMY_TABLE = Object.freeze({
@@ -44,7 +45,7 @@ function foeProfile(engine, state, enemy, foeName) {
             const dex = Number(profileOf(engine, state, foeName, '敏捷').value) || 50;
             return { profile: null, ac: 10 + engine.ruleset.modOf(dex), save: enemy.save };
         }
-        const profile = ['格斗', '射击', '武艺', '剑术', '魔法', '力量'].map((skill) => profileOf(engine, state, foeName, skill)).sort((a, b) => b.value - a.value)[0];
+        const profile = ['格斗', '射击', '剑术', '魔法', '力量'].map((skill) => profileOf(engine, state, foeName, skill)).sort((a, b) => b.value - a.value)[0];
         return { profile, ac: enemy.ac, save: enemy.save };
     }
     return { profile: { kind: 'skill', value: enemy.value, learned: true, attributeValue: enemy.value, rank: '普通人', entry: { attribute: '力量' } }, ac: enemy.ac, save: enemy.save };
@@ -122,8 +123,8 @@ export function applyBattle(state, directive, ctx) {
     let next = withBars(state, bars);
     if (result.outcome !== '败') next = markSkill(next, result.attack);
     if (result.ally && result.outcome !== '败' && next.characters[result.ally]) {
-        const roll = () => resolveCheck(engine, next, { actor: PROTAGONIST, skill: '魅力', toward: result.ally }, ctx.random);
-        const { character, result: ev } = applyKeyEvent(next.characters[result.ally], '共患难', { roll, random: ctx.random });
+        const roll = () => resolveCheck(engine, next, { actor: PROTAGONIST, skill: keyEventSkill(engine, next, '共患难', ctx.rev), toward: result.ally }, ctx.random);
+        const { character, result: ev } = applyKeyEvent(next.characters[result.ally], '共患难', { roll, random: ctx.random, extraGates: ctx.rev >= 2 ? extraGatesOf(next, ctx.traitCat, result.ally) : [] });
         if (ev.success) ctx.changes.push({ source: 'battle', target: result.ally, key: '好感', from: ev.gate, to: ev.gate + 1, note: '共患难突破' });
         ctx.events.push({ target: result.ally, ...ev });
         next = withCharacter(next, result.ally, character);
