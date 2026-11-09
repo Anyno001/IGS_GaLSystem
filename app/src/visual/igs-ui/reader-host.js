@@ -135,7 +135,7 @@ import { createOriginPageController } from './origin-panel.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { parseTables } from '../../data/shujuku/table-parser.js';
 import { lookupSkillValue } from '../../data/shujuku/skill-table.js';
-import { STATUS_HUD_PHONE_MEDIA, buildStatusHudModel, normalizeStatusHudSettings, resolveStatusAvatar, statusHudUsesTables } from '../../data/shujuku/status-hud-model.js';
+import { STATUS_HUD_PHONE_MEDIA, buildStatusHudModel, normalizeStatusHudSettings, resolveStatusAvatar, resolveStatusHudPicks, statusHudUsesTables } from '../../data/shujuku/status-hud-model.js';
 import { readOptionItems } from '../../choices/option-table.js';
 import { buildItemActionText, extractBodyChoices, listPresentNames, normalizeOptionSources, splitQuickActions } from '../../choices/option-sources.js';
 import { buildItemCatalog } from '../../data/shujuku/item-catalog.js';
@@ -2533,7 +2533,7 @@ export function createIgsReaderHost(options = {}) {
                 return { ok: true, expanded };
             }
             if (normalizedAction === 'map' && !hud.character && !hud.location) return { ok: false, reason: 'record-entry-not-visible' };
-            if (normalizedAction === 'favor' && !(hud.metrics || []).some(metric => /好感/.test(String(metric?.label || '')))) return { ok: false, reason: 'favor-bar-missing' };
+            if (normalizedAction === 'favor' && !hud.favorData && !(hud.metrics || []).some(metric => /好感/.test(String(metric?.label || '')))) return { ok: false, reason: 'favor-bar-missing' };
             if (normalizedAction === 'combat' && !normalizeCombatExpansionSettings(settings?.combatExpansion).enabled) return { ok: false, reason: 'combat-disabled' };
             if (anyPanelOpen(current.dom)) return { ok: false, reason: 'panel-open' };
             if (!menu.hasAttribute('hidden')) {
@@ -4445,14 +4445,14 @@ ${row.key}`;
 
     function buildReaderSnapshot(payload, mode, readerSettings, index = 0) {
         const scene = payload.scene || (payload.render && payload.render.scene) || {};
-        const buildStatusHudForSnapshot = (settings, speaker, emotion, sceneInfo, isNarration, outfitFor) => {
+        const buildStatusHudForSnapshot = (settings, speaker, emotion, sceneInfo, isNarration, outfitFor, spriteAvatar) => {
             const statusHud = normalizeStatusHudSettings(settings && settings.statusHud);
             if (!statusHud.enabled) return buildStatusHudModel({ settings: statusHud, character: '', emotion: '', location: '' });
             const sceneAssets = (settings && settings._sceneAssets) || {};
             const usesTables = statusHudUsesTables(statusHud);
             const readResult = usesTables ? readStatusHudTables() : null;
             const info = sceneInfo && typeof sceneInfo === 'object' ? sceneInfo : {};
-            const hud = buildStatusHudModel({ settings: statusHud, sceneAssets, character: speaker, emotion, location: info.location, time: info.time, weather: info.weather, isNarration, readResult, outfitFor, parsedTables: usesTables ? tableData.parsed() : [], rowFor: tableData.rowFor });
+            const hud = buildStatusHudModel({ settings: statusHud, sceneAssets, character: speaker, emotion, location: info.location, time: info.time, weather: info.weather, isNarration, readResult, outfitFor, spriteAvatar, parsedTables: usesTables ? tableData.parsed() : [], rowFor: tableData.rowFor });
             // 数值系统接管时，已登记角色的 HUD 条以 IGS 为准（易错点 H3）。
             const tavernLookup = typeof options.statsLookup === 'function' ? options.statsLookup() : null;
             // 主角说话时显示主角条（生命、体力、压力、金钱），其余角色读好感等人际数值；旁白页不加主角区。
@@ -4463,7 +4463,15 @@ ${row.key}`;
             const userCharacter = String(sceneAssets.userCharacter || '').trim();
             const asHero = Boolean(userCharacter) && (speaker === userCharacter || hud.character === userCharacter);
             const heroSpeaker = asHero ? PROTAGONIST : speaker;
-            return withConcreteAvatar(dropUserFavor(composeStatsHud(hud, { lookup: statsLookup, speaker: heroSpeaker }), heroSpeaker, userName));
+            const composed = withConcreteAvatar(dropUserFavor(composeStatsHud(hud, { lookup: statsLookup, speaker: heroSpeaker }), heroSpeaker, userName));
+            // 好感总览数据信号：数值系统有已登记角色，或状态栏已选到读取表；旁白页、只有主角条的页面据此也显示入口。
+            let favorData = false;
+            try {
+                const live = typeof options.statsFavorOverview === 'function' ? options.statsFavorOverview() : null;
+                favorData = live ? Boolean(live.people && live.people.length) : Boolean(usesTables && resolveStatusHudPicks(statusHud, readResult, tableData.parsed()).length);
+            } catch (_) { favorData = false; }
+            if (composed && favorData) composed.favorData = true;
+            return composed;
         };
         const readStatusHudTables = () => tableData.read();
         const render = payload.render || {};
@@ -5065,7 +5073,8 @@ ${row.key}`;
                 nsfwCgPortrait,
                 illustrationSlot: illustrationHit ? illustrationHit.slot : null,
                 illustrationUrl,
-                statusHud: buildStatusHudForSnapshot(readerSettings, sceneStateForBg && sceneStateForBg.nsfw ? '' : resolvedSpeaker, sceneStateForBg && sceneStateForBg.nsfw ? '' : bubbleMood, statusSceneInfo, textType === 'narration' || textType === 'thought' || textType === 'chat' || textType === 'system' || Boolean(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw), { character: spriteCharacter, outfit: spriteOutfit }),
+                statusHud: buildStatusHudForSnapshot(readerSettings, sceneStateForBg && sceneStateForBg.nsfw ? '' : resolvedSpeaker, sceneStateForBg && sceneStateForBg.nsfw ? '' : bubbleMood, statusSceneInfo, textType === 'narration' || textType === 'thought' || textType === 'chat' || textType === 'system' || Boolean(sceneStateForBg && sceneStateForBg.nsfw && hideSpriteOnNsfw), { character: spriteCharacter, outfit: spriteOutfit },
+                    spriteImage && !spriteBackArt ? { character: spriteCharacter, url: spriteImage } : null),
             },
             // _sceneAssets 是整份有效素材库，只读不改；跟着整份深拷贝会让翻页随素材库变大而变慢。
             readerSettings: sceneDialogSkin(cloneReaderSettingsShallowAssets(readerSettings), statusSceneInfo.location),
@@ -5386,6 +5395,12 @@ ${row.key}`;
                     if (profile) return { kind: creatureVoiceKind(creatureVoiceText(key, dnaMap[key])), size: profile.size };
                 }
                 return null;
+            },
+            // VS 对撞的场景图底：阅读器背景层正在显示的那张图（挂 CG 的页取本页普通场景背景）；没有时返回空串。
+            getCombatBackdrop: () => {
+                const c = state.activeReader && state.activeReader.snapshot && state.activeReader.snapshot.content;
+                const url = c ? (c.sceneBackdrop || c.backgroundImage || '') : '';
+                return url ? resolveReaderAssetUrl(url, state.activeReader) : '';
             },
             // 战斗台词开关与朗读：读当前阅读器快照的设置与素材（声线按角色取）。
             getCombatExpansion: () => {

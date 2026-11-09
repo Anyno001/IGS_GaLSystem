@@ -9,10 +9,11 @@ import { FAVOR_PROMPT_GROUPS, FAVOR_STRENGTHS, STRESS_STRENGTHS, HURT_TIERS, INT
 import { CHECK_ROLLS_TEMPLATE, checkRollsVars, fillCheckRolls } from '../check-rolls.js';
 import { COC_CHECK_ROLLS_TEMPLATE, cocRollsVars } from './stat-coc-checks.js';
 import { fameLines, fameTagLines } from './stat-fame.js';
+import { STATUS_TAG_LINE, statusPromptLines } from './stat-status.js';
 import { BREAK_TAG_LINE, OBSESSED_NOTE, STRESS_EXTREME, STRESS_SOURCE_TAG_LINE, strainSentence, stressLimitActive } from './stat-strain.js';
 import { applyCombatRuleModifiers, COMBAT_GROWTH_LINES, COMBAT_RULE_HEAD, COMBAT_STORY_LINES, COMBAT_SYNTAX_LINES } from '../combat-prompt.js';
 
-export const STAT_PROMPT_SEGMENTS = Object.freeze(['source', 'protagonist', 'fame', 'skills', 'perception', 'present', 'sheets', 'check', 'dice', 'tags', 'combat', 'party', 'mandates']);
+export const STAT_PROMPT_SEGMENTS = Object.freeze(['source', 'protagonist', 'fame', 'skills', 'perception', 'present', 'status', 'sheets', 'check', 'dice', 'tags', 'combat', 'party', 'mandates']);
 // 后台请求的提示词（角色卡生成、批量补全）：可编辑，不参与注入开关。
 export const STAT_BACKGROUND_PROMPTS = Object.freeze(['sheetGen', 'backfill', 'heroSkills', 'startRelations']);
 // 用户提示词版本：3 起 roll、rollManual、protagonist 的旧覆盖移进 stalePrompts（模板已改名或改格式）；
@@ -52,7 +53,7 @@ const BASE_PROMPTS = {
         '[igs-stat:grudge|角色名|上升/下降|{{强度}}]（芥蒂是对主角的不满与心结，可与好感同时很高；上升如被敷衍、冷落、羞辱，下降如道歉、弥补、释怀、接纳、和解）',
         '[igs-stat:know|角色名|上升/下降]（深谈、得知主角的秘密或真实一面时上升，发现此前对主角的看法有误时下降）',
         '[igs-stat:event|角色名|约会/告白/共患难/交心]（约会、告白只在角色发起或接受时写，被拒不写；交心用于朋友、家人间的深谈、托付秘密、并肩扛事）',
-        '[igs-stat:event|角色名|夸奖/批评/拒绝/背叛/求助/信仰质疑/耳语/重逢/提起]（仅作记录，事件发生时写一次：被夸奖、被批评、被拒绝、遭背叛、向TA求助、质疑其信仰、耳语、久别重逢、被他人提起；与上一行的关键事件不同，不影响关系进展）',
+        '[igs-stat:event|角色名|夸奖/批评/拒绝/背叛/求助/信仰质疑/耳语/重逢/提起/守约/失约]（仅作记录，事件发生时写一次：被夸奖、被批评、被拒绝、遭背叛、向TA求助、质疑其信仰、耳语、久别重逢、被他人提起；与上一行的关键事件不同，不影响关系进展）',
         '[igs-stat:event|角色名|吸血/歌唱/发情]（正文有吸血、歌唱、发情的描写时写一次）',
         '[igs-stat:gift|角色名|礼物类别]',
         '生活（档位前可加角色名，不写角色名则指主角）：',
@@ -67,7 +68,8 @@ const BASE_PROMPTS = {
         '[igs-stat:insight|角色名|技能名]（想通、开窍或生死关头的突破时写；日常练习用 grow）',
     ].join('\n'),
     mandates: '【本轮必须写出】{{事项}}',
-    fame: '【主角声望】以下是各个群体对主角的看法，正文中旁人的反应须与之相符：\n{{声望}}',
+    fame: '【声望】以下是各方对相关人物的看法，正文中旁人的反应须与之相符：\n{{声望}}',
+    status: '【角色状态】以下状态由数值系统记录，正文中须与之相符：\n{{状态}}',
 };
 
 // dice 段默认就是正文检定模板（骰序、优劣势、在场加值、更正）；combat、party 只在战斗扩展开启时出现。
@@ -267,6 +269,9 @@ export function buildStatsPrompt(state, opts = {}) {
             }, diagnostics) + staminaNote(c, name) + heroNoteText(name, opts.heroNotes);
         }).concat(prompts.presentRule ? [fillTemplate(prompts.presentRule, {}, diagnostics)] : []).join('\n'));
     }
+    // 状态（B 批）：只给在场角色；来源与单条开关由 statusPromptLines 把关，旧特质注入五项并入此段。opts.statusCat 为 { statuses }，特质读 opts.traits。
+    const statusLines = statusPromptLines(state, { ...(opts.statusCat || {}), traits: opts.traits, nsfw: opts.nsfw }, present);
+    if (statusLines.length) push('status', fillTemplate(prompts.status, { 状态: statusLines.join('\n') }, diagnostics));
     const sheets = (opts.sheetLines || []).filter((s) => s && s.name && present.includes(s.name));
     if (sheets.length) {
         push('sheets', sheets.map((s) => fillTemplate(prompts.sheets, { 角色: s.name, 资历: s.rank || '普通人', 擅长: s.strong || '无特别擅长', 六维加值: s.bonus || '由数值系统按其实力估算' }, diagnostics)).join('\n'));
@@ -289,7 +294,7 @@ export function buildStatsPrompt(state, opts = {}) {
     if (dice.length) push('dice', dice.join('\n'));
     push('tags', fillTemplate(prompts.tags, {
         好感档位: FAVOR_PROMPT_GROUPS.map((g) => `${g.label}：${g.words.join('/')}`).join('；'), 压力强度: STRESS_STRENGTHS.slice(0, 3).join('/'), 强度: FAVOR_STRENGTHS.join('/'), 好感强度: FAVOR_STRENGTHS.join('/'), 体力档位: STAMINA_EVENTS.join('/'), 金钱档位: MONEY_TIERS.join('/'), 伤势档位: HURT_TIERS.join('/'),
-    }, diagnostics) + [...conditionalTagLines(state, opts), ...fameTagLines(opts.fameBars), ...strainTagLines(state)].map((line) => `\n${line}`).join('') + (opts.nsfw ? `\n${DESIRE_TAG_LINE}` : '') + (opts.nsfw && opts.intimateCost && opts.intimateCost !== 'off' ? `\n${INTIMATE_TAG_LINE}` : ''));
+    }, diagnostics) + [...conditionalTagLines(state, opts), ...fameTagLines(opts.fameBars), ...strainTagLines(state), STATUS_TAG_LINE(opts.worlds)].map((line) => `\n${line}`).join('') + (opts.nsfw ? `\n${DESIRE_TAG_LINE}` : '') + (opts.nsfw && opts.intimateCost && opts.intimateCost !== 'off' ? `\n${INTIMATE_TAG_LINE}` : ''));
     if (opts.combatOn) push('combat', combatSegmentText(prompts, opts, diagnostics));
     const party = (opts.partyLines || []).filter(Boolean);
     if (opts.combatOn && party.length) push('party', fillTemplate(prompts.party, { 同伴: party.join('\n') }, diagnostics));
@@ -306,6 +311,8 @@ export function mandatesFromFlags(flags = {}, vitals = null, { fame = false } = 
     if (flags.battle) out.push(`上一楼的战斗结果为【${flags.battle.outcome}】，按此写出战斗结局，不得改判`);
     if (flags.work) out.push(`上一楼的打工结果为【${flags.work.tier}】${flags.work.income ? `，收入档位${flags.work.income}` : '，没有收入'}`);
     if (flags.forcedRest) out.push('主角体力耗尽，写出主角昏睡或休息');
+    // 关键事件大失败：只在紧接着的下一楼出现一次（flags 来自上一楼）。
+    if (flags.keyFumble && flags.keyFumble.event) out.push(`上一楼的${flags.keyFumble.event}出了岔子，本楼正文需体现`);
     if (healthStatus(vitals) === '倒下') out.push('主角已倒下，写出被救、被俘或醒来的情节');
     return out;
 }

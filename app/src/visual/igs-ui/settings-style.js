@@ -158,6 +158,11 @@ ${THEMED.map(([value, palette]) => `${themeSelector(value)}::before{opacity:${pa
 .igs-switch[disabled]{opacity:.5;cursor:not-allowed;pointer-events:none}
 .igs-source-filter{grid-column:1/-1;padding:14px 16px 16px;border:0;border-radius:var(--igs-settings-radius-control);background:var(--igs-settings-surface);display:flex;flex-direction:column;gap:14px;min-width:0;max-width:100%;box-sizing:border-box}
 .igs-source-filter-title{font-size:13px;line-height:20px;font-weight:600;letter-spacing:.04em;color:var(--igs-settings-ink)}
+details.igs-log-calc>summary{cursor:pointer;list-style:none}
+details.igs-log-calc>summary::-webkit-details-marker{display:none}
+details.igs-log-calc>summary::after{content:" ▾"}
+details.igs-log-calc[open]>summary::after{content:" ▴"}
+details.igs-log-calc>.igs-source-filter-note{padding-left:14px}
 .igs-source-filter-note{font-size:11px;line-height:16px;font-weight:400;color:var(--igs-settings-ink-4);overflow-wrap:anywhere}
 .igs-tts-voice-lib{display:flex;flex-direction:column;gap:6px}
 .igs-tts-voice-lib .igs-asset-folder-bar>span:first-child{display:inline-flex;align-items:center;gap:6px}
@@ -301,12 +306,19 @@ details.igs-stats-person details.igs-edit-fold>summary{padding-left:0}
 .igs-edit-add{display:flex;align-items:center;min-height:40px;border:0;background:transparent;color:var(--igs-settings-ink-2);font:inherit;font-size:13px;cursor:pointer;text-align:left;padding:0}
 .igs-edit-add:hover{color:var(--igs-settings-ink)}
 .igs-edit-add.is-off{opacity:.45;cursor:default}
-.igs-add-toggle:checked+.igs-edit-add{color:var(--igs-settings-accent)}
+.igs-edit-row.is-off{opacity:.45}
+.igs-add-fold>summary{list-style:none}.igs-add-fold>summary::-webkit-details-marker{display:none}.igs-add-fold[open]>summary.igs-edit-add{color:var(--igs-settings-accent)}
 .igs-edit-card .igs-trait-panel{display:none;padding-bottom:6px}
 .igs-edit-row:last-of-type{border-bottom:1px solid var(--igs-settings-raised)}
-.igs-add-toggle:checked~.igs-trait-panel{display:flex}
+.igs-edit-card .igs-add-fold[open]>.igs-trait-panel{display:flex}
 .igs-edit-card .igs-trait-pick .igs-trait-chip{background:var(--igs-settings-raised)}
 .igs-trait-limits{padding:4px 0;font-size:11px;color:var(--igs-settings-ink-4)}
+.igs-edit-main>.igs-status-src{font-size:11px;color:var(--igs-settings-ink-4)}
+.igs-cycle-box{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0 0 10px;border-bottom:1px solid var(--igs-settings-raised)}
+.igs-cycle-row{border-bottom:0;padding-bottom:6px}
+@media (max-width:520px){.igs-status-row{flex-wrap:wrap}.igs-status-row>.igs-edit-main{flex:1 1 100%}.igs-status-row>.igs-edit-ops{max-width:100%;flex:1 1 100%;justify-content:flex-start}}
+.igs-world-pick{display:flex;flex-wrap:wrap;gap:6px}
+.igs-world-pick .igs-settings-action.is-on{background:var(--igs-settings-accent);color:var(--igs-settings-on-accent)}
 details.igs-stats-person .igs-stats-hero-actions>.igs-settings-action{background:var(--igs-settings-raised)}
 details.igs-stats-person .igs-stats-hero-actions>.igs-settings-action:hover{background:var(--igs-settings-accent)}
 .igs-trait-group>summary{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px;font-size:12px;color:var(--igs-settings-ink-2);cursor:pointer;user-select:none}

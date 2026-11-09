@@ -46,7 +46,7 @@ test('满格时「＋ 添加特质」置灰且没有面板', () => {
     const items = ['companion', 'bodiless', 'kin', 'fragile', '长生'].map((id) => item(id));
     const html = renderTraitBlock('小雪', { traitList: { 小雪: { items, slots: 5, auto: 0, achieve: 0 } }, traitNsfw: false });
     assert.match(html, /igs-edit-add is-off/);
-    assert.doesNotMatch(html, /igs-trait-panel/);
+    assert.doesNotMatch(html, /data-advanced="trait-add:/);
 });
 
 test('添加面板：NSFW 关时不列 nsfw 项，主角只列主角可用项，已挂项不再列出', () => {
@@ -109,7 +109,7 @@ test('声望：只读小标签写「名 · 档位」，编辑态有关闭与新�
     const base = { day: 1, bars: {}, wallet: 0, vitals: null, attributes: [], skills: [], log: [], total: 0, checks: [], story: [], sheets: [], skillEdit: [], characters: [], traits: {}, aptitude: {}, heroNotes: {} };
     const html = renderStatsHeroTail({ ...base, fame: [{ name: '唯粉', kind: '粉丝', tier: '小有名气' }] }, (key) => (key === 'stats-hero-edit' ? ' open' : ''));
     assert.match(html, /<b>唯粉 · 小有名气<\/b>/);
-    assert.match(html, /<em>1\/3<\/em>/);
+    assert.match(html, /<em>1\/10<\/em>/);
     assert.match(html, /data-action="stats-op:fame-remove:/);
     assert.match(html, /data-action="stats-op:fame-add"[^>]*>＋ 新增声望/);
     assert.match(renderStatsHeroTail({ ...base, fame: [] }).slice(renderStatsHeroTail({ ...base, fame: [] }).indexOf('data-stats-fame')), /未设置/);

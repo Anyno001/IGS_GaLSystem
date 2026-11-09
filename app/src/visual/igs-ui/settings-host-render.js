@@ -44,7 +44,7 @@ import { esc, toHex } from './reader-value-utils.js';
 import { normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale } from './settings-normalize.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { listStatusHudTables, normalizeStatusHudSettings, resolveStatusHudPicks } from '../../data/shujuku/status-hud-model.js';
-import { isStatusHudPhone, renderStatusHudPositionField, statusHudPositionDevice } from './status-hud-position-fields.js';
+import { isStatusHudPhone, renderStatusHudAvatarFraming, renderStatusHudPositionField, statusHudPositionDevice } from './status-hud-position-fields.js';
 import { renderSectionResetButton, sectionResetPlaceholders } from './settings-sections.js';
 import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLabel } from '../../generated-images/image-job-log.js';
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
@@ -92,6 +92,7 @@ import { normalizePromptPlacement } from './tag-grammar.js';
 import { renderPromptEntryFields } from './prompt-entries-fields.js';
 import { getLastPromptReport } from '../../scene/prompt-triggers.js';
 import { resolveRenderQuality } from './render-quality.js';
+import { isMatteUnlocked } from '../../media/matte-unlock.js';
 
 // 这几个分类的页面按当前角色卡显示（适配世界、本卡对话框风格提示、仪表盘现状）。
 const READER_SCOPE_CATEGORIES = new Set(['dash', 'style', 'text', 'ui', 'perf', 'sound']);
@@ -206,7 +207,9 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 field('readerSettings.statusHud.size', '状态栏大小', segmentedInput('readerSettings.statusHud.size', statusHud.size, [['small', '小'], ['medium', '中'], ['large', '大']], '状态栏大小')),
                 // 头像圆角、背景、配色直接摊开，不再收进「高级」。
                 field('readerSettings.statusHud.avatarRadius', '头像圆角', selectInput('readerSettings.statusHud.avatarRadius', statusHud.avatarRadius, [['square', '方角'], ['soft', '微圆角'], ['small', '小圆角'], ['medium', '中圆角'], ['large', '大圆角'], ['circle', '圆形']])),
+                field('readerSettings.statusHud.avatarSource', '头像来源', segmentedInput('readerSettings.statusHud.avatarSource', statusHud.avatarSource, [['upload', '上传头像'], ['sprite', '跟随立绘']], '头像来源')),
                 '</div>',
+                statusHud.avatarSource === 'sprite' ? renderStatusHudAvatarFraming(statusHud) : '',
                 renderStatusHudPositionField(statusHud, statusHudPositionDevice(asyncState, win), isStatusHudPhone(win) ? 'mobile' : 'pc'),
                 '<div class="igs-source-filter-grid">',
                 field('readerSettings.statusHud.background', '状态栏背景', segmentedInput('readerSettings.statusHud.background', statusHud.background, [['none', '无背景'], ['dialog', '跟随对话框']], '状态栏背景')),
@@ -295,15 +298,20 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             const stats = normalizeStatsSettings(bridge.stats);
             let chat = null;
             try { chat = typeof options.statsChat === 'function' && !idx ? options.statsChat() : null; } catch (error) { chat = null; }
+            let archiveError = '';
             const archive = (() => {
-                try { return typeof options.statsArchive === 'function' && !idx ? options.statsArchive() : null; } catch (error) { return null; }
+                try { return typeof options.statsArchive === 'function' && !idx ? options.statsArchive() : null; } catch (error) {
+                    archiveError = String((error && (error.stack || error.message)) || error).split('\n').slice(0, 3).join(' | ').slice(0, 300);
+                    try { console.error('[IGS] 数值存档读取出错', error); } catch (e) { /* 无控制台 */ }
+                    return null;
+                }
             })();
             const mappings = (() => {
                 if (!stats.push.enabled || idx || typeof options.statsMappings !== 'function') return null;
                 try { return options.statsMappings(stats.push.mappings); } catch (error) { return { ok: false, reason: 'stats-push-read-failed', detail: String(error && error.message || error) }; }
             })();
             return buildStatsPageValues({
-                stats, chat, archive, mappings, advancedOpen, noteDrafts: asyncState.statsNoteDrafts || null,
+                stats, chat, archive, archiveError, mappings, advancedOpen, noteDrafts: asyncState.statsNoteDrafts || null,
                 combatOn: Boolean(reader && reader.combatExpansion && reader.combatExpansion.enabled === true),
                 worldview: resolveWorldview(worldviewAssets),
             });
@@ -460,10 +468,10 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 sourceExtensionHidden: hiddenAttr(sourceMode !== 'extension'),
                 sourceDbgenHidden: hiddenAttr(sourceMode !== 'dbgen'),
                 sourceExternalHidden: hiddenAttr(sourceMode === 'nai'),
-                spriteMatteColorField: field('bridge.imageApi.spriteMatteColor', '抠图底色', segmentedInput('bridge.imageApi.spriteMatteColor',
+                spriteMatteColorField: !isMatteUnlocked() ? '' : field('bridge.imageApi.spriteMatteColor', '抠图底色', segmentedInput('bridge.imageApi.spriteMatteColor',
                     imageApi.spriteMatteColor || 'auto', [['auto', '自动'], ['white', '白底'], ['grey', '灰底'], ['green', '绿底'], ['purple', '紫底']], '抠图底色'),
                     '立绘与物品图未出透明底时按此底色出图后抠除，角色主色与底色相近时可更换。自动：内置NAI与数据库生图用白底，其余用浅灰底。'),
-                autoMatteField: checkbox('bridge.imageApi.autoMatte', imageApi.autoMatte !== false, '自动抠图（关闭后保留原图底色）'),
+                autoMatteField: !isMatteUnlocked() ? '' : checkbox('bridge.imageApi.autoMatte', imageApi.autoMatte !== false, '自动抠图（关闭后保留原图底色）'),
                 externalSpriteDnaField: checkbox('bridge.imageApi.externalSpriteDna', imageApi.externalSpriteDna === true, '外部生图前补齐角色 DNA'),
                 naiSpriteTransparentField: checkbox('bridge.imageApi.naiSpriteTransparent', imageApi.naiSpriteTransparent !== false, '立绘透明底'),
                 dbgenSpriteTransparentField: checkbox('bridge.imageApi.dbgenSpriteTransparent', imageApi.dbgenSpriteTransparent !== false, '立绘透明底（V4.5 请关闭）'),
