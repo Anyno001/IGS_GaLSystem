@@ -3,12 +3,11 @@
 // 纯函数。标签文本为 AI 输出，一律按不可信输入处理：长度、数量、枚举都在此校验。
 import { DEFAULT_HTML_CARD_TAGS, extractHtmlCards, parseHtmlCardMarker } from './html-cards.js';
 import { extractChatBlocks, parseChatMarker } from './chat-blocks.js';
-import { stripMarkerDirectives } from './directive-tags.js';
 import { readerBodyText } from './message-source.js';
 import { stripIllustrationMarkers } from './scene-directives.js';
 
 export const COMBAT_TAG_LIMITS = Object.freeze({ maxEnemies: 50, maxAllies: 3, storyExpCapPerFloor: 50, expMax: 1e3 });
-export const COMBAT_GROWTH_KINDS = Object.freeze(['exp', 'learn', 'upgrade', 'class', 'equip', 'unequip', 'item', 'rel', 'stat', 'loot', 'heal']);
+export const COMBAT_GROWTH_KINDS = Object.freeze(['exp', 'learn', 'upgrade', 'class', 'equip', 'unequip', 'item', 'rel', 'stat', 'loot', 'heal', 'inscribe', 'purge', 'card-upgrade']);
 
 // 战报编号：r + 最多 13 位小写字母数字。
 const REPORT_ID_PATTERN = /^r[0-9a-z]{1,13}$/;
@@ -138,8 +137,11 @@ function parseEnemies(value) {
     return total > COMBAT_TAG_LIMITS.maxEnemies ? fail('enemies', 'too-many') : { ok: true, value: list };
 }
 
+// 友方栏写「无」一类词表示没有同行者，按空栏处理，不当作角色建档。
+const NO_ALLY_WORDS = new Set(['无', '没有', '无人', '暂无', 'none', 'null', '-']);
+
 function parseAllies(value) {
-    const names = [...new Set(splitList(value))];
+    const names = [...new Set(splitList(value))].filter((name) => !NO_ALLY_WORDS.has(name.toLowerCase()));
     if (names.some((name) => !validText(name, NAME_MAX))) return fail('allies', 'invalid-name');
     return names.length > COMBAT_TAG_LIMITS.maxAllies ? fail('allies', 'too-many') : { ok: true, value: names };
 }
@@ -160,7 +162,10 @@ function parseStartFields(fields) {
 }
 
 // 各成长标签允许的最大字段数（含角色名）。
-const GROWTH_FIELD_MAX = Object.freeze({ exp: 3, learn: 4, upgrade: 3, class: 2, equip: 5, unequip: 2, item: 5, rel: 2, stat: 4, loot: 4, heal: 3 });
+// loot 第 5 字段（规则 v6）：三选一卡牌槽的候选序号（0 起）或 skip，旧标签不带。
+// purge（规则 v6 删卡，只写在胜利战报后）：角色、战报 ID、卡组副本 ID。
+// card-upgrade（规则 v6 G3c 升级机会，只写在胜利战报后）：字段同 purge。
+const GROWTH_FIELD_MAX = Object.freeze({ exp: 3, learn: 4, upgrade: 3, class: 2, equip: 5, unequip: 2, item: 5, rel: 2, stat: 4, loot: 5, heal: 3, inscribe: 4, purge: 3, 'card-upgrade': 3 });
 const HEAL_FLAT_MAX = 9999;
 
 // 稀有度字段：空为 null（不指定），未知词报错。
@@ -209,7 +214,19 @@ function parseGrowthFields(kind, fields) {
         const slot = parseIntInRange(fields[2], 0, 3);
         if (slot === null) return fail('slot', 'invalid-slot');
         const set = String(fields[3] ?? '').trim() || 'main';
-        return set !== 'main' && set !== 'reserve' ? fail('set', 'unknown-set') : { ok: true, value: { ...base, reportId, slot, set } };
+        if (set !== 'main' && set !== 'reserve') return fail('set', 'unknown-set');
+        const pickWord = String(fields[4] ?? '').trim().toLowerCase();
+        if (!pickWord) return { ok: true, value: { ...base, reportId, slot, set } };
+        if (pickWord === 'skip') return { ok: true, value: { ...base, reportId, slot, set, pick: 'skip' } };
+        const pick = parseIntInRange(pickWord, 0, 3);
+        return pick === null ? fail('pick', 'invalid-pick') : { ok: true, value: { ...base, reportId, slot, set, pick } };
+    }
+    if (kind === 'purge' || kind === 'card-upgrade') {
+        const reportId = String(fields[1] ?? '').trim();
+        if (!REPORT_ID_PATTERN.test(reportId)) return fail('reportId', 'invalid-report-id');
+        const copyId = String(fields[2] ?? '').trim();
+        if (!/^[A-Za-z0-9_:.-]{1,200}$/.test(copyId)) return fail('copyId', 'invalid-copy-id');
+        return { ok: true, value: { ...base, reportId, copyId } };
     }
     if (kind === 'heal') {
         // 数量可写成百分比（含全角％）。
@@ -219,6 +236,15 @@ function parseGrowthFields(kind, fields) {
         if (amount === null) return fail('amount', 'invalid-amount');
         const reason = textField('reason', fields[2], DESC_MAX, false);
         return reason.ok ? { ok: true, value: { ...base, amount, mode: percent ? 'percent' : 'flat', reason: reason.value } } : reason;
+    }
+    // 规则 v5 P5b 刻印：角色|牌名|刻印名|原因。刻印名由账本按刻印表核对。
+    if (kind === 'inscribe') {
+        const card = textField('card', fields[1], NAME_MAX, true);
+        if (!card.ok) return card;
+        const inscription = textField('inscription', fields[2], NAME_MAX, true);
+        if (!inscription.ok) return inscription;
+        const reason = textField('reason', fields[3], DESC_MAX, false);
+        return reason.ok ? { ok: true, value: { ...base, card: card.value, inscription: inscription.value, reason: reason.value } } : reason;
     }
     if (kind === 'exp') {
         const amount = parseIntInRange(fields[1], 1, COMBAT_TAG_LIMITS.expMax);
@@ -292,31 +318,16 @@ function pickAwaken(body, tags, startTag, diagnostics) {
     return null;
 }
 
-// 开战标签之后只剩纯标记行（数值 stat、成长 rel / exp、判定、恐怖档位等，不含开战与觉醒标签）时视同末行（v0.39.2）：
-// 模型常把这些结算标签写在开战标签后面，它们不承载正文；后面还有任何正文时仍判 combat-start-not-tail。
-const START_OR_AWAKEN_RE = /\[igs-combat:\s*(?:start|awaken)\s*[|\]]/i;
-function withoutTrailingMarkers(body) {
-    const lines = String(body || '').split('\n');
-    while (lines.length) {
-        const line = lines[lines.length - 1].trim();
-        if (line && (START_OR_AWAKEN_RE.test(line) || stripMarkerDirectives(line).trim())) break;
-        lines.pop();
-    }
-    return lines.join('\n');
-}
-
-// 提取开战指令：只认正文最后一行（忽略其后的纯标记行）的最后一个 start 标签，其余记「不在末尾」诊断。
+// 提取开战指令：开战标签在正文任意位置都认（正文预设常在末尾追加状态栏等内容）；
+// 同一楼有多个时只认最后一个，其余记 combat-start-duplicate。
 export function extractCombatStart(raw, options = {}) {
     const body = combatBodyText(raw, options);
     const tags = scanCombatTags(body);
     const starts = tags.filter((tag) => tag.kind === 'start');
     const diagnostics = [];
-    const head = withoutTrailingMarkers(body);
-    const lastLine = lastNonEmptyLine(head);
     const last = starts.at(-1);
-    const atTail = !!last && lastLine === last.raw && head.trimEnd().endsWith(last.raw);
-    for (const tag of starts) if (tag !== last || !atTail) diagnostics.push({ code: 'combat-start-not-tail', ...locateOf(tag) });
-    if (!atTail) return { start: null, diagnostics };
+    for (const tag of starts) if (tag !== last) diagnostics.push({ code: 'combat-start-duplicate', ...locateOf(tag) });
+    if (!last) return { start: null, diagnostics };
     const parsed = parseStartFields(last.fields);
     if (!parsed.ok) {
         diagnostics.push({ code: 'combat-start-invalid', field: parsed.field, problem: parsed.problem, ...locateOf(last) });
@@ -325,14 +336,13 @@ export function extractCombatStart(raw, options = {}) {
     const start = { ...parsed.value, ...locateOf(last) };
     const awaken = pickAwaken(body, tags, last, diagnostics);
     if (awaken) start.awaken = awaken;
-    const lines = pickCombatLines(tags, last, diagnostics);
+    const lines = collectCombatLines(tags, diagnostics);
     if (lines.length) start.lines = lines;
     return { start, diagnostics };
 }
 
 // 战斗台词 [igs-combat:lines|角色|开场|出招|受击|倒下]：只给面板演出与朗读，不进账本、不改战斗结算。
 // 四段各用「/」写多句，每句不超过 LINES_SENTENCE_MAX 字、每段不超过 LINES_PER_PHASE 句；每个角色取第一条，最多 LINES_MAX_CHARACTERS 人。
-// 必须写在开战标签之前（开战标签之后的 lines 忽略）。
 const LINES_SENTENCE_MAX = 20;
 const LINES_PER_PHASE = 4;
 const LINES_MAX_CHARACTERS = 6;
@@ -342,12 +352,11 @@ function parseLinePhase(value) {
     return String(value ?? '').split(/[\/／]+/).map((part) => part.trim()).filter((part) => part && part.length <= LINES_SENTENCE_MAX).slice(0, LINES_PER_PHASE);
 }
 
-function collectCombatLines(tags, diagnostics, beforeIndex = Infinity) {
+function collectCombatLines(tags, diagnostics) {
     const out = [];
     const seen = new Set();
     for (const tag of tags) {
         if (tag.kind !== 'lines') continue;
-        if (tag.index > beforeIndex) { diagnostics.push({ code: 'combat-lines-after-start', ...locateOf(tag) }); continue; }
         const character = textField('character', tag.fields[0], NAME_MAX, true);
         if (!character.ok) { diagnostics.push({ code: 'combat-lines-invalid', field: character.field, problem: character.problem, ...locateOf(tag) }); continue; }
         if (seen.has(character.value)) { diagnostics.push({ code: 'combat-lines-duplicate', ...locateOf(tag) }); continue; }
@@ -360,8 +369,6 @@ function collectCombatLines(tags, diagnostics, beforeIndex = Infinity) {
     }
     return out;
 }
-
-const pickCombatLines = (tags, startTag, diagnostics) => collectCombatLines(tags, diagnostics, startTag.index);
 
 // 亲密对决的台词：同一个 lines 标签，四段含义为开场、出招、受击、快失守；标签位置不限，按角色名对上对方。
 export function extractIntimateLines(body, diagnostics = []) {

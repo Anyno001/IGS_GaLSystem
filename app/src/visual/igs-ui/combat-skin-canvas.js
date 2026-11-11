@@ -92,4 +92,3 @@ export function canvasGhostWrap(doc, cardEl) {
     wrap.appendChild(inner);
     return { wrap, inner };
 }
-

@@ -22,7 +22,8 @@
 html,body{margin:0;height:100%;background:#0b0d10;color:#d8d5cf;font-family:"Source Han Serif CN",serif;}
 #stage{position:relative;margin:0 auto;overflow:hidden;background:#16181a;background-image:url("./assets/scene-demo-clean-night.png");background-size:cover;background-position:center;}
 #stage[data-bg="none"]{background-image:none;}
-#igs-overlay{position:absolute;inset:0;overflow:hidden;}
+/* 阅读器样式把 #igs-overlay 设为铺满窗口的 fixed；预览把它限定在舞台里，面板与舞台底图同框（窗口比舞台大时不再跑出底图） */
+#stage>#igs-overlay{position:absolute;inset:0;width:auto;height:auto;overflow:hidden;}
 #igs-db-layer{position:absolute;inset:0;pointer-events:none;}
 #hud{display:none;position:fixed;top:8px;left:8px;z-index:99;gap:6px;font:12px sans-serif;}
 #hud button{padding:4px 10px;border:1px solid #555;background:#222;color:#ddd;cursor:pointer;}
@@ -56,10 +57,19 @@ import { relationshipsFixture } from './fixtures/relationships.fixture.js';
 import { createCombatPreview } from './fixtures/combat.fixture.js';
 import { createCombatPanelController } from '../../src/visual/igs-ui/combat-panel.js';
 import { createCombatDeckPanelController } from '../../src/visual/igs-ui/combat-deck-panel.js';
+import { planCardDraw } from '../../src/combat/rewards.js';
+import { sellPrice } from '../../src/combat/points.js';
+import { fixedCard } from '../../src/combat/fixed-cards/index.js';
+import { inscribable } from '../../src/combat/mechanics/inscription.js';
 import { buildSkillCutin, buildAwakenCutin, COMBAT_CUTIN_MS } from '../../src/visual/igs-ui/combat-cutin.js';
 import { probeSpriteHead } from '../../src/visual/igs-ui/fx-anchor.js';
 import { bootstrapIGS, createMemoryStorage } from '../../src/index.js';
 import { isSettingsPage } from '../../src/visual/igs-ui/settings-pages.js';
+import { chooseCard, emptyPick, flipCard, flipView, pickCardChoice, pickPurgeChoice, pickUpgradeChoice } from '../../src/combat/flip.js';
+import { FIXED_GENERAL_CARDS, fixedClassPool } from '../../src/combat/fixed-cards/index.js';
+import { openWaitStagePreview } from './fixtures/wait-stage.fixture.js';
+import { createStatsPreview } from './fixtures/stats.fixture.js';
+import { openOriginExchangePreview } from './fixtures/origin-exchange.fixture.js';
 import { createOriginPageController } from '../../src/visual/igs-ui/origin-panel.js';
 import { createStubOriginEngine } from '../../src/visual/igs-ui/origin-panel-stub.js';
 
@@ -147,6 +157,23 @@ const previewUse = name => {
   else { inventorySheet.content.splice(inventorySheet.content.indexOf(row), 1); heroInventory.items.splice(heroInventory.items.indexOf(item), 1); }
   return { ok: true };
 };
+const previewSell = (kind, key, count = 1) => {
+  if (!Number.isSafeInteger(count) || count < 1) return { ok: false, reason: 'combat-sell-count-invalid' };
+  const pool = kind === 'keepsake' ? heroInventory.collection : kind === 'gear' ? heroInventory.gear.bag : [];
+  const item = pool.find(entry => (kind === 'keepsake' ? entry.itemId : entry.gearId) === key);
+  if (!item) return { ok: false, reason: 'combat-item-missing' };
+  if (count > item.count) return { ok: false, reason: 'combat-sell-count-insufficient' };
+  const row = inventorySheet.content.find(cells => cells[0] === item.name);
+  if (!row || Number(row[1]) <= 0) return { ok: false, reason: 'combat-item-missing' };
+  const price = sellPrice(item.rarity, key, { junk: item.junk === true }) * count;
+  item.count -= count;
+  const after = Number(row[1]) - count;
+  if (item.count === 0) pool.splice(pool.indexOf(item), 1);
+  if (after > 0) row[1] = String(after);
+  else inventorySheet.content.splice(inventorySheet.content.indexOf(row), 1);
+  heroInventory.points = (heroInventory.points || 0) + price;
+  return { ok: true, price };
+};
 // ?itemart=1：给每件物品画一张示意物品图（canvas 转 data:image/png，按名字配色），用于看背包详情头的点击放大；不读任何本地素材。
 const itemArtPreview = new URLSearchParams(location.search).get('itemart') === '1';
 const itemArtCache = new Map();
@@ -167,13 +194,13 @@ const previewItemArt = name => {
   return url;
 };
 const record = createRecordPanelController(document, globalShim, async () => ({ ok: true }), {
-  ...(heroInventory ? { getHeroInventory: () => heroInventory, setHeroGear: async (id, equip) => previewGear(id, equip), useInventoryItem: async name => previewUse(name) } : {}),
+  ...(heroInventory ? { getHeroInventory: () => heroInventory, setHeroGear: async (id, equip) => previewGear(id, equip), useInventoryItem: async name => previewUse(name), sellHeroItem: async (kind, key, count) => previewSell(kind, key, count) } : {}),
   ...(itemArtPreview ? { resolveItemImage: previewItemArt } : {}),
 });
 const map = createMapPanelController(document, globalShim, async () => ({ ok: true }), { getChatId: () => 'preview-chat' });
 const SIZES = {
   desktop: [1440, 900], ref: [1672, 941], mid: [1024, 768],
-  tall: [900, 1700], mobile: [390, 844], short: [390, 500], tiny: [320, 568],
+  tall: [900, 1700], mobile: [390, 844], long: [390, 2600], short: [390, 500], tiny: [320, 568],
 };
 let current = null;
 // 设置器素材页截图入口：真实设置器 + 内存存储（不写浏览器 localStorage）+ 示例素材与本地文件夹归类。
@@ -181,6 +208,7 @@ let current = null;
 let settingsVn = null;
 function openSettingsScene() {
   const q = new URLSearchParams(location.search);
+  const statsPreview = (q.get('page') || '').startsWith('stats') ? createStatsPreview({ retry: q.get('currency') === 'retry' }) : null;
   const img = new URL('./assets/scene-demo-clean-night.png', location.href).href;
   const mem = createMemoryStorage();
   // ?card=卡名：模拟打开了一张角色卡，小雪和睡衣提示词放在这张卡里，其余在全局。
@@ -190,7 +218,7 @@ function openSettingsScene() {
     characterOutfits: { 小雪: { 校服: { moods: { 微笑: img }, words: ['制服'], scenes: [], note: '' }, 睡衣: { moods: {}, words: [], scenes: ['卧室'], note: '晚上在家' } } },
     wardrobe: { 睡衣: { prompt: 'pink pajamas' } },
   };
-  mem.setItem('igs_bridge_config', JSON.stringify({ ...(q.get('nai') ? { imageApi: { mode: 'nai' } } : {}), sceneAssets: {
+  mem.setItem('igs_bridge_config', JSON.stringify({ ...statsPreview?.bridge, ...(q.get('nai') ? { imageApi: { mode: 'nai' } } : {}), sceneAssets: {
     enabled: true, promptRule: '规则', characterAliases: {}, moodGroups: [],
     // 带时间行和长名字，看窄屏挤不挤。
     scenes: { 教室: { url: img, times: { '14:50': { url: img } } }, 走廊: { url: img, times: {} }, 海边: { url: img, times: { '黄昏': { url: img } } }, 天台: { url: '', times: {} }, 伦敦国王十字车站: { url: 'https://example.com/london.png', times: {} } },
@@ -213,9 +241,16 @@ function openSettingsScene() {
     scenes: { view, folders: ['学校', '户外'], collapsed: [], assign: { 教室: '学校', 走廊: '学校', 海边: '户外' } },
     characters: { view, folders: ['主角'], collapsed: [], assign: { 林夏: '主角' } },
   } } }));
-  // 只替换 localStorage，其余全局能力沿用真实 window；小写方法绑定到 window，避免 Illegal invocation。
+  // 设置预览使用内存存储和空表情备注，其余能力沿用真实 window。
   const globalProxy = new Proxy(window, { get(target, key) {
     if (key === 'localStorage') return mem;
+    if (statsPreview && key === 'AutoCardUpdaterAPI') return statsPreview.api;
+    if (statsPreview && key === 'SillyTavern') return { getContext: () => statsPreview.context };
+    if (key === 'fetch') return (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+      if (url.origin === location.origin && url.pathname === '/user/files/igs-expression-notes.json') return Promise.resolve(new Response('{"version":1,"notes":{}}', { headers: { 'content-type': 'application/json' } }));
+      return target.fetch(input, init);
+    };
     if (key === 'SillyTavern' && q.get('card')) return { getContext: () => ({ name2: q.get('card'), characters: [] }) };
     const value = Reflect.get(target, key, target);
     return typeof value === 'function' && typeof key === 'string' && /^[a-z]/.test(key) ? value.bind(target) : value;
@@ -231,11 +266,12 @@ function openSettingsScene() {
   }, { get: (target, key) => (key in target ? target[key] : (typeof key === 'string' ? () => undefined : undefined)) }) : undefined;
   settingsVn = settingsVn || bootstrapIGS({
     global: globalProxy,
+    ...(statsPreview ? { secondaryLlm: statsPreview.secondaryLlm } : {}),
     ...(fakeGen ? { assetGenerationService: fakeGen } : {}),
     autoAttachMagicWand: false,
     hostAdapter: { getCurrentMessage: async () => ({ id: 1, text: '素材设置预览。' }), typeAndSend: async () => ({ ok: true }) },
   });
-  const mode = (q.get('size') || 'desktop').match(/^(mobile|short|tiny)$/) ? 'mobile' : 'pc';
+  const mode = (q.get('size') || 'desktop').match(/^(mobile|long|short|tiny)$/) ? 'mobile' : 'pc';
   // ?page=<设置页 id> 直接打开某页（dash style text ui perf-text perf-stage perf-story perf-special perf-rhythm sound chars wardrobe review scenes eventcg cglib source kinds llm rules parse data logs）；
   // ?page=settings-scene 或 ?tab=<分类或旧 tab id> 仍可用（旧 tab：basic reader scene image，默认 scene）；?readersub= 切旧的阅读器子页。
   const wanted = q.get('page');
@@ -267,17 +303,100 @@ function openSettingsScene() {
   const focus = q.get('focus');
   if (focus) setTimeout(() => { const el = document.querySelector(focus); if (el) { el.style.scrollMarginTop = '96px'; el.scrollIntoView({ block: 'start' }); } }, 0);
   // ?open=折叠区键,… 展开对应的 data-advanced 折叠区。
-  for (const key of (q.get('open') || '').split(',').filter(Boolean)) {
-    const node = document.querySelector(`[data-advanced="${CSS.escape(key)}"]`);
-    if (node) node.open = true;
-  }
+  // 数值页的内容是异步补出来的，折叠区晚到：隔一会儿再补开几次。
+  const openFolds = () => {
+    for (const key of (q.get('open') || '').split(',').filter(Boolean)) {
+      const node = document.querySelector(`[data-advanced="${CSS.escape(key)}"]`);
+      if (node && !node.open) node.open = true;
+    }
+  };
+  openFolds();
+  if (q.get('open')) for (const ms of [400, 900, 1500]) setTimeout(openFolds, ms);
   // ?nav=open：窄屏下把分类抽屉展开再截图。
   if (q.get('nav') === 'open') document.getElementById('igs-unified-settings')?.setAttribute('data-igs-nav', 'open');
   return { close: () => opened.controller?.close?.() };
 }
 // 战斗面板预览：内存战斗表与存档；?combat=battle 直接开战，?combat=end 打到结束。
-const combatPreview = createCombatPreview();
-const combat = createCombatPanelController(document, { getSession: () => combatPreview.session, getLedger: () => combatPreview.ledger });
+const attributePreview = new URLSearchParams(location.search).get('attributes') === '1';
+const combatPreview = createCombatPreview({ attributes: attributePreview });
+// ?res=mage|mage3|bard|priest|warrior|summoner|all：给主战者叠一组假资源，只改面板读到的快照，不写引擎状态，用于看资源条排版。
+const RES_PREVIEW = {
+  mage: { orbs: { slots: 10, list: ['lightning', 'frost', 'dark', 'plasma', 'glass', 'lightning', 'frost'].map(kind => ({ kind })) }, focus: 2 },
+  mage3: { orbs: { slots: 3, list: [{ kind: 'lightning' }, { kind: 'frost' }] }, focus: 0 },
+  bard: { stance: 'wrath', momentum: 7 },
+  priest: { radiance: 6 },
+  warrior: { forge: { value: 14 } },
+  summoner: { minion: { hp: 9, maxHp: 15 } },
+};
+RES_PREVIEW.all = Object.assign({}, RES_PREVIEW.mage, RES_PREVIEW.bard, RES_PREVIEW.priest, RES_PREVIEW.warrior, RES_PREVIEW.summoner);
+const resPreview = RES_PREVIEW[new URLSearchParams(location.search).get('res') || ''] || null;
+// ?marks=1：给主战者手牌前五张依次挂规则 v5 E19 牌面附着（绑定、加费、痛刺、虚无、受创），只改面板读到的快照，用于看牌面关键字；可与 ?res= 同用。
+const MARK_PREVIEW = ['bound', 'taxed', 'pain', 'ethereal', 'scar'];
+const marksPreview = new URLSearchParams(location.search).get('marks') === '1';
+// ?inscribe=1：给主战者手牌前五张依次挂规则 v5 P5b 刻印（锋利、灵巧、稳持、蚀心、预燃）；?inscribe=键1,键2 可指定刻印。只改面板读到的快照，可与 ?marks=1 同用。
+const inscribeParam = new URLSearchParams(location.search).get('inscribe') || '';
+const INSCRIBE_PREVIEW = inscribeParam === '1' ? ['sharp', 'deft', 'steady', 'corrode', 'kindle'] : inscribeParam.split(',').map((s) => s.trim()).filter(Boolean);
+const previewBattle = (b) => {
+  const id = b && b.controlledId;
+  if (!b || !b.units || !b.units[id]) return b;
+  let next = b;
+  if (resPreview) next = { ...next, units: { ...next.units, [id]: { ...next.units[id], res: { ...next.units[id].res, ...resPreview } } } };
+  const hand = marksPreview || INSCRIBE_PREVIEW.length ? (next.piles?.[id]?.hand || []) : [];
+  if (hand.length) {
+    const cards = { ...next.cards };
+    if (marksPreview) hand.slice(0, MARK_PREVIEW.length).forEach((inst, i) => { cards[inst] = { ...cards[inst], marks: [MARK_PREVIEW[i]] }; });
+    hand.slice(0, INSCRIBE_PREVIEW.length).forEach((inst, i) => { cards[inst] = { ...cards[inst], inscription: INSCRIBE_PREVIEW[i] }; });
+    next = { ...next, cards };
+  }
+  return next;
+};
+const baseSession = !resPreview && !marksPreview && !INSCRIBE_PREVIEW.length ? combatPreview.session : { ...combatPreview.session, state() {
+  const st = combatPreview.session.state();
+  return st.battle ? { ...st, battle: previewBattle(st.battle) } : st;
+} };
+// ?loot=v6（配合 ?combat=end）：结算时换成一份规则 v6 示例战利品（卡牌槽三选一：本职业固定、无色固定、本职业随机），翻牌、取候选与跳过只改内存。
+const lootPreview = new URLSearchParams(location.search).get('loot') === 'v6';
+const warriorPool = fixedClassPool('warrior');
+const lootOffer = {
+  combatId: 'preview-loot', reveal: 0,
+  slots: [
+    { index: 0, kind: 'card', rarity: 'uncommon', name: '裂空斩', origin: '桥头一战后的领悟', choices: [
+      JSON.parse(JSON.stringify(warriorPool.find((c) => c.rarity === 'uncommon') || warriorPool[0])),
+      { id: 'rc-preview', name: '裂空斩', type: 'attack', cost: 1, rarity: 'uncommon', effects: [{ op: 'damage', amount: 9 }, { op: 'status', status: 'vulnerable', stacks: 1, target: 'enemy' }] },
+      JSON.parse(JSON.stringify(FIXED_GENERAL_CARDS.find((c) => c.rarity === 'uncommon') || FIXED_GENERAL_CARDS[0])),
+    ] },
+    { index: 1, kind: 'keepsake', rarity: 'rare', name: '旧铜铃', origin: '狼群首领颈上挂着的' },
+    { index: 2, kind: 'item', rarity: 'common', name: '止血草', origin: '', item: { count: 1 } },
+  ],
+};
+let lootPick = emptyPick();
+const lootStep = (next) => { if (next.ok) lootPick = next.pick; return Promise.resolve(next.ok ? { ok: true } : { ok: false, reason: next.reason }); };
+// ?purge=1（配合 ?combat=end&loot=v6）：本场视为第 5 场普通胜利，结算页同时给一次删牌机会（75 金钱）；?purge=poor 为金钱不足。只改内存。
+const purgeParam = new URLSearchParams(location.search).get('purge') || '';
+const purgeOffer = !purgeParam ? null : purgeParam === 'poor' ? { battle: 5, cost: 75, available: false, reason: 'combat-points-insufficient' }
+  : { battle: 5, cost: 75, available: true, cards: warriorPool.slice(0, 6).flatMap((c, i) => Array.from({ length: i < 2 ? 3 : 1 }, (_, k) => {
+      const up = i === 0 && k === 0 && c.upgraded ? c.upgraded : null;
+      return { copyId: `preview-${c.id}:${k}`, cardId: c.id, name: c.name, type: c.type, cost: up?.cost ?? c.cost, rarity: c.rarity, effects: up?.effects || c.effects, ...(up ? { upgraded: true } : {}), ...(i === 1 && k === 0 ? { bonus: { damage: 2, block: 0 } } : {}),
+        ...(c.innate || c.retain || c.ethereal ? { keywords: { innate: c.innate, retain: c.retain, ethereal: c.ethereal } } : {}) };
+    })) };
+// ?upgrade=1（配合 ?combat=end&loot=v6，可与 ?purge=1 同开）：本场视为第 5 场普通胜利，结算页给一次免费升级机会；?upgrade=none 为卡组里没有可升级的牌。只改内存。
+const upgradeParam = new URLSearchParams(location.search).get('upgrade') || '';
+const upgradeOffer = !upgradeParam ? null : upgradeParam === 'none' ? { battle: 5, available: false, reason: 'combat-card-upgrade-none' }
+  : { battle: 5, available: true, cards: warriorPool.filter((c) => c.upgraded && c.rarity !== 'signature').slice(0, 6).flatMap((c, i) => Array.from({ length: i < 2 ? 2 : 1 }, (_, k) => ({
+      copyId: `preview-${c.id}:${k}`, cardId: c.id, name: c.name, type: c.type, rarity: c.rarity, cost: c.cost, effects: c.effects,
+      upCost: c.upgraded.cost ?? c.cost, upEffects: c.upgraded.effects || c.effects, ...(i === 1 && k === 0 ? { bonus: { damage: 2, block: 0 } } : {}),
+      ...(c.innate || c.retain || c.ethereal ? { keywords: { innate: c.innate, retain: c.retain, ethereal: c.ethereal } } : {}) }))) };
+const combatSession = !lootPreview ? baseSession : { ...baseSession,
+  state() { const st = baseSession.state(); return st.status === 'ended' || st.status === 'send-failed' ? { ...st, flip: flipView(lootOffer, lootPick, { points: 100, payer: false }, purgeOffer, upgradeOffer) } : st; },
+  loadFlip: async () => ({ ok: true }),
+  flip: (i) => lootStep(flipCard(lootOffer, lootPick, i)), choose: (i) => lootStep(chooseCard(lootOffer, lootPick, i)),
+  pickCard: (v) => lootStep(pickCardChoice(lootOffer, lootPick, v)), pickPurge: (v) => lootStep(pickPurgeChoice(purgeOffer, lootPick, v)),
+  pickUpgrade: (v) => lootStep(pickUpgradeChoice(upgradeOffer, lootPick, v)),
+  reroll: async () => ({ ok: false, reason: 'combat-reroll-unavailable' }) };
+// ?skin=<皮肤键>（veil comic ink tech mystic soft-a soft-c dark-a dark-b initial）：换战斗面板皮肤，缺省黑幕。
+// ?combat=end 自动打完一场，按减少动态效果跑，结算前不播长演出。
+const autoEnd = new URLSearchParams(location.search).get('combat') === 'end';
+const combat = createCombatPanelController(document, { getSession: () => combatSession, getLedger: () => combatPreview.ledger, skin: () => new URLSearchParams(location.search).get('skin') || '', ...(autoEnd ? { reducedMotion: () => true } : {}) });
 // 截图脚本以 combatReady 判定本场景已就绪，不以中间态（lobby 后尚未开战）截图。
 const combatState = { ready: false, want: '' };
 async function openCombat() {
@@ -287,10 +406,20 @@ async function openCombat() {
   combatState.want = want;
   for (let i = 0; i < 40 && combat.view()?.status !== 'lobby'; i += 1) await new Promise(r => setTimeout(r, 25));
   if (want !== 'lobby') combat.invoke('start');
-  for (let i = 0; want === 'end' && i < 400 && combat.view()?.status === 'battle'; i += 1) {
-    const card = combat.view().battle.hand.find(c => c.playable);
+  // 结束回合后面板会锁住演出（combat-busy），每步之间让出事件循环，等演出播完再继续出牌。
+  const deadline = Date.now() + 120000;
+  while (want === 'end' && Date.now() < deadline && combat.view()?.status === 'battle') {
+    await new Promise(r => setTimeout(r, 20));
+    // 先出要选目标的攻击牌，避免只打格挡牌拖到输掉（输了不翻牌）。
+    const battle = combat.view().battle;
+    const playable = battle.hand.filter(c => c.playable);
+    const card = playable.find(c => c.targets.length) || playable[0];
     if (!card) { combat.invoke('end-turn'); continue; }
-    if (!combat.invoke('card', card.inst).ok) combat.invoke('target', card.targets[0] ?? card.affects[0]);
+    const r = combat.invoke('card', card.inst);
+    if (r.reason === 'combat-busy') continue;
+    // 鞭尸状态下已倒下的敌人也在可选目标里，优先打还活着的。
+    const alive = new Set(battle.enemies.filter(u => u.alive).map(u => u.id));
+    if (!r.ok) combat.invoke('target', card.targets.find(id => alive.has(id)) ?? card.targets[0] ?? card.affects[0]);
   }
   // ?cutin=skill|awaken：挂一张真实技能 / 觉醒特写并停在中段，用于看字号与位置；&skill= 换招式名（觉醒为类型），&awaken= 情绪（rage guard grief resolve bond limit vengeance unyielding），&line= 台词；
   // &portrait=<文件名> 读本机 tools/local-preview/assets/<文件名>.png 作立绘（该目录不随仓库提交），不传时不画立绘。
@@ -321,6 +450,16 @@ async function openCombat() {
       if (loop) setInterval(() => { shown.remove(); shown = mount(); }, (awaken ? COMBAT_CUTIN_MS.awaken : COMBAT_CUTIN_MS.skill) + 700);
     }
   }
+  // ?sheet=upgrade|purge（配合 ?combat=end&loot=v6）：结算后先翻开第一张战利品，再打开升级 / 删牌浮层并查看第一张牌的详情。只改内存。
+  const sheet = cq.get('sheet');
+  const sheetOffer = sheet === 'upgrade' ? upgradeOffer : sheet === 'purge' ? purgeOffer : null;
+  if (lootPreview && sheetOffer?.available && combat.view()?.status === 'ended') {
+    // 结果横幅（.igs-fx-battle-result）是约 3 秒的瞬时演出，等它退场再开浮层，避免截到中间帧。
+    for (let i = 0; i < 160 && document.querySelector('.igs-fx-battle-result'); i += 1) await new Promise(r => setTimeout(r, 50));
+    await combat.invoke('flip', '0');
+    combat.invoke(`${sheet}-open`);
+    combat.invoke(`${sheet}-focus`, sheetOffer.cards[0].copyId);
+  }
   combatState.ready = true;
 }
 // 人物状态面板 · 只开数值系统（P8c）：不注入战斗账本，本聊天为手动建档；名单为尚无建档的主角与带关系的角色，确认建档只改内存。
@@ -336,10 +475,57 @@ const deckBuild = createCombatDeckPanelController(document, {
     .filter(([name]) => !buildDone.has(name)).map(([name, protagonist]) => ({ name, protagonist, attributes: buildAttr })) }),
 });
 // 人物状态面板 · 战斗开启：读战斗示例账本（主角与职业档案）；?deckpage=status|alloc|gear|deck 打开后切到该页。写入能力只给空函数，用于显示按钮。
+// 同带 ?inscribe= 时，卡组角色按副本顺序给前几张副本挂上同一组刻印（只改面板读到的归并视图），用于看卡组页的副本标签。
+const inscribeCopies = (c) => {
+  if (c.kind !== 'deck-character' || !Array.isArray(c.copies)) return c;
+  const marked = new Map(c.copies.slice(0, INSCRIBE_PREVIEW.length).map((row, i) => [row.copyId, INSCRIBE_PREVIEW[i]]));
+  const mark = (row) => (marked.has(row.copyId) ? { ...row, inscription: marked.get(row.copyId) } : row);
+  return { ...c, copies: c.copies.map(mark), deckEntries: (c.deckEntries || []).map(mark) };
+};
+// ?carddraw=open：主角金钱 500，可点「抽卡」；?carddraw=pending：另挂一组按种子规划的 3 张背面牌（本职业固定 2 + 示例随机 1），
+// 点一张即按预览翻开（不写账本），亮出全部牌面，再「加入卡组」或「放弃」；?carddraw=flipped 打开时已翻开第一张。只改面板读到的归并视图。
+const cardDrawParam = new URLSearchParams(location.search).get('carddraw') || '';
+const cardDrawPreview = { flipped: cardDrawParam === 'flipped' ? 0 : null, done: false };
+const cardDrawView = (c) => {
+  if (c.kind !== 'deck-character' || c.attributes?.protagonist !== true) return c;
+  const out = { ...c, points: Math.max(c.points || 0, 500) };
+  if (!['pending', 'flipped'].includes(cardDrawParam) || cardDrawPreview.done) return out;
+  const plan = planCardDraw({ ...c, classProfile: c.classProfile || { archetype: 'warrior' } });
+  if (!plan) return out;
+  const choices = plan.fixedIds.map((id) => JSON.parse(JSON.stringify(fixedCard(id))));
+  choices.splice(plan.randomAt, 0, { id: plan.cardId, name: '裂岩斩', type: 'attack', cost: 1, rarity: plan.rarity, effects: [{ op: 'damage', amount: 3 }, { op: 'block', amount: 3 }] });
+  const flipped = cardDrawPreview.flipped === null ? {} : { flipped: cardDrawPreview.flipped };
+  return { ...out, pendingDraw: { drawId: plan.drawId, choices, ...flipped } };
+};
+// ?relicinscribe=1：主角挂一项待刻的御印，可选卡组里未刻印、可刻的攻击 / 技能副本；?relicinscribe=pick 打开后直接展开并选中第一张。
+// 「确认刻印」按预览给该副本刻上御准并清掉待刻项（不写账本）。只改面板读到的归并视图。
+const sealParam = new URLSearchParams(location.search).get('relicinscribe') || '';
+const sealPreview = { copyId: null };
+const SEAL_KEY = 'rl-s-18|original';
+const sealView = (c) => {
+  if (!sealParam || c.kind !== 'deck-character' || c.attributes?.protagonist !== true) return c;
+  if (sealPreview.copyId) {
+    const mark = (row) => (row.copyId === sealPreview.copyId ? { ...row, inscription: 'sovereign' } : row);
+    return { ...c, copies: (c.copies || []).map(mark), deckEntries: (c.deckEntries || []).map(mark) };
+  }
+  const fit = (e) => { const card = c.catalog?.get(e.cardId); return !e.inscription && ['attack', 'skill'].includes(card?.type) && inscribable(card, 'sovereign'); };
+  const copies = (c.deckEntries || []).filter(fit).map((e) => e.copyId);
+  return { ...c, relicInscribe: [{ relic: { relicId: 'rl-s-18', model: 'original' }, inscription: 'sovereign', cardType: ['attack', 'skill'], copies }] };
+};
+const deckLedger = !INSCRIBE_PREVIEW.length && !cardDrawParam && !sealParam ? combatPreview.ledger : { ...combatPreview.ledger, async effectiveState() {
+  const st = await combatPreview.ledger.effectiveState();
+  if (!st?.ok || !st.characters) return st;
+  const view = (c) => sealView(cardDrawParam ? cardDrawView(INSCRIBE_PREVIEW.length ? inscribeCopies(c) : c) : inscribeCopies(c));
+  return { ...st, characters: new Map([...st.characters].map(([id, c]) => [id, view(c)])) };
+} };
 const deckNoop = async () => ({ ok: false, reason: 'combat-generate-unavailable' });
+const freeUpgradeParam = new URLSearchParams(location.search).get('freeupgrade') || '';
 const deckFull = createCombatDeckPanelController(document, {
-  getLedger: () => combatPreview.ledger, getSession: () => combatPreview.session,
-  regenerateDeck: deckNoop, respecClass: deckNoop, ascendClass: deckNoop, drawTrait: deckNoop, pickTrait: deckNoop, unlockTraitSlot: deckNoop,
+  getLedger: () => deckLedger, getSession: () => combatPreview.session,
+  regenerateDeck: deckNoop, respecClass: deckNoop, ascendClass: deckNoop, drawTrait: deckNoop, pickTrait: deckNoop, unlockTraitSlot: deckNoop, drawCard: deckNoop, upgradeCard: deckNoop,
+  flipCard: cardDrawParam ? async ({ position }) => { await new Promise((r) => setTimeout(r, 450)); cardDrawPreview.flipped = position; return { ok: true, position }; } : deckNoop,
+  pickCard: cardDrawParam ? async ({ pick }) => { await new Promise((r) => setTimeout(r, 200)); cardDrawPreview.done = true; return { ok: true, pick }; } : deckNoop,
+  inscribeRelic: sealParam ? async ({ copyId }) => { await new Promise((r) => setTimeout(r, 200)); sealPreview.copyId = copyId; return { ok: true, copyId }; } : deckNoop,
   getTheme: () => new URLSearchParams(location.search).get('theme') || '', setTheme: () => {},
 });
 async function openDeckFull() {
@@ -347,6 +533,23 @@ async function openDeckFull() {
   for (let i = 0; i < 80 && deckFull.view()?.status !== 'ready'; i += 1) await new Promise(r => setTimeout(r, 25));
   const want = new URLSearchParams(location.search).get('deckpage');
   if (want) deckFull.invoke('page', want);
+  if (cardDrawParam === 'confirm') deckFull.invoke('draw-open');
+  if (freeUpgradeParam) {
+    deckFull.invoke('upgrade-open');
+    const first = deckFull.view()?.detail?.upgradeCards?.[0];
+    if (freeUpgradeParam === 'pick' && first) deckFull.invoke('upgrade-pick', first.copyId);
+  }
+  if (new URLSearchParams(location.search).get('tip') === '1') {
+    const tipAnchor = document.querySelector('#igs-combat-deck-panel .igs-deck-card p [data-scale-tip]');
+    tipAnchor?.scrollIntoView({ block: 'center' });
+    tipAnchor?.click();
+  }
+  if (sealParam === 'pick') {
+    deckFull.invoke('inscribe-open', SEAL_KEY);
+    const first = deckFull.view()?.detail?.relicInscribe?.[0]?.copies?.[0];
+    if (first) deckFull.invoke('inscribe-pick', first.copyId);
+    document.querySelector('#igs-combat-deck-panel .igs-deck-seal')?.scrollIntoView({ block: 'end' });
+  }
 }
 const originEngine = createStubOriginEngine();
 let originTheme = new URLSearchParams(location.search).get('theme') || 'frost';
@@ -357,6 +560,10 @@ const originPage = createOriginPageController(document, {
 function openPage(page) {
   current?.close?.();
   if (page === 'deck') { current = deckFull; openDeckFull(); }
+  else if (page === 'origin-exchange') current = openOriginExchangePreview(overlay, new URLSearchParams(location.search));
+  else if (page === 'wait-stage') current = openWaitStagePreview(overlay, new URLSearchParams(location.search));
+  // 设置面板也有 id 为 combat 的页面，page=combat 会先进设置页；战斗面板用 page=combat-panel 打开。
+  else if (page === 'combat-panel') { current = combat; openCombat(); }
   else if (page === 'origin') {
     // ?theme=：四套配色；记下打开到下一帧的耗时（window.__originOpenMs）。
     current = originPage;

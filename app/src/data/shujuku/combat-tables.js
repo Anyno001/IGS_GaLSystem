@@ -10,6 +10,7 @@ export const COMBAT_TABLE_REQUIRED_API = Object.freeze([
 
 // 单元格字符数上限，超长 JSON 按「分段 i/n」拆成多行。
 export const DEFAULT_COMBAT_CELL_MAX = 16000;
+const REFRESH_TIMEOUT_MS = 15000;
 const SEGMENT_COLUMN = '分段';
 // 没有插件事件可订阅时，缓存只在这个时间窗内复用（毫秒）。
 export const TABLE_CACHE_TTL_MS = 1500;
@@ -359,8 +360,12 @@ export function createCachedTableClient({ api, now = Date.now, ttlMs = TABLE_CAC
         },
         async refresh() {
             if (!api || typeof api.refreshDataAndWorldbook !== 'function') return { ok: false, reason: 'missing-api' };
-            await api.refreshDataAndWorldbook();
-            return { ok: true };
+            // 行已写入并核对过；插件刷新世界书迟迟不回应时不能一直占着写入队列。
+            let timer;
+            const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: true, slow: true }), REFRESH_TIMEOUT_MS); });
+            try {
+                return await Promise.race([Promise.resolve(api.refreshDataAndWorldbook()).then(() => ({ ok: true })), timeout]);
+            } finally { clearTimeout(timer); }
         },
         registerCallback(callback) {
             if (api && typeof api.registerTableUpdateCallback === 'function') api.registerTableUpdateCallback(callback);
@@ -462,6 +467,26 @@ export function createCombatTables({ api, cellMax = DEFAULT_COMBAT_CELL_MAX, cli
         const visible = { ...result };
         for (const key of RAW_KEYS_HIDDEN_FROM_READ) delete visible[key];
         return visible;
+    }
+
+    function matchesIncomplete(kind, record) {
+        const spec = COMBAT_TABLE_SPECS[kind];
+        if (!spec) return false;
+        const loaded = loadSheets(client);
+        if (!loaded.ok) return false;
+        const sheet = findSheet(loaded.sheets, kind);
+        if (!sheet) return false;
+        const expected = encodeCombatRecord(kind, record, cellMax);
+        const parts = new Set();
+        for (const row of sheet.rows) {
+            const cells = rowToCells(sheet, Array.isArray(row) ? row : []);
+            if (spec.keyOf(cells) !== expected.key) continue;
+            const match = cells[SEGMENT_COLUMN].match(SEGMENT_PATTERN);
+            const wanted = match && expected.rows[Number(match[1]) - 1];
+            if (!wanted || Object.keys(wanted).some((key) => cells[key] !== wanted[key])) return false;
+            parts.add(Number(match[1]));
+        }
+        return parts.size > 0 && parts.size < expected.rows.length;
     }
 
     // 缺表时在用户当前模板上补建，建完核对。
@@ -636,13 +661,21 @@ export function createCombatTables({ api, cellMax = DEFAULT_COMBAT_CELL_MAX, cli
         });
     }
 
-    function append(kind, records, options) {
+    async function append(kind, records, options) {
         if (!Object.hasOwn(COMBAT_TABLE_SPECS, kind)) return Promise.resolve({ ok: false, reason: 'combat-table-unknown-kind' });
-        for (const record of Array.isArray(records) ? records : [records]) {
-            queue.push({ kind, record, reason: 'queued', ...(options && { options }) });
+        const requests = (Array.isArray(records) ? records : [records]).map((record) => ({ kind, record, reason: 'queued', ...(options && { options }) }));
+        queue.push(...requests);
+        try {
+            return await flush();
+        } finally {
+            if (options?.retainOnFailure === false) {
+                const owned = new Set(requests);
+                for (let at = queue.length - 1; at >= 0; at -= 1) {
+                    if (owned.has(queue[at])) queue.splice(at, 1);
+                }
+            }
         }
-        return flush();
     }
 
-    return { probe, read, ensure, append, flush, pending, serial, isWriting: () => writing, client };
+    return { probe, read, ensure, append, flush, pending, serial, matchesIncomplete, isWriting: () => writing, client };
 }

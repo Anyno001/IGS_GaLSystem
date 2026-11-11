@@ -6,9 +6,16 @@
 //   - 成长监听者只在有效状态签名变化时才被通知（内部缓存照常更新）；
 //   - 同一事件内账本有效状态只取一次并传递。
 import { createCachedTableClient, createCombatTables } from '../data/shujuku/combat-tables.js';
+import { createOriginStore } from '../data/shujuku/origin-store.js';
+import { createPointsStore } from '../data/shujuku/points-store.js';
+import { GAME_IDS, newPointsId, pointFloors, pointsFloorId, pointsSwipe } from '../scene/points/points-policy.js';
+import { createPointsEngine } from '../scene/points/points-engine.js';
+import { createGamePointsRound } from '../scene/points/game-points-round.js';
+import { createMahjongPointsRound } from '../scene/points/mahjong-points-round.js';
+import { createPointsIntents } from '../storage/points-intents.js';
 import { createCombatMaterialContext } from './combat-material-context.js';
 import { createInventoryTables } from '../data/shujuku/inventory-tables.js';
-import { PROTAGONIST_ALIASES, abilitiesForName, createCombatLedger, grantGeneratedGear, heroPointLog, signaturePending, vitalsForName } from '../combat/ledger.js';
+import { PROTAGONIST_ALIASES, abilitiesForName, createCombatLedger, grantGeneratedGear, signaturePending, upgradableRows, vitalsForName } from '../combat/ledger.js';
 import { createCombatSession, locateCombatStart, partyStatus } from '../combat/session.js';
 import { combatBodyText } from '../scene/combat-directives.js';
 import { withFloorNote } from '../combat/floor-note.js';
@@ -16,14 +23,18 @@ import {
     checkCorrections, checkRollPairsFor, floorCheckOrdinal, floorCheckSwipe, floorIndexOfOrdinal, replayChecks, upcomingCheckOrdinal, upcomingCheckSwipe,
 } from '../scene/check-rolls.js';
 import {
-    classTierEntity, deckProfileEntities, generationWrites, growthEntity, profileGearEntity, profileRecord, resolveCombatLlm, respecClassEntity, traitEntity,
+    classTierEntity, deckProfileEntities, drawCardEntity, generationWrites, growthEntity, profileGearEntity, profileRecord, resolveCombatLlm, respecClassEntity, traitEntity,
     withCharacterLore, withStoryContext,
 } from '../combat/generation.js';
 import { generateWithRetry } from '../combat/generation-retry.js';
 import { itemIdFor, normalizeProfile, profileIdFor } from '../combat/schema.js';
 import { COMBAT_RULES } from '../combat/rules.js';
-import { ASCEND_TIERS, REBUILD_COST, RESPEC_COST, TRAIT_DRAW_COST } from '../combat/points.js';
-import { TRAIT_BASE_SLOTS, keptInnateKinds, nextTraitSlot, planTrait, traitFits, traitSeed } from '../combat/traits.js';
+import { equippedGear } from '../combat/gear-slots.js';
+import { ASCEND_TIERS, CARD_DRAW_COST, REBUILD_COST, RESPEC_COST, TRAIT_DRAW_COST } from '../combat/points.js';
+import { ownedRelicIds, planCardDraw } from '../combat/rewards.js';
+import { planTraitRelic } from '../combat/relics/draw.js';
+import { fixedCard } from '../combat/fixed-cards/index.js';
+import { TRAIT_BASE_SLOTS, keptInnateKinds, nextTraitSlot, planTrait, planTraitLink, traitFits, traitSeed } from '../combat/traits.js';
 import { planTraitShape } from '../combat/trait-pool.js';
 import { ABILITY_KEYS, parseCombatInit, wantsAutoInit } from '../combat/abilities.js';
 import { ensureChallengeReportRegex, ensureCombatReportRegex } from '../host/combat-report-regex.js';
@@ -45,7 +56,6 @@ const PREPARE_BUSY_STATUSES = Object.freeze(['preparing', 'battle', 'ended', 'se
 const PREPARE_DONE_STATUSES = Object.freeze(['lobby', 'blocked', 'done', 'skipped']);
 // 生命缓存（只读场景复用）的兜底有效期，防止楼层被外部改动却签名不变
 const LIFE_CACHE_TTL_MS = 10000;
-const EMPTY_POINT_LOG = Object.freeze([]);
 const DIAGNOSTICS_MAX = 20;
 
 // 楼层签名：楼数 + 每层（是否用户楼、swipe、正文长度）的滚动哈希，用来判断楼层有没有变
@@ -55,6 +65,9 @@ function chatSignature(chat) {
         const swipe = Number.isInteger(message?.swipe_id) ? message.swipe_id : 0;
         const length = String(message?.mes ?? '').length;
         hash = Math.imul(hash ^ ((message?.is_user ? 1 : 0) + swipe * 2 + length * 64), 16777619) >>> 0;
+        const floorId = pointsFloorId(message);
+        for (let at = 0; at < floorId.length; at += 1) hash = Math.imul(hash ^ floorId.charCodeAt(at), 16777619) >>> 0;
+        if (message?.is_system) hash = Math.imul(hash ^ 31, 16777619) >>> 0;
     }
     return `${chat.length}:${hash}`;
 }
@@ -106,7 +119,9 @@ export function createCombatServices(options = {}) {
     }
     const getChatId = () => String((typeof options.getChatId === 'function' ? options.getChatId() : '') || '');
     const traitSeeds = createCombatTraitSeed(global, getChatId);
+    const traitsOf = (name) => { try { return typeof options.traitNamesOf === 'function' ? options.traitNamesOf(name) : null; } catch { return null; } };
     let traitEpoch = 0;
+    let traitDrawTask = null;
     const getChat = () => {
         const context = getSillyTavernContext(global);
         return context && Array.isArray(context.chat) ? context.chat : [];
@@ -207,11 +222,13 @@ export function createCombatServices(options = {}) {
             const raw = createCombatTables({ api, client });
             const inventory = createInventoryTables({ api, client, serial: raw.serial });
             bundleGeneration += 1;
-            bundle = { api, client, raw, impl: wrapTables(raw), inventory, generation: bundleGeneration };
+            bundle = { api, client, raw, impl: wrapTables(raw), inventory, origin: createOriginStore({ tables: raw }),
+                points: createPointsStore({ tables: raw, chat: getChat, chatId: getChatId }), generation: bundleGeneration };
             ledger = createCombatLedger({
-                tables: bundle.impl, chat: getChat, userName: getUserName, sourceFilter: getSourceFilter,
+                tables: bundle.impl, chat: getChat, chatId: getChatId, userName: getUserName, sourceFilter: getSourceFilter,
                 difficulty: () => settings().difficulty, inventory,
-                // 随身系统的原始积分并入主角余额（战斗积分与随身系统积分合成一个余额）。
+                spendingGate: () => points().spendingGate(),
+                // 旧 bars.money 是只读积分份额，剧情货币不进入此处。
                 wallet: () => (typeof options.getWallet === 'function' ? options.getWallet() : 0),
             });
             ensureFailure = null;
@@ -249,9 +266,15 @@ export function createCombatServices(options = {}) {
             session = createCombatSession({
                 ledger, tables: bundle.impl, request, send, storage, global, chat: getChat, getChatId, userName: getUserName,
                 chatRecord: options.chatRecord, llm: getLlm, sourceFilter: getSourceFilter, readLore, readStoryContext, now: () => Date.now(),
+                pointsSpendingGate,
                 buildMode: getBuildMode, difficulty: () => settings().difficulty, reportDetail: () => settings().reportDetail, retryDelays,
                 awaitProtagonist: () => (protagonistTask && protagonistTask.key === protagonistKey() ? protagonistTask.promise : null),
                 kinds,
+                // 数值特质名单：主角与同场同伴（福星）；数值系统未启用时 traitsOf 返回 null，奖励照旧。
+                statTraits: ({ hero, allies }) => {
+                    const mine = traitsOf(hero);
+                    return mine ? { hero: mine, allies: allies.flatMap((name) => traitsOf(name) || []) } : null;
+                },
                 onReportSettled: () => { Promise.resolve(refreshGrowth()).catch(() => null); },
                 challenge: {
                     state: () => (typeof options.getChallengeSnapshot === 'function' ? options.getChallengeSnapshot() : null),
@@ -339,16 +362,16 @@ export function createCombatServices(options = {}) {
         });
     }
 
-    // 穿/卸装备；hint 可带入 setHeroGear 刚读过的状态
-    function setGear(characterId, gearId, equip, hint = null) {
+    // 穿/卸装备；hint 可带入 setHeroGear 刚读过的状态；slotIndex（规则 v6，可选）为装宝物时替换的格位
+    function setGear(characterId, gearId, equip, hint = null, slotIndex = undefined) {
         return enqueue(async () => {
             const context = await ledgerContext(hint);
             if (!context.ok) return context;
             const character = context.state.characters.get(characterId);
             if (!character) return { ok: false, reason: 'combat-character-missing' };
-            const gear = equip ? (character.gear?.bag || []).find((entry) => entry.gearId === gearId) : Object.values(character.gear?.slots || {}).find((slot) => slot?.gearId === gearId);
+            const gear = equip ? (character.gear?.bag || []).find((entry) => entry.gearId === gearId) : equippedGear(character.gear?.slots).find((slot) => slot?.gearId === gearId);
             return gear
-                ? withNote(`（${character.name || ''}${equip ? '装上了' : '卸下了'}${gear.name}）`, () => context.ledgerImpl.setGear(characterId, gearId, equip === true))
+                ? withNote(`（${character.name || ''}${equip ? '装上了' : '卸下了'}${gear.name}）`, () => context.ledgerImpl.setGear(characterId, gearId, equip === true, slotIndex))
                 : { ok: false, reason: 'combat-gear-missing' };
         });
     }
@@ -370,7 +393,7 @@ export function createCombatServices(options = {}) {
 
     // 背包卖出（v0.39.2，人物状态面板的背包页取消后统一在阅读器背包卖）：只主角；装备须在背包里（穿戴中由账本拒收），杂物按 itemId。
     // 售价按稀有度由账本计算，积分记在主角名下；战斗进行中只读。返回的 price 为本次所得。
-    function sellHeroItem(kind, id) {
+    function sellHeroItem(kind, id, count = 1) {
         return enqueue(async () => {
             if (isDeckBusy()) return { ok: false, reason: 'combat-deck-readonly' };
             const context = await ledgerContext();
@@ -379,16 +402,16 @@ export function createCombatServices(options = {}) {
             if (!heroId || !context.state.characters.get(heroId)) return { ok: false, reason: 'combat-points-not-protagonist' };
             const write = kind === 'gear' ? context.ledgerImpl.sellGear : kind === 'keepsake' ? context.ledgerImpl.sellKeepsake : null;
             if (typeof write !== 'function') return { ok: false, reason: 'combat-sell-unavailable' };
-            return write(String(id || ''));
+            return write(String(id || ''), count);
         });
     }
 
-    async function setHeroGear(gearId, equip) {
+    async function setHeroGear(gearId, equip, slotIndex = undefined) {
         const context = await ledgerContext();
         if (!context.ok) return context;
         const heroId = context.state.attributes?.heroId;
         if (!heroId || !context.state.characters.get(heroId)) return { ok: false, reason: 'combat-points-not-protagonist' };
-        return setGear(heroId, gearId, equip === true, context);
+        return setGear(heroId, gearId, equip === true, context, slotIndex);
     }
 
     // ---- 生命刷新（refreshLife）：排队合并 + 只读缓存 ----
@@ -491,10 +514,12 @@ export function createCombatServices(options = {}) {
                 return sheet || (state ? abilitiesForName(state, name, getUserName(), extra) : null);
             },
             readVitals: (name, extra) => (state ? vitalsForName(state, name, getUserName(), extra) : null),
-            // 主角的战斗积分净流水（原始值，不含随身系统积分）；战斗数据没就绪时按 0。
-            readPoints: () => { const heroId = state && state.attributes && state.attributes.heroId; const hero = heroId ? state.characters.get(heroId) : null; return hero ? Number(hero.points) || 0 : 0; },
-            // 主角积分进出流水（原始值，按楼号），战斗数据没就绪时为空；同一状态返回同一数组。
-            readPointLog: () => (state ? heroPointLog(state) : EMPTY_POINT_LOG),
+            // 净流水不含旧 bars.money；共享积分不受战斗界面开关影响。
+            readPoints: () => {
+                const shared = pointsSnapshot();
+                const hero = state?.characters.get(state.attributes?.heroId);
+                return shared.ok ? shared.flow : (Number(hero?.points) || 0) + (state?.originPoints || 0);
+            },
             names: () => (state ? [...state.characters.values()].map((character) => character.name).filter(Boolean) : []),
             refresh: refreshLife,
         };
@@ -599,6 +624,133 @@ export function createCombatServices(options = {}) {
                 },
             }
             : { ok: false, reason: probe.reason, missing: probe.missing };
+    }
+
+    // 物品表读写口（数值侧剧情货币用）：与战斗共用同一套背包写口与串行队列。
+    function inventoryTables() {
+        getTables();
+        return bundle.inventory;
+    }
+
+    // 积分独立于战斗界面开关；原钱包份额与战斗净流水均只读。
+    let pointsCache = null;
+    function originStore() {
+        getTables();
+        return bundle.origin;
+    }
+    async function ensurePointsFloor(messageId) {
+        if (typeof options.pointsFloorRecord?.ensure !== 'function') return { ok: false, reason: 'points-floor-unsupported' };
+        return options.pointsFloorRecord.ensure(messageId);
+    }
+    let pointsEngine = null;
+    function points() {
+        if (!pointsEngine) pointsEngine = createPointsEngine({
+            store: () => { getTables(); return bundle.points; },
+            floors: options.pointsFloorRecord,
+            chat: getChat, chatId: getChatId, lock: withPointsLock,
+            wallet: readSharedPoints, intents: createPointsIntents(storage),
+        });
+        return pointsEngine;
+    }
+    function gamePointsRounds(game, messageId) {
+        if (!GAME_IDS.includes(game) || game === 'mahjong') return undefined;
+        const id = getChatId(), path = getChat();
+        const source = Number.isInteger(messageId) && pointFloors(path).find(f => f.messageId === messageId);
+        const message = source && path[source.messageId];
+        const valid = () => Boolean(id && message && getChatId() === id && getChat() === path
+            && path.includes(message) && pointsSwipe(message) === source.swipeId
+            && pointFloors(path).some(f => path[f.messageId] === message));
+        return () => {
+            const engine = points();
+            return createGamePointsRound({ engine, valid,
+                start: roundId => valid()
+                    ? engine.start({ game, messageId: path.indexOf(message), ...(roundId ? { roundId } : {}) })
+                    : Promise.resolve({ ok: false, reason: 'points-floor-missing' }),
+            });
+        };
+    }
+    function mahjongPointsRounds(messageId) {
+        const id = getChatId(), path = getChat();
+        const source = pointFloors(path).find(f => f.messageId === messageId);
+        const message = source && path[source.messageId];
+        const sameChat = () => Boolean(id && getChatId() === id && getChat() === path);
+        return async (saved, rules = saved?.rules || 'chengdu') => {
+            if (!sameChat()) return { ok: false, reason: 'request-stale' };
+            if (!['chengdu', 'riichi'].includes(rules)) return { ok: false, reason: 'points-rules-unavailable' };
+            let identity = saved;
+            if (saved) {
+                if (saved.version !== 1 || saved.rules !== rules || saved.chatId !== id
+                    || typeof saved.roundId !== 'string' || !saved.roundId || !saved.anchor?.floorId
+                    || !Number.isSafeInteger(saved.anchor.swipeId) || saved.anchor.swipeId < 0) {
+                    return { ok: false, reason: 'points-round-stale' };
+                }
+            } else {
+                if (!message || !path.includes(message) || pointsSwipe(message) !== source.swipeId) return { ok: false, reason: 'points-floor-missing' };
+                const bound = await ensurePointsFloor(path.indexOf(message));
+                if (!bound.ok) return bound;
+                if (!sameChat() || pointsSwipe(message) !== source.swipeId || bound.anchor.swipeId !== source.swipeId) return { ok: false, reason: 'request-stale' };
+                identity = { version: 1, rules, chatId: id, roundId: newPointsId(), anchor: bound.anchor };
+            }
+            const locate = () => pointFloors(path).filter(f => f.floorId === identity.anchor.floorId && f.swipeId === identity.anchor.swipeId);
+            const valid = () => sameChat() && locate().length === 1;
+            return createMahjongPointsRound({ engine: points(), identity, valid, sameChat,
+                start: () => valid() ? points().start({ game: 'mahjong', rules,
+                    messageId: locate()[0].messageId, sourceId: identity.roundId, anchor: identity.anchor })
+                    : Promise.resolve({ ok: false, reason: 'points-round-stale' }),
+            });
+        };
+    }
+    const pointsSpendingGate = () => points().spendingGate();
+    async function readSharedPoints() {
+        getTables();
+        const owner = bundle;
+        const chatId = getChatId();
+        if (!chatId) return { ok: false, reason: 'origin-no-chat' };
+        const state = await ledger.effectiveState({ raw: true });
+        if (bundle !== owner || getChatId() !== chatId) return { ok: false, reason: 'request-stale' };
+        if (!state.ok) { pointsCache = null; return state; }
+        lifeCache = { chatId, state };
+        const hero = state.characters.get(state.attributes?.heroId);
+        const combat = Number(hero?.points) || 0;
+        const wallet = Number(typeof options.getWallet === 'function' ? options.getWallet() : 0) || 0;
+        const origin = state.originPoints || 0;
+        const games = state.gamePoints || 0;
+        const balance = wallet + combat + origin + games;
+        if (!Number.isSafeInteger(balance)) return { ok: false, reason: 'origin-points-invalid' };
+        const value = { ok: true, balance, combat, origin, games, wallet, flow: combat + origin + games };
+        pointsCache = { chatId, owner, key: cacheKey(), value };
+        return value;
+    }
+    async function readOriginWallet({ intent } = {}) {
+        getTables();
+        const owner = bundle;
+        const chatId = getChatId();
+        if (!chatId || !intent?.ok) return { ok: false, reason: 'origin-wallet-unavailable' };
+        owner.client.invalidate();
+        const checked = owner.origin.read({ intent });
+        if (!checked.ok) return checked;
+        if (checked.revision !== intent.revision && checked.revision !== intent.record?.payload.parent) {
+            return { ok: false, reason: 'origin-database-conflict' };
+        }
+        const external = await ledger.externalPoints();
+        if (bundle !== owner || getChatId() !== chatId) return { ok: false, reason: 'request-stale' };
+        if (!external.ok) return external;
+        const balance = external.balance + (Number(typeof options.getWallet === 'function' ? options.getWallet() : 0) || 0);
+        return Number.isSafeInteger(balance) ? { ok: true, balance } : { ok: false, reason: 'origin-points-invalid' };
+    }
+    function pointsSnapshot() {
+        if (pointsCache?.owner !== bundle || pointsCache.chatId !== getChatId() || pointsCache.key !== cacheKey()) {
+            return { ok: false, reason: 'origin-wallet-unavailable' };
+        }
+        const wallet = Number(typeof options.getWallet === 'function' ? options.getWallet() : 0) || 0;
+        const balance = pointsCache.value.flow + wallet;
+        return Number.isSafeInteger(balance)
+            ? { ...pointsCache.value, wallet, balance }
+            : { ok: false, reason: 'origin-points-invalid' };
+    }
+    function withPointsLock(task) {
+        getTables();
+        return ledger.withPointsLock(task);
     }
 
     async function ensureTables() {
@@ -826,7 +978,7 @@ export function createCombatServices(options = {}) {
         for (const pending of [...(scan.pendingGeneration || []), ...signaturePending(state)]) {
             if (wanted && !wanted.has(Number(pending.anchor?.messageId))) continue;
             const character = pending.characterId ? state.characters.get(pending.characterId) : null;
-            const built = growthEntity(pending, character, { classes: state.classes, now: Date.now(), profileMeta: state.profileMeta });
+            const built = growthEntity(pending, character, { classes: state.classes, now: Date.now(), profileMeta: state.profileMeta, traits: traitsOf(character?.name) });
             if (built.entry) entries.push(built.entry);
             else if (built.entity) entities.push(built.entity);
             else skipped += 1;
@@ -1103,7 +1255,16 @@ export function createCombatServices(options = {}) {
         return written?.ok !== true ? { ok: false, reason: written?.reason || 'combat-ledger-insert-failed' } : { ok: true, id: hero.id, tier, tierName: tierProfile.tierName, cost: tierRule.cost };
     }
 
-    async function drawTrait({ signal, onPlan } = {}) {
+    function drawTrait(options = {}) {
+        const chatId = getChatId();
+        const epoch = traitEpoch;
+        if (traitDrawTask?.chatId === chatId && traitDrawTask.epoch === epoch) return Promise.resolve({ ok: false, reason: 'combat-trait-busy' });
+        const task = { chatId, epoch };
+        traitDrawTask = task;
+        return runDrawTrait(options).finally(() => { if (traitDrawTask === task) traitDrawTask = null; });
+    }
+
+    async function runDrawTrait({ signal, onPlan } = {}) {
         const actionChatId = getChatId();
         const actionEpoch = traitEpoch;
         const context = await heroActionContext('drawTrait', 'trait');
@@ -1121,11 +1282,14 @@ export function createCombatServices(options = {}) {
         const seed = traitSeed(hero.id, hero.traitDraws, savedSeed.seed);
         const { rarity } = planTrait(seed);
         const shape = planTraitShape(seed, rarity);
+        const link = planTraitLink(seed, rarity);
+        // 规则 v6 遗物特性（G5f）：是否出遗物、出哪件、原版或拆解都由程序按种子定，副 LLM 只写来历。
+        const relic = planTraitRelic({ seed, rarity, archetype: hero.classProfile?.archetype, owned: ownedRelicIds(hero) });
         try { onPlan?.({ rarity }); } catch { /* 界面回调失败不改变抽取结果。 */ }
         const traitId = `tr-${Date.now().toString(36)}`;
         const kept = keptInnateKinds(hero);
         const innate = [kept.includes('active') ? hero.profile?.heroSkill : null, kept.includes('passive') ? hero.profile?.personalPassive : null].filter(Boolean);
-        const entities = await withCharacterLore([traitEntity({ character: hero, rarity, traitId, shape, existing: [...innate, ...(hero.traits || [])] })], readLore);
+        const entities = await withCharacterLore([traitEntity({ character: hero, rarity, traitId, shape, link, relic, existing: [...innate, ...(hero.traits || [])] })], readLore);
         if (!alive()) return { ok: false, reason: 'request-stale' };
         const story = await withStoryContext({ protagonist: getUserName() }, readStoryContext, { names: [hero.name], signal });
         if (!alive()) return { ok: false, reason: 'request-stale' };
@@ -1134,7 +1298,7 @@ export function createCombatServices(options = {}) {
         if (generated.reason) return generationFailure(generated);
         const trait = (generated.accepted || []).find((item) => item.kind === 'trait')?.trait;
         if (!trait) return { ok: false, reason: generated.requestFailure ? 'combat-llm-request-failed' : 'combat-trait-generation-failed' };
-        const written = await ledgerImpl.drawTrait(hero.id, trait);
+        const written = await ledgerImpl.drawTrait(hero.id, trait, { expectedDraws: hero.traitDraws });
         if (written?.ok !== true) return { ok: false, reason: written?.reason || 'combat-ledger-insert-failed' };
         const pending = trait.kind ? !traitFits(hero, trait.kind) : (hero.traits || []).length >= TRAIT_BASE_SLOTS;
         return { ok: true, id: hero.id, trait, pending, cost: TRAIT_DRAW_COST };
@@ -1152,6 +1316,20 @@ export function createCombatServices(options = {}) {
             : { ok: true, id: hero.id, traitId: pending.traitId, drop, discarded: drop === pending.traitId };
     }
 
+    // 规则 v6 G5f-4d 御印：为挂起的遗物刻印选定一张卡组副本（copyId）；挂起项与可选副本由账本视图 relicInscribe 给出，重放复核。
+    async function inscribeRelic({ relicId, model, copyId } = {}) {
+        const context = await heroActionContext('inscribeRelic', 'relic-inscribe', { needLlm: false });
+        if (!context.ok) return context;
+        const { ledgerImpl, hero } = context;
+        const due = (hero.relicInscribe || []).find((item) => item.relic.relicId === relicId && item.relic.model === model);
+        if (!due) return { ok: false, reason: 'combat-relic-inscribe-unavailable' };
+        if (!due.copies.includes(copyId)) return { ok: false, reason: 'combat-relic-inscribe-invalid' };
+        const cardId = (hero.deckEntries || []).find((row) => row.copyId === copyId)?.cardId;
+        if (!cardId) return { ok: false, reason: 'combat-relic-inscribe-copy-missing' };
+        const written = await ledgerImpl.inscribeRelic(hero.id, { relicId, model, copyId, cardId, inscription: due.inscription });
+        return written?.ok !== true ? { ok: false, reason: written?.reason || 'combat-ledger-insert-failed' } : { ok: true, id: hero.id, relicId, copyId, cardId, inscription: due.inscription };
+    }
+
     async function unlockTraitSlot() {
         const context = await heroActionContext('unlockTraitSlot', 'trait-slot', { needLlm: false });
         if (!context.ok) return context;
@@ -1161,6 +1339,82 @@ export function createCombatServices(options = {}) {
         if ((hero.points || 0) < next.cost) return { ok: false, reason: 'combat-points-insufficient' };
         const unlocked = await ledgerImpl.unlockTraitSlot(hero.id, next.slot);
         return unlocked?.ok !== true ? { ok: false, reason: unlocked?.reason || 'combat-ledger-insert-failed' } : { ok: true, id: hero.id, slot: next.slot, cost: next.cost };
+    }
+
+    // 规则 v6 积分抽卡：程序按种子定候选（本职业固定 2 + 随机 1），副 LLM 只给随机卡起名选模板；生成成功后才写 card-draw 扣费，失败或取消不扣费。
+    async function drawCard({ signal, free } = {}) {
+        const context = await heroActionContext('drawCard', 'card-draw');
+        if (!context.ok) return context;
+        const { ledgerImpl, state, hero } = context;
+        if (hero.pendingDraw) return { ok: false, reason: 'combat-card-draw-pending' };
+        if (free !== undefined && (!free || typeof free !== 'object' || Array.isArray(free)
+            || Object.keys(free).some(key => key !== 'level') || !hero.freeDraws?.includes(free.level))) {
+            return { ok: false, reason: 'combat-card-draw-free-unavailable' };
+        }
+        const freeDraw = free === undefined ? null : { level: free.level };
+        if (!freeDraw && (hero.points || 0) < CARD_DRAW_COST) return { ok: false, reason: 'combat-points-insufficient' };
+        const plan = planCardDraw(hero);
+        if (!plan) return { ok: false, reason: 'combat-card-draw-pool-empty' };
+        const llm = resolveCombatLlm(getLlm());
+        if (!llm.ok) return llmFailure(llm);
+        const entities = await withCharacterLore([drawCardEntity({ character: hero, plan })], readLore);
+        if (signal?.aborted) return { ok: false, reason: 'request-stale' };
+        const story = await withStoryContext({ protagonist: getUserName() }, readStoryContext, { names: [hero.name], signal });
+        if (signal?.aborted) return { ok: false, reason: 'request-stale' };
+        const generated = await generateWithRetry(entities, { request, llm: getLlm(), signal, classes: state.classes, now: Date.now(), context: story, retryDelays });
+        if (generated.reason === 'request-stale' || signal?.aborted) return { ok: false, reason: 'request-stale' };
+        if (generated.reason) return generationFailure(generated);
+        const card = (generated.accepted || []).find((item) => item.card)?.card;
+        if (!card) return { ok: false, reason: generated.requestFailure ? 'combat-llm-request-failed' : 'combat-card-draw-generation-failed' };
+        const choices = plan.fixedIds.map((id) => JSON.parse(JSON.stringify(fixedCard(id))));
+        choices.splice(plan.randomAt, 0, card);
+        const written = await ledgerImpl.drawCard(hero.id, { drawId: plan.drawId, choices, ...(freeDraw ? { free: freeDraw } : {}) });
+        if (written?.ok !== true) return { ok: false, reason: written?.reason || 'combat-ledger-insert-failed' };
+        return { ok: true, id: hero.id, drawId: plan.drawId, choices, cost: freeDraw ? 0 : CARD_DRAW_COST };
+    }
+
+    async function upgradeCard({ level, copyId } = {}) {
+        const context = await heroActionContext('upgradeCard', 'card-upgrade', { needLlm: false });
+        if (!context.ok) return context;
+        const { ledgerImpl, hero } = context;
+        if (!hero.freeUpgrades?.includes(level)) return { ok: false, reason: 'combat-card-upgrade-free-unavailable' };
+        const row = upgradableRows(hero).find(item => item.copyId === copyId);
+        if (!row) return { ok: false, reason: 'combat-card-upgrade-invalid' };
+        const written = await ledgerImpl.upgradeCard(hero.id, { level, copyId, cardId: row.cardId });
+        return written?.ok === true ? { ok: true, id: hero.id, level, copyId }
+            : { ok: false, reason: written?.reason || 'combat-ledger-insert-failed' };
+    }
+
+    // 翻牌：position 为背面朝上的位置 0–2，每抽只能翻一张；翻开后再决定加入卡组或放弃。
+    async function flipCard({ position } = {}) {
+        const context = await heroActionContext('flipCard', 'card-flip', { needLlm: false });
+        if (!context.ok) return context;
+        const { ledgerImpl, hero } = context;
+        const pending = hero.pendingDraw;
+        if (!pending) return { ok: false, reason: 'combat-card-flip-invalid' };
+        if (pending.flipped !== undefined) return { ok: false, reason: 'combat-card-flip-done' };
+        const at = Number(position);
+        if (!(Number.isInteger(at) && at >= 0 && at < pending.choices.length)) return { ok: false, reason: 'combat-card-flip-invalid' };
+        const flipped = await ledgerImpl.flipCard(hero.id, pending.drawId, at);
+        return flipped?.ok !== true
+            ? { ok: false, reason: flipped?.reason || 'combat-ledger-insert-failed' }
+            : { ok: true, id: hero.id, drawId: pending.drawId, position: at, card: pending.choices[at] };
+    }
+
+    // pick：翻开的那张的位置（加入卡组）或 'skip'（翻前翻后都可放弃，不退款）。
+    async function pickCard({ pick } = {}) {
+        const context = await heroActionContext('pickCard', 'card-pick', { needLlm: false });
+        if (!context.ok) return context;
+        const { ledgerImpl, hero } = context;
+        const pending = hero.pendingDraw;
+        if (!pending) return { ok: false, reason: 'combat-card-pick-invalid' };
+        const choice = pick === 'skip' ? 'skip' : Number(pick);
+        if (choice !== 'skip' && !(Number.isInteger(choice) && choice >= 0 && choice < pending.choices.length)) return { ok: false, reason: 'combat-card-pick-invalid' };
+        if (choice !== 'skip' && pending.flipped !== choice) return { ok: false, reason: 'combat-card-pick-unflipped' };
+        const picked = await ledgerImpl.pickCard(hero.id, pending.drawId, choice);
+        return picked?.ok !== true
+            ? { ok: false, reason: picked?.reason || 'combat-ledger-insert-failed' }
+            : { ok: true, id: hero.id, drawId: pending.drawId, pick: choice, card: choice === 'skip' ? null : pending.choices[choice] };
     }
 
     // ---- 主角档案（进入聊天后自动准备，状态可订阅） ----
@@ -1408,6 +1662,7 @@ export function createCombatServices(options = {}) {
         growthCache = null;
         lifeCache = null;
         lifeStamp = null;
+        pointsCache = null;
         growthSnapshot = null;
         ensureFailure = null;
         inventoryTakeover = null;
@@ -1436,8 +1691,9 @@ export function createCombatServices(options = {}) {
     }
 
     return {
-        getSession, getLedger, ensureTables, statsTables, syncRegex, resetChat, settings, inspectGenerationMaterials: materialContext.inspect, generateDeckProfile, regenerateDeck, respecClass, ascendClass,
-        drawTrait, pickTrait, unlockTraitSlot, refreshGrowth, getGrowth, onGrowthUpdated, retryGrowth, setAllyTier, lifeSource, refreshLife,
+        getSession, getLedger, ensureTables, statsTables, inventoryTables, syncRegex, resetChat, settings, inspectGenerationMaterials: materialContext.inspect, generateDeckProfile, regenerateDeck, respecClass, ascendClass,
+        originStore, points, gamePointsRounds, mahjongPointsRounds, ensurePointsFloor, pointsSpendingGate, readSharedPoints, readOriginWallet, pointsSnapshot, withPointsLock,
+        drawTrait, pickTrait, unlockTraitSlot, inscribeRelic, drawCard, flipCard, pickCard, upgradeCard, refreshGrowth, getGrowth, onGrowthUpdated, retryGrowth, setAllyTier, lifeSource, refreshLife,
         prepareProtagonist, getProtagonist, onProtagonistUpdated, autoPrepare, challengePromptQuota, intimateGate, intimatePrepared, combatSinceStart, challengeHistory, autoGrowth, checkReplayFor, checkPromptInput, partyPromptInput,
         getDiagnostics: () => diagnostics.map((item) => ({ ...item })), captureCombatInit, writeManualInit, buildCandidates, useInventoryItem, setGear,
         heroInventory, setHeroGear, sellHeroItem, takeoverInventory,

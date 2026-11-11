@@ -1,6 +1,9 @@
 // 战斗规则常量与纯函数：能量/抽牌/等级曲线、难度与敌人缩放、卡牌价值估算与预算校验。
 // 所有常量深冻结，整局共享，只读。数值与文案原样来自 v0.39.0，不要顺手调平衡。
 import { hash32 } from './random.js';
+import { opHandler } from './mechanics/registry.js';
+// 规则 v5 机制登记入口：导入即登记，保证估值前机制已就位。
+import './mechanics/index.js';
 
 // 难度档：affixes 是 普通/精英/首领 各自的词缀数，其余字段缺省时取「无影响」的值。
 function difficultyTier({ label, hp, damage, affixes: [normal, elite, boss], curse = 0, maxHpPct = 1, extraSkills = 0, enrageAt = 50, loot = 0, healScale = 1 }) {
@@ -17,34 +20,51 @@ function deepFreeze(value) {
 }
 
 export const COMBAT_RULES = Object.freeze({
-    version: 4,
+    version: 6,
     energyPerTurn: 3,
     drawPerTurn: 5,
     handLimit: 10,
-    deckMin: 20,
-    deckMax: 30,
+    // 规则 v6：卡组即全部持有的副本，不设张数上限；删卡后不少于 deckMin 张（D-05）。
+    deckMin: 10,
+    // 账本 deck 记录与卡组视图的长度护栏（防异常数据），不是玩法上限。
+    deckSanityMax: 200,
     copyLimit: 3,
     tempCardsPerTurn: 10,
     starterDeckSize: 20,
+    // v3–v5 档案的起始卡组形状（只用于校验旧档案与固定池缺失时的兜底）。
     starterDeckShape: Object.freeze({ basicAttack: 3, basicDefend: 3, classCards: 10, personalCards: 4 }),
+    // 规则 v6 起始卡组：每类先选种类，数组为各种类的副本数（攻击 3/3/2、技能 3/3/2、能力或第三种 ×2、个人牌 ×2，合计 starterDeckSize）。
+    starterDeckShapeV6: Object.freeze({ attack: Object.freeze([3, 3, 2]), skill: Object.freeze([3, 3, 2]), third: Object.freeze([2]), personal: Object.freeze([2]) }),
     storyExpCapPerFloor: 50,
     maxLevel: 20,
     maxEnemies: 50,
+    // 场上敌人总位置（含爪牙）；显式 v6 的普通敌人另限 3 名，旧版本与未标版本的 setup 保留旧上限。
     maxEnemiesOnField: 5,
+    maxFoesOnField: 3,
     maxAllies: 3,
     defaultSpeed: 100,
     speedJitter: 5,
     tiers: Object.freeze({
-        normal: Object.freeze({ label: '普通', hp: 40, damageCap: 12, exp: 20, speed: 100, hpScale: 1.3, damageScale: 2.7, difficultyGain: 1 }),
-        elite: Object.freeze({ label: '精英', hp: 80, damageCap: 18, exp: 45, speed: 104, hpScale: 1.15, damageScale: 1.75, difficultyGain: 0.5 }),
-        boss: Object.freeze({ label: '首领', hp: 160, damageCap: 26, exp: 100, speed: 92, hpScale: 0.68, damageScale: 1, difficultyGain: 0.5 }),
+        normal: Object.freeze({ label: '普通', hp: 40, damageCap: 12, exp: 20, speed: 100, hpScale: 1.2, damageScale: 2.38, difficultyGain: 1 }),
+        elite: Object.freeze({ label: '精英', hp: 80, damageCap: 18, exp: 45, speed: 104, hpScale: 1.01, damageScale: 1.49, difficultyGain: 0.5 }),
+        boss: Object.freeze({ label: '首领', hp: 160, damageCap: 26, exp: 100, speed: 92, hpScale: 0.51, damageScale: 0.75, difficultyGain: 0.5 }),
     }),
     tierScalePerLevel: 0.05,
     levelGap: Object.freeze({ hp: 0.02, damage: 0.04 }),
-    // 多敌折算：单只敌人生命与伤害 × 1 / (1 + perExtra × (在场人数 − 1))，不低于 floor；在场人数受 maxEnemiesOnField 限制，预备队不计。
-    // 按 scripts/combat-balance.mjs 校准（1 级标准档单主角普通敌人：2 只约 80%、3 只约 60%），只写进新建 setup，旧战斗按已存数值重放。
-    // 多敌折算仅写入新建 setup，旧战斗沿用已保存数值。
-    crowd: Object.freeze({ perExtra: 0.43, floor: 0.5 }),
+    // 剧情战斗每五个有效胜场恢复一档；scale 依次为单敌、双敌、三敌、四敌以上。
+    crowd: Object.freeze([
+        Object.freeze({ wins: 0, scale: Object.freeze([0.8, 0.4, 0.28, 0.22]) }),
+        Object.freeze({ wins: 5, scale: Object.freeze([0.85, 0.55, 0.46, 0.42]) }),
+        Object.freeze({ wins: 10, scale: Object.freeze([0.9, 0.7, 0.64, 0.61]) }),
+        Object.freeze({ wins: 15, scale: Object.freeze([0.95, 0.85, 0.82, 0.81]) }),
+        Object.freeze({ wins: 20, scale: Object.freeze([1, 1, 1, 1]) }),
+    ]),
+    // 仅用于剧情建局，避免改变共用 scaleEnemyStats 的日常挑战调用方。
+    encounterScale: Object.freeze({ elite: 1.4 }),
+    openingEliteScale: Object.freeze({
+        warrior: 1.25, guardian: 1.06, ranger: 1.11, assassin: 1.27,
+        mage: 1.33, priest: 1.1, summoner: 1.16, bard: 1.15,
+    }),
     // 生成敌人档位校准：副 LLM 生成的敌人（generated 不为 false）生命与伤害再 × 该值，模板敌人不变；首领按 scripts/combat-balance.mjs --generated 校准。
     generatedScale: Object.freeze({ boss: 0.9 }),
     difficulty: Object.freeze({
@@ -113,8 +133,8 @@ export const BASIC_CARDS = deepFreeze({
 export const BASIC_STRIKE_ID = 'basic-strike';
 export const BASIC_DEFEND_ID = 'basic-defend';
 
-// 旧存档的规则版本 3 与 4 可以互相兼容。
-export const COMPATIBLE_RULES_VERSIONS = Object.freeze([3, 4]);
+// 旧存档的规则版本 3–6 可以互相兼容；v5 新机制在 state.rulesVersion >= 5 时启用，v6 的战斗结算与 v5 相同（v6 改的是卡组与奖励）。
+export const COMPATIBLE_RULES_VERSIONS = Object.freeze([3, 4, 5, 6]);
 export const isCompatibleRulesVersion = (version) => COMPATIBLE_RULES_VERSIONS.includes(version);
 
 // 战斗中生成的临时牌与状态牌。
@@ -124,6 +144,20 @@ export const TOKEN_CARDS = deepFreeze({
     'token-spark': { id: 'token-spark', name: '灵光', type: 'skill', cost: 0, rarity: 'basic', effects: [{ op: 'draw', amount: 1 }, { op: 'exhaust-self' }], skillRef: '灵光' },
     'status-daze': { id: 'status-daze', name: '眩晕', type: 'skill', cost: 0, rarity: 'basic', effects: [], unplayable: true, ethereal: true, skillRef: '眩晕' },
     'status-wound': { id: 'status-wound', name: '伤口', type: 'skill', cost: 0, rarity: 'basic', effects: [], unplayable: true, skillRef: '伤口' },
+    // 规则 v5 G23 状态牌（结算在 mechanics/status-cards.js，只在 v5 战斗中生效；黏浊可打出，付 1 费后消耗）。
+    'status-burn': { id: 'status-burn', name: '灼痕', type: 'skill', cost: 0, rarity: 'basic', effects: [], unplayable: true, skillRef: '灼痕' },
+    'status-slime': { id: 'status-slime', name: '黏浊', type: 'skill', cost: 1, rarity: 'basic', effects: [{ op: 'exhaust-self' }], skillRef: '黏浊' },
+    'status-void': { id: 'status-void', name: '空洞', type: 'skill', cost: 0, rarity: 'basic', effects: [], unplayable: true, ethereal: true, skillRef: '空洞' },
+    'status-pain': { id: 'status-pain', name: '痛楚', type: 'skill', cost: 0, rarity: 'basic', effects: [], unplayable: true, skillRef: '痛楚' },
+    // 规则 v6 乐师固定卡的衍生牌（只新增键；只由 v6 固定卡的 create 生成）。
+    'token-rebuke': { id: 'token-rebuke', name: '罚音', type: 'attack', cost: 0, rarity: 'basic', retain: true, effects: [{ op: 'damage', amount: 5, hits: 1, target: 'enemy' }, { op: 'exhaust-self' }], skillRef: '罚音' },
+    'token-grace': { id: 'token-grace', name: '天籁', type: 'skill', cost: 0, rarity: 'basic', retain: true, effects: [{ op: 'energy', amount: 1 }, { op: 'exhaust-self' }], skillRef: '天籁' },
+    'token-miracle': { id: 'token-miracle', name: '奇迹', type: 'skill', cost: 0, rarity: 'basic', retain: true, effects: [{ op: 'energy', amount: 1 }, { op: 'exhaust-self' }], skillRef: '奇迹' },
+    'token-epiphany': { id: 'token-epiphany', name: '悟弦', type: 'skill', cost: 0, rarity: 'basic', retain: true, effects: [{ op: 'draw', amount: 2 }, { op: 'exhaust-self' }], skillRef: '悟弦' },
+    'token-shelter': { id: 'token-shelter', name: '护调', type: 'skill', cost: 1, rarity: 'basic', retain: true, effects: [{ op: 'block', amount: 6, target: 'self' }, { op: 'exhaust-self' }], skillRef: '护调' },
+    'token-sever': { id: 'token-sever', name: '断弦', type: 'attack', cost: 1, rarity: 'basic', effects: [{ op: 'damage', amount: 3, hits: 3, target: 'enemy' }, { op: 'exhaust-self' }], skillRef: '断弦' },
+    'token-pierce': { id: 'token-pierce', name: '穿云', type: 'attack', cost: 1, rarity: 'basic', retain: true, effects: [{ op: 'damage', amount: 9, hits: 1, target: 'enemy' }, { op: 'exhaust-self' }], skillRef: '穿云' },
+    'token-finale': { id: 'token-finale', name: '终曲', type: 'attack', cost: 1, rarity: 'basic', effects: [{ op: 'damage', amount: 8, hits: 1, target: 'all-enemies' }, { op: 'exhaust-self' }], skillRef: '终曲' },
 });
 export const TOKEN_KEYS = Object.freeze(Object.keys(TOKEN_CARDS));
 
@@ -201,7 +235,8 @@ function effectValue(effect) {
         case 'buff':
             return effect.turns * (BUFF_TRIGGER_VALUE[effect.trigger] || 1) * (effect.cardType ? 0.5 : 1) * sumEffects(effect.then);
         default:
-            return 0;
+            // 已登记机制的算子按其自身估值，未登记的仍为 0。
+            return opHandler(effect.op)?.value?.(effect, sumEffects) ?? 0;
     }
 }
 
@@ -214,12 +249,18 @@ export function estimateEffectsValue(effects) {
     return round2(sumEffects(effects));
 }
 
-// 牌自身的附加价值：固有 +2，消散且没有自带耗尽 -2，弃牌触发效果按可打出与否折算。
+// 牌自身的附加价值：固有 +2，消散且没有自带耗尽 -2，弃牌触发效果按可打出与否折算；
+// 规则 v5 关键字：重演按效果价值 × 次数 × 0.85 计入，狡黠 +1.5；
+// 圣辉第二费用每点 -3（与获得 1 点圣辉的估值相抵），X 圣辉按平均投入 2 点计：效果再计 1 倍、减 6。
 function cardTraitValue(card, effects) {
     let value = 0;
     if (card.innate) value += 2;
     if (card.ethereal && !(effects || []).some((effect) => effect?.op === 'exhaust-self')) value -= 2;
     if (card.onDiscard) value += sumEffects(card.onDiscard) * (card.unplayable ? 1 : 0.5);
+    if (Number.isInteger(card.replay) && card.replay > 0) value += sumEffects(effects) * card.replay * 0.85;
+    if (card.sly) value += 1.5;
+    if (card.radiance === 'X') value += sumEffects(effects) - 6;
+    else if (Number.isInteger(card.radiance) && card.radiance > 0) value -= card.radiance * 3;
     return value;
 }
 
@@ -299,21 +340,20 @@ export function signatureCardAt(profile, slot) {
     return (profile?.signatureCards || []).find((card, index) => signatureSlotOf(card, index) === slot) || null;
 }
 
-// 牌组校验：张数、同名上限、是否拥有。owned 可以是 Map 或普通对象，catalog 是 id 到牌定义的 Map。
+// 牌组校验：张数下限、是否拥有、目录与稀有度。规则 v6 卡组即持有，不再限总张数与同名张数（同名上限只约束获得来源）。
+// owned 可以是 Map 或普通对象，catalog 是 id 到牌定义的 Map。
 export function validateDeck(cardIds, owned, catalog) {
     const ids = Array.isArray(cardIds) ? cardIds : [];
     const errors = [];
     if (ids.length < COMBAT_RULES.deckMin) errors.push({ path: 'cards', reason: 'deck-too-small', detail: { size: ids.length, min: COMBAT_RULES.deckMin } });
-    if (ids.length > COMBAT_RULES.deckMax) errors.push({ path: 'cards', reason: 'deck-too-large', detail: { size: ids.length, max: COMBAT_RULES.deckMax } });
+    if (ids.length > COMBAT_RULES.deckSanityMax) errors.push({ path: 'cards', reason: 'deck-too-large', detail: { size: ids.length, max: COMBAT_RULES.deckSanityMax } });
     const counts = new Map();
     for (const id of ids) counts.set(id, (counts.get(id) || 0) + 1);
     const ownedMap = owned instanceof Map ? owned : new Map(Object.entries(owned || {}));
     for (const [id, count] of counts) {
         const card = catalog?.get(id);
-        const limit = cardCopyLimit(card?.rarity);
         if (!card) errors.push({ path: 'cards', reason: 'unknown-card', cardId: id });
-        else if (!limit) errors.push({ path: 'cards', reason: 'invalid-rarity', cardId: id });
-        else if (count > limit) errors.push({ path: 'cards', reason: 'copy-limit', cardId: id, detail: { count, limit } });
+        else if (!cardCopyLimit(card.rarity)) errors.push({ path: 'cards', reason: 'invalid-rarity', cardId: id });
         const ownedCount = ownedMap.get(id) || 0;
         if (!ownedCount) errors.push({ path: 'cards', reason: 'not-owned', cardId: id });
         else if (count > ownedCount) errors.push({ path: 'cards', reason: 'owned-exceeded', cardId: id, detail: { count, owned: ownedCount } });
@@ -359,12 +399,24 @@ export function scaleEnemyStats(template, level = 1, difficulty = 'normal', { ga
     return { hp, damageScale: Math.min(5, Math.round(damage * 100) / 100) };
 }
 
-// 多敌折算系数：total 为本场敌人总数，按在场上限截断；1 只时为 1，setup 与旧版一致。
-export function crowdScaleFor(total) {
-    const n = Math.min(COMBAT_RULES.maxEnemiesOnField, Math.max(1, Math.floor(Number(total) || 1)));
-    if (n <= 1) return 1;
-    const { perExtra, floor } = COMBAT_RULES.crowd;
-    return Math.max(floor, 1 / (1 + perExtra * (n - 1)));
+// 新建战斗按人数与胜场取档，最多计入第一名后备；旧 setup 不重算。
+export function crowdScaleFor(total, battleWins = 0) {
+    const n = Math.min(COMBAT_RULES.maxFoesOnField + 1, Math.max(1, Math.floor(Number(total) || 1)));
+    const wins = Number.isSafeInteger(battleWins) && battleWins >= 0 ? battleWins : 0;
+    return COMBAT_RULES.crowd.filter((tier) => wins >= tier.wins).at(-1).scale[n - 1];
+}
+
+// 精英以职业初期强度逐档恢复，叠加相同的相对人数折算。
+export function encounterScaleFor(tier, battleWins = 0, archetype) {
+    if (tier !== 'elite') return 1;
+    const wins = Number.isSafeInteger(battleWins) && battleWins >= 0 ? battleWins : 0;
+    const stages = COMBAT_RULES.crowd;
+    const index = stages.findLastIndex(stage => wins >= stage.wins);
+    const restored = index / (stages.length - 1);
+    const full = COMBAT_RULES.encounterScale[tier];
+    const opening = Object.hasOwn(COMBAT_RULES.openingEliteScale, archetype)
+        ? COMBAT_RULES.openingEliteScale[archetype] : full;
+    return (opening + (full - opening) * restored) / stages[index].scale[0];
 }
 
 // 一组敌人的战斗经验合计。

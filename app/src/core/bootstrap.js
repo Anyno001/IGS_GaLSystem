@@ -99,13 +99,14 @@ import { resolvePromptTriggers, setLastPromptReport } from '../scene/prompt-trig
 import { collectPromptContext } from '../host/prompt-context.js';
 import { createCombatServices } from './combat-services.js';
 import { createCombatChatRecord } from '../host/combat-chat-record.js';
+import { createPointsFloorRecord } from '../host/points-floor-record.js';
 import { createCombatGenerationMaterials } from '../host/combat-generation-materials.js';
 import { createCombatStoryContext } from '../host/combat-story-context.js';
 import { applyCombatRuleModifiers, combatExpansionEnabled, combatCooldownFloorsOf, combatGrammarEnabled, findPendingCombatReport, resolveChallengePromptSegment, resolveCombatNarrationSegment, resolveCombatPartySegment, resolveCombatPromptRule } from '../scene/combat-prompt.js';
 import { mergeCheckInputs, resolveCheckRollsSegment } from '../scene/check-rolls.js';
 import { isMatteUnlocked } from '../media/matte-unlock.js';
 
-const IGS_VERSION = '0.39.95';
+const IGS_VERSION = '0.40.1';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 
@@ -434,6 +435,7 @@ export function bootstrapIGS(options = {}) {
         global: globalObject,
         storage: storageLike,
         chatRecord: createCombatChatRecord(globalObject),
+        pointsFloorRecord: createPointsFloorRecord(globalObject),
         send: (text, options) => typeAndSend(text, options),
         request: (prompt, llm) => secondaryLlm.request(prompt, llm),
         getReaderSettings: () => (getUnifiedSettingsSnapshot() || {}).readerSettings || {},
@@ -441,9 +443,8 @@ export function bootstrapIGS(options = {}) {
         getSourceFilter: () => readImageBridge().sourceFilter,
         getChatId: () => (typeof illustrationMessageHost.getChatId === 'function' ? illustrationMessageHost.getChatId() : ''),
         getUserName: () => (typeof illustrationMessageHost.getUserName === 'function' ? illustrationMessageHost.getUserName() : ''),
-        // 积分与金钱分开计算（2026-11-05 用户定）：战斗积分不并入数值侧金钱。
-        // wallet 接随身系统的原始积分：主角积分余额 = 战斗流水 + 随身系统流水，花费按合计判断；这里只读对方原始值，不读合并视图。
-        getWallet: () => (app.originRuntime && typeof app.originRuntime.rawPoints === 'function' ? app.originRuntime.rawPoints() : 0),
+        // 战斗积分与数值侧金钱合并成一个钱包：主角余额里并入数值侧金钱（statsRuntime 在战斗服务之后创建，按需读取）。
+        getWallet: () => (app.statsRuntime && typeof app.statsRuntime.walletMoney === 'function' ? app.statsRuntime.walletMoney() : 0),
         readLore: (name) => (typeof illustrationMessageHost.readCharacterLore === 'function'
             ? illustrationMessageHost.readCharacterLore(name, { includeWorldInfo: false }) : []),
         readGenerationMaterials: createCombatGenerationMaterials(globalObject),
@@ -454,6 +455,7 @@ export function bootstrapIGS(options = {}) {
         writeFloor: (id, text, floor, writeOptions) => illustrationMessageHost.writeFloor(id, text, floor, writeOptions),
         buildMode: () => (app.statsRuntime && typeof app.statsRuntime.getBuildMode === 'function'
             ? { mode: app.statsRuntime.getBuildMode(), choices: app.statsRuntime.getBuildChoices() } : null),
+        traitNamesOf: (name) => (app.statsRuntime && typeof app.statsRuntime.traitNamesOf === 'function' ? app.statsRuntime.traitNamesOf(name) : null),
         npcAbilities: (name) => (app.statsRuntime && typeof app.statsRuntime.npcAbilities === 'function' ? app.statsRuntime.npcAbilities(name) : null),
         getChallengeSnapshot: () => (app.statsRuntime && typeof app.statsRuntime.challengeSnapshot === 'function' ? app.statsRuntime.challengeSnapshot() : null),
     });
@@ -483,7 +485,8 @@ export function bootstrapIGS(options = {}) {
         // 推送映射页：读当前表格，按草稿里的覆盖值标出每列状态；没装数据库插件时返回 null。
         statsMappings: (overridesByFingerprint) => {
             const api = globalObject.AutoCardUpdaterAPI;
-            return api ? describeStatMappings(createShujukuClient(api).readTables(), overridesByFingerprint || {}) : null;
+            const currencyName = app.statsRuntime?.archive()?.currency?.name || '';
+            return api ? describeStatMappings(createShujukuClient(api).readTables(), overridesByFingerprint || {}, { currencyName }) : null;
         },
         // 数值 v2：选项骰子走 IGS 引擎（未启用时返回 null，交回 AcuDice）、选项成功率、阅读器提示条、诊断与存档区操作。
         statsDice: (raw, ctx) => (app.statsRuntime ? app.statsRuntime.resolveDice(raw, ctx) : null),
@@ -498,6 +501,7 @@ export function bootstrapIGS(options = {}) {
             if (kind === 'skill') return rt.skillOp(op, name, payload);
             if (kind === 'hero') return rt.heroOp(op, name, payload);
             if (kind === 'relation') return rt.relationOp(op, name, payload);
+            if (kind === 'currency' && op === 'retry') return rt.retryCurrency();
             // 「修改属性」：主角六维底数写进战斗属性表（手改记录覆盖原初始化），剧情与升级加点照常叠加。
             if (kind === 'attrs') {
                 const heroName = (typeof illustrationMessageHost.getUserName === 'function' && String(illustrationMessageHost.getUserName() || '').trim()) || '主角';
@@ -580,6 +584,8 @@ export function bootstrapIGS(options = {}) {
         saveUnifiedSettings,
         typeAndSend,
         // 卡牌战斗：只接数据与服务回调，战斗面板界面尚未接入。
+        gamePointsRounds: (game, messageId) => combatServices.gamePointsRounds?.(game, messageId),
+        mahjongPointsRounds: messageId => combatServices.mahjongPointsRounds?.(messageId),
         getCombatSession: () => combatServices.getSession(),
         getChallengeHistory: () => (typeof combatServices.challengeHistory === 'function' ? combatServices.challengeHistory() : null),
         getChallengeQuota: (messageId) => (typeof combatServices.challengePromptQuota === 'function' ? combatServices.challengePromptQuota(messageId) : null),
@@ -602,12 +608,17 @@ export function bootstrapIGS(options = {}) {
         drawCombatTrait: (name) => combatServices.drawTrait(name),
         pickCombatTrait: (name) => combatServices.pickTrait(name),
         unlockCombatTraitSlot: () => combatServices.unlockTraitSlot(),
-        setCombatGear: typeof combatServices.setGear === 'function' ? (name, slot, itemId) => combatServices.setGear(name, slot, itemId) : undefined,
+        inscribeCombatRelic: (opts) => combatServices.inscribeRelic(opts),
+        drawCombatCard: (opts) => combatServices.drawCard(opts),
+        upgradeCombatCard: (opts) => combatServices.upgradeCard(opts),
+        flipCombatCard: (opts) => combatServices.flipCard(opts),
+        pickCombatCard: (opts) => combatServices.pickCard(opts),
+        setCombatGear: typeof combatServices.setGear === 'function' ? (name, gearId, equip, slotIndex) => combatServices.setGear(name, gearId, equip, null, slotIndex) : undefined,
         useCombatInventoryItem: typeof combatServices.useInventoryItem === 'function' ? (item) => combatServices.useInventoryItem(item) : undefined,
         getCombatHeroInventory: typeof combatServices.heroInventory === 'function' ? () => combatServices.heroInventory() : undefined,
-        setCombatHeroGear: typeof combatServices.setHeroGear === 'function' ? (slot, itemId) => combatServices.setHeroGear(slot, itemId) : undefined,
+        setCombatHeroGear: typeof combatServices.setHeroGear === 'function' ? (gearId, equip, slotIndex) => combatServices.setHeroGear(gearId, equip, slotIndex) : undefined,
         // 背包卖出（v0.39.2）：kind 为 gear / keepsake。
-        sellCombatHeroItem: typeof combatServices.sellHeroItem === 'function' ? (kind, id) => combatServices.sellHeroItem(kind, id) : undefined,
+        sellCombatHeroItem: typeof combatServices.sellHeroItem === 'function' ? (kind, id, count) => combatServices.sellHeroItem(kind, id, count) : undefined,
         setCombatAllyTier: (name, tier) => combatServices.setAllyTier(name, tier),
         getCombatGrowth: () => combatServices.getGrowth(),
         // 检定回放先问数值系统，数值系统没有结果再回落战斗自己的。
@@ -862,7 +873,9 @@ export function bootstrapIGS(options = {}) {
     // 角色资料（v2 §6.4）：主角读人设，NPC 读角色卡与按名字、别名扫到的世界书条目（标题或正文开头含名字的也算）；
     // 仍为空时从最近楼层截取提到该角色的段落兜底。读取失败记在 errors 里，由数值运行时写进诊断。
     const PERSONA_FLOORS = 20;
-    const PERSONA_FALLBACK_MAX = 1200;
+    const PERSONA_FALLBACK_MAX = 3000;
+    // 条目开头的 HTML 注释（如数据库技能元信息）不是设定内容，读人设时去掉。
+    const stripNotes = (text) => String(text || '').replace(/<!--[\s\S]*?-->/g, '').trim();
     const aliasGroupOf = (name) => {
         const aliases = (readImageBridge().sceneAssets || {}).characterAliases || {};
         const group = new Set([name, ...(Array.isArray(aliases[name]) ? aliases[name] : [])]);
@@ -886,34 +899,44 @@ export function bootstrapIGS(options = {}) {
         const out = [];
         for (const name of names) {
             if (name === '主角') {
-                let summary = String((c && c.powerUserSettings && c.powerUserSettings.persona_description) || '').trim();
+                const own = String((c && c.powerUserSettings && c.powerUserSettings.persona_description) || '').trim();
+                let world = '';
                 const userName = String((c && c.name1) || '').trim();
                 if (userName) {
                     try {
                         const wi = await statsWorldInfo({ description: userName });
-                        if (wi && wi.ok && wi.text) summary = `${summary} ${wi.text}`.trim();
+                        if (wi && wi.ok && wi.text) world = stripNotes(wi.text);
                     } catch (error) { /* 世界书读不到时只用人设 */ }
                 }
-                out.push({ name, summary });
+                out.push({ name, summary: [own, world].filter(Boolean).join('\n'), own, world });
                 continue;
             }
             const words = aliasGroupOf(name);
             const card = cards.find((ch) => ch && words.includes(ch.name));
-            let summary = card ? [card.description, card.personality].filter(Boolean).join(' ') : '';
+            // own：角色自己的资料（卡面人设 + 标题或开头写着名字的条目），排在最前；world：其余扫到的世界书（常驻与关键词条目）。
+            // 常驻条目多的卡，世界书全文远长于角色条目，混在一起再截断会把角色自己的条目切掉。
+            let own = card ? stripNotes([card.description, card.personality].filter(Boolean).join('\n')) : '';
+            let world = '';
             const errors = [];
             try {
                 const wi = await statsWorldInfo({ description: words.join(' ') });
-                if (wi && wi.ok && wi.text) summary = `${summary} ${wi.text}`.trim();
+                if (wi && wi.ok && wi.text) world = stripNotes(wi.text);
                 else if (wi && !wi.ok) errors.push(wi.reason || 'WORLDINFO_RESOLVE_FAILED');
             } catch (error) { errors.push('WORLDINFO_RESOLVE_THREW'); }
             try {
                 const named = await readWorldInfoByNames(globalObject, words, readWorldInfoExclude());
-                for (const part of named.entries || []) if (!summary.includes(part)) summary = `${summary} ${part}`.trim();
+                for (const raw of named.entries || []) {
+                    const part = stripNotes(raw);
+                    if (!part) continue;
+                    if (world.includes(part)) world = world.split(part).join('').trim();
+                    if (!own.includes(part)) own = `${own}\n${part}`.trim();
+                }
                 if (named.reason) errors.push(named.reason);
             } catch (error) { errors.push('WORLDINFO_BY_NAME_THREW'); }
+            let summary = [own, world].filter(Boolean).join('\n');
             let from = summary ? 'card' : '';
-            if (!summary) { summary = recentParagraphs(c, words); from = summary ? 'floors' : ''; }
-            out.push({ name, summary, from, ...(errors.length ? { errors } : {}) });
+            if (!summary) { summary = recentParagraphs(c, words); own = summary; from = summary ? 'floors' : ''; }
+            out.push({ name, summary, own, world, from, ...(errors.length ? { errors } : {}) });
         }
         return out;
     };
@@ -987,6 +1010,9 @@ export function bootstrapIGS(options = {}) {
         // 卡牌战斗桥接：生命与六维取自战斗表，数值表读写走战斗的缓存客户端，检定提示词与队伍状态合并下发。
         combatSource: () => (typeof combatServices.lifeSource === 'function' ? combatServices.lifeSource() : null),
         statsTables: () => (typeof combatServices.statsTables === 'function' ? combatServices.statsTables() : null),
+        // 剧情货币是物品表里的一行：与战斗共用背包写口。
+        currencyInventory: () => (typeof combatServices.inventoryTables === 'function' ? combatServices.inventoryTables() : null),
+        pointsExchange: () => combatServices.points?.() || null,
         combatPrompt: (type) => {
             const readerSettings = (getUnifiedSettingsSnapshot() || {}).readerSettings;
             if (!combatExpansionEnabled(readerSettings)) return null;
@@ -1046,20 +1072,13 @@ export function bootstrapIGS(options = {}) {
         readLlm: () => (((getUnifiedSettingsSnapshot() || {}).bridge || {}).autoIllustration || {}).llm,
         readProfiles: () => createModelProfilesStore(globalObject).read(),
         secondaryLlm,
+        combatServices,
+        statsRuntime,
         notice: (level, text) => { const notice = app.igsUi && app.igsUi.showImageNotice; if (typeof notice === 'function') notice.call(app.igsUi, level, text); },
         openSettings: () => publicApi.openSettings({ tab: 'origin' }),
         legacyActive: () => originLegacyActive(globalObject),
-        // 战斗主角的原始积分（lifeSource 读的是 effectiveState({ raw: true })，不含 wallet）。
-        // 战斗关闭为 0；战斗开着但数据还没载入时返回 null（未知），随身系统记账时不写快照，免得把 0 固化进账本。
-        readCombatPoints: () => {
-            if (!combatExpansionEnabled((getUnifiedSettingsSnapshot() || {}).readerSettings)) return 0;
-            const src = typeof combatServices.lifeSource === 'function' ? combatServices.lifeSource() : null;
-            if (!src || src.ready !== true || typeof src.readPoints !== 'function') return null;
-            return src.readPoints();
-        },
         // 当前数值体系（coc7 或 dnd5e）；数值系统没开按 CoC。
         readRuleset: () => { const st = ((getUnifiedSettingsSnapshot() || {}).bridge || {}).stats; return st && st.enabled && st.ruleset === 'dnd5e' ? 'dnd5e' : 'coc7'; },
-        readCombatPointLog: () => { const src = typeof combatServices.lifeSource === 'function' ? combatServices.lifeSource() : null; return src && typeof src.readPointLog === 'function' ? src.readPointLog() : null; },
     });
     app.originRuntime = originRuntime;
     state.originSettingsOff = events.on('igs:legacy-settings-updated', () => originRuntime.sync());

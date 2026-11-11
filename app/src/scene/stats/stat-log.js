@@ -5,6 +5,7 @@ import { hash32 } from '../../combat/random.js';
 import { BUILD_CHOICES, BUILD_MODES, abilityKeyOf } from '../../combat/abilities.js';
 import { STATS_LOG_MAX, createStatsLedger, currentStatsState, ledgerKey } from './stat-ledger.js';
 import { deserializeLedger, sanitizeCatalog, sanitizeLearned } from './stat-persist.js';
+import { currencyRecordValue, normalizeCurrencyRecord } from './stat-currency.js';
 import { LEGACY_SKILL_MAP, mergeLegacyValue } from './stat-registry.js';
 
 export { BUILD_CHOICES, BUILD_MODES };
@@ -12,8 +13,9 @@ export { BUILD_CHOICES, BUILD_MODES };
 export const STAT_LOG_CHARACTER = '主角';
 // 正文里与数值相关的标签（igs-stat 与 igs-check）。标签变了，对应楼层记录就不再适用。
 const TAG_PATTERN = /[\[【]\s*igs\s*-?\s*stat\s*[:：][^\]】]*[\]】]|\[igs-check:[^\]\n]*\]/gi;
-const META_KEYS = Object.freeze(['check', 'checks', 'preroll', 'note', 'flags', 'pendingRoll', 'favorMode', 'favorTier', 'strengthRev', 'intimateCost', 'manual', 'bondEvents', 'reviewEvents']);
-const TYPE_OF_PREFIX = Object.freeze({ chat: 'chat', skill: 'skill-def', merge: 'skill-merge', sheet: 'sheet', base: 'base', edit: 'base', hero: 'base', queue: 'queue', notified: 'notified', learned: 'learned', force: 'force', aptitude: 'aptitude', trait: 'trait', counter: 'counter', heronote: 'heronote', romance: 'romance', fame: 'fame', traitinit: 'trait', traitnote: 'trait', status: 'status', cycle: 'status', landmine: 'trait' });
+// currency：本楼剧情货币增减（{ delta, balance }），重算同一楼时按新旧差额补写物品表。
+const META_KEYS = Object.freeze(['check', 'checks', 'preroll', 'note', 'flags', 'pendingRoll', 'favorMode', 'favorTier', 'strengthRev', 'intimateCost', 'manual', 'bondEvents', 'reviewEvents', 'currency', 'heroSide']);
+const TYPE_OF_PREFIX = Object.freeze({ chat: 'chat', skill: 'skill-def', merge: 'skill-merge', sheet: 'sheet', base: 'base', edit: 'base', hero: 'base', queue: 'queue', notified: 'notified', learned: 'learned', force: 'force', aptitude: 'aptitude', trait: 'trait', counter: 'counter', heronote: 'heronote', romance: 'romance', fame: 'fame', traitinit: 'trait', traitnote: 'trait', status: 'status', cycle: 'status', landmine: 'trait', soft: 'trait', rename: 'trait' });
 export const STAT_CHAT_RECORD_TYPES = Object.freeze(Object.values(TYPE_OF_PREFIX));
 // 旧存档的六个属性名 → 战斗六维名（含原样保留的三项），用来从旧百分制属性反推六维倾向。
 const LEGACY_SCORE_NAMES = Object.freeze({ 健康: '体质', 力量: '力量', 敏捷: '敏捷', 理智: '智力', 观察: '感知', 魅力: '魅力' });
@@ -103,7 +105,7 @@ function metaToStore(meta) {
     return Object.keys(out).length ? out : null;
 }
 
-const changeText = (changes) => changes.slice(0, 4).map((c) => `${c.target ?? ''}${c.key ?? ''}${c.from ?? ''}→${c.to ?? ''}`).join('；').slice(0, 40);
+const changeText = (changes) => changes.slice(0, 4).map((c) => `${c.target ?? ''}${c.key === 'address' ? '称呼' : c.key ?? ''}${c.from ?? ''}→${c.to ?? ''}`).join('；').slice(0, 40);
 
 export function floorRecord({ messageId, swipeId, tagHash, baseId = null, seed, before, after, changes = [], meta = null, createdAt = 0 }) {
     const payload = { base: baseId, seed, ops: diffState(before, after), changes: Array.isArray(changes) ? changes : [] };
@@ -124,12 +126,16 @@ export function normalizeBuildChoices(raw) {
 }
 
 // 聊天级设置 → 键值表（Map：键 → 值）。
-export function chatEntries({ chatEnabled = false, catalog = null, learned = {}, buildMode = null, buildChoices = {} } = {}) {
+export function chatEntries({ chatEnabled = false, catalog = null, learned = {}, buildMode = null, buildChoices = {}, currency = null } = {}) {
     const clean = sanitizeCatalog(catalog);
     const map = new Map([['chat:enabled', Boolean(chatEnabled)]]);
     if (normalizeBuildMode(buildMode)) map.set('chat:buildMode', buildMode);
     const choices = normalizeBuildChoices(buildChoices);
     if (Object.keys(choices).length) map.set('chat:buildChoices', choices);
+    const money = normalizeCurrencyRecord(currency);
+    if (money) map.set('chat:currency', currencyRecordValue(money));
+    // 固定支出（聊天级）：有条目才写。
+    if (clean.expenses.length) map.set('chat:expenses', clean.expenses);
     for (const skill of clean.story) map.set(`skill:${skill.name}`, skill);
     for (const [from, to] of Object.entries(clean.merged)) map.set(`merge:${from}`, to);
     for (const [name, sheet] of Object.entries(clean.sheets)) map.set(`sheet:${name}`, sheet);
@@ -146,6 +152,8 @@ export function chatEntries({ chatEnabled = false, catalog = null, learned = {},
     for (const [name, list] of Object.entries(clean.statuses)) map.set(`status:${name}`, list);
     for (const [name, list] of Object.entries(clean.cycles)) map.set(`cycle:${name}`, list);
     for (const [name, marks] of Object.entries(clean.landmineKnown || {})) map.set(`landmine:${name}`, marks);
+    for (const [name, marks] of Object.entries(clean.softKnown || {})) map.set(`soft:${name}`, marks);
+    for (const [from, to] of Object.entries(clean.renames)) map.set(`rename:${from}`, to);
     for (const name of clean.romanceSeen) map.set(`romance:${name}`, true);
     if (clean.fameBars.length) map.set('fame:bars', clean.fameBars);
     map.set('queue:skills', clean.queue.skills);
@@ -175,11 +183,12 @@ export function diffChatRecords(baseline, entries, { tag = '', createdAt = 0 } =
 
 // 键值表 → 聊天级设置对象（diffChatRecords 的逆过程）。
 export function restoreChat(map) {
-    const raw = { story: [], merged: {}, sheets: {}, protagonistBase: {}, protagonistEdit: {}, heroAssigned: false, intimacyForced: [], aptitude: {}, traits: {}, counters: {}, heroNotes: {}, romanceSeen: [], fameBars: [], queue: { skills: [], people: [] }, notified: [], traitInit: [], traitNotes: {}, statuses: {}, cycles: {}, landmineKnown: {} };
+    const raw = { story: [], merged: {}, sheets: {}, protagonistBase: {}, protagonistEdit: {}, heroAssigned: false, intimacyForced: [], aptitude: {}, traits: {}, counters: {}, heroNotes: {}, romanceSeen: [], fameBars: [], queue: { skills: [], people: [] }, notified: [], traitInit: [], traitNotes: {}, statuses: {}, cycles: {}, landmineKnown: {}, softKnown: {}, renames: {} };
     const learned = {};
     let chatEnabled = false;
     let buildMode = null;
     let buildChoices = {};
+    let currency = null;
     for (const [key, value] of map) {
         const colon = key.indexOf(':');
         const prefix = key.slice(0, colon);
@@ -187,6 +196,8 @@ export function restoreChat(map) {
         if (prefix === 'chat' && name === 'enabled') chatEnabled = value === true;
         else if (prefix === 'chat' && name === 'buildMode') buildMode = normalizeBuildMode(value);
         else if (prefix === 'chat' && name === 'buildChoices') buildChoices = normalizeBuildChoices(value);
+        else if (prefix === 'chat' && name === 'currency') currency = normalizeCurrencyRecord(value);
+        else if (prefix === 'chat' && name === 'expenses') raw.expenses = value;
         else if (prefix === 'skill') raw.story.push(value);
         else if (prefix === 'merge') raw.merged[name] = value;
         else if (prefix === 'sheet') raw.sheets[name] = value;
@@ -205,12 +216,14 @@ export function restoreChat(map) {
         else if (prefix === 'status') raw.statuses[name] = value;
         else if (prefix === 'cycle') raw.cycles[name] = value;
         else if (prefix === 'landmine') raw.landmineKnown[name] = value;
+        else if (prefix === 'soft') raw.softKnown[name] = value;
+        else if (prefix === 'rename') raw.renames[name] = value;
         else if (prefix === 'counter') raw.counters[name] = value;
         else if (prefix === 'romance' && value === true) raw.romanceSeen.push(name);
         else if (prefix === 'fame' && name === 'bars') raw.fameBars = value;
         else if (prefix === 'learned') learned[name] = value;
     }
-    return { chatEnabled, buildMode, buildChoices, catalog: sanitizeCatalog(raw), learned: sanitizeLearned(learned).learned };
+    return { chatEnabled, buildMode, buildChoices, currency, catalog: sanitizeCatalog(raw), learned: sanitizeLearned(learned).learned };
 }
 
 // 读取：init 记录 + 聊天级记录（表内顺序重放，后写覆盖先写）+ 与当前正文标签相符的楼层记录 → 账本。

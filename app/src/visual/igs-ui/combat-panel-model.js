@@ -1,19 +1,29 @@
-import { canAfford, cardView, computeBlock, computeDamage, describeIntent, effectsNeedTarget, livingIds, opposite } from '../../combat/battle-state.js';
+import { canPlay, cardView, computeBlock, computeDamage, describeIntent, effectsNeedTarget, livingIds, opposite } from '../../combat/battle-state.js';
 import { actionProgress, isWhipping, targetSpec, upcomingActors } from '../../combat/engine.js';
 import { combatFeats } from '../../combat/feats.js';
 import { COMBAT_RULES, cardCopyLimit } from '../../combat/rules.js';
 import { hash32 } from '../../combat/random.js';
 import { enemyArtKeyFor } from '../../combat/enemy-art.js';
 import { AWAKEN_TYPE_NAMES, injuryLevel } from '../../combat/report.js';
-import { CARD_TYPE_LABELS, KEYWORD_TIPS, cardArtSvg, describeEffectParts, describeEffects, describeKeywordParts, describeTrigger } from './combat-card-art.js';
+import { CARD_TYPE_LABELS, KEYWORD_TIPS, attributeNumberOptions, attributeScalingTip, cardArtSvg, describeEffectParts, describeEffects, describeKeywordParts, describeTrigger } from './combat-card-art.js';
+import { INSCRIPTION_TIPS } from './combat-card-art.js';
+import { INSCRIPTION_LABELS, isInscription } from '../../combat/mechanics/inscription.js';
 import { cardMotifSvg } from './combat-card-motifs.js';
 import { scalingMarks } from '../../combat/card-scaling.js';
 import { ABILITY_LABELS } from '../../combat/abilities.js';
 import { CHALLENGE_LABELS, challengeStatusName, intimateLabelsOf } from '../../combat/challenge-labels.js';
+import { briefRegistered, statusLabel } from '../../combat/mechanics/registry.js';
 
 // 卡牌属性性能显示：换算过的卡给出带增减标记的描述片段；固定卡与旧战斗不带字段，形状与旧版一致。
 // 带标记的数字附 tip（要求属性、倍率与「原值 → 现值（差值）」，点数字由面板弹出）；scaleNote 是同样内容的整句，并入卡牌 aria-label 供读屏。
 export function cardScalingView(card) {
+    if (Array.isArray(card?.attributeScaling)) {
+        const notes = [...new Set(card.attributeScaling.map(attributeScalingTip).filter(Boolean))];
+        return {
+            textParts: describeEffectParts(card.effects, undefined, undefined, attributeNumberOptions(card)),
+            ...(notes.length ? { scaleNote: notes.join('；') } : {}),
+        };
+    }
     const s = card?.scaling;
     if (!s) return {};
     // 手牌经 cardView 后 upgraded 为布尔值；图鉴卡上的 upgraded 是升级形态对象，不代表当前是升级形态。
@@ -58,7 +68,7 @@ const mainEffect = (effects) => effects.find((e) => effectAt(e, 'damage', 'block
 // 附加效果短写：状态「易伤2」、抽牌「抽1」、能量「能量1」、每回合触发「回合初挡4」；认不出的效果返回空串。
 function effectBrief(e) {
     switch (e?.op) {
-        case 'status': return `${COMBAT_STATUS_NAMES[e.status] || e.status}${e.stacks}`;
+        case 'status': return `${statusName(e.status)}${e.stacks}`;
         case 'draw': return `抽${e.amount}`;
         case 'energy': return `能量${e.amount}`;
         case 'damage': return `伤${e.amount}`;
@@ -66,7 +76,7 @@ function effectBrief(e) {
         case 'heal': return `回${e.amount}`;
         case 'each-turn': { const t = effectBrief((e.then || [])[0]); return t ? `${e.at === 'turn-end' ? '回合末' : '回合初'}${t}` : ''; }
         case 'conditional': { const t = effectBrief((e.then || [])[0]); return t ? `条件${t}` : ''; }
-        case 'next-turn': return e.gain === 'energy' ? `下回合能量${e.amount}` : e.gain === 'draw' ? `下回合抽${e.amount}` : `下回合${COMBAT_STATUS_NAMES[e.status] || e.status}${e.stacks}`;
+        case 'next-turn': return e.gain === 'energy' ? `下回合能量${e.amount}` : e.gain === 'draw' ? `下回合抽${e.amount}` : `下回合${statusName(e.status)}${e.stacks}`;
         case 'self-damage': return `失血${e.amount}`;
         case 'delayed-counter': return `反击${e.amount * e.mult}`;
         case 'mutual-damage': return `同伤${e.amount}`;
@@ -77,7 +87,8 @@ function effectBrief(e) {
         case 'cleanse': return '净化';
         case 'heal-pct': return `回血${e.pct}%`;
         case 'grow': return `成长${e.amount}`;
-        default: return '';
+        // 规则 v5 已登记机制的算子取其 brief；未登记的仍为空串。
+        default: return briefRegistered(e, { statusName });
     }
 }
 
@@ -94,42 +105,80 @@ function slotFxText(effects, main, value, hits) {
     return out.filter(Boolean).join('，').replace(/：/g, '，');
 }
 
-export function cardSlotView(card, hero) {
+// rulesVersion：战局规则版本，v5 时伤害预览与结算一样经过已登记的修正阶段（目标未定，target 为 null）。
+export function cardSlotView(card, hero, rulesVersion) {
     const effects = Array.isArray(card?.effects) ? card.effects : [];
     const main = mainEffect(effects);
-    if (!main) return { value: null, unit: '', fxText: slotFxText(effects, null, 0, 1) };
+    const marked = Array.isArray(card?.attributeScaling);
+    const options = attributeNumberOptions(card);
+    const fxView = (value, hits) => {
+        const fxText = slotFxText(effects, main, value, hits);
+        if (!marked) return { fxText };
+        const groups = effects.flatMap((effect, index) => {
+            if (effect.op === 'exhaust-self') return [];
+            if (effect !== main || !defaultTarget(effect)) return [describeEffectParts([effect], undefined, undefined, { ...options, offset: index })];
+            if (hits > 1) return [[{ text: `${hits} 段，共 ${value * hits} 点` }]];
+            return effect.op === 'damage' && effect.strengthScale > 1 ? [[{ text: `攻击力 ×${effect.strengthScale} 生效` }]] : [];
+        });
+        const discard = describeKeywordParts({ onDiscard: card.onDiscard }, options);
+        if (discard.length) groups.push(discard);
+        return { fxText, fxParts: groups.flatMap((parts, index) => [...(index ? [{ text: '，' }] : []), ...parts]) };
+    };
+    if (!main) return { value: null, unit: '', ...fxView(0, 1) };
     const briefs = effects.filter((e) => e !== main && e.op !== 'exhaust-self').map(effectBrief).filter(Boolean);
     const extra = briefs.length ? `${briefs[0]}${briefs.length > 1 ? '…' : ''}` : '';
     const st = hero?.statuses || {};
+    const mainPath = `effects.${effects.indexOf(main)}.${main.op === 'status' ? 'stacks' : 'amount'}`;
+    const attributeTip = attributeScalingTip(card.attributeScaling?.find(mark => mark.path === mainPath));
     const finish = (value, baseValue, unit, hits, parts) => {
         const bonusNote = value !== baseValue ? `${parts.join('，')}，合计 ${value} 点${TOTAL_UNITS[main.op]}` : '';
-        return { value, baseValue, unit, ...(hits > 1 ? { hits } : {}), ...(extra ? { extra } : {}), fxText: slotFxText(effects, main, value, hits), ...(bonusNote ? { bonusNote } : {}) };
+        const valueTip = [attributeTip, bonusNote].filter(Boolean).join('；');
+        return { value, baseValue, unit, ...(hits > 1 ? { hits } : {}), ...(extra ? { extra } : {}), ...fxView(value, hits),
+            ...(bonusNote ? { bonusNote } : {}), ...(attributeTip ? { valueTip } : {}) };
     };
-    if (main.op === 'status') return { value: main.stacks, baseValue: main.stacks, unit: COMBAT_STATUS_NAMES[main.status], ...(extra ? { extra } : {}), fxText: slotFxText(effects, main, main.stacks, 1) };
+    if (main.op === 'status') return { value: main.stacks, baseValue: main.stacks, unit: COMBAT_STATUS_NAMES[main.status] || statusLabel(main.status) || undefined,
+        ...(extra ? { extra } : {}), ...fxView(main.stacks, 1), ...(attributeTip ? { valueTip: attributeTip } : {}) };
     if (main.op === 'heal') return finish(main.amount, main.amount, '回复', 1, []);
     const baseValue = main.amount;
     if (main.op === 'block') {
-        const value = computeBlock(hero, baseValue);
+        const value = computeBlock(hero, baseValue, hero, rulesVersion, 'card');
         const parts = [`基础 ${baseValue}`];
         if (st.dexterity) parts.push(`防御力 ${signed(st.dexterity)}`);
         if (st.frail > 0) parts.push('脆弱 ×0.75');
+        // 规则 v5 已登记的格挡修正（如防御力下降）合并为一项。
+        const plainBlock = computeBlock(hero, baseValue);
+        if (value !== plainBlock) parts.push(`其他修正 ${signed(value - plainBlock)}`);
         return finish(value, baseValue, '格挡', 1, parts);
     }
-    const value = computeDamage(hero, null, baseValue, main.strengthScale);
+    // 规则 v6 G5c：牌面预览与结算一样把本牌交给出伤加值（牌名、升级、X 费、刻印过滤）。
+    const value = computeDamage(hero, null, baseValue, main.strengthScale, rulesVersion, rulesVersion >= 6 ? card : undefined);
     const parts = [`基础 ${baseValue}`];
     const power = (st.strength || 0) * (main.strengthScale || 1);
     if (hero?.damageScale && hero.damageScale !== 1) parts.push(`伤害倍率 ×${hero.damageScale}`);
     if (power) parts.push(`攻击力 ${signed(power)}`);
     if (st.weak > 0) parts.push('虚弱 ×0.75');
+    // 规则 v5 已登记的伤害修正（蓄势、倍伤、先手、攻击力下降等）合并为一项。
+    const plainDamage = computeDamage(hero, null, baseValue, main.strengthScale);
+    if (value !== plainDamage) parts.push(`其他修正 ${signed(value - plainDamage)}`);
     return finish(value, baseValue, main.target === 'all-enemies' ? '群伤' : '伤害', Number(main.hits) || 1, parts);
 }
 
-// 关键字单字（窄签印记用）与优先级：窄签只露一枚，不能打出 > 消耗 > 虚无 > 保留 > 固有；临时已有虚线框，窄签不再标。
-export const KEYWORD_CHAR = Object.freeze({ 不能打出: '禁', 消耗: '耗', 虚无: '虚', 保留: '留', 固有: '固', 临时: '临' });
-export const KEYWORD_PRIORITY = Object.freeze(['不能打出', '消耗', '虚无', '保留', '固有']);
+// 关键字单字（窄签印记用）与优先级：窄签只露一枚，不能打出 > 规则 v5 E19 牌面附着（绑定、痛刺、受创）> 规则 v5 P5b 刻印 > 消耗 > 虚无 > 保留 > 固有；临时已有虚线框，窄签不再标。
+// 刻印单字互不重复，也不与其他关键字单字重复。
+const INSCRIPTION_CHAR = Object.freeze({
+    deft: '巧', sharp: '锋', instinct: '本', corrode: '蚀', momentum: '量', nimble: '动', flourish: '华', spiral: '旋', steady: '稳',
+    sovereign: '御', swift: '迅', sow: '播', soul: '魂', attune: '契', float: '浮', thrift: '省', kindle: '燃', ink: '墨',
+});
+const INSCRIPTION_NAMES = Object.values(INSCRIPTION_LABELS);
+export const KEYWORD_CHAR = Object.freeze({ 不能打出: '禁', 绑定: '绑', 痛刺: '刺', 受创: '创', 消耗: '耗', 虚无: '虚', 保留: '留', 固有: '固', 临时: '临',
+    ...Object.fromEntries(Object.entries(INSCRIPTION_LABELS).map(([key, label]) => [label, INSCRIPTION_CHAR[key]])) });
+export const KEYWORD_PRIORITY = Object.freeze(['不能打出', '绑定', '痛刺', '受创', ...INSCRIPTION_NAMES, '消耗', '虚无', '保留', '固有']);
 // 关键字点开的解释（不带句号）；不能打出字面自明，这里仍给一句，供单字印记点开。
 export const KEYWORD_NAME_TIPS = Object.freeze({
     不能打出: '不能打出：这张牌不能被打出', 消耗: KEYWORD_TIPS.exhaust, 虚无: KEYWORD_TIPS.ethereal, 保留: KEYWORD_TIPS.retain, 固有: KEYWORD_TIPS.innate, 临时: KEYWORD_TIPS.temp,
+    狡黠: KEYWORD_TIPS.sly, 重演: KEYWORD_TIPS.replay, 圣辉: KEYWORD_TIPS.radiance,
+    绑定: '绑定：每回合只能打出一张带绑定的牌', 痛刺: '痛刺：打出时失去 2 点生命', 受创: '受创：打出后到下一回合开始，每次受到的攻击伤害 +3',
+    ...Object.fromEntries(Object.entries(INSCRIPTION_LABELS).map(([key, label]) => [label, INSCRIPTION_TIPS[key]])),
 });
 // 加成 / 减弱差值：value 与 baseValue 不同时给带符号的字符串（减号为 U+2212），否则空串；数字本身不转色，差值只做单位后的淡色小字。
 export const cardValueDelta = (c) => (Number.isFinite(c?.value) && c.baseValue !== undefined && c.value !== c.baseValue ? signed(c.value - c.baseValue) : '');
@@ -140,7 +189,14 @@ export function cardKeywordNames(card) {
     const names = [];
     if (card?.unplayable) names.push('不能打出');
     for (const [flag, label] of [['innate', '固有'], ['retain', '保留'], ['ethereal', '虚无']]) if (card?.[flag]) names.push(label);
+    if (card?.sly) names.push('狡黠');
+    if (Number.isInteger(card?.replay) && card.replay > 0) names.push('重演');
+    if (card?.radiance !== undefined) names.push('圣辉');
     if (card?.temp) names.push('临时');
+    // 规则 v5 E19 牌面附着（加费体现在费用上，附加虚无已并入虚无）。
+    for (const [mark, label] of [['bound', '绑定'], ['pain', '痛刺'], ['scar', '受创']]) if (card?.marks?.includes(mark)) names.push(label);
+    // 规则 v5 P5b 刻印（cardView 在 v5 战斗里才带 inscription）。
+    if (isInscription(card?.inscription)) names.push(INSCRIPTION_LABELS[card.inscription]);
     const exhaust = (list) => (list || []).some((e) => e.op === 'exhaust-self' || (Array.isArray(e.then) && exhaust(e.then)));
     if (exhaust(card?.effects)) names.push('消耗');
     return names;
@@ -149,6 +205,10 @@ export function cardKeywordNames(card) {
 // 战斗面板的纯视图模型：会话快照 → 战前 / 对局 / 结算所需字段；不操作 DOM。
 // 是否可出牌只以引擎 legalActions 为准，界面不另算规则。
 export const COMBAT_STATUS_NAMES = Object.freeze({ vulnerable: '易伤', weak: '虚弱', strength: '攻击力', dexterity: '防御力', poison: '中毒', regen: '再生', thorns: '荆棘', intangible: '无形', 'no-draw': '禁抽', endure: '不屈', artifact: '人工制品', frail: '脆弱' });
+// 状态显示名：内置名表优先，其次规则 v5 登记的 label，最后回落到键名。
+function statusName(key) {
+    return COMBAT_STATUS_NAMES[key] || statusLabel(key) || key;
+}
 export const COMBAT_INTENT_LABELS = Object.freeze({ attack: '攻击', defend: '防御', buff: '强化', debuff: '削弱', heal: '治疗', special: '特殊' });
 export const COMBAT_OUTCOME_LABELS = Object.freeze({ victory: '胜利', defeat: '败北', escape: '撤退' });
 // 日常挑战只换显示：结局名取自说法映射表，意图类别与剩余意志的描述在这里补全，内部字段与引擎不变。
@@ -181,7 +241,7 @@ export const COMBAT_ORDER_COUNT = 6;
 const FX_HIT_LIMIT = 6;
 
 const statusList = (statuses, challenge = false) => Object.entries(statuses || {}).filter(([, v]) => v > 0)
-    .map(([key, stacks]) => ({ key, label: (challenge && (intimateLabelsOf(challenge)?.statuses[key] || challengeStatusName(key))) || COMBAT_STATUS_NAMES[key] || key, stacks }));
+    .map(([key, stacks]) => ({ key, label: (challenge && (intimateLabelsOf(challenge)?.statuses[key] || challengeStatusName(key))) || statusName(key), stacks }));
 
 // 不选目标的牌 / 技能的承受方：选中后高亮这些单位，点其中任一个（或再点一次牌）确认打出。只读推导，不参与结算。
 function affectedIds(state, unit, effects) {
@@ -209,8 +269,34 @@ function intentView(state, id, challenge = false) {
     return { name: intent.name, kind: intent.intent, label: (labels ? labels.intents : challenge ? CHALLENGE_INTENT_LABELS : COMBAT_INTENT_LABELS)[intent.intent] || '', ...(challenge ? { unit: labels ? labels.damage : CHALLENGE_LABELS.damage } : {}), damage: intent.damage, targetName: intent.targetId ? state.units[intent.targetId]?.name || '' : '' };
 }
 
+// 规则 v5 单位资源的面板视图：只挑可显示的键（法珠、专注、圣辉、心境与乐势、锻造、随从），unit.res 里的内部记账键不进视图；没有可显示资源时返回 null。
+export const ORB_SLOT_MAX = 10;
+const ORB_KINDS = new Set(['lightning', 'frost', 'dark', 'plasma', 'glass']);
+const STANCES = new Set(['neutral', 'calm', 'wrath', 'divinity']);
+const resCount = (v, max) => (Number.isFinite(v) ? Math.max(0, Math.min(max, Math.floor(v))) : null);
+export function resourceView(res) {
+    if (!res || typeof res !== 'object') return null;
+    const out = {};
+    const slots = res.orbs && typeof res.orbs === 'object' ? resCount(res.orbs.slots, ORB_SLOT_MAX) : null;
+    if (slots) {
+        const list = (Array.isArray(res.orbs.list) ? res.orbs.list : []).filter((o) => ORB_KINDS.has(o?.kind)).slice(0, slots);
+        out.orbs = { slots, list: list.map((o) => ({ kind: o.kind })) };
+    }
+    if (Number.isFinite(res.focus) && (out.orbs || res.focus)) out.focus = Math.trunc(res.focus);
+    if (Number.isFinite(res.radiance)) out.radiance = resCount(res.radiance, 999);
+    if (STANCES.has(res.stance) || Number.isFinite(res.momentum)) {
+        out.stance = STANCES.has(res.stance) ? res.stance : 'neutral';
+        if (Number.isFinite(res.momentum)) out.momentum = resCount(res.momentum, 10);
+    }
+    if (res.forge && typeof res.forge === 'object' && Number.isFinite(res.forge.value)) out.forge = resCount(res.forge.value, 999);
+    const m = res.minion;
+    if (m && typeof m === 'object' && Number.isFinite(m.maxHp) && m.maxHp > 0) out.minion = { hp: resCount(m.hp, m.maxHp) ?? 0, maxHp: Math.floor(m.maxHp) };
+    return Object.keys(out).length ? out : null;
+}
+
 export function unitView(state, id, challenge = false) {
     const u = state.units[id];
+    const res = resourceView(u.res);
     return {
         id, name: u.name, side: u.side, kind: u.kind, hp: Math.max(0, u.hp), maxHp: u.maxHp, block: u.block, alive: u.alive,
         controlled: id === state.controlledId, statuses: statusList(u.statuses, challenge),
@@ -218,6 +304,8 @@ export function unitView(state, id, challenge = false) {
         // 敌人外观格位（setup 带 art 时）：面板据此在通用敌人图集里取图；我方与旧战斗不带该字段。
         ...(u.side === 'enemy' && typeof u.art === 'string' && u.art ? { art: u.art } : {}),
         ...(u.side === 'enemy' && (u.tier === 'elite' || u.tier === 'boss') ? { tier: u.tier } : {}),
+        // v5 资源：只在有可显示资源时出现，v3/v4 与无资源单位的视图形状不变。
+        ...(res ? { res } : {}),
     };
 }
 
@@ -252,7 +340,7 @@ function traitOrbs(state, hero, legal) {
 // 单位详情（助手 10-28：点头像阅读）：卡组角色的被动按人物特性（个人被动与抽到的被动特性）/ 职业 / 装备分组（setup 的被动带 source；旧战斗没有时归入「被动」），
 // 非操控的卡组角色另列主动；技能角色与敌人列技能（意图、绝招、冷却）、被动与常驻效果（source 为 affix），另列尚未触发的阶段。rarity 为 innate（固有）或特性稀有度。
 const PASSIVE_SOURCES = Object.freeze(['personal', 'trait', 'class', 'gear']);
-const passiveItem = (p, t) => ({ name: p.name || t?.name || '', meta: describeTrigger(p.trigger, p.cardType), text: describeEffects(p.effects),
+const passiveItem = (p, t) => ({ name: p.name || t?.name || '', meta: describeTrigger(p.trigger, p.cardType, p), text: describeEffects(p.effects),
     ...(t ? { rarity: t.innate ? 'innate' : t.rarity || '' } : {}) });
 const skillItem = (s) => ({ name: s.name || '', text: describeEffects(s.effects),
     meta: [COMBAT_INTENT_LABELS[s.intent] || '', s.ultimate ? '绝招' : '', s.cooldown ? `冷却 ${s.cooldown} 回合` : ''].filter(Boolean).join(' · ') });
@@ -296,12 +384,13 @@ export function battleView(state, legal = [], { challenge = false } = {}) {
         const mine = plays.filter((a) => a.inst === inst);
         const targets = mine.map((a) => a.targetId).filter((t) => t !== undefined);
         // v4：关键字与被弃时说明（keywordParts 带可点注释）、临时牌标记、减费前的原费用；没有时不写字段，旧手牌视图形状不变。
-        const keywordParts = describeKeywordParts(card);
+        const keywordParts = describeKeywordParts(card, attributeNumberOptions(card));
         const keywords = keywordParts.map((p) => p.text).join('');
         return {
             inst, id: card.id, name: card.name, type: card.type, cost: card.cost, upgraded: card.upgraded, rarity: card.rarity || '',
             typeLabel: CARD_TYPE_LABELS[card.type] || '', text: describeEffects(card.effects), art: cardArtSvg(card),
-            affordable: canAfford(card, hero.energy), needsTarget: effectsNeedTarget(card.effects),
+            // 规则 v5 出牌限制（E18 等）与引擎共用 canPlay；v3/v4 与原 canAfford 相同。
+            affordable: canPlay(state, hero, card), needsTarget: effectsNeedTarget(card.effects),
             targets, affects: targets.length ? [] : affectedIds(state, hero, card.effects), playable: mine.length > 0,
             ...(keywords ? { keywords, keywordParts } : {}), ...(card.temp ? { temp: true } : {}),
             // 待选阶段的候选牌；不在待选阶段时不写字段。
@@ -310,13 +399,17 @@ export function battleView(state, legal = [], { challenge = false } = {}) {
             ...(card.baseCost !== undefined && card.baseCost !== card.cost ? { baseCost: card.baseCost } : {}),
             ...cardTextView(card),
             // 卡面插槽：主效果数值与单位（风格化皮肤的窄签与放大牌用）、关键字全称；initial 皮肤不显示这些节点。
-            ...cardSlotView(card, hero), keywordNames: cardKeywordNames(card),
+            ...cardSlotView(card, hero, state.rulesVersion), keywordNames: cardKeywordNames(card),
         };
     }).filter(Boolean);
-    // 同名张数：手牌里同 id 且同升级状态的张数，至少 2 张才给 stack。
+    // 同名张数：手牌里同 id、同升级状态、同牌面附着（规则 v5 E19）、同刻印与同永久成长（规则 v5 P5）的张数，至少 2 张才给 stack。
     const sameCount = new Map();
-    for (const c of hand) { const k = `${c.id}|${c.upgraded ? 1 : 0}`; sameCount.set(k, (sameCount.get(k) || 0) + 1); }
-    for (const c of hand) { const n = sameCount.get(`${c.id}|${c.upgraded ? 1 : 0}`); if (n >= 2) c.stack = n; }
+    const stackKey = (c) => {
+        const entry = state.cards[c.inst] || {};
+        return `${c.id}|${c.upgraded ? 1 : 0}|${(entry.marks || []).join(',')}|${entry.inscription || ''}|${entry.bonus ? `${entry.bonus.damage || 0}/${entry.bonus.block || 0}` : ''}`;
+    };
+    for (const c of hand) { const k = stackKey(c); sameCount.set(k, (sameCount.get(k) || 0) + 1); }
+    for (const c of hand) { const n = sameCount.get(stackKey(c)); if (n >= 2) c.stack = n; }
     const side = (s) => state.order.filter((id) => state.units[id].side === s).map((id) => unitView(state, id, challenge));
     // 人物技能：可用与否只看 legal 里的 hero-skill 动作；旧档案没有技能时为 null。
     const skillActs = legal.filter((a) => a.type === 'hero-skill' && a.skillId === undefined);
@@ -366,8 +459,10 @@ function challengeBattleView(view, challenge = true) {
     return {
         ...view,
         hand: view.hand.map((card) => ({
-            ...words(card, ['text', 'keywords', 'scaleNote', 'bonusNote', 'fxText', 'extra']),
+            ...words(card, ['text', 'keywords', 'scaleNote', 'bonusNote', 'valueTip', 'fxText', 'extra']),
             ...(card.textParts ? { textParts: card.textParts.map((part) => ({ ...part, text: challengeWords(part.text), ...(part.tip ? { tip: challengeWords(part.tip) } : {}) })) } : {}),
+            ...(card.fxParts ? { fxParts: card.fxParts.map((part) => ({ ...part, text: challengeWords(part.text), ...(part.tip ? { tip: challengeWords(part.tip) } : {}) })) } : {}),
+            ...(card.keywordParts ? { keywordParts: card.keywordParts.map((part) => ({ ...part, text: challengeWords(part.text), ...(part.tip ? { tip: challengeWords(part.tip) } : {}) })) } : {}),
         })),
         heroSkill: view.heroSkill ? words(view.heroSkill, ['text']) : null,
         items: view.items.map((item) => words(item, ['text'])),
@@ -487,24 +582,6 @@ export function challengeLobbyView(session) {
         enemies: [{ name: foe.name, count: 1, templated: false, tier: 'normal', art: null }],
         absent: [], downed: [], skipped: [], canEscape: setup.canEscape !== false,
     };
-}
-
-// 升级三选一：新卡从图鉴里未满同名上限的非基础卡中按 seed 确定性抽 3 张；升级选有升级形态且还有未升级副本的卡；始终可跳过。
-export function rewardChoices(view, level, seedKey = '') {
-    if (!view || view.kind !== 'deck-character' || !view.pendingRewards?.includes(level)) return null;
-    // 专属卡只靠剧情解锁与精进，不进新卡池，也不出现在升级选项里。
-    const pool = [...view.catalog.values()].filter((c) => c.rarity !== 'basic' && c.rarity !== 'signature' && (view.owned.get(c.id) || 0) < cardCopyLimit(c.rarity))
-        .sort((a, b) => (a.id < b.id ? -1 : 1));
-    const cards = [];
-    let h = hash32(`${seedKey}|${view.id}|${level}`);
-    while (pool.length && cards.length < COMBAT_REWARD_CARD_COUNT) {
-        h = hash32(`${h}`);
-        const [card] = pool.splice(h % pool.length, 1);
-        cards.push({ cardId: card.id, name: card.name, type: card.type, cost: card.cost });
-    }
-    const upgrades = [...view.owned.entries()].filter(([id, n]) => n > (view.upgraded.get(id) || 0) && view.catalog.get(id)?.upgraded && view.catalog.get(id).rarity !== 'signature')
-        .map(([id]) => ({ targetId: id, name: view.catalog.get(id).name }));
-    return { level, cards, upgrades };
 }
 
 // 引擎事件 → fx-battle 的标签形状。每次出手取对各目标的结果，只保留最后几招，避免托管与敌方阶段的演出过长。

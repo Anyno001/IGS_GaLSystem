@@ -10,7 +10,7 @@ import {
     normalizeWaitStageSettings,
     weaveWaitStageLines,
 } from './wait-stage.js';
-import { getWaitStageGamePack, listWaitStageGameIds, subscribeWaitStageGamePack } from './wait-stage-games-api.js';
+import { getWaitStageGamePack, listWaitStageGameIds, startWaitStageGamePack, subscribeWaitStageGamePack } from './wait-stage-games-api.js';
 import { ORIGINAL_READER_ICONS } from './reader-icons.js';
 
 const QUOTE_MAX = 34;
@@ -464,10 +464,10 @@ export function createWaitStageRuntime(options = {}) {
             // 主程序混音总线：{ context(), input(), resume() }，游戏音效接进 sfx 子总线。
             audio: options.audio || null,
             isExiting: () => phase === 'exit',
-            isSettled: () => Boolean(gameState && gameState.done),
+            isSettled: () => gameState !== own || Boolean(own && own.done),
             markDone() {
-                if (!gameState || gameState.done) return;
-                gameState.done = true;
+                if (gameState !== own || !own || own.done) return;
+                own.done = true;
             },
             requestClose: () => closeGame(),
             // 等待层自己的「返回」「加载下一楼」：铺满整层的游戏把它们放进自己的工具栏，底栏就不用留。
@@ -495,7 +495,7 @@ export function createWaitStageRuntime(options = {}) {
 
     function openGame(id) {
         const pack = getWaitStageGamePack();
-        if (!pack || typeof pack.start !== 'function' || !board || !model || phase !== 'wait') return;
+        if (!settings.games || !pack || typeof pack.start !== 'function' || !board || !model || phase !== 'wait') return;
         clearTimer();
         game = { id };
         gameState = { listeners: new Set(), hostListeners: new Set() };
@@ -504,7 +504,12 @@ export function createWaitStageRuntime(options = {}) {
         syncGameAttr();
         if (typeof pack.ensureStyle === 'function') pack.ensureStyle(doc);
         try {
-            pack.start(gameContext(id));
+            const own = gameState;
+            const rounds = id === 'mahjong'
+                ? options.mahjongPointsRounds?.(options.getPointsMessageId?.())
+                : options.gamePointsRounds?.(id, options.getPointsMessageId?.());
+            startWaitStageGamePack(gameContext(id), typeof rounds === 'function'
+                ? (...args) => gameState === own && settings.games ? rounds(...args) : null : undefined);
         } catch (error) {
             closeGame();
         }
@@ -514,9 +519,10 @@ export function createWaitStageRuntime(options = {}) {
         if (!gamesRow) return;
         gamesRow.innerHTML = '';
         const pack = getWaitStageGamePack();
-        const list = (!minimal && (play || settings.games) && pack && model) ? listWaitStageGameIds(model) : [];
+        const list = (!minimal && settings.games && pack && model) ? listWaitStageGameIds(model) : [];
         if (play && !game) {
-            if (!pack) setNote('还没装小游戏脚本。');
+            if (!settings.games) setNote('小游戏已关闭。');
+            else if (!pack) setNote('小游戏暂不可用。');
             else if (!model) setNote('正在摆桌…');
             else setNote(list.length ? '' : '最近几楼里还凑不齐小游戏要的角色和台词，多读几楼再来。');
         }
@@ -540,12 +546,25 @@ export function createWaitStageRuntime(options = {}) {
         });
     }
 
-    subscribeWaitStageGamePack(() => {
+    const offGamePack = subscribeWaitStageGamePack(() => {
         if (!root || phase !== 'wait' || game) return;
         renderGames();
     });
 
     return {
+        syncSettings(value) {
+            settings = normalizeWaitStageSettings(value);
+            if (!root) return;
+            if (!settings.games && play) { closeRoot(); return; }
+            if (!settings.games && game) {
+                closeGame();
+                if (replyReady && !imageHold) showNextFloorAction();
+            } else if (phase === 'wait' && !game) renderGames();
+        },
+        dispose() {
+            closeRoot();
+            offGamePack();
+        },
         open(host, opts = {}) {
             if (!host || !host.appendChild) return null;
             const nextDoc = host.ownerDocument || resolveDoc();
@@ -729,6 +748,8 @@ export function createWaitStageRuntime(options = {}) {
             return true;
         },
         isPlaying: () => Boolean(root && play),
+        // 等待层里点开了某个小游戏（不论是否从工具栏主动打开）：方向键等按键归游戏。
+        hasGame: () => Boolean(root && game),
         enterWait,
         close: closeRoot,
     };

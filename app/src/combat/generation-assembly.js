@@ -4,9 +4,9 @@
 // 错误与数值夹取记录都带路径，供上层写诊断或要求模型重写。
 import { BASIC_DEFEND_ID, BASIC_STRIKE_ID, COMBAT_RULES, combatSpeedFor, signatureSlotOf } from './rules.js';
 import {
-    CARD_TEMPLATES, GEAR_PASSIVE_TEMPLATES, ITEM_TEMPLATES, PASSIVE_TEMPLATES, SKILL_TEMPLATES, cardFromValues, gearPassiveFromTemplate,
+    ARCHETYPE_FAMILIES, CARD_TEMPLATES, GEAR_PASSIVE_TEMPLATES, ITEM_TEMPLATES, PASSIVE_TEMPLATES, SKILL_TEMPLATES, cardFromValues, gearPassiveFromTemplate,
     heroSkillFromTemplate, itemAtRarity, itemFromTemplate, fixedTemplateCost, nearestTemplateCost, passiveAtRarity, passiveFromTemplate,
-    skillFromTemplate, solveCardTemplate,
+    skillFromTemplate, solveCardTemplate, templateAllowedFor, templateFamily, templatesFor,
 } from './card-templates.js';
 import { forbiddenCombos } from './combos.js';
 import { GEAR_BONUS_BY_RARITY, GEAR_SLOTS, REWARD_ORIGIN_MAX, effectsDamage, gearIdFor, itemIdFor, profileIdFor } from './schema.js';
@@ -14,6 +14,11 @@ import { ABILITY_KEYS, abilityKeyOf } from './abilities.js';
 import { gearHasPassive, templateCandidates } from './acquire-candidates.js';
 import { hash32, hashString, nextRandom } from './random.js';
 import { isEnemyArtKey } from './enemy-art.js';
+import { INSCRIPTION_LABELS } from './mechanics/inscription.js';
+import { fixedCard, fixedClassPool } from './fixed-cards/index.js';
+import { resolveRelic } from './relics/draw.js';
+import { planRewardMarks } from './reward-cards.js';
+import { CLASS_PASSIVE_VERSION, fixedClassPassive } from './class-passives.js';
 
 const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const indexPath = (path, index) => `${path}[${index}]`;
@@ -81,25 +86,11 @@ const cleanAliases = (value) => (Array.isArray(value)
     ? [...new Set(value.filter((item) => typeof item === 'string').map((item) => item.trim().slice(0, 20)).filter(Boolean))].slice(0, 5)
     : []);
 
-// 职业 11 张卡的稀有度分配：7 普通 + 4 罕见，按职业名做确定性洗牌
-export function classRaritiesFor(seed = '') {
-    const rarities = [...Array(7).fill('common'), ...Array(4).fill('uncommon')];
-    let state = hash32(`rarities:class:${seed}`);
-    for (let i = rarities.length - 1; i > 0; i -= 1) {
-        const step = nextRandom(state);
-        state = step.state;
-        const j = Math.floor(step.value * (i + 1));
-        [rarities[i], rarities[j]] = [rarities[j], rarities[i]];
-    }
-    return rarities;
-}
-
 // 费用最大值（0 到 3，X 费另算）
 const MAX_CARD_COST = 3;
 
 // 各类卡牌的固定费用槽位（每张卡的费用由槽位决定，模型填的费用只做提示）
 export const CARD_COST_SLOTS = Object.freeze({
-    class: Object.freeze([0, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3]),
     personal: Object.freeze([1, 1, 2, 2]),
     signature: Object.freeze([2, 3]),
     tier: Object.freeze([1, 2, 3]),
@@ -109,7 +100,6 @@ const isBlank = (value) => value === null || value === undefined || value === ''
 
 // 需要按种子随机分布费用的槽位形状：size 张卡，counts 是每个费用（0..3）的 [最少, 最多] 张数
 const SLOT_SHAPES = Object.freeze({
-    class: Object.freeze({ size: 11, counts: Object.freeze([[0, 1], [4, 6], [3, 4], [1, 3]]) }),
     personal: Object.freeze({ size: 4, counts: Object.freeze([[0, 0], [1, 2], [1, 2], [0, 1]]) }),
 });
 
@@ -147,6 +137,39 @@ function restrictTable(table, names) {
     return kept.length ? Object.fromEntries(kept.map((name) => [name, table[name]])) : table;
 }
 
+// 规则 v5 职业白名单：已知职业取其允许的卡牌模板子表；职业非法时不收窄（职业字段另行报错）。
+const knownArchetype = (archetype) => typeof archetype === 'string' && Object.hasOwn(ARCHETYPE_FAMILIES, archetype);
+const archetypeTable = (archetype) => (knownArchetype(archetype) ? templatesFor(archetype) : CARD_TEMPLATES);
+// 人物技能候选：职业允许且可作人物技能的模板，越界统一报 invalid-template。
+const HERO_TABLES = new Map();
+function heroTableFor(archetype) {
+    const key = knownArchetype(archetype) ? archetype : '*';
+    if (!HERO_TABLES.has(key)) {
+        HERO_TABLES.set(key, Object.freeze(Object.fromEntries(Object.entries(archetypeTable(archetype)).filter(([name]) => heroSkillFromTemplate(name, {})))));
+    }
+    return HERO_TABLES.get(key);
+}
+
+// 个人卡池最多 limit 张其他职业族的卡（D3）；超出的从第 limit+1 张起报 invalid-template。
+function checkCrossFamily(cards, path, collector, archetype, limit = 1) {
+    if (!knownArchetype(archetype) || !Array.isArray(cards)) return;
+    let crossed = 0;
+    cards.forEach((item, index) => {
+        const raw = Array.isArray(item) ? item[1] : item?.template;
+        const key = typeof raw === 'string' ? raw.trim() : raw;
+        if (typeof key !== 'string' || !Object.hasOwn(CARD_TEMPLATES, key) || templateAllowedFor(key, archetype)) return;
+        crossed += 1;
+        if (crossed > limit) collector.fail(indexPath(indexPath(path, index), 1), 'invalid-template', { allowed: Object.keys(templatesFor(archetype)), crossLimit: limit });
+    });
+}
+
+function cardArchetype(template, archetype) {
+    const family = templateFamily(template);
+    const owners = Object.keys(ARCHETYPE_FAMILIES).filter(key => ARCHETYPE_FAMILIES[key].includes(family));
+    if (owners.length === 1) return owners[0];
+    return knownArchetype(archetype) ? archetype : 'general';
+}
+
 // 组装一张卡：名字 + 模板 + 费用 -> 完整卡牌。
 // paths 依次是 [名字路径, 模板路径, 费用路径]；options.slot 给定时费用以槽位为准；
 // options.values 给定时按模型给出的数值反解，否则由模板按稀有度解算默认数值。
@@ -179,7 +202,7 @@ function buildCard(nameValue, templateValue, costValue, paths, collector, option
     const combos = forbiddenCombos({ cost: solvedCost, effects: card.effects, onDiscard: card.onDiscard });
     if (combos.length) return collector.fail(paths[1], 'forbidden-combo', { combos });
     const { type, effects, upgraded, ...rest } = card;
-    return { id, name, type, cost: solvedCost, rarity, ...rest, effects, ...(upgraded ? { upgraded } : {}) };
+    return { id, name, type, cost: solvedCost, rarity, ...rest, archetype: cardArchetype(template, options.archetype), effects, ...(upgraded ? { upgraded } : {}) };
 }
 
 // 卡牌三元组 [名字, 模板, 费用]（数组或对象）-> 卡
@@ -221,10 +244,11 @@ const passivesField = (raw) => raw.passives ?? (raw.passive !== undefined && raw
 const hpValue = (value, path, collector, [min, max]) => clampedInt(value, path, collector, min, max, Math.round((min + max) / 2));
 
 // 一组卡：rarity 可为数组（逐张稀有度）；slots 给定时按槽位循环取费用；序号从 1 起
-const cardList = (value, path, collector, min, max, owner, tag, rarity, slots, fixedCost = false) => mapList(value, path, collector, min, max, (item, itemPath, index) => cardFromTriple(item, itemPath, collector, {
-    id: `${owner}-${tag}${index + 1}`,
+const cardList = (value, path, collector, min, max, owner, tag, rarity, slots, fixedCost = false, table, archetype) => mapList(value, path, collector, min, max, (item, itemPath, index) => cardFromTriple(item, itemPath, collector, {
+    id: `${owner}-${tag}${index + 1}`, archetype,
     rarity: Array.isArray(rarity) ? rarity[index] : rarity,
     fixedCost,
+    ...(table ? { table } : {}),
     ...(slots ? { slot: slots[index % slots.length] } : {}),
 }));
 const skillList = (value, path, collector, min, max, owner, damageCap) => mapList(value, path, collector, min, max, (item, itemPath, index) => skillFromPair(item, itemPath, collector, `${owner}-s${index + 1}`, damageCap));
@@ -233,22 +257,122 @@ const passiveList = (value, path, collector, min, max, owner) => mapList(value, 
 const requiredPassive = (value, path, collector, id) => (isBlank(value) ? collector.fail(path, 'required') : buildPassive(value, path, collector, id));
 
 // 英雄技能：[名字, 卡牌模板]，借卡牌模板解算
-function buildHeroSkill(value, path, collector, id) {
+function buildHeroSkill(value, path, collector, id, table = heroTableFor(null)) {
     if (isBlank(value)) return collector.fail(path, 'required');
     const fields = fieldsOf(value, path, collector, ['name', 'template']);
     if (!fields) return;
     const name = requiredText(fields[0], indexPath(path, 0), collector, 20);
-    const template = pickTemplate(fields[1], indexPath(path, 1), collector, CARD_TEMPLATES);
+    const template = pickTemplate(fields[1], indexPath(path, 1), collector, table);
     if (!name || !template) return;
     return heroSkillFromTemplate(template, { id, name }) || collector.fail(indexPath(path, 1), 'template-unsolvable');
 }
 
 // 起始牌组各费用的抽取权重（X 费与未知费用按 1）
 const STARTER_COST_WEIGHT = Object.freeze({ 0: 2, 1: 3, 2: 2, 3: 1, X: 1 });
+// 规则 v6 起始卡组的稀有度权重：只取普通、罕见，约 3:1。
+const STARTER_RARITY_WEIGHT = Object.freeze({ common: 3, uncommon: 1 });
 
-// 起始牌组：基础攻击 + 基础防御 + 职业牌 + 个人牌。
+// 按权重不放回地选出 count 种不同的牌；rng 为 { state }，抽取后推进。
+function pickDistinct(rng, cards, count, weightOf) {
+    const left = [...cards];
+    const out = [];
+    while (out.length < count && left.length) {
+        const weights = left.map(weightOf);
+        const step = nextRandom(rng.state);
+        rng.state = step.state;
+        let roll = step.value * weights.reduce((sum, weight) => sum + weight, 0);
+        let picked = 0;
+        while (picked < left.length - 1 && roll >= weights[picked]) {
+            roll -= weights[picked];
+            picked += 1;
+        }
+        out.push(left.splice(picked, 1)[0]);
+    }
+    return out;
+}
+
+function starterDirectValue(card, op) {
+    if (!Number.isInteger(card.cost) || card.cost > 2 || card.radiance != null || card.ethereal) return 0;
+    if (card.effects.some((effect) => ['exhaust-self', 'exhaust-other', 'end-turn', 'requires', 'transmute', 'morph-hand', 'discard-hand'].includes(effect.op)
+        || (['status', 'apply-status'].includes(effect.op) && effect.status === 'no-draw')
+        || (effect.op === 'create' && /^(status-|curse-)/.test(effect.card)))) return 0;
+    const amount = card.effects.reduce((sum, effect) => {
+        if (effect.op !== op) return sum;
+        const targets = op === 'damage' ? ['enemy', 'all-enemies', 'random-enemy'] : ['self', 'all-allies'];
+        if (!targets.includes(effect.target || (op === 'damage' ? 'enemy' : 'self'))) return sum;
+        return sum + effect.amount * (op === 'damage' ? effect.hits || 1 : 1);
+    }, 0);
+    const loss = card.effects.filter((effect) => effect.op === 'self-damage').reduce((sum, effect) => sum + effect.amount, 0);
+    return Math.max(0, amount - loss) / Math.max(1, card.cost);
+}
+
+const channels = (card, orb) => card.effects.some((effect) => effect.op === 'channel' && effect.orb === orb);
+const grantsStatus = (card, status) => card.effects.some((effect) => ['status', 'apply-status'].includes(effect.op) && effect.status === status);
+const STARTER_ENGINES = Object.freeze({
+    mage: { attack: (card) => channels(card, 'lightning'), skill: (card) => channels(card, 'frost') },
+    priest: {
+        attack: (card) => Number.isInteger(card.radiance) && card.radiance <= 2
+            && card.effects.some((effect) => effect.op === 'damage' && effect.amount * (effect.hits || 1) >= 6),
+        skill: (card) => card.effects.some((effect) => effect.op === 'radiance')
+            && card.effects.some((effect) => effect.op === 'block'),
+        third: (card) => card.type === 'power' && grantsStatus(card, 'halo-strike'),
+    },
+    guardian: { third: (card) => card.type === 'power' && (grantsStatus(card, 'dexterity') || grantsStatus(card, 'plated')) },
+});
+
+// 高副本槽以打击 6 / 防御 5 的净收益为参照；池不足时取实际前列，至少保留一个低费核心。
+function pickStarterTypes(rng, cards, count, op, weightOf, engine) {
+    const ranked = cards.map((card) => ({ card, value: starterDirectValue(card, op) }))
+        .filter((item) => item.value > 0).sort((a, b) => b.value - a.value);
+    const coreCount = Math.min(2, count, ranked.length);
+    const benchmark = op === 'damage' ? 6 : 5;
+    const threshold = Math.min(benchmark, ranked[coreCount - 1]?.value ?? 0);
+    const cheap = ranked.filter((item) => item.card.cost <= 1);
+    const cheapThreshold = Math.min(benchmark, cheap[0]?.value ?? 0);
+    const core = pickDistinct(rng, cheap.filter((item) => item.value >= cheapThreshold).map((item) => item.card), Math.min(1, coreCount), weightOf);
+    const first = new Set(core.map((card) => card.id));
+    if (engine && core.length < coreCount) {
+        core.push(...pickDistinct(rng, cards.filter((card) => !first.has(card.id) && Number.isInteger(card.cost) && card.cost <= 2
+            && !card.ethereal && !card.effects.some((effect) => ['exhaust-self', 'exhaust-other'].includes(effect.op)) && engine(card)), 1, weightOf));
+    }
+    const reserved = new Set(core.map((card) => card.id));
+    core.push(...pickDistinct(rng, ranked.filter((item) => item.value >= threshold && !reserved.has(item.card.id))
+        .map((item) => item.card), coreCount - core.length, weightOf));
+    const taken = new Set(core.map((card) => card.id));
+    return [...core, ...pickDistinct(rng, cards.filter((card) => !taken.has(card.id)), count - core.length, weightOf)];
+}
+
+// 规则 v6 起始卡组：从本职业固定池（普通、罕见、可打出）先选种类、再按 starterDeckShapeV6 定份数，不放基础打击 / 防御。
+// 攻击、技能各选 3 种，第三种从能力牌与剩下的攻击 / 技能里选，个人牌选 1 种；固定池凑不齐形状时返回 null。
+function buildFixedStarterDeck(fixedPool, personalPool, seed, archetype) {
+    const shape = COMBAT_RULES.starterDeckShapeV6;
+    const rng = { state: hash32(`starter-v6:${seed}`) };
+    const costWeight = (card) => STARTER_COST_WEIGHT[card.cost] ?? 1;
+    const fixedWeight = (card) => costWeight(card) * STARTER_RARITY_WEIGHT[card.rarity];
+    const usable = (Array.isArray(fixedPool) ? fixedPool : []).filter((card) => Object.hasOwn(STARTER_RARITY_WEIGHT, card.rarity) && !card.unplayable
+        && !card.effects.some((effect) => effect.op === 'exhaust-other'
+            || (effect.op === 'grant-flag' && effect.flag === 'ethereal')));
+    const engine = STARTER_ENGINES[archetype];
+    const attacks = pickStarterTypes(rng, usable.filter((card) => card.type === 'attack'), shape.attack.length, 'damage', fixedWeight, engine?.attack);
+    const skills = pickStarterTypes(rng, usable.filter((card) => card.type === 'skill'), shape.skill.length, 'block', fixedWeight, engine?.skill);
+    const taken = new Set([...attacks, ...skills].map((card) => card.id));
+    const remaining = usable.filter((card) => !taken.has(card.id));
+    const support = engine?.third ? remaining.filter(engine.third) : [];
+    const third = pickDistinct(rng, support.length ? support : remaining, shape.third.length, fixedWeight);
+    const personal = pickDistinct(rng, Array.isArray(personalPool) ? personalPool : [], shape.personal.length, costWeight);
+    const groups = [[attacks, shape.attack], [skills, shape.skill], [third, shape.third], [personal, shape.personal]];
+    if (groups.some(([cards, copies]) => cards.length < copies.length)) return null;
+    return groups.flatMap(([cards, copies]) => cards.flatMap((card, index) => Array(copies[index]).fill(card.id)));
+}
+
+// 起始牌组。传入职业原型且本职业有固定池时按规则 v6 生成（见 buildFixedStarterDeck）；
+// 否则为 v3–v5 形状：基础攻击 + 基础防御 + 职业牌 + 个人牌。
 // 抽取用确定性随机；同一张已抽得越多权重越低，且不超过 perCardLimit。
-export function buildStarterDeck(classPool, personalPool, seed = '') {
+export function buildStarterDeck(classPool, personalPool, seed = '', archetype) {
+    if (archetype !== undefined) {
+        const fixedDeck = buildFixedStarterDeck(fixedClassPool(archetype), personalPool, seed, archetype);
+        if (fixedDeck) return fixedDeck;
+    }
     const shape = COMBAT_RULES.starterDeckShape;
     let state = hash32(`starter:${seed}`);
     const draw = (pool, count, perCardLimit) => {
@@ -278,8 +402,8 @@ export function buildStarterDeck(classPool, personalPool, seed = '') {
     ];
 }
 
-// 职业：职业名、流派、职业被动、11 张职业牌（固定费用模板）
-export function assembleClass(raw, { key, owner = key, fixed = {}, input = {} } = {}) {
+// 职业：职业名、原型与固定职业被动。
+export function assembleClass(raw, { key, fixed = {} } = {}) {
     const invalid = expectObject(raw);
     if (invalid) return invalid;
     const collector = createCollector(key);
@@ -289,9 +413,8 @@ export function assembleClass(raw, { key, owner = key, fixed = {}, input = {} } 
         : collector.fail('archetype', 'invalid-enum', { allowed: Object.keys(COMBAT_RULES.archetypes) });
     if (!className) return finish(collector, null);
     const id = profileIdFor('class', className);
-    const classPassive = requiredPassive(raw.passive, 'passive', collector, `${id}-p1`);
-    const classPool = cardList(raw.cards, 'cards', collector, 11, 11, id, 'c', classRaritiesFor(owner), validSlots(input?.costSlots, CARD_COST_SLOTS.class), true);
-    return finish(collector, { kind: 'class', id, className, archetype, classPassive, classPool });
+    const classPassive = fixedClassPassive(archetype, 1, `${id}-p1`);
+    return finish(collector, { kind: 'class', id, className, archetype, classPassive, classPassiveVersion: CLASS_PASSIVE_VERSION, classPool: [] });
 }
 
 // 职业进阶档：档名 + 3 张卡（id 可由 fixed.cardIds 指定）
@@ -302,7 +425,7 @@ export function assembleClassTier(raw, { key, fixed = {}, input = {} } = {}) {
     const tierName = requiredText(raw.tierName, 'tierName', collector, 12);
     const cardIds = Array.isArray(fixed.cardIds) ? fixed.cardIds : [];
     const slots = validSlots(input?.costSlots, CARD_COST_SLOTS.tier);
-    const cards = mapList(raw.cards, 'cards', collector, 3, 3, (item, itemPath, index) => cardFromTriple(item, itemPath, collector, { id: cardIds[index], rarity: input?.rarity, slot: slots[index % slots.length] }));
+    const cards = mapList(raw.cards, 'cards', collector, 3, 3, (item, itemPath, index) => cardFromTriple(item, itemPath, collector, { id: cardIds[index], rarity: input?.rarity, slot: slots[index % slots.length], table: archetypeTable(input?.archetype), archetype: input?.archetype }));
     return collector.errors.length ? { errors: collector.errors } : { value: { tierName, cards }, diagnostics: collector.diagnostics };
 }
 
@@ -322,12 +445,13 @@ export function assembleDeck(raw, { key, fixed, cls, input = {} }) {
         base: { hp: hpValue(raw.hp, 'hp', collector, hpRange), speed: combatSpeedFor({ archetype: cls.archetype, id }) },
         growth: { hpPerLevel: clampedInt(raw.hpPerLevel, 'hpPerLevel', collector, 1, 8, 4) },
         personalPassive: requiredPassive(raw.passive, 'passive', collector, `${id}-p1`),
-        personalPool: cardList(raw.cards, 'cards', collector, 4, 8, id, 'm', 'personal', validSlots(input?.costSlots, CARD_COST_SLOTS.personal)),
-        heroSkill: buildHeroSkill(raw.skill, 'skill', collector, `${id}-h1`),
+        personalPool: cardList(raw.cards, 'cards', collector, 4, 8, id, 'm', 'personal', validSlots(input?.costSlots, CARD_COST_SLOTS.personal), false, undefined, cls.archetype),
+        heroSkill: buildHeroSkill(raw.skill, 'skill', collector, `${id}-h1`, heroTableFor(cls.archetype)),
     };
-    const signature = cardList(raw.signature, 'signature', collector, 0, COMBAT_RULES.signatureLimit, id, 'g', 'signature', CARD_COST_SLOTS.signature);
+    checkCrossFamily(raw.cards, 'cards', collector, cls.archetype);
+    const signature = cardList(raw.signature, 'signature', collector, 0, COMBAT_RULES.signatureLimit, id, 'g', 'signature', CARD_COST_SLOTS.signature, false, undefined, cls.archetype);
     if (Array.isArray(signature) && signature.length) profile.signatureCards = signature;
-    if (!collector.errors.length) profile.starterDeck = buildStarterDeck(cls.classPool, profile.personalPool, id);
+    if (!collector.errors.length) profile.starterDeck = buildStarterDeck(cls.classPool, profile.personalPool, id, cls.archetype);
     return finish(collector, profile);
 }
 
@@ -342,7 +466,7 @@ export function assembleSignature(raw, { key, fixed, input = {} }) {
     const slots = Array.isArray(input.slots) ? input.slots : [];
     const costs = validSlots(input.costSlots, slots.map((slot) => CARD_COST_SLOTS.signature[slot - 1] ?? CARD_COST_SLOTS.signature[0]));
     const cards = mapList(raw.cards, 'cards', collector, slots.length, slots.length, (item, itemPath, index) => cardFromTriple(item, itemPath, collector, {
-        id: `${profile.id}-g${slots[index]}`, rarity: 'signature', slot: costs[index % costs.length],
+        id: `${profile.id}-g${slots[index]}`, rarity: 'signature', slot: costs[index % costs.length], archetype: input.archetype,
     }));
     const seen = new Set((profile.signatureCards || []).map((card) => card.name));
     (Array.isArray(cards) ? cards : []).forEach((card, index) => {
@@ -442,7 +566,7 @@ export function assembleGrowth(raw, { key, input }) {
         ? { id: undefined, rarity: input.rarity, table: restrictTable(CARD_TEMPLATES, input.templates), ...(raw.values !== undefined ? { values: raw.values } : {}) }
         : { id: undefined, rarity: 'personal' };
     const result = input.output === 'card'
-        ? buildCard(name, raw.template, raw.cost, ['name', 'template', 'cost'], collector, cardOptions)
+        ? buildCard(name, raw.template, raw.cost, ['name', 'template', 'cost'], collector, { ...cardOptions, archetype: input.archetype })
         : buildSkill(name, raw.template, ['name', 'template'], collector, undefined, COMBAT_RULES.allySkillDamageCap);
     if (collector.errors.length) return { errors: collector.errors };
     return { value: { [input.output]: result, ...(raw.targetId !== undefined ? { targetId: raw.targetId } : {}) }, diagnostics: collector.diagnostics };
@@ -537,17 +661,26 @@ export function assembleItem(raw, { key, input }) {
 const deepCopy = (value) => JSON.parse(JSON.stringify(value));
 
 // 特质：fixed.shape 给定时直接用其形状（主动技能或被动），否则按被动模板与稀有度生成
+// fixed.relic（规则 v6 遗物特性）给定时名称与被动都由遗物表还原，模型只写来历；战斗外模型的遗物特性不带被动，只记引用。
 export function assembleTrait(raw, { key, fixed = {} } = {}) {
     const invalid = expectObject(raw);
     if (invalid) return invalid;
     const collector = createCollector(key);
-    const shape = fixed.shape || null;
-    const name = requiredText(raw.name, 'name', collector, 20);
-    const template = shape ? null : pickTemplate(raw.template, 'template', collector, GEAR_PASSIVE_TEMPLATES);
-    if (!name || (!shape && !template)) return { errors: collector.errors };
+    const relic = fixed.relic ? resolveRelic(fixed.relic.relicId, fixed.relic.model) : null;
+    if (fixed.relic && !relic) return { errors: [{ path: 'relic', reason: 'relic-trait-invalid' }] };
+    // 遗物被动的 id / name 换成本特性自己的，其余（触发器、过滤、效果、描述）原样保留。
+    const relicPassiveBody = relic?.passive ? (({ id: _id, name: _name, ...rest }) => rest)(relic.passive) : null;
+    const shape = relic ? (relicPassiveBody ? { kind: 'passive', passive: relicPassiveBody } : null) : fixed.shape || null;
+    const name = relic ? relic.name : requiredText(raw.name, 'name', collector, 20);
+    const template = shape || relic ? null : pickTemplate(raw.template, 'template', collector, GEAR_PASSIVE_TEMPLATES);
+    if (!name || (!shape && !relic && !template)) return { errors: collector.errors };
     const origin = typeof raw.origin === 'string' ? raw.origin.trim() : '';
     if (origin.length > REWARD_ORIGIN_MAX) collector.note('origin', origin.length, REWARD_ORIGIN_MAX);
-    const base = { traitId: fixed.traitId, name, origin: origin.slice(0, REWARD_ORIGIN_MAX), rarity: fixed.rarity };
+    const base = {
+        traitId: fixed.traitId, name, origin: origin.slice(0, REWARD_ORIGIN_MAX), rarity: fixed.rarity, ...(fixed.link ? { link: fixed.link } : {}),
+        ...(relic ? { relic: { relicId: relic.relicId, model: relic.model } } : {}),
+    };
+    if (relic && !relic.passive) return { value: { ...base, kind: 'passive' }, diagnostics: collector.diagnostics };
     if (shape?.kind === 'active') {
         const { cost, effects, description } = shape.skill;
         return { value: { ...base, kind: 'active', skill: { id: `${fixed.traitId}-s`, name, cost, effects: deepCopy(effects), description } }, diagnostics: collector.diagnostics };
@@ -569,11 +702,43 @@ function buildRewardEntry(value, path, collector, slot, seed) {
     if (origin.length > REWARD_ORIGIN_MAX) collector.note(paths[2], origin.length, REWARD_ORIGIN_MAX);
     const base = { index: slot.index, kind: slot.kind, rarity: slot.rarity, origin: origin.slice(0, REWARD_ORIGIN_MAX) };
     if (slot.kind === 'card') {
-        const card = buildCard(nameValue, templateValue, undefined, [paths[0], paths[1], `${path}.cost`], collector, { id: rewardId(seed, slot.index, 'rc'), rarity: slot.rarity, slot: slot.cost });
-        return card ? { ...base, name: card.name, card } : undefined;
+        // 规则 v6 三选一槽（rewards.js 的 withCardCandidates）：随机卡只能用本职业允许的模板，与程序定的固定卡一起按 randomAt 排成 choices。
+        const fixedIds = Array.isArray(slot.fixedIds) ? slot.fixedIds : null;
+        const table = fixedIds ? archetypeTable(slot.archetype) : CARD_TEMPLATES;
+        const card = buildCard(nameValue, templateValue, undefined, [paths[0], paths[1], `${path}.cost`], collector, { id: rewardId(seed, slot.index, 'rc'), rarity: slot.rarity, slot: slot.cost, table, archetype: slot.archetype });
+        if (!card) return undefined;
+        const fixed = (fixedIds || []).map((id) => fixedCard(id));
+        if (fixed.some((item) => !item)) return collector.fail(path, 'reward-choice-invalid');
+        const choices = fixed.map((item) => JSON.parse(JSON.stringify(item)));
+        choices.splice(Math.max(0, Math.min(choices.length, Number(slot.randomAt) || 0)), 0, card);
+        return {
+            ...base, name: card.name, card, ...(fixedIds ? { choices } : {}),
+            ...(slot.inscribe > 0 ? { marks: planRewardMarks(choices, `${seed}|${slot.index}`, slot.inscribe) } : {}),
+            ...(slot.upgradeNoDamage === true ? { upgradeNoDamage: true } : {}),
+        };
+    }
+    // 规则 v5 P5b 刻印槽：刻印种类、目标副本与名称都由程序定，模型只写来历。
+    if (slot.kind === 'inscribe') {
+        const label = INSCRIPTION_LABELS[slot.inscription];
+        if (!label || !slot.cardId || !slot.copyId) return collector.fail(path, 'inscribe-slot-invalid');
+        return { ...base, name: `${label}·${String(slot.cardName || '')}`.slice(0, 20), inscription: slot.inscription, cardId: slot.cardId, copyId: slot.copyId, cardName: String(slot.cardName || slot.cardId).slice(0, 40) };
+    }
+    // 规则 v6 遗物宝物槽（rewards.js 的 withRelics）：条目、模型、名称与效果都由程序定，模型只写来历。
+    if (slot.kind === 'gear' && slot.relic) {
+        const relic = resolveRelic(slot.relic.relicId, slot.relic.model);
+        if (!relic) return collector.fail(path, 'relic-slot-invalid');
+        const gearId = gearIdFor(relic.name);
+        const passive = relic.passive ? { ...relic.passive, id: `${gearId}-p`, name: relic.name } : null;
+        const description = passive ? passive.description : relic.description;
+        return {
+            ...base, name: relic.name,
+            gear: { gearId, name: relic.name, slot: slot.gearSlot, ...(passive ? { passive } : {}), description, relic: { relicId: relic.relicId, model: relic.model } },
+        };
     }
     const name = requiredText(nameValue, paths[0], collector, 20);
-    const table = slot.kind === 'gear' ? GEAR_PASSIVE_TEMPLATES : slot.kind === 'item' ? ITEM_TEMPLATES : null;
+    // 装备槽带程序给的候选（规则 v5 D10）时只能从候选里选；旧槽位不带候选，照旧用全表。
+    const gearTable = Array.isArray(slot.templates) && slot.templates.length ? restrictTable(GEAR_PASSIVE_TEMPLATES, slot.templates) : GEAR_PASSIVE_TEMPLATES;
+    const table = slot.kind === 'gear' ? gearTable : slot.kind === 'item' ? ITEM_TEMPLATES : null;
     const template = table ? pickTemplate(templateValue, paths[1], collector, table) : null;
     if (!name || (table && !template)) return;
     if (slot.kind === 'gear') {
@@ -585,7 +750,8 @@ function buildRewardEntry(value, path, collector, slot, seed) {
         const item = itemFromTemplate(template);
         return { ...base, name, item: { itemId: itemIdFor(name), name, count: slot.count, effects: item.effects, description: item.description } };
     }
-    return { ...base, name };
+    // 规则 v6 G3d 弱敌战的劣等杂物：junk 由程序定，随奖励单与战利品记录保存。
+    return { ...base, name, ...(slot.kind === 'keepsake' && slot.junk === true ? { junk: true } : {}) };
 }
 
 // 奖励：按 input.slots（以及可选 input.reserve 备选）逐槽生成
@@ -602,4 +768,17 @@ export function assembleReward(raw, { key, input }) {
     return collector.errors.length
         ? { errors: collector.errors }
         : { value: { slots, ...(reserve ? { reserve } : {}) }, diagnostics: collector.diagnostics };
+}
+
+// 规则 v6 积分抽卡的随机候选：{ card: [名称, 模板键] }。稀有度、费用、ID 与本职业模板范围由程序定（rewards.js 的 planCardDraw）。
+export function assembleDrawCard(raw, { key, fixed = {} } = {}) {
+    const invalid = expectObject(raw);
+    if (invalid) return invalid;
+    const collector = createCollector(key);
+    const fields = fieldsOf(raw.card, 'card', collector, ['name', 'template']);
+    if (!fields) return { errors: collector.errors };
+    const card = buildCard(fields[0], fields[1], undefined, [indexPath('card', 0), indexPath('card', 1), 'card.cost'], collector, {
+        id: fixed.cardId, rarity: fixed.rarity, slot: fixed.cost, table: archetypeTable(fixed.archetype), archetype: fixed.archetype,
+    });
+    return card && !collector.errors.length ? { value: card, diagnostics: collector.diagnostics } : { errors: collector.errors };
 }

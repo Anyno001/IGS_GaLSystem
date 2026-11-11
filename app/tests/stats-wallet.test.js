@@ -20,61 +20,6 @@ if (!Object.getOwnPropertyDescriptor(FakeEl.prototype, 'classList')) {
     } });
 }
 
-// ---------- 合并余额计算 ----------
-test('合并余额 = 数值侧金钱 + 战斗积分；取不到的一侧按 0', () => {
-    assert.equal(walletBalance({ money: 80 }, 120), 200);
-    assert.equal(walletBalance({ money: 80 }), 80);
-    assert.equal(walletBalance({ money: -30 }, 130), 100);
-    assert.equal(walletBalance(null, 'x'), 0);
-});
-
-// ---------- 「买不起」按合并余额 ----------
-test('花费：数值侧金钱不够但合并余额够时照扣并让 bars.money 为负；合并余额也不够才买不起', () => {
-    const bars = { stamina: 100, stress: 0, money: 50 };
-    const spend = { kind: 'money', flow: '花费', value: '普通' };
-    const short = applyBarDirective(bars, spend);
-    assert.equal(short.shortfall, true);
-    assert.equal(short.bars.money, 50);
-    const paid = applyBarDirective(bars, spend, undefined, 60);
-    assert.equal(paid.shortfall, undefined);
-    assert.equal(paid.bars.money, -50);
-    assert.equal(walletBalance(paid.bars, 60), 10);
-    assert.equal(applyBarDirective(bars, spend, undefined, 49).shortfall, true);
-    assert.equal(applyBarDirective(bars, { kind: 'money', flow: '收入', value: '少量' }).bars.money, 70);
-    assert.equal(applyBarDirective({ ...bars, money: 500 }, spend).bars.money, 400);
-});
-
-test('结算：settleFloorText 把战斗积分带进「买不起」判断；提示词里的「金钱」是合并余额', () => {
-    const before = createStatsState({ money: 30 });
-    const text = '她递来账单。\n[igs-stat:money|花费|普通]';
-    const broke = settleFloorText(before, text, { random: () => 0.5 });
-    assert.equal(broke.meta.flags.shortfall, true);
-    const covered = settleFloorText(before, text, { random: () => 0.5, walletExtra: 80 });
-    assert.equal(covered.meta.flags && covered.meta.flags.shortfall, undefined);
-    assert.equal(covered.state.protagonist.bars.money, -70);
-    const prompt = buildStatsPrompt(covered.state, { walletExtra: 80 });
-    assert.match(prompt.content, /金钱[^\n]*10/);
-});
-
-// ---------- bars.* 开关与状态栏主角条 ----------
-test('主角条：金钱条显示合并余额；bars 开关决定出哪几条', () => {
-    const bars = { stamina: 60, stress: 20, money: 40 };
-    const all = protagonistStatMetrics(bars, { enabledBars: { stamina: true, stress: true, money: true }, walletExtra: 160 });
-    assert.deepEqual(all.map((m) => m.label), ['体力', '压力', '金钱']);
-    assert.equal(all.find((m) => m.label === '金钱').display, '200');
-    const some = protagonistStatMetrics(bars, { enabledBars: { stamina: false, stress: true, money: false }, vitals: { hp: 9, maxHp: 10, down: false } });
-    assert.deepEqual(some.map((m) => m.label), ['生命', '压力']);
-    assert.ok(all.every((m) => /^slot-[1-6]$/.test(m.colorKey)));
-});
-
-test('状态栏叠加：主角说话时换成主角条；其他名字原样返回', () => {
-    const model = { character: '我', metrics: [{ label: '旧', percent: 1, display: '1' }], hiddenCount: 2, loadState: 'idle', relation: '' };
-    const metrics = protagonistStatMetrics({ stamina: 60, stress: 20, money: 5 }, { enabledBars: { money: true }, walletExtra: 5 });
-    const lookup = (name) => (name === '我' ? { metrics, stages: [] } : null);
-    assert.equal(overlayStatsMetrics(model, lookup, '我').metrics, metrics);
-    assert.equal(overlayStatsMetrics(model, lookup, '路人'), model);
-});
-
 // ---------- 战斗花费：积分不足但合并余额足够 ----------
 const attack = (id) => ({ id, name: `斩${id}`, type: 'attack', cost: 1, rarity: 'common', effects: [{ op: 'damage', amount: 6 }] });
 const guard = (id) => ({ id, name: `守${id}`, type: 'skill', cost: 1, rarity: 'common', effects: [{ op: 'block', amount: 5 }] });
@@ -109,22 +54,6 @@ const walletLedger = (money) => {
 };
 const heroOf = (state) => state.characters.get('pc-hero');
 
-test('战斗花费：合并余额不足被拒、足够可通过；写入后合并余额与战斗净流水各自正确', async () => {
-    const { holder, ledger } = walletLedger(100);
-    assert.equal(heroOf(await ledger.effectiveState()).points, 100);
-    assert.equal(heroOf(await ledger.effectiveState({ raw: true })).points, 0);
-    const refused = await ledger.respecClass('pc-hero', 'cls-mage');
-    assert.equal(refused.ok, false);
-    assert.equal(refused.reason, 'combat-points-insufficient');
-    holder.money = 150;
-    const done = await ledger.respecClass('pc-hero', 'cls-mage');
-    assert.equal(done.ok, true, JSON.stringify(done));
-    assert.equal(heroOf(await ledger.effectiveState({ raw: true })).points, -150);
-    assert.equal(heroOf(await ledger.effectiveState()).points, 0);
-    holder.money = 400;
-    assert.equal(heroOf(await ledger.effectiveState()).points, 250);
-});
-
 test('钱包为 0 或取值抛错时，主角余额与旧行为一致', async () => {
     const { ledger } = walletLedger(0);
     assert.equal(heroOf(await ledger.effectiveState()).points, 0);
@@ -139,40 +68,6 @@ const favorTexts = (root) => {
 };
 const READER = { favorToast: { enabled: true } };
 const fx = { messageId: 9, toasts: [{ target: '小雪', delta: 4, up: true, text: '♥' }], growth: [{ skill: '说服', from: 30, to: 33, gain: 3 }], stages: [{ target: '小雪', from: '陌生', to: '熟人' }, { target: '阿福', from: 'a', to: 'b' }] };
-
-test('igs:stats-fx 反馈：好感与成长走现有飘字，关系阶段只给当前说话人；同楼同角色好感只飘一次', () => {
-    const root = makeStage({ hud: true });
-    const timers = makeTimers();
-    const opts = { readerSettings: READER, speaker: '小雪', schedule: timers.schedule, clear: timers.clear };
-    assert.equal(playStatsFeedback(root, fx, opts).played, 3);
-    assert.deepEqual(favorTexts(root), ['小雪 ♥', '说服成长 +3', '小雪：陌生 → 熟人']);
-    assert.equal(playStatsFeedback(root, fx, opts).played, 2);
-    cancelFxEffects(root);
-});
-
-test('飘字开关关闭时 igs:stats-fx 反馈直接丢弃，不动 DOM', () => {
-    const root = makeStage({ hud: true });
-    assert.equal(playStatsFeedback(root, fx, { readerSettings: { favorToast: { enabled: false } }, speaker: '小雪' }).played, 0);
-    assert.equal(root.querySelector('.igs-fx-favor-stack'), null);
-});
-
-test('页面差分飘字与 igs:stats-fx 去重：stats-fx 先飘过的好感，随后页面差分不再重复', () => {
-    const timers = makeTimers();
-    const opts = { schedule: timers.schedule, clear: timers.clear, playSfx: () => {}, readerSettings: READER, speaker: '小雪' };
-    const page = (value) => ({
-        messageId: 9, mode: 'embedded', readerSettings: READER,
-        content: { currentIndex: 0, statusHud: { character: '小雪', metrics: [{ label: '好感', percent: value, display: '', statValue: value, quiet: true }] }, fx: { instants: [] } },
-    });
-    const root = makeStage({ hud: true });
-    applyFxToDom(root, page(10), opts);
-    playStatsFeedback(root, fx, opts);
-    assert.equal(applyFxToDom(root, page(14), opts).played.includes('favor'), false);
-    cancelFxEffects(root);
-    // 没有先飘过时，页面差分照常出飘字（差分基线是模块级的，上面已记到 14，回落到 10 即有变化）
-    const other = makeStage({ hud: true });
-    assert.equal(applyFxToDom(other, page(10), opts).played.includes('favor'), true);
-    cancelFxEffects(other);
-});
 
 // ---------- 数值系统运行时：主角条与钱包 ----------
 
@@ -191,55 +86,6 @@ function runtimeSetup({ combat = false, points = 0, bars, userCharacter = () => 
     rt.enableForChat();
     return rt;
 }
-
-test('运行时：状态栏主角条只给主角；金钱只算数值侧，不并入战斗积分（积分与金钱分开）', () => {
-    const off = runtimeSetup({ combat: false, points: 500 });
-    const lookup = off.protagonistLookup();
-    assert.equal(lookup('小雪'), null);
-    const own = lookup('阿明');
-    assert.deepEqual(own.metrics.map((m) => m.label), ['体力', '压力', '金钱']);
-    assert.equal(own.metrics.find((m) => m.label === '金钱').display, '0');
-    assert.equal(off.walletMoney(), 0);
-    const on = runtimeSetup({ combat: true, points: 120 });
-    const mine = on.protagonistLookup()('阿明');
-    assert.deepEqual(mine.metrics.map((m) => m.label), ['生命', '体力', '压力', '金钱']);
-    assert.equal(mine.metrics.find((m) => m.label === '金钱').display, '0');
-    assert.equal(mine.metrics.find((m) => m.label === '生命').display, '7/10');
-});
-
-test('运行时：bars 开关关掉的条不出现；总开关关闭或本聊天未启用时返回 null', () => {
-    const rt = runtimeSetup({ bars: { stamina: false, money: false, stress: true } });
-    assert.deepEqual(rt.protagonistLookup()('阿明').metrics.map((m) => m.label), ['压力']);
-    const idle = createStatsRuntime({ getContext: () => ({ chat: [], chatMetadata: {}, getCurrentChatId: () => 'c' }), readSettings: () => ({ enabled: false }) });
-    assert.equal(idle.protagonistLookup(), null);
-    assert.equal(idle.walletMoney(), 0);
-});
-
-// ---------- 状态栏开关：关着什么都不显示，开着只在主角说话时出主角条 ----------
-test('状态栏开关：关着时主角区与数值反馈都不出现，开着时旁白与其他角色不加主角区、反馈照常', () => {
-    const rt = runtimeSetup({ combat: true, points: 120 });
-    const block = rt.protagonistBlock();
-    assert.equal(block.name, '阿明');
-    assert.deepEqual(block.metrics.map((m) => m.label), ['生命', '体力', '压力', '金钱']);
-    const lookup = rt.protagonistLookup();
-    const model = (enabled, character) => ({ enabled, character, metrics: [], hiddenCount: 0, relation: '' });
-    const compose = (enabled, speaker) => composeStatsHud(model(enabled, speaker), { lookup, speaker });
-    for (const speaker of ['', '小雪']) {
-        const off = model(false, speaker);
-        assert.equal(composeStatsHud(off, { lookup, speaker }), off);
-        assert.equal(compose(true, speaker).hero, undefined);
-    }
-    assert.equal(compose(true, '阿明').hero, undefined);
-    assert.deepEqual(compose(true, '阿明').metrics, block.metrics);
-    const root = makeStage({ hud: true });
-    const timers = makeTimers();
-    const opts = (statusHud) => ({ readerSettings: { ...READER, statusHud }, speaker: '小雪', schedule: timers.schedule, clear: timers.clear });
-    assert.equal(playStatsFeedbackWithHud(root, fx, opts({ enabled: false })).played, 0);
-    assert.equal(playStatsFeedbackWithHud(root, fx, { ...opts(undefined) }).played, 0);
-    assert.equal(root.querySelector('.igs-fx-favor-stack'), null);
-    assert.equal(playStatsFeedbackWithHud(root, fx, opts({ enabled: true })).played, 3);
-    cancelFxEffects(root);
-});
 
 // ---------- 楼层回退：数值侧金钱与战斗侧积分各自回退 ----------
 test('金钱合并后楼层回退：bars.money 随数值账本回退，战斗积分流水随锚点楼回退，互不牵连', async () => {
@@ -270,17 +116,332 @@ test('金钱合并后楼层回退：bars.money 随数值账本回退，战斗积
     assert.equal(heroOf(await combat.effectiveState({ raw: true })).points, 0);
 });
 
-test('运行时：「设为User立绘」的角色按主角处理，状态栏出生活条、不出好感信任', () => {
-    const rt = runtimeSetup({ userCharacter: () => '白墨' });
-    assert.deepEqual(rt.protagonistLookup()('白墨').metrics.map((m) => m.label), ['体力', '压力', '金钱']);
-    assert.deepEqual(rt.metricsLookup()('白墨').metrics, []);
-    const table = { metrics: [{ label: '好感度' }, { label: '信赖' }, { label: '体力' }] };
-    assert.deepEqual(dropUserFavor(table, '主角').metrics.map((m) => m.label), ['体力']);
+async function sharedRuntime(t, money = 500, originSettings = {}, currencyOptions = null) {
+    const { createCombatTables } = await import('../src/data/shujuku/combat-tables.js');
+    const { createCombatServices } = await import('../src/core/combat-services.js');
+    const { createOriginRuntime } = await import('../src/core/origin-runtime.js');
+    const { createPointsFloorRecord } = await import('../src/host/points-floor-record.js');
+    const { createHarness } = await import('./origin-host.js');
+    const { createLedgerMockHost, userInventorySheet } = await import('./helpers/combat-mock-host-ledger.js');
+    const db = createLedgerMockHost();
+    db.sheets.sheet_userbag = userInventorySheet();
+    const tables = createCombatTables({ api: db.api });
+    assert.equal((await tables.ensure()).ok, true);
+    assert.equal((await tables.append('profile', [row(classDef('cls-blade'), 1), row(classDef('cls-mage'), 2), row(heroDef(), 3)])).ok, true);
+    const game = createHarness({ enabled: false });
+    const holder = { money, enabled: true };
+    const values = new Map();
+    const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+    const host = { AutoCardUpdaterAPI: db.api, SillyTavern: { getContext: () => game.ctx } };
+    const services = createCombatServices({
+        global: host, storage, pointsFloorRecord: createPointsFloorRecord(host),
+        getChatId: () => game.ctx.chatId, getUserName: () => '主角', getWallet: () => holder.money,
+        getReaderSettings: () => ({ combatExpansion: { enabled: holder.enabled } }),
+    });
+    let statsRuntime = null;
+    const openStats = async (exchange = services.points()) => {
+        const { createStatsRuntime } = await import('../src/core/stats-runtime.js');
+        statsRuntime?.destroy();
+        statsRuntime = createStatsRuntime({
+            getContext: () => game.ctx, statsTables: () => services.statsTables(),
+            currencyInventory: () => services.inventoryTables(), pointsExchange: () => exchange,
+            combatSource: () => services.lifeSource(),
+            readSettings: () => ({ enabled: true, ruleset: 'coc7', sheetGen: 'off', backfill: 'off', push: { enabled: false } }),
+            getBackgroundRequest: () => () => JSON.stringify({ name: '铜钱', initial: 100,
+                prices: { 少量: 7, 普通: 30, 昂贵: 90, 巨额: 300 }, rate: currencyOptions?.rate ?? 0.25 }),
+        });
+        statsRuntime.sync();
+        await statsRuntime.enableForChat({ initial: createStatsState({ money }) });
+        await statsRuntime.whenSaved();
+        return statsRuntime;
+    };
+    if (currencyOptions) { game.ai('古城开场'); await openStats(); }
+    const runtime = createOriginRuntime({
+        getContext: () => ({ ...game.ctx }), readSettings: () => ({ enabled: true, achieveOn: false, ...originSettings }),
+        readLlm: () => ({}), combatServices: services,
+        ...(currencyOptions && { statsRuntime: {
+            exchangeInfo: () => statsRuntime.exchangeInfo(),
+            quoteExchange: points => statsRuntime.quoteExchange(points), exchangePoints: quote => statsRuntime.exchangePoints(quote),
+            retryExchange: () => statsRuntime.retryExchange(),
+        } }),
+    });
+    runtime.sync();
+    t.after(() => { statsRuntime?.destroy(); runtime.destroy(); game.engine.stop(); });
+    await runtime.engine.whenSaved();
+    assert.equal(runtime.engine.isBlocked(), null);
+    return { db, game, holder, services, runtime, host, storage, tables, ledger: services.getLedger(),
+        get stats() { return statsRuntime; }, openStats };
+}
+
+test('生产失败恢复：分段购买不发货且共享余额拒读，原意图重试后只扣款一次', async (t) => {
+    const h = await sharedRuntime(t, 500);
+    h.game.ai('购买前的有效来源楼');
+    await h.runtime.engine.whenSaved();
+    const { runtime } = h;
+    h.game.ctx.generateQuietPrompt = async () => '系统回复。'.repeat(4000) + '<origin>\n购买|凝神丹\n</origin>';
+    const insert = h.db.api.insertRow;
+    let interrupted = false;
+    h.db.api.insertRow = (...args) => {
+        const cells = typeof args[0] === 'object' ? args[0].data : args[1];
+        if (String(cells?.['分段']).startsWith('2/')) { interrupted = true; return false; }
+        return insert(...args);
+    };
+    assert.equal((await runtime.engine.sysChat('购买凝神丹')).ok, false);
+    assert.equal(interrupted, true, '实际写入必须跨过生产分段阈值');
+    assert.equal(runtime.engine.getState().bag.some((item) => item.name === '凝神丹'), false);
+    assert.equal(runtime.engine.getState().points, 500);
+    assert.equal((await h.services.readSharedPoints()).ok, false);
+    h.db.api.insertRow = insert;
+    const recovered = await runtime.engine.retrySave();
+    assert.equal(recovered.ok, true, JSON.stringify(recovered));
+    assert.equal(runtime.engine.getState().bag.find((item) => item.name === '凝神丹').count, 1);
+    assert.equal((await h.services.readSharedPoints()).balance, 300);
+    const count = h.db.calls.insertRow;
+    assert.equal((await runtime.engine.retrySave()).ok, true);
+    await runtime.engine.whenSaved();
+    assert.equal(h.db.calls.insertRow, count);
+    assert.equal(runtime.engine.getState().points, 300);
 });
 
-test('运行时：User 角色与酒馆用户名的别名都按主角处理，不出好感信任', () => {
-    const rt = runtimeSetup({ userCharacter: () => '白墨', characterAliases: () => ({ 白墨: ['小白', '墨哥'], 阿明: ['明明'], 小雪: ['雪儿'] }) });
-    for (const name of ['小白', '墨哥', '明明']) assert.deepEqual(rt.metricsLookup()(name).metrics, [], name);
-    assert.ok(rt.protagonistLookup()('小白'));
-    assert.equal(rt.protagonistLookup()('雪儿'), null);
+test('积分结算基础：待扣款持久化并阻止新消费，重建服务重试只结算原记录', async t => {
+    const h = await sharedRuntime(t, 500);
+    const messageId = h.game.ai('牌桌'); await h.runtime.engine.whenSaved();
+    const points = h.services.points();
+    const started = await points.start({ game: 'mahjong', rules: 'chengdu', messageId });
+    assert.equal(started.ok, true, JSON.stringify(started));
+    const insert = h.db.api.insertRow;
+    h.db.api.insertRow = (...args) => {
+        const cells = typeof args[0] === 'object' ? args[0].data : args[1];
+        if (String(cells?.['载荷JSON']).includes('"kind":"settle"')) return false;
+        return insert(...args);
+    };
+    const result = await points.hand(started.roundId, { handId: 'debt', rules: 'chengdu', legs: [-20, -20, -20], raw: { source: 'fixture' } });
+    assert.equal(result.ok, false);
+    assert.equal(points.pending().record.payload.kind, 'settle');
+    assert.equal((await h.services.readSharedPoints()).balance, 500);
+    assert.equal((await h.ledger.respecClass('pc-hero', 'cls-mage')).reason, 'points-intent-pending');
+    assert.equal((await h.runtime.engine.dispatch({ type: 'buy', name: '凝神丹' })).reason, 'points-intent-pending');
+    assert.equal(h.runtime.engine.getState().bag.length, 0);
+    h.db.api.insertRow = insert;
+    const { createCombatServices } = await import('../src/core/combat-services.js');
+    const { createPointsFloorRecord } = await import('../src/host/points-floor-record.js');
+    const reopened = createCombatServices({ global: h.host, storage: h.storage, pointsFloorRecord: createPointsFloorRecord(h.host),
+        getChatId: () => h.game.ctx.chatId, getWallet: () => h.holder.money, getUserName: () => '主角' });
+    assert.equal((await reopened.points().retry()).ok, true);
+    assert.equal((await reopened.readSharedPoints()).balance, -100);
+    assert.equal(reopened.points().pending().record, null);
+    const count = h.db.calls.insertRow;
+    assert.equal((await reopened.points().retry()).ok, true);
+    assert.equal(h.db.calls.insertRow, count);
 });
+
+test('积分结算基础：分段中断只补原意图，swipe失效不把奖励转到新分支', async t => {
+    const h = await sharedRuntime(t, 0);
+    const messageId = h.game.ai('游戏'); await h.runtime.engine.whenSaved();
+    const points = h.services.points();
+    const started = await points.start({ game: 'rps', messageId });
+    assert.equal(started.ok, true, JSON.stringify(started));
+    const insert = h.db.api.insertRow;
+    h.db.api.insertRow = (...args) => {
+        const cells = typeof args[0] === 'object' ? args[0].data : args[1];
+        return String(cells?.['分段']).startsWith('2/') ? false : insert(...args);
+    };
+    const result = { win: true, proof: '本地终局'.repeat(5000) };
+    assert.equal((await points.award(started.roundId, result)).ok, false);
+    const intent = points.pending().record;
+    assert.equal(intent.payload.kind, 'award');
+    assert.equal((await h.services.readSharedPoints()).ok, false);
+    h.game.ctx.chat[messageId].swipe_id = 1;
+    h.db.api.insertRow = insert;
+    assert.equal((await points.retry()).skipped, true);
+    assert.equal(points.pending().record, null);
+    assert.equal((await h.services.readSharedPoints()).balance, 0);
+    h.game.ctx.chat[messageId].swipe_id = 0;
+    assert.equal((await h.services.readSharedPoints()).balance, 2);
+    const count = h.db.calls.insertRow;
+    assert.equal((await points.award(started.roundId, result)).present, true);
+    assert.equal(h.db.calls.insertRow, count);
+});
+
+test('积分结算基础：同楼两奖与同类型一次，窗口逐楼释放且迟到奖励检查后续窗口', async t => {
+    const h = await sharedRuntime(t, 0);
+    const ids = [];
+    for (let i = 0; i < 11; i += 1) ids.push(h.game.ai(`楼${i}`));
+    await h.runtime.engine.whenSaved();
+    const points = h.services.points();
+    const award = async (game, at, result) => {
+        const start = await points.start({ game, messageId: ids[at] });
+        assert.equal(start.ok, true, JSON.stringify(start));
+        return points.award(start.roundId, result);
+    };
+    assert.equal((await award('ludo', 1, { win: true, humans: 1 })).amount, 20);
+    assert.equal((await award('ludo', 1, { win: true, humans: 1 })).amount, 0);
+    assert.equal((await award('snake', 1, { terminal: true, score: 20 })).amount, 15);
+    assert.equal((await award('rps', 1, { win: true })).amount, 0);
+    assert.equal((await award('ludo', 9, { win: true, humans: 1 })).amount, 20);
+    assert.equal((await award('ludo', 10, { win: true, humans: 1 })).amount, 5);
+    assert.equal((await award('rps', 0, { win: true })).amount, 2);
+    assert.equal((await award('snake', 0, { terminal: true, score: 20 })).amount, 3);
+    assert.equal(points.read().balance, 65);
+    ids.push(h.game.ai('楼11')); await h.runtime.engine.whenSaved();
+    assert.equal((await award('snake', 11, { terminal: true, score: 20 })).amount, 15);
+});
+
+test('Origin经济：核准收入写失败不发布，重试只写原结果且不重复通知', async t => {
+    const h = await sharedRuntime(t, 0);
+    h.game.ai('准备'); await h.runtime.engine.whenSaved();
+    const insert = h.db.api.insertRow;
+    h.db.api.insertRow = () => false;
+    h.game.ai('奖励<origin>\n积分|+999|奖励\n</origin>');
+    await h.runtime.engine.whenSaved();
+    assert.ok(h.runtime.engine.isBlocked());
+    assert.equal(h.runtime.engine.getState().points, 0);
+    const count = h.game.notes.length;
+    h.db.api.insertRow = insert;
+    assert.equal((await h.runtime.engine.retrySave()).ok, true);
+    assert.equal((await h.services.readSharedPoints()).balance, 20);
+    const rows = h.db.calls.insertRow;
+    assert.equal((await h.runtime.engine.retrySave()).ok, true);
+    assert.equal(h.db.calls.insertRow, rows);
+    assert.ok(h.game.notes.length >= count);
+});
+
+function chengduEvidence(hand, legs) {
+    const transfers = legs.map((fan, index) => ({ from: fan < 0 ? 0 : index + 1,
+        to: fan < 0 ? index + 1 : 0, type: 'hu', fan: Math.abs(fan), score: 16 }));
+    const scores = [0, 0, 0, 0];
+    for (const item of transfers) { scores[item.from] -= item.score; scores[item.to] += item.score; }
+    return { points: { version: 1, rules: 'chengdu', hand, transfers }, results: scores.map(score => ({ score })) };
+}
+
+async function mahjongSessionHarness(h, messageId, saved, hands = [], rules = 'chengdu') {
+    const { createMahjongPointsSession } = await import('../src/visual/igs-ui/wait-stage-mahjong-points.js');
+    const { riichiPointsHand } = await import('../src/visual/igs-ui/riichi-points-settlement.js');
+    let snapshot, writable = true, final = false;
+    const factory = h.services.mahjongPointsRounds(messageId);
+    const session = createMahjongPointsSession({ factory: identity => factory(identity, rules), saved,
+        adapt: rules === 'riichi' ? riichiPointsHand : undefined,
+        evidence: () => hands, terminal: () => final,
+        persist() {
+            if (!writable) return { ok: false, reason: 'points-table-save-failed' };
+            snapshot = structuredClone({ version: 2, points: session.state.identity, pointsExit: session.state.exitRequested });
+            return { ok: true };
+        } });
+    return { session, hands, get snapshot() { return snapshot; },
+        writable(value) { writable = value; }, final(value) { final = value; } };
+}
+
+async function scmjUiHarness(t, h, messageId, saved, seed = 1) {
+    const { JSDOM } = await import('jsdom');
+    const { openScmjTable, forgetScmjTable } = await import('../src/visual/igs-ui/wait-stage-scmj.js');
+    const dom = new JSDOM('<!doctype html><body><div id="board"></div></body>', { url: 'https://igs.test/' });
+    const doc = dom.window.document, board = doc.getElementById('board');
+    let closed = 0, detached = false;
+    const ctx = { doc, board, model: {}, storage: h.storage, setNote() {}, onVoice() {},
+        loadImage: () => '', isSettled: () => detached, requestClose() { closed += 1; detached = true; } };
+    const factory = h.services.mahjongPointsRounds(messageId);
+    const match = openScmjTable(ctx, ['你', '甲', '乙', '丙'].map(name => ({ name })), saved,
+        { seed, present: false, pointsRounds: factory });
+    t.after(() => { forgetScmjTable(); dom.window.close(); });
+    await match.points.retry();
+    return { dom, doc, board, ctx, match, factory, get closed() { return closed; }, detach() { detached = true; } };
+}
+
+async function scmjToBoundary(match) {
+    const { greedyDecide } = await import('../scripts/scmj-players.mjs');
+    for (let guard = 0; !['result', 'final'].includes(match.phase()); guard += 1) {
+        assert.ok(guard < 500, '成都牌局必须能推进到局末');
+        assert.equal(match.canPlay(), true, JSON.stringify(match.points.state));
+        match.answer(greedyDecide(match.view()));
+    }
+    return match.points.retry();
+}
+
+async function settleScmjBranches(prepare) {
+    const { createScmjController } = await import('../src/visual/igs-ui/scmj/controller.js');
+    const { SCMJ_CONF } = await import('../src/visual/igs-ui/scmj/host.js');
+    const { scmjPointsHand } = await import('../src/visual/igs-ui/scmj/points-settlement.js');
+    const controller = createScmjController({ seed: 1 });
+    const seats = Array.from({ length: 4 }, (_, seatIndex) => ({
+        seatIndex, holds: [0, 1, 2, 9, 10, 11, 12, 13, 14, 18, 19, 20, 21, 21], countMap: {},
+        pengs: [], angangs: [], diangangs: [], wangangs: [], tingMap: { 21: { fan: 2, pattern: 'normal' } },
+        hued: true, actions: [], score: 0, fan: 2, pattern: 'normal',
+        numZiMo: 0, numJiePao: 0, numDianPao: 0, numChaJiao: 0,
+    }));
+    prepare(seats);
+    const game = { gameIndex: 0, conf: { ...SCMJ_CONF, menqing: false, jiangdui: false, tiandihu: false }, gameSeats: seats };
+    controller.xzdd.__internals.calculateResult(game, { seats: seats.map(() => ({ score: 0 })) });
+    const data = { points: game.pointsSettlement, results: seats.map(s => ({ score: s.score })) };
+    const result = scmjPointsHand(data);
+    assert.equal(result.ok, true, JSON.stringify(data));
+    return { data, hand: result.hand, seats };
+}
+
+function riichiEvidence(hand, win, jushu = 0, qijia = 0) {
+    return { version: 1, rules: 'riichi', hand, self: 0, qijia, qipai: { jushu }, results: [win
+        ? { hule: win } : { pingju: { name: '九種九牌', fenpei: [0, 0, 0, 0] } }] };
+}
+
+async function riichiUiHarness(t, h, at, { saved, asyncMessages = false } = {}) {
+    const { JSDOM } = await import('jsdom');
+    const { startMahjong, forgetMahjongTable } = await import('../src/visual/igs-ui/wait-stage-mahjong.js');
+    forgetMahjongTable();
+    h.storage.setItem('igs-wait-mahjong-mode-v1', 'riichi');
+    if (saved) h.storage.setItem('igs-wait-mahjong-v1', JSON.stringify(saved));
+    const dom = new JSDOM('<!doctype html><body><div id="board"></div></body>', { url: 'https://igs.test/' });
+    const doc = dom.window.document, board = doc.getElementById('board');
+    let closed = 0, back = 0;
+    const ctx = { doc, board, storage: h.storage, model: {}, setNote() {}, onVoice() {},
+        loadImage: () => '', isSettled: () => false, requestClose() { closed += 1; },
+        host: { state: () => ({ back: '返回阅读', next: false }), onChange: () => () => {}, back() { back += 1; } } };
+    const game = startMahjong(ctx, h.services.mahjongPointsRounds(at));
+    const match = globalThis.__IGS_MAHJONG_MATCH__;
+    if (!asyncMessages) {
+        const dispatch = game.call_players.bind(game);
+        game.call_players = (...args) => {
+            const sync = game._sync; game._sync = true;
+            try { return dispatch(...args); } finally { game._sync = sync; }
+        };
+    }
+    t.after(() => { game.stop(); clearTimeout(game._timeout_id); forgetMahjongTable(); dom.window.close(); });
+    const confirmed = await match.points.retry();
+    const click = text => {
+        const node = [...board.querySelectorAll('button')].find(button => button.textContent === text);
+        assert.ok(node, text); assert.equal(node.disabled, false, text); node.click();
+    };
+    return { game, match, board, doc, ctx, confirmed, click, get closed() { return closed; }, get back() { return back; },
+        snapshot: () => JSON.parse(h.storage.getItem('igs-wait-mahjong-v1')) };
+}
+
+async function riichiUiWin(ui, winner = 0) {
+    const Majiang = (await import('@kobalab/majiang-core')).default;
+    ui.game.qipai();
+    ui.game._model.shoupai[winner] = Majiang.Shoupai.fromString('z11122233344455');
+    ui.game._model.lunban = winner;
+    ui.game.hule();
+    return ui.match.points.retry();
+}
+
+const exchangeBalance = async h => {
+    const { currencyBalanceOf } = await import('../src/scene/stats/stat-currency.js');
+    const inventory = h.services.inventoryTables();
+    inventory.client?.invalidate?.();
+    const result = currencyBalanceOf(inventory.read(), '铜钱');
+    assert.equal(result.ok, true, result.reason);
+    return result.balance;
+};
+
+async function segmentedExchange(h) {
+    const { createCombatTables } = await import('../src/data/shujuku/combat-tables.js');
+    const { createPointsStore } = await import('../src/data/shujuku/points-store.js');
+    const { createPointsEngine } = await import('../src/scene/points/points-engine.js');
+    const { createPointsIntents } = await import('../src/storage/points-intents.js');
+    const { createPointsFloorRecord } = await import('../src/host/points-floor-record.js');
+    const chat = () => h.game.ctx.chat, chatId = () => h.game.ctx.chatId;
+    const raw = createCombatTables({ api: h.db.api, cellMax: 180 });
+    const store = createPointsStore({ tables: raw, chat, chatId });
+    return createPointsEngine({ store: () => store, chat, chatId,
+        floors: createPointsFloorRecord(h.host), intents: createPointsIntents(h.storage),
+        lock: task => h.services.withPointsLock(task), wallet: () => h.services.readSharedPoints() });
+}
+

@@ -12,12 +12,45 @@ export const ASCEND_TIERS = Object.freeze({
     3: Object.freeze({ cost: 600, level: 10, rarity: 'epic' }),
 });
 export const TRAIT_DRAW_COST = 100;
+// 规则 v6 积分抽卡（D-09）：3 张本职业候选（固定 2 + 随机 1），选一张进卡组或放弃，放弃不退款；单价不递增。
+export const CARD_DRAW_COST = 150;
+// 规则 v6 删卡：每五胜一次机会，费用 min(500, 75 + 50 × 已删次数)；历史记录按原费用策略重放。
+export const PURGE_EVERY = 5;
+// 规则 v6 G3c 升级机会：与删卡共用普通胜场计数，每满 UPGRADE_EVERY 场给一次免费升级，过期作废，与删卡互不占用。
+export const UPGRADE_EVERY = 5;
+export const PURGE_BASE_COST = 75;
+export const PURGE_STEP_COST = 50;
+export const PURGE_MAX_COST = 500;
+export const PURGE_COST_VERSION = 1;
+export function purgeCost(used, version = PURGE_COST_VERSION) {
+    const cost = PURGE_BASE_COST + PURGE_STEP_COST * Math.max(0, Number(used) || 0);
+    return version === 0 ? cost : Math.min(PURGE_MAX_COST, cost);
+}
 // 出售价在基础价上下浮动的比例。
 export const SELL_PRICE_SPREAD = 0.2;
+// 规则 v6 G5g 战斗胜利积分（D-16）：按本场最高敌人档位取区间，以战斗 ID 作种子定额。
+export const BATTLE_POINTS_RANGE = Object.freeze({
+    normal: Object.freeze([10, 15]), elite: Object.freeze([16, 22]), boss: Object.freeze([23, 30]),
+});
+export const BATTLE_POINT_TIERS = Object.freeze(['normal', 'elite', 'boss']);
+// 规则 v6 G3d 弱敌战（D-24）：敌方全部「远逊」时经验与胜利积分按 1/4 向下取整，劣等杂物卖价按 1/4（至少 1）。
+export const WEAK_SHARE = 0.25;
+export const weakShare = (value) => Math.floor((Number(value) || 0) * WEAK_SHARE);
+export const weakBattlePoints = (tier, combatId) => weakShare(battlePoints(tier, combatId));
 
-// 出售价：基础价 ± 20%，浮动由 seed 哈希决定（同 seed 恒定），最低 1。
-export function sellPrice(rarity, seed) {
+// 本场档位：有首领取首领，否则有精英取精英，其余为普通。
+export const battleTierOf = (tiers) => (Array.isArray(tiers) && tiers.includes('boss') ? 'boss' : Array.isArray(tiers) && tiers.includes('elite') ? 'elite' : 'normal');
+
+// 胜利积分：区间内按战斗 ID 哈希定额，同一战斗恒定。
+export function battlePoints(tier, combatId) {
+    const [min, max] = BATTLE_POINTS_RANGE[tier] || BATTLE_POINTS_RANGE.normal;
+    return min + (hash32(`igs-win:${combatId ?? ''}`) % (max - min + 1));
+}
+
+// 出售价：基础价 ± 20%，浮动由 seed 哈希决定（同 seed 恒定），最低 1；劣等杂物（junk）按 1/4。
+export function sellPrice(rarity, seed, { junk = false } = {}) {
     const base = KEEPSAKE_PRICES[rarity] ?? KEEPSAKE_PRICES.common;
     const spread = Math.round(base * SELL_PRICE_SPREAD);
-    return Math.max(1, base - spread + (hash32(`igs-sell:${seed ?? ''}`) % (spread * 2 + 1)));
+    const price = Math.max(1, base - spread + (hash32(`igs-sell:${seed ?? ''}`) % (spread * 2 + 1)));
+    return junk === true ? Math.max(1, weakShare(price)) : price;
 }

@@ -495,6 +495,9 @@ export function createIgsReaderHost(options = {}) {
         waitStageLeases?.releaseAll();
     }
     const waitStage = createWaitStageRuntime({
+        gamePointsRounds: options.gamePointsRounds,
+        mahjongPointsRounds: options.mahjongPointsRounds,
+        getPointsMessageId: () => currentTurnMessageId(state.activeReader || {}),
         penalty: waitStagePenalty,
         persona: waitStagePersona,
         loadImage: (url) => loadWaitStageImage(url),
@@ -1381,6 +1384,7 @@ export function createIgsReaderHost(options = {}) {
         offImageJobLog();
         teardownStatusHudSubscription();
         closeReader();
+        waitStage.dispose();
         sourceCache.invalidate();
         tableData.invalidate();
         disarmEditReopen();
@@ -1761,6 +1765,7 @@ export function createIgsReaderHost(options = {}) {
         if (waitStage.isOpen()) return { ok: false, reason: 'awaiting-reply' };
         if (!getWaitStageGamePack()) return { ok: false, reason: 'wait-games-not-installed' };
         const settings = (current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.waitStage) || null;
+        if (settings && settings.games === false) return { ok: false, reason: 'wait-games-disabled' };
         waitStage.open(host, { settings, model: null, play: true });
         void refreshWaitStageModel(current);
         return { ok: true, open: true };
@@ -2798,6 +2803,7 @@ export function createIgsReaderHost(options = {}) {
         state.activeReader.mode = nextMode;
         syncReaderMountForMode(state.activeReader, nextMode);
         state.activeReader.snapshot = snapshot;
+        waitStage.syncSettings(readerSettings.waitStage);
         updateMountedReader(snapshot);
         readerStaleBehindSettings = false;
         return { ok: true };
@@ -5273,6 +5279,8 @@ ${row.key}`;
                 }
                 return;
             }
+            // 等回复时点开的小游戏同样盖在正文上：方向键、空格等交给游戏，不翻底下的楼层；Esc 仍走下面的关闭流程。
+            if (waitStage.hasGame?.() && event.key !== 'Escape') return;
             const optionLayer = state.activeReader.dom?.overlay?.querySelector?.('#igs-option-bubbles');
             if (event.key === 'Escape' && optionLayer && !optionLayer.hasAttribute('hidden') && optionLayer.hasAttribute('data-igs-panel')) {
                 event.preventDefault(); event.stopPropagation?.();
@@ -5352,9 +5360,9 @@ ${row.key}`;
             useInventoryItem: typeof options.useCombatInventoryItem === 'function' ? (name) => options.useCombatInventoryItem(name) : null,
             // 背包分组、已装备标记与装备映射（P7e）：战斗开启时读主角背包投影；装上 / 卸下走现有换装服务。
             getHeroInventory: typeof options.getCombatHeroInventory === 'function' ? () => options.getCombatHeroInventory() : null,
-            setHeroGear: typeof options.setCombatHeroGear === 'function' ? (gearId, equip) => options.setCombatHeroGear(gearId, equip) : null,
+            setHeroGear: typeof options.setCombatHeroGear === 'function' ? (gearId, equip, slotIndex) => options.setCombatHeroGear(gearId, equip, slotIndex) : null,
             // 背包卖出（v0.39.2）：人物状态面板的背包页已取消，主角装备与杂物统一在这里卖出。
-            sellHeroItem: typeof options.sellCombatHeroItem === 'function' ? (kind, id) => options.sellCombatHeroItem(kind, id) : null,
+            sellHeroItem: typeof options.sellCombatHeroItem === 'function' ? (kind, id, count) => options.sellCombatHeroItem(kind, id, count) : null,
         });
         const mapController = createMapPanelController(doc, options.global, fillRecordDraft, {
             mediaCache: options.media?.cache,
@@ -5473,7 +5481,12 @@ ${row.key}`;
             drawTrait: typeof options.drawCombatTrait === 'function' ? (opts) => options.drawCombatTrait(opts) : null,
             pickTrait: typeof options.pickCombatTrait === 'function' ? (opts) => options.pickCombatTrait(opts) : null,
             unlockTraitSlot: typeof options.unlockCombatTraitSlot === 'function' ? () => options.unlockCombatTraitSlot() : null,
-            setGear: typeof options.setCombatGear === 'function' ? (id, gearId, equip) => options.setCombatGear(id, gearId, equip) : null,
+            drawCard: typeof options.drawCombatCard === 'function' ? (opts) => options.drawCombatCard(opts) : null,
+            upgradeCard: typeof options.upgradeCombatCard === 'function' ? (opts) => options.upgradeCombatCard(opts) : null,
+            flipCard: typeof options.flipCombatCard === 'function' ? (opts) => options.flipCombatCard(opts) : null,
+            pickCard: typeof options.pickCombatCard === 'function' ? (opts) => options.pickCombatCard(opts) : null,
+            inscribeRelic: typeof options.inscribeCombatRelic === 'function' ? (opts) => options.inscribeCombatRelic(opts) : null,
+            setGear: typeof options.setCombatGear === 'function' ? (id, gearId, equip, slotIndex) => options.setCombatGear(id, gearId, equip, slotIndex) : null,
             // 手动建档（P8c）：本聊天建档方式为「手动」时，加点页给尚无建档记录的角色逐项加点，确认后写属性表 init。
             writeManualInit: typeof options.writeCombatManualInit === 'function' ? (name, raw) => options.writeCombatManualInit(name, raw) : null,
             buildMode: () => (typeof options.statsBuildMode === 'function' ? options.statsBuildMode() : null),

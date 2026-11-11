@@ -1,6 +1,8 @@
 // 星辉皮肤 · 战斗中画面：照搬概念稿 gal/战斗界面设计稿/概念/第二轮/mystic/（core.js 外壳 + 定稿.js）的标记，假数据换成真实视图 v.battle。
 // 样式在 combat-skin-mystic-concept-style.js（由设计稿 CSS 生成）与本文件末尾的接线样式。动作照旧走 data-combat-act / data-combat-id。
 import { esc } from './reader-value-utils.js';
+import { cardFxHtml } from './combat-card-text.js';
+import { resourceBarHtml } from './combat-resource-bar.js';
 import { intentIconSvg, portraitSilhouetteSvg } from './combat-card-art.js';
 import { enemyArtKeyFor } from '../../combat/enemy-art.js';
 import { enemyArtTopOf } from './combat-enemy-art.js';
@@ -113,10 +115,10 @@ function cardHtml(c, i, style, v, picks, energy) {
     const textW = (t) => [...t].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2000 ? 9 : 5), 0);
     const kwInSt = showExtra && textW(c.extra) + 15 <= 46;
     const unitLine = `${esc(c.unit || '')}${stars}${delta ? `<span class="nv-delta">${esc(delta)}</span>` : ''}${kwInSt ? '' : kw1}`;
-    const valTip = sel && c.bonusNote ? ` data-scale-tip="${esc(c.bonusNote)}"` : '';
+    const valTip = sel && (c.valueTip || c.bonusNote) ? ` data-scale-tip="${esc(c.valueTip || c.bonusNote)}"` : '';
     const val = hasNum ? `<div class="val"><b${valTip}>${esc(c.value)}</b><span class="ut">${unitLine}</span>${kwl}</div>` : `<div class="val no-num">${MOTIF[t]}</div>`;
     const stLine = showExtra ? `<em class="nv-st">${esc(c.extra)}${kwInSt ? kw1 : ''}</em>` : !hasNum && kw1 ? `<em class="nv-st">${kw1}</em>` : '';
-    const fx = sel ? esc(c.fxText ?? c.text ?? '') : '';
+    const fx = sel ? cardFxHtml(c) : '';
     const costNote = c.baseCost !== undefined ? `（原 ${c.baseCost}）` : '';
     const label = `${c.name} 消耗 ${c.cost} 点能量${costNote} ${c.keywords ? `${c.keywords}。` : ''}${c.text || ''}${c.scaleNote ? `。${c.scaleNote}` : ''}`;
     const len = [...c.name].length;
@@ -147,7 +149,7 @@ function leadHtml(hero, v, pick) {
     const chips = `${hero.block ? `<span class="chip">${ICON.shield}<b>${esc(hero.block)}</b></span>` : ''}${hero.statuses.map((s) => `<span class="chip">${esc(s.label)} <b>${esc(s.stacks)}</b></span>`).join('')}`;
     return `<div class="lead ${unitCls(hero, ok)}"${unitData(hero)}>`
         + `<div class="face cx-face"${unitAct(hero, ok)}><span class="pic">${face((v.portraits || {})[hero.name], hero.name)}</span><svg viewBox="-50 -50 100 100" class="tk" aria-hidden="true">${dots(46, 40, 2.4, '#8c7d4e')}</svg>${awBtn}</div>`
-        + `<div class="info"><div class="n"><span class="nmw">${esc(hero.name)}</span><span class="hp"><b class="cx-hp-cur">${esc(hero.hp)}</b>/${esc(hero.maxHp)}</span></div>${hpBar(hero, true)}<div class="chips">${chips}</div></div></div>`;
+        + `<div class="info"><div class="n"><span class="nmw">${esc(hero.name)}</span><span class="hp"><b class="cx-hp-cur">${esc(hero.hp)}</b>/${esc(hero.maxHp)}</span></div>${hpBar(hero, true)}<div class="chips">${chips}</div>${resourceBarHtml(hero.res, { row: 'chips', item: 'chip' })}</div></div>`;
 }
 
 function mateHtml(u, v, pick) {

@@ -2,11 +2,13 @@
 // 恐怖两套（A 断帧监控、B 无影灯）标记完全相同，只差装饰层与结束回合键，因此共用标记写在本文件并导出，combat-skin-dark-b.js 引用。
 // 样式：概念稿 common.css + grid.css + A.css（或 B.css）+ minimal.css 由 落盘/gen-skin-css.mjs 生成到 combat-skin-dark-<a|b>-concept-style.js，再加本文件的接线样式。
 import { esc } from './reader-value-utils.js';
+import { cardFxHtml } from './combat-card-text.js';
+import { resourceBarHtml } from './combat-resource-bar.js';
 import { intentIconSvg, portraitSilhouetteSvg } from './combat-card-art.js';
 import { enemyArtTopOf } from './combat-enemy-art.js';
 import { battlePick, canvasW, SKILL_ICON_SVG, ITEM_ICON_SVG } from './combat-skin-canvas.js';
 import { COMBAT_SKIN_DARK_A_CONCEPT_CSS } from './combat-skin-dark-a-concept-style.js';
-import { KEYWORD_CHAR, cardMainKeyword, cardValueDelta } from './combat-panel-model.js';
+import { KEYWORD_CHAR, KEYWORD_NAME_TIPS, cardMainKeyword, cardValueDelta } from './combat-panel-model.js';
 
 // 概念稿 buildBattle 的 opts（方案A.html / 方案B.html 里的 ring、fan 完全一致）。
 const RING_BASE = { port: { rx: 150, w: 330, lift: 60, back: 0.55, dim: 0.5 }, land: { rx: 410, w: 390, lift: 70, back: 0.58, dim: 0.5 } };
@@ -106,7 +108,7 @@ function cardHtml(c, p, v, picks, energy, picking) {
     const badge = `${c.stack > 1 ? `<i class="bd">×${esc(c.stack)}</i>` : ''}${c.upgraded ? '<i class="bd up">强</i>' : ''}`;
     const poor = !live || c.cost > energy, lock = kws.includes('不能打出');
     const sel = v.selected === c.inst;
-    const kg = kws.map((k) => `<i class="kg${k === '临时' ? ' tp' : ''}" data-scale-tip="${esc(`${k}：${KWD[k] || ''}`)}">${esc(k)}</i>`).join('');
+    const kg = kws.map((k) => `<i class="kg${k === '临时' ? ' tp' : ''}" data-scale-tip="${esc(KWD[k] ? `${k}：${KWD[k]}` : KEYWORD_NAME_TIPS[k] || k)}">${esc(k)}</i>`).join('');
     const chars = [...c.name];
     const cols = !sel && chars.length > 5;
     const half = Math.ceil(chars.length / 2);
@@ -118,7 +120,7 @@ function cardHtml(c, p, v, picks, energy, picking) {
     const extra = !sel && c.extra ? `<span class="xtra">${esc(c.extra)}</span>` : '';
     const delta = cardValueDelta(c);
     const hits = c.hits > 1 ? `<i class="hits" aria-hidden="true">${'<i></i>'.repeat(Math.min(c.hits, 6))}</i>` : '';
-    const valTip = sel && c.bonusNote ? ` data-scale-tip="${esc(c.bonusNote)}"` : '';
+    const valTip = sel && (c.valueTip || c.bonusNote) ? ` data-scale-tip="${esc(c.valueTip || c.bonusNote)}"` : '';
     const costNote = c.baseCost !== undefined ? `（原 ${c.baseCost}）` : '';
     const label = `${c.name} 消耗 ${c.cost} 点能量${costNote} ${c.keywords ? `${c.keywords}。` : ''}${c.text || ''}${c.scaleNote ? `。${c.scaleNote}` : ''}`;
     const cls = `card t-${t}${r ? ` r-${r[0]}` : ''}${bd ? ` ${bd}` : ''}${extra ? ' has-st' : ''}${poor ? ' poor' : ''}${lock ? ' lock' : ''}${sel ? ' sel' : ''}${v.hovered === c.inst ? ' is-hover' : ''}`
@@ -130,7 +132,7 @@ function cardHtml(c, p, v, picks, energy, picking) {
         + (!hasVal ? `<div class="val no-num" aria-hidden="true">${MOTIF[t]}</div>` : '')
         + (hasVal ? `<div class="val"><b${valTip}>${esc(c.value)}</b>${hits}<i class="vdir"></i><em class="u" title="${esc(c.unit)}">${UNIT[c.unit] || ''}</em></div><i class="ut">${esc(c.unit)}${delta ? `<span class="delta">${esc(delta)}</span>` : ''}</i>` : '')
         + badge + kwm + extra
-        + `<div class="full"><div class="kws">${kg}${c.stack > 1 ? `<i class="kg sk">×${esc(c.stack)}</i>` : ''}</div><p class="ds">${esc(c.fxText ?? c.text ?? '')}</p>`
+        + `<div class="full"><div class="kws">${kg}${c.stack > 1 ? `<i class="kg sk">×${esc(c.stack)}</i>` : ''}</div><p class="ds">${cardFxHtml(c)}</p>`
         + `${poor && live ? '<p class="sr bad">能量不足</p>' : ''}</div><i class="pk">✓</i></button>`;
 }
 
@@ -179,7 +181,7 @@ function leadHtml(hero, v, pick) {
     return `<div class="lead ${unitCls(hero, ok)}"${unitData(hero)}>`
         + `<div class="face cx-face"${unitAct(hero, ok)}>${face(pics[hero.name], hero.name)}${awBtn}</div>`
         + `<div class="info"><div class="n">${esc(hero.name)}${hero.controlled ? '<u class="ctl">操控</u>' : ''}<span class="hp"><b class="cx-hp-cur">${esc(hero.hp)}</b>/${esc(hero.maxHp)}</span></div>`
-        + `<div class="hpbar cx-hp" style="--igs-combat-hp:${pct}%"><i></i></div><div class="chips">${chips}</div>`
+        + `<div class="hpbar cx-hp" style="--igs-combat-hp:${pct}%"><i></i></div><div class="chips">${chips}</div>${resourceBarHtml(hero.res, { row: 'chips', item: 'sc' })}`
         + `<div class="ecg"><svg viewBox="0 0 240 26" preserveAspectRatio="none"><defs><clipPath id="hpc"><rect x="0" y="-5" width="${(pct * 2.4).toFixed(1)}" height="40"/></clipPath></defs><path d="${EC}" stroke="#3d454b"/><path d="${EC}" stroke="#cf2f3a" clip-path="url(#hpc)"/></svg></div></div></div>`;
 }
 

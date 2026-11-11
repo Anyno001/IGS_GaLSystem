@@ -1,8 +1,9 @@
-// 卡牌随能力缩放：按角色六维相对稀有度门槛，给牌面数值乘一个 0.7~1.3 的倍率。纯函数。
+// 技能随能力缩放：按角色六维相对技能门槛，给技能数值乘一个 0.7~1.3 的倍率；另给旧 setup 牌面的涨跌标记。纯函数。
 import { abilityMod } from './abilities.js';
+import { scaleSpecOf } from './mechanics/registry.js';
+// 规则 v5 机制登记入口：已登记算子可声明 scale（关键能力、数值字段、上限）参与缩放。
+import './mechanics/index.js';
 
-// 各稀有度的能力门槛。
-export const CARD_REQUIREMENTS = Object.freeze({ common: 10, uncommon: 12, rare: 14, epic: 16, mythic: 18, personal: 13, signature: 16 });
 // 英雄技能的能力门槛。
 export const SKILL_REQUIREMENT = 12;
 // 每点差距对应的倍率步长，与倍率范围。
@@ -18,18 +19,26 @@ const SCALABLE = Object.freeze({
     heal: Object.freeze({ key: 'amount', max: 60 }),
     status: Object.freeze({ key: 'stacks', max: 10 }),
 });
-// 内含子效果（then）的容器 op。
-const CONTAINER_OPS = new Set(['conditional', 'each-turn', 'buff']);
+// 内含子效果（then）的容器 op；requires 为规则 v6 固定卡的打出条件（mechanics/fixed-pile.js）。
+const CONTAINER_OPS = new Set(['conditional', 'each-turn', 'buff', 'requires']);
+const CONDITION_OPS = new Set(['conditional', 'requires']);
 
 const asArray = (value) => (Array.isArray(value) ? value : []);
+// 内置算子查固定表，已登记算子查其 scale 声明；都没有时为 null。
+const abilityOf = (op) => (Object.hasOwn(OP_ABILITY, op) ? OP_ABILITY[op] : scaleSpecOf(op)?.ability ?? null);
+const scalableOf = (op) => {
+    if (Object.hasOwn(SCALABLE, op)) return SCALABLE[op];
+    const spec = scaleSpecOf(op);
+    return spec ? { key: spec.key, max: spec.max } : null;
+};
 
 // 效果列表里第一个有对应能力的 op（条件效果递归进 then）。
 function firstScalingOp(effects) {
     for (const effect of asArray(effects)) {
-        if (effect?.op === 'conditional') {
+        if (CONDITION_OPS.has(effect?.op)) {
             const inner = firstScalingOp(effect.then);
             if (inner) return inner;
-        } else if (Object.hasOwn(OP_ABILITY, effect?.op)) return effect.op;
+        } else if (abilityOf(effect?.op)) return effect.op;
     }
     return null;
 }
@@ -38,7 +47,7 @@ function firstScalingOp(effects) {
 export function requiredAbility(effects, character) {
     const op = firstScalingOp(effects);
     if (!op) return null;
-    const ability = OP_ABILITY[op];
+    const ability = abilityOf(op);
     if (ability !== 'phys') return ability;
     const scores = character?.scores || {};
     return (scores.dex ?? 0) > (scores.str ?? 0) ? 'dex' : 'str';
@@ -57,7 +66,10 @@ export function effectNumbers(effects) {
     const numbers = [];
     for (const effect of asArray(effects)) {
         if (CONTAINER_OPS.has(effect?.op)) numbers.push(...effectNumbers(effect.then));
-        else if (Object.hasOwn(SCALABLE, effect?.op)) numbers.push(effect[SCALABLE[effect.op].key]);
+        else {
+            const spec = scalableOf(effect?.op);
+            if (spec && Number.isFinite(effect[spec.key])) numbers.push(effect[spec.key]);
+        }
     }
     return numbers;
 }
@@ -67,38 +79,9 @@ export function scaleEffects(effects, multiplier) {
     if (multiplier === 1) return effects;
     return asArray(effects).map((effect) => {
         if (CONTAINER_OPS.has(effect?.op)) return { ...effect, then: scaleEffects(effect.then, multiplier) };
-        const spec = SCALABLE[effect?.op];
-        return spec ? { ...effect, [spec.key]: Math.min(spec.max, Math.max(1, Math.round(effect[spec.key] * multiplier))) } : effect;
+        const spec = scalableOf(effect?.op);
+        return spec && Number.isFinite(effect[spec.key]) ? { ...effect, [spec.key]: Math.min(spec.max, Math.max(1, Math.round(effect[spec.key] * multiplier))) } : effect;
     });
-}
-
-// 固定牌：没有卡或基础牌，或升级前后都没有可缩放数值，则不随能力变化。
-export function isFixedCard(card) {
-    if (!card || card.rarity === 'basic') return true;
-    return effectNumbers(card.effects).length === 0 && effectNumbers(card.upgraded?.effects).length === 0;
-}
-
-// 缩放一张牌，返回新对象（带 scaling 说明：能力、门槛、倍率、基础数值）；不适用则原样返回。
-export function scaleCard(card, character) {
-    if (!character?.scores || isFixedCard(card) || !Object.hasOwn(CARD_REQUIREMENTS, card.rarity)) return card;
-    const ability = requiredAbility(card.effects, character) || requiredAbility(card.upgraded?.effects, character);
-    if (!ability) return card;
-    const required = CARD_REQUIREMENTS[card.rarity];
-    const multiplier = scalingMultiplier(character, ability, required);
-    const scaling = { ability, required, multiplier, base: effectNumbers(card.effects) };
-    const scaled = { ...card, effects: scaleEffects(card.effects, multiplier) };
-    if (card.upgraded?.effects) {
-        scaled.upgraded = { ...card.upgraded, effects: scaleEffects(card.upgraded.effects, multiplier) };
-        scaling.baseUpgraded = effectNumbers(card.upgraded.effects);
-    }
-    scaled.scaling = scaling;
-    return scaled;
-}
-
-// 缩放整个目录（Map 或普通对象），返回以原键为键的新对象。
-export function scaleCatalog(catalog, character) {
-    const entries = catalog instanceof Map ? [...catalog] : Object.entries(catalog || {});
-    return Object.fromEntries(entries.map(([id, card]) => [id, scaleCard(card, character)]));
 }
 
 // 缩放技能列表（统一用 SKILL_REQUIREMENT 门槛）；倍率为 1 的技能原样保留。

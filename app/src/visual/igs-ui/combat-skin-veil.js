@@ -1,12 +1,14 @@
 // 黑幕皮肤 · 战斗中画面：照搬概念稿 gal/战斗界面设计稿/概念/第二轮/veil/common.js 的标记，假数据换成真实视图 v.battle。
 // 样式在 combat-skin-veil-concept-style.js（由设计稿 CSS 生成）与本文件末尾的接线样式。动作照旧走 data-combat-act / data-combat-id。
 import { esc } from './reader-value-utils.js';
+import { cardFxHtml } from './combat-card-text.js';
+import { resourceBarHtml } from './combat-resource-bar.js';
 import { intentIconSvg } from './combat-card-art.js';
 import { enemyArtKeyFor } from '../../combat/enemy-art.js';
 import { enemyArtTopOf } from './combat-enemy-art.js';
 import { battlePick, canvasW, ringVars, SKILL_ICON_SVG, ITEM_ICON_SVG } from './combat-skin-canvas.js';
 import { COMBAT_SKIN_VEIL_CONCEPT_CSS } from './combat-skin-veil-concept-style.js';
-import { KEYWORD_NAME_TIPS, cardMainKeyword, cardValueDelta } from './combat-panel-model.js';
+import { KEYWORD_CHAR, KEYWORD_NAME_TIPS, cardMainKeyword, cardValueDelta } from './combat-panel-model.js';
 
 // 概念稿 window.SCHEME（定稿.html）；pw / hd 为敌人头顶信息区的宽与下沉量，hw 为手牌区宽度（common.css .hand）。
 const CFG = {
@@ -83,7 +85,7 @@ function cardHtml(c, i, pos, v, picks, energy) {
     const lines = nameLines(`${c.name}`);
     // 数值居中、单位小字在下方，差值接在单位后；点放大牌的大数值弹出来源说明。
     const delta = cardValueDelta(c);
-    const valTip = sel && c.bonusNote ? ` data-scale-tip="${esc(c.bonusNote)}"` : '';
+    const valTip = sel && (c.valueTip || c.bonusNote) ? ` data-scale-tip="${esc(c.valueTip || c.bonusNote)}"` : '';
     const val = Number.isFinite(c.value) ? `<div class="val"><b${valTip}>${esc(c.value)}</b><span class="ut">${esc(c.unit || '')}${delta ? `<i class="delta">${esc(delta)}</i>` : ''}</span></div>` : `<div class="val no-num">${MOTIF[t]}</div>`;
     const badge = chosen ? '' : `${c.stack > 1 ? `<i class="bd">×${esc(c.stack)}</i>` : ''}${c.upgraded ? '<i class="bd up">强</i>' : ''}`;
     const dear = c.baseCost !== undefined && c.cost > c.baseCost;
@@ -91,9 +93,8 @@ function cardHtml(c, i, pos, v, picks, energy) {
     const label = `${c.name} 消耗 ${c.cost} 点能量${costNote} ${c.keywords ? `${c.keywords}。` : ''}${c.text || ''}${c.scaleNote ? `。${c.scaleNote}` : ''}`;
     const p = pos[i];
     const mainKw = cardMainKeyword(c.keywordNames);
-    // 「强」与「不能打出」同时出现时窄签放不下全称，小注只写「禁」。
-    const short = c.upgraded && mainKw === '不能打出';
-    const kwm = !sel && mainKw ? `<i class="kwm${short ? ' one' : ''}">${esc(short ? '禁' : mainKw)}</i>` : '';
+    // 窄签小注只写关键字单字（与其他皮肤一致）；放大牌的 .kws 列全称。
+    const kwm = !sel && mainKw ? `<i class="kwm one">${esc(KEYWORD_CHAR[mainKw] || mainKw)}</i>` : '';
     const xtra = !sel && c.extra ? `<span class="xtra">${esc(c.extra)}</span>` : '';
     const cls = `card t-${t}${c.upgraded ? ' enhd' : ''}${RARITY[c.rarity] || ''}${poor ? ' poor' : ''}${cut ? ' cut' : ''}${sig ? ' sig' : ''}${state}${sel ? ' sel' : ''}${chosen ? ' chosen' : ''}${dear ? ' dear' : ''}${c.choosable && !chosen ? ' cand' : ''}${xtra ? ' has-st' : ''}`;
     return `<div class="${cls}" style="left:${p.left}px;z-index:${p.z};--ty:${p.ty}px;--rot:${p.rot}deg" role="button" tabindex="0" data-combat-act="card" data-combat-id="${esc(c.inst)}" data-card-type="${esc(c.type)}"${c.rarity ? ` data-rarity="${esc(c.rarity)}"` : ''}`
@@ -102,7 +103,7 @@ function cardHtml(c, i, pos, v, picks, energy) {
         + `<div class="plate"><div class="mt">${MOTIF[t]}</div></div>`
         + `<div class="nm">${lines.map((l) => `<span>${esc(l)}</span>`).join('')}</div>`
         + `${val}${kwm}${xtra}<div class="kws">${kws.map((k) => `<span class="kw" data-k="${esc(k)}"${KEYWORD_NAME_TIPS[k] ? ` data-scale-tip="${esc(KEYWORD_NAME_TIPS[k])}"` : ''}>${esc(k)}</span>`).join('')}</div>`
-        + `<div class="ds">${esc(c.fxText ?? c.text ?? '')}</div><div class="tip"></div><i class="ck">✓</i></div>`;
+        + `<div class="ds">${cardFxHtml(c)}</div><div class="tip"></div><i class="ck">✓</i></div>`;
 }
 
 function foeHtml(u, i, f, n, L, v, pick) {
@@ -130,7 +131,7 @@ function leadHtml(hero, v, pick) {
     return `<div class="lead ${unitCls(hero, ok)}"${unitData(hero)}>`
         + `<div class="face cx-face${faceCls(pics[hero.name])}${ok ? ' pick' : ''}"${unitAct(hero, ok)}>${faceInner(pics[hero.name], hero.name)}${awBtn}</div>`
         + `<div class="info"><div class="n">${esc(hero.name)}<span class="hp"><b class="cx-hp-cur">${esc(hero.hp)}</b><small>/${esc(hero.maxHp)}</small></span></div>${hpBar(hero, true)}`
-        + `<div class="chips">${chips}</div></div></div>`;
+        + `<div class="chips">${chips}</div>${resourceBarHtml(hero.res, { row: 'chips', item: 'chip' })}</div></div>`;
 }
 
 function mateHtml(u, v, pick) {

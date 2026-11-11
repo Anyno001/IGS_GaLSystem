@@ -1,6 +1,6 @@
 // 随身系统宿主层（Origin 系统 原作 vicliaaa，经授权移植）：把 scene/origin 的核心接到 IGS。
 // 只做四件事：给核心提供 host（上下文、设置、存盘、生成、通知）、按总开关挂/卸监听、登记到界面接入点、设置变化时同步。
-// 设置只读：bridge.origin 来自共享只读快照，这里不改它；本聊天数据（世界名、任务方向）核心自己存在 chatMetadata.origin_v2。
+// 设置只读；生产操作经共用积分服务持久化，旧 chatMetadata.origin_v2 仅在数据库无记录时导入。
 import { getSharedOriginEngine } from '../scene/origin/origin-engine.js';
 import { attachOriginEngine } from '../visual/igs-ui/origin-attach.js';
 import { normalizeOriginSettings, originRequestRoute } from '../visual/igs-ui/origin-settings.js';
@@ -9,7 +9,13 @@ import { runBackgroundGeneration, isBackgroundGenerationActive } from '../host/b
 // 核心的通知类别 → 阅读器细线的级别。
 const NOTICE_LEVEL = Object.freeze({ warn: 'warn', info: 'info' });
 
-export function createOriginRuntime({ getContext, readSettings, readLlm, readProfiles, secondaryLlm, notice, openSettings, saveSetting, legacyActive, readCombatPoints, readCombatPointLog, readRuleset }) {
+function externalPoints(value) {
+    if (!value?.ok) return value || { ok: false, reason: 'origin-wallet-unavailable' };
+    const balance = value.balance - value.origin;
+    return Number.isSafeInteger(balance) ? { ok: true, balance } : { ok: false, reason: 'origin-points-invalid' };
+}
+
+export function createOriginRuntime({ getContext, readSettings, readLlm, readProfiles, secondaryLlm, notice, openSettings, saveSetting, legacyActive, combatServices, statsRuntime, readRuleset }) {
     const ctx = () => { try { return getContext() || null; } catch (error) { return null; } };
 
     async function viaTavern(prompt) {
@@ -30,6 +36,17 @@ export function createOriginRuntime({ getContext, readSettings, readLlm, readPro
     let lastNorm = null;
     const host = {
         getContext: ctx,
+        ...(combatServices ? {
+            database: () => combatServices.originStore(),
+            wallet: async (options) => options?.intent
+                ? combatServices.readOriginWallet(options)
+                : externalPoints(await combatServices.readSharedPoints()),
+            walletSnapshot: () => externalPoints(combatServices.pointsSnapshot()),
+            pointsEconomy: () => true,
+            ensurePointsFloor: messageId => combatServices.ensurePointsFloor(messageId),
+            spendingGate: () => combatServices.pointsSpendingGate(),
+            withPointsLock: (task) => combatServices.withPointsLock(task),
+        } : {}),
         // 核心内部 fillSettings 会返回新对象，不会改这里给出的快照。
         settings: () => {
             const raw = readSettings();
@@ -60,11 +77,8 @@ export function createOriginRuntime({ getContext, readSettings, readLlm, readPro
             try { notice(NOTICE_LEVEL[kind] || 'info', String(text)); } catch (error) { /* 细线出错不影响结算 */ }
         },
         legacyActive: () => { try { return Boolean(legacyActive && legacyActive()); } catch (error) { return false; } },
-        // 战斗侧主角的原始积分（不含随身系统积分）：与随身系统积分合成一个余额，两边只读对方的原始值。
+        // 当前体系（coc7 / dnd5e），随身系统按它换算属性奖励。
         readRuleset: () => { try { return typeof readRuleset === 'function' ? readRuleset() : 'coc7'; } catch (error) { return 'coc7'; } },
-        extraPointLog: () => { try { const l = typeof readCombatPointLog === 'function' ? readCombatPointLog() : null; return Array.isArray(l) ? l : null; } catch (error) { return null; } },
-        // 战斗数据未载入时为 null（未知），核心据此不写快照。
-        extraPoints: () => { try { const v = typeof readCombatPoints === 'function' ? readCombatPoints() : 0; return v === null ? null : Number(v) || 0; } catch (error) { return null; } },
     };
 
     const engine = getSharedOriginEngine(host);
@@ -73,14 +87,18 @@ export function createOriginRuntime({ getContext, readSettings, readLlm, readPro
         notice: (level, text) => host.notify({ kind: level, text }),
         openSettings,
         saveSetting,
+        ...(statsRuntime ? { exchange: {
+            info: () => statsRuntime.exchangeInfo(),
+            quote: points => statsRuntime.quoteExchange(points),
+            confirm: quote => statsRuntime.exchangePoints(quote),
+            retry: () => statsRuntime.retryExchange(),
+        } } : {}),
     });
 
     return {
         engine,
         // 总开关或其他设置变化后调用：开就挂监听并读存档，关就解绑。
         sync: () => engine.sync(),
-        // 随身系统自己的原始积分（战斗侧当钱包读）；未启用或没存档为 0。
-        rawPoints: () => engine.rawPoints(),
         // 随身系统自己的属性加成 [{ name, val }]（只读）；IGS 数值系统按同名叠加。
         rawStats: () => engine.rawStats(),
         destroy: () => { try { engine.release(); } catch (error) { /* */ } detach(); },

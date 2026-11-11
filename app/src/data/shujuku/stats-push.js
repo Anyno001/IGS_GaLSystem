@@ -14,7 +14,7 @@ export const SHUJUKU_ROW_OFFSET = 1;
 const NAME_COLUMNS = new Set(['姓名', '角色姓名', '角色名', '角色真实姓名', '调查员姓名', 'name', '名称']);
 const DIM_RULES = Object.freeze([['好感', /好感/], ['信任', /信任/], ['了解', /了解/], ['芥蒂', /芥蒂|仇怨|怨恨/]]);
 // 生命不再由数值侧推送（生命取自战斗 vitals），所以这里没有 health 规则。
-const BAR_RULES = Object.freeze([['stamina', /体力/], ['money', /^(?:金钱|金币|货币)(?:余额)?$/], ['stress', /压力/]]);
+const BAR_RULES = Object.freeze([['stamina', /体力/], ['money', /^(?:金钱|金币|货币)(?:余额)?$/], ['points', /^积分$/], ['stress', /压力/]]);
 const ATTR_COLUMNS = Object.freeze({ 基础属性: 'base', 特有属性: 'special' });
 const TYPE_COLUMN = '角色类型';
 
@@ -57,7 +57,7 @@ function dimForm(table, col, header) {
 }
 
 // overrides：{ '表名|列名': 'skip' | { form, range } }，来自映射页。
-export function detectStatMappings(tables, { overrides = {} } = {}) {
+export function detectStatMappings(tables, { overrides = {}, currencyName = '' } = {}) {
     const mappings = [];
     const diagnostics = [];
     const add = (m) => {
@@ -80,7 +80,7 @@ export function detectStatMappings(tables, { overrides = {} } = {}) {
             const base = { table: table.name, column: header, col };
             if (ATTR_COLUMNS[header] && mainRows.length) { add({ ...base, kind: 'attrs', group: ATTR_COLUMNS[header], form: 'attrs', rows: mainRows }); return; }
             if (isMain) {
-                const bar = BAR_RULES.find(([, re]) => re.test(header));
+                const bar = BAR_RULES.find(([, re]) => re.test(header)) || (currencyName && header === currencyName ? ['money'] : null);
                 if (bar && mainRows.length) add({ ...base, kind: 'bar', key: bar[0], form: 'number', rows: mainRows, percent: cellsOf(table, col).some((c) => String(c).includes('%')) });
                 return;
             }
@@ -132,7 +132,7 @@ export function skillKeyOf(name, characterKey, heroRow) {
 }
 
 // 只产出与当前单元格不同的写入；rowOffset = 数据行下标到 updateCell 行号的偏移。
-export function planStatsPush(state, tables, mappings, { characterKey = (name) => name, rowOffset = SHUJUKU_ROW_OFFSET, baseAttributes = null, walletExtra = 0, isHero = null, skillValues = null, heroName = '', skillCanon = null } = {}) {
+export function planStatsPush(state, tables, mappings, { characterKey = (name) => name, rowOffset = SHUJUKU_ROW_OFFSET, baseAttributes = null, currency = null, walletExtra = 0, isHero = null, skillValues = null, heroName = '', skillCanon = null } = {}) {
     const heroRow = (name, key) => key === '主角' || name === '主角' || (typeof isHero === 'function' && Boolean(isHero(name)));
     const byName = new Map(tables.map((t) => [t.name, t]));
     const writes = [];
@@ -187,7 +187,11 @@ export function planStatsPush(state, tables, mappings, { characterKey = (name) =
                 // 基础属性组写回时带旧名映射：格内的「健康/理智/观察」改写成新六维名。
                 if (changed) push(m, i, from, writeAttributeCell(from, updates, m.group === 'base' ? { renames: LEGACY_ATTRIBUTE_MAP } : undefined));
             } else {
-                push(m, i, from, cellValue(m, from, m.key === 'money' ? walletBalance(state.protagonist.bars, walletExtra) : state.protagonist.bars[m.key]));
+                if (m.key === 'money' && currency?.ready !== true) { diagnostics.push({ code: 'stats-push-currency-unready', table: m.table }); continue; }
+                const value = m.key === 'money' ? currency.balance
+                    : m.key === 'points' ? walletBalance(state.protagonist.bars, walletExtra) : state.protagonist.bars[m.key];
+                if (!Number.isFinite(value)) continue;
+                push(m, i, from, cellValue(m, from, value));
             }
         }
     }
@@ -196,19 +200,20 @@ export function planStatsPush(state, tables, mappings, { characterKey = (name) =
 
 // client 为 createShujukuClient(api)。读失败与「没有可写的格子」分开报告（契约：失败不当空）；一批写完只刷新一次。
 // overridesByFingerprint：按模板指纹保存的映射覆盖（§8B 第 5 条），切换模板时自动换成该模板的映射。
-export async function pushStats(client, state, { overrides, overridesByFingerprint, characterKey, rowOffset = SHUJUKU_ROW_OFFSET, baseAttributes = null, walletExtra = 0, isHero = null, skillValues = null, heroName = '', skillCanon = null } = {}) {
+export async function pushStats(client, state, { overrides, overridesByFingerprint, characterKey, rowOffset = SHUJUKU_ROW_OFFSET, baseAttributes = null, currency = null, walletExtra = 0, isHero = null, skillValues = null, heroName = '', skillCanon = null, shouldStart = () => true } = {}) {
     const read = client.readTables();
     if (!read.ok) return { ok: false, reason: 'stats-push-read-failed', detail: read.reason, wrote: 0 };
     const tables = parseTables(read.data);
     const fingerprint = fingerprintTables(tables);
     const picked = overrides || (overridesByFingerprint && overridesByFingerprint[fingerprint]) || {};
-    const detected = detectStatMappings(tables, { overrides: picked });
-    const plan = planStatsPush(state, tables, detected.mappings, { characterKey, rowOffset, baseAttributes, walletExtra, isHero, skillValues, heroName, skillCanon });
+    const detected = detectStatMappings(tables, { overrides: picked, currencyName: currency?.name });
+    const plan = planStatsPush(state, tables, detected.mappings, { characterKey, rowOffset, baseAttributes, currency, walletExtra, isHero, skillValues, heroName, skillCanon });
     const failures = [];
     const diagnostics = [...detected.diagnostics, ...plan.diagnostics];
     let wrote = 0;
     for (const w of plan.writes) {
         let r;
+        if (!shouldStart()) return { ok: false, reason: 'request-stale', wrote };
         try { r = await client.updateCell(w.table, w.rowIndex, w.column, w.value); } catch (error) { r = { ok: false, reason: String(error && error.message || error) }; }
         if (r && r.ok) wrote += 1; else failures.push({ ...w, reason: r && r.reason });
     }
@@ -242,8 +247,9 @@ function readCellNumber(m, text) {
     return m.range && m.range.from && m.range.to ? scaleValue(v, { from: m.range.to, to: m.range.from }) : Math.round(v);
 }
 
-// 用户在表格里手改的 IGS 管辖格子（关系四项 + 体力、金钱、压力，主角与角色）与当前 IGS 值比较，返回不同的项。
-// items：[{ name（角色名或「主角」）, kind: 'dim' | 'bar', key, from（IGS 显示值）, shown（表格显示值）, to（存回 IGS 的值）}]；主角金钱按合并余额比较，to 已扣掉 walletExtra 换回数值侧金钱。
+// 用户在表格里手改的 IGS 管辖格子（关系四项 + 体力、压力，主角与角色）与当前 IGS 值比较，返回不同的项。
+// 金钱列是物品表剧情货币、积分列是只读积分份额，都不从表格回读。
+// items：[{ name（角色名或「主角」）, kind: 'dim' | 'bar', key, from（IGS 显示值）, shown（表格显示值）, to（存回 IGS 的值）}]。
 export function planTableAdoption(state, tables, mappings, { characterKey = (name) => name, walletExtra = 0, isHero = null } = {}) {
     const byName = new Map(tables.map((t) => [t.name, t]));
     const found = new Map();
@@ -265,6 +271,7 @@ export function planTableAdoption(state, tables, mappings, { characterKey = (nam
                 if (to !== null) take(key, 'dim', m.key, Math.round(Number(c.dims[m.key]) || 0), to);
             });
         } else if (m.kind === 'barcol' || m.kind === 'bar') {
+            if (m.key === 'money' || m.key === 'points') continue;
             const rows = m.kind === 'bar' ? m.rows.map((i) => ({ row: table.rows[i], hero: true })) : table.rows.map((row) => ({ row, name: trim(row[m.nameCol]) }));
             for (const item of rows) {
                 if (!item.row) continue;
@@ -309,16 +316,16 @@ export function readSkillAdoptions(client, known, { overrides, overridesByFinger
 }
 
 // 映射页数据：自动识别结果 + 当前模板已保存的覆盖值；读失败与「没有可推送的列」分开报告（易错点 F7）。
-export function describeStatMappings(readResult, overridesByFingerprint = {}) {
+export function describeStatMappings(readResult, overridesByFingerprint = {}, { currencyName = '' } = {}) {
     if (!readResult || readResult.ok === false) return { ok: false, reason: 'stats-push-read-failed', detail: readResult && readResult.reason };
-    const detected = detectStatMappings(parseTables(readResult.data));
+    const detected = detectStatMappings(parseTables(readResult.data), { currencyName });
     const all = overridesByFingerprint && typeof overridesByFingerprint === 'object' ? overridesByFingerprint : {};
     const saved = all[detected.fingerprint] || {};
     const rows = detected.mappings.map((m) => {
         const key = mappingKey(m.table, m.column);
         return { key, table: m.table, column: m.column, kind: m.kind, target: m.key || m.group || (m.kind === 'skills' ? 'skills' : ''), form: m.form, value: saved[key] || 'auto', stageAllowed: m.kind === 'dim' && m.key === '好感' };
     });
-    return { ok: true, fingerprint: detected.fingerprint, known: Object.hasOwn(all, detected.fingerprint), rows, diagnostics: detected.diagnostics };
+    return { ok: true, fingerprint: detected.fingerprint, known: Object.hasOwn(all, detected.fingerprint), currencyName, rows, diagnostics: detected.diagnostics };
 }
 
 // 生成前补写最多等 3 秒，超时放行（易错点 F6）。

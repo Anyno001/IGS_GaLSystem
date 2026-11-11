@@ -7,7 +7,10 @@ import { hash32 } from './random.js';
 // 构造一个 status 效果。
 const statusEffect = (status, stacks, target = 'self') => ({ op: 'status', status, stacks, target });
 
-// 构造一条词缀定义：extra 里可带 cardType、debuff 标记。
+// 构造一个规则 v5 施加通用状态的效果（自身）。
+const selfApply = (status, stacks) => ({ op: 'apply-status', status, stacks, target: 'self' });
+
+// 构造一条词缀定义：extra 里可带 cardType、debuff 标记，以及 tiers（只在这些阶级可抽到，未写为全部阶级）。
 const affix = (name, trigger, effects, extra = {}) => Object.freeze({ name, trigger, effects: Object.freeze(effects), ...extra });
 
 export const ENEMY_AFFIXES = Object.freeze({
@@ -25,6 +28,29 @@ export const ENEMY_AFFIXES = Object.freeze({
     pulse: affix('心律', 'foe-card-played', [{ op: 'damage', amount: 1, hits: 1, target: 'enemy' }], { debuff: true }),
     daze: affix('晕眩', 'turn-end', [{ op: 'create', card: 'status-daze', amount: 1, to: 'draw' }], { debuff: true }),
     wound: affix('撕伤', 'battle-start', [{ op: 'create', card: 'status-wound', amount: 2, to: 'draw' }], { debuff: true }),
+    // 规则 v5 P4a 敌方状态反应（mechanics/foe.js）。
+    flight: affix('翱翔', 'battle-start', [selfApply('flying', 3)], { tiers: ['normal', 'elite'] }),
+    unsteady: affix('失衡', 'battle-start', [selfApply('unsteady', 1)], { tiers: ['elite'] }),
+    adapt: affix('应变', 'battle-start', [selfApply('adapt', 1)], { tiers: ['elite'] }),
+    harden: affix('硬化', 'battle-start', [selfApply('harden', 3)], { tiers: ['normal'] }),
+    enrage: affix('激怒', 'battle-start', [selfApply('enrage', 1)], { tiers: ['elite', 'boss'] }),
+    barbed: affix('刺甲', 'battle-start', [selfApply('barbed', 3)], { tiers: ['elite'] }),
+    'time-warp': affix('时滞', 'battle-start', [selfApply('time-warp', 1)], { tiers: ['boss'] }),
+    // 规则 v5 P4b 分裂与复生（mechanics/foe-units.js）；复生只在有其他敌人存活时生效。
+    split: affix('分裂', 'battle-start', [selfApply('split', 1)], { tiers: ['normal', 'boss'] }),
+    revive: affix('不灭', 'battle-start', [selfApply('revive', 1)], { tiers: ['normal'] }),
+    // 规则 v5 P4b E17 自爆倒计时与限时撤离（mechanics/foe-units.js）；撤离按 D11 记胜利、不给战利品。
+    fuse: affix('自爆', 'battle-start', [selfApply('fuse', 3)], { tiers: ['normal'] }),
+    flee: affix('遁逃', 'battle-start', [selfApply('flee', 4)], { tiers: ['normal'] }),
+    // 规则 v5 P4c 无敌上限与最大生命损伤（mechanics/foe-seize.js）。
+    invincible: affix('无敌', 'battle-start', [selfApply('invincible', 3)], { tiers: ['boss'] }),
+    'hit-cap': affix('坚韧', 'battle-start', [selfApply('hit-cap', 2)], { tiers: ['boss'] }),
+    maim: affix('摧魄', 'battle-start', [selfApply('maim', 2)], { tiers: ['boss'] }),
+    // 规则 v5 P4d E18 出牌上限光环（mechanics/foe-restrict.js）：敌方存活时对方每回合最多打出层数张牌 / 技能牌。
+    'play-cap': affix('束缚', 'battle-start', [selfApply('play-cap', 6)], { tiers: ['elite', 'boss'] }),
+    'skill-cap': affix('封技', 'battle-start', [selfApply('skill-cap', 3)], { tiers: ['elite'] }),
+    // 规则 v5 P4d E20 降级（只限首领，开战即对我方全体生效）。
+    downgrade: affix('降级', 'battle-start', [{ op: 'apply-status', status: 'downgrade', stacks: 1, target: 'all-enemies' }], { tiers: ['boss'], debuff: true }),
 });
 
 // 补技能时可选的模板键 -> 技能名。
@@ -45,15 +71,17 @@ function shuffleByHash(items, seed) {
         .map(([item]) => item);
 }
 
-// 给敌人挑词缀：数量由难度档与阶级决定；有数量时保证优先放入一条减益类词缀。
+// 给敌人挑词缀：数量由难度档与阶级决定；名额不少于 2 时保证优先放入一条减益类词缀，只有 1 个名额时按洗牌顺序取
+// （否则只限普通阶级的非减益词缀，如 E05 硬化、E11 不灭，永远抽不到）。只影响新建 setup，已保存的记录照旧重放。
 export function enemyAffixes(enemy, difficulty = 'normal') {
     const diff = normalizeDifficulty(difficulty);
     const tier = Object.hasOwn(COMBAT_RULES.tiers, enemy?.tier) ? enemy.tier : 'normal';
     const count = difficultyRule(diff).affixes[tier] || 0;
     if (!count || !enemy?.id) return [];
-    const order = shuffleByHash(Object.keys(ENEMY_AFFIXES), `affix:${enemy.id}:${diff}`);
-    const firstDebuff = order.find((key) => ENEMY_AFFIXES[key].debuff);
-    return [firstDebuff, ...order.filter((key) => key !== firstDebuff)].slice(0, count).map((key) => {
+    const order = shuffleByHash(Object.keys(ENEMY_AFFIXES).filter((key) => !ENEMY_AFFIXES[key].tiers || ENEMY_AFFIXES[key].tiers.includes(tier)), `affix:${enemy.id}:${diff}`);
+    const firstDebuff = count >= 2 ? order.find((key) => ENEMY_AFFIXES[key].debuff) : undefined;
+    const picked = firstDebuff ? [firstDebuff, ...order.filter((key) => key !== firstDebuff)] : order;
+    return picked.slice(0, count).map((key) => {
         const def = ENEMY_AFFIXES[key];
         return {
             id: `af-${key}`,

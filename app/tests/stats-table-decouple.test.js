@@ -163,14 +163,16 @@ test('窗口外的更新视为用户手改：关系与生活条被采纳', async
     assert.ok(t.rt.getDiagnostics().some((d) => d.code === 'stats-table-manual-adopted' && d.name === '小雪' && d.key === '信任' && d.to === 33));
 });
 
-test('主角金钱手改：表格金钱即数值侧金钱（积分与金钱分开），存回原值', async () => {
+test('主角金钱列手改不回写：金钱列是物品表剧情货币，不改数值侧积分份额', async () => {
     const t = setup();
     t.say('旁白。');
     await t.rt.pushNow();
     await wait(QUIET);
+    const before = t.rt.getState().protagonist.bars.money;
     t.userEdit(1, '金钱', '250');
     await wait(AFTER_DELAY);
-    assert.equal(t.rt.getState().protagonist.bars.money, 250);
+    assert.equal(t.rt.getState().protagonist.bars.money, before);
+    assert.ok(!t.rt.getDiagnostics().some((d) => d.code === 'stats-table-manual-adopted' && d.key === 'money'));
 });
 
 test('自己写表触发的更新不会被当成手改', async () => {

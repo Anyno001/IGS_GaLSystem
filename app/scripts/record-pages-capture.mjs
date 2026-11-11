@@ -23,11 +23,13 @@ const exerciseRecord = args.includes('--exercise-record');
 const castStep = arg('step', '');
 const freezeAt = arg('freeze', null);
 const readerActions = arg('actions', '');
+// --settle <秒>：等待面板就绪的上限，缺省 10 秒（自动打完一场的战斗结算可能更久）。
+const settleTries = Math.max(1, Math.round((Number(arg('settle', '10')) || 10) * 4));
 const previewPath = page === 'stage-cast' ? 'fixtures/stage-cast/preview.html'
     : page === 'stage-cast-reader' ? 'fixtures/stage-cast/reader.html'
     : 'fixtures/record-pages/preview.html';
 
-const SIZES = { desktop: [1440, 900], ref: [1672, 941], mid: [1024, 768], tall: [900, 1700], mobile: [390, 844], short: [390, 500], tiny: [320, 568] };
+const SIZES = { desktop: [1440, 900], ref: [1672, 941], mid: [1024, 768], tall: [900, 1700], mobile: [390, 844], long: [390, 2600], short: [390, 500], tiny: [320, 568] };
 const [width, height] = SIZES[size] || SIZES.desktop;
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -74,11 +76,11 @@ try {
     const evaluate = async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true })).result?.result?.value;
     // 等待面板挂载且地图底图状态机收敛（loading → ready/failed/none），替代固定时长猜测。
     let settled = false;
-    for (let i = 0; i < 40 && !settled; i++) {
+    for (let i = 0; i < settleTries && !settled; i++) {
         await sleep(250);
         settled = await evaluate(`(() => {
             if (window.__stageCast) return window.__stageCast.ready === true;
-            const panel = document.querySelector('#igs-map-panel,#igs-record-panel,#igs-unified-settings,#igs-combat-panel,#igs-combat-deck-panel,#igs-origin-page');
+            const panel = document.querySelector('#igs-map-panel,#igs-record-panel,#igs-unified-settings,#igs-combat-panel,#igs-combat-deck-panel,.igs-waitstage,#igs-origin-page');
             if (panel?.id === 'igs-combat-deck-panel') return window.__preview?.deckFull?.isOpen?.() ? window.__preview.deckFull.view()?.status === 'ready' : true;
             if (location.search.includes('bench=frame')) return window.__originFrameMs != null;
             if (!panel) return false;
@@ -190,7 +192,7 @@ try {
         }
         return evaluate('window.__stageCast.probe()');
     })() : null;
-    const readerSteps = page === 'stage-cast-reader' ? await (async () => {
+    const readerSteps = (page === 'stage-cast-reader' || readerActions) ? await (async () => {
         const evalAsync = async (expression) => {
             const res = (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result;
             if (res?.exceptionDetails) return { error: res.exceptionDetails.exception?.description || res.exceptionDetails.text };
@@ -234,7 +236,7 @@ try {
         return out;
     })() : null;
     const state = await evaluate(`(() => {
-        const panel = document.querySelector('#igs-map-panel,#igs-record-panel,#igs-unified-settings');
+        const panel = document.querySelector('#igs-map-panel,#igs-record-panel,#igs-unified-settings,.igs-waitstage,.igs-or-win');
         const title = document.querySelector('.igs-rp-title');
         const back = document.querySelector('.igs-rp-back');
       const tRect = title?.getBoundingClientRect(), bRect = back?.getBoundingClientRect(), stage = document.getElementById('stage')?.getBoundingClientRect();
@@ -251,6 +253,17 @@ try {
             originBench: window.__originBench ?? null,
             originFrameMs: window.__originFrameMs ?? null,
             overflowX: panel ? panel.scrollWidth > panel.clientWidth + 1 : null,
+            origin: panel?.classList.contains('igs-or-win') ? (() => {
+                const rect = panel.getBoundingClientRect();
+                const modal = document.querySelector('.igs-page-modal');
+                return {
+                    rect: [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)],
+                    points: panel.querySelector('.igs-or-stat-v')?.textContent || '',
+                    exchange: Boolean(panel.querySelector('[data-oa="exchange"]')),
+                    retry: Boolean(panel.querySelector('[data-oa="exchange-retry"]')),
+                    modal: modal?.querySelector('.igs-page-modal-msg')?.textContent || '',
+                };
+            })() : null,
             overlayClass: document.getElementById('igs-overlay').className,
             fontSerif: document.fonts.check('16px "Source Han Serif CN"'),
             fontLatin: document.fonts.check('16px "Cormorant Garamond"'),
@@ -284,6 +297,12 @@ try {
             stageCastReader: ${JSON.stringify(readerSteps)},
             relationshipNodeCount: panel?.querySelectorAll?.('.igs-record-relationship-node')?.length ?? null,
             relationshipLabelCount: panel?.querySelectorAll?.('.igs-record-relationship-label')?.length ?? null,
+            waitStage: (() => {
+                const root = document.querySelector('.igs-waitstage');
+                return root ? { play: root.classList.contains('is-play'),
+                    games: [...root.querySelectorAll('[data-game]')].map(node => node.getAttribute('data-game')),
+                    boardVisible: !root.querySelector('.igs-ws-board')?.hidden } : null;
+            })(),
             // 战斗面板诊断：状态、尺寸与溢出、可见文字（截断）、手牌与焦点；不代替看图。
             combat: (() => {
                 const root = document.getElementById('igs-combat-panel');

@@ -1,16 +1,18 @@
 import { renderCombatGenerationForm } from './combat-generation-form.js';
 import { esc } from './reader-value-utils.js';
+import { cardTextHtml } from './combat-card-text.js';
 import { combatReasonText } from './combat-panel-render.js';
 import { recordPageHeadHtml } from './record-page-shell.js';
 import { renderSettingsThemeSwitch } from './settings-theme.js';
 import { DECK_PAGES, DECK_PAGE_LABELS } from './combat-deck-panel-model.js';
-import { ASCEND_TIERS, REBUILD_COST, RESPEC_COST, TRAIT_DRAW_COST } from '../../combat/points.js';
+import { ASCEND_TIERS, CARD_DRAW_COST, REBUILD_COST, RESPEC_COST, TRAIT_DRAW_COST } from '../../combat/points.js';
 import { TRAIT_LINK_LABELS } from '../../combat/traits.js';
 
 // 人物状态面板的 HTML：动作走 data-deck-act / data-deck-id；只输出字段、状态、错误与操作确认。
 const REASON_TEXT = Object.freeze({
     'combat-deck-invalid': '卡组不合规，不能保存',
     'combat-deck-readonly': '战斗进行中，卡组只读',
+    'combat-deck-locked': '获得的牌会直接进卡组，不需要手动整理',
     'combat-deck-no-floor': '当前聊天没有楼层，无法保存卡组',
     'combat-profile-exists': '该角色已有卡组档案',
     'combat-generate-unavailable': '当前无法生成卡组档案',
@@ -45,6 +47,13 @@ const REASON_TEXT = Object.freeze({
     'combat-points-not-protagonist': '只有主角可以卖出',
     'combat-sell-no-floor': '当前聊天没有楼层，无法卖出',
     'combat-sell-unavailable': '当前无法卖出',
+    'combat-sell-count-invalid': '回收数量必须为正整数',
+    'combat-sell-count-insufficient': '可回收数量不足，请刷新背包后重试',
+    'combat-sell-rollback-failed': '回收失败且库存未能恢复，请先核对背包，勿重复回收',
+    'combat-stock-revoke-failed': '账本撤销失败，请先核对积分与背包',
+    'gear-write-failed': '装配信息写入失败，请刷新后核对背包',
+    'gear-write-unverified': '装配信息写入未确认，请刷新后核对背包',
+    'inventory-write-failed': '背包写入失败，请刷新后核对',
     'combat-rebuild-unavailable': '当前无法重新生成卡组',
     'combat-rebuild-invalid': '新卡组不合规',
     'combat-rebuild-no-floor': '当前聊天没有楼层，无法重新生成',
@@ -71,6 +80,8 @@ const REASON_TEXT = Object.freeze({
     'combat-ascend-tier-invalid': '职业阶已变化，请重试',
     'combat-trait-unavailable': '当前无法抽取人物特性',
     'combat-trait-pending': '先决定替换或放弃新特性',
+    'combat-trait-busy': '正在抽取人物特性，请等待本次结果',
+    'combat-trait-stale': '抽取次数已变化，请重试；本次未扣费',
     'combat-trait-generation-failed': '人物特性生成失败',
     'combat-trait-seed-unavailable': '当前无法保存抽取进度，请重新载入聊天后重试',
     'combat-trait-seed-save-failed': '抽取进度保存失败，请重试；尚未扣费',
@@ -86,6 +97,30 @@ const REASON_TEXT = Object.freeze({
     'combat-trait-slot-cost-invalid': '特性槽价格已变化，请重试',
     'combat-trait-slot-kind-mismatch': '只有卡组角色可以解锁特性槽',
     'combat-trait-slot-no-floor': '当前聊天没有楼层，无法解锁特性槽',
+    'combat-card-draw-unavailable': '当前无法抽卡',
+    'combat-card-draw-free-unavailable': '免费抽卡额度已变化，请重试',
+    'combat-card-draw-free-level-invalid': '该等级没有免费抽卡额度',
+    'combat-card-draw-free-level-unreached': '尚未达到免费抽卡所需等级',
+    'combat-card-draw-free-used': '该等级的免费抽卡已使用',
+    'combat-card-upgrade-free-unavailable': '免费升级额度已变化，请重试',
+    'combat-card-upgrade-free-level-invalid': '该等级没有免费升级额度',
+    'combat-card-upgrade-free-level-unreached': '尚未达到免费升级所需等级',
+    'combat-card-upgrade-free-used': '该等级的免费升级已使用',
+    'combat-card-upgrade-none': '没有可升级的卡组副本',
+    'combat-card-upgrade-invalid': '这张牌不能升级，请重选',
+    'combat-card-upgrade-copy-missing': '卡组里已没有这张副本',
+    'combat-card-draw-pending': '先从抽到的牌里选一张或放弃',
+    'combat-card-draw-pool-empty': '本职业没有可抽的牌',
+    'combat-card-draw-generation-failed': '抽卡生成失败，未扣积分或消耗免费额度',
+    'combat-card-draw-no-floor': '当前聊天没有楼层，无法抽卡',
+    'combat-card-draw-kind-mismatch': '只有卡组角色可以抽卡',
+    'combat-card-draw-choices-invalid': '候选牌不合规，请重试',
+    'combat-card-pick-unavailable': '当前无法选牌',
+    'combat-card-pick-invalid': '候选已变化，请重试',
+    'combat-card-pick-copy-limit': '这张牌已达同名上限',
+    'combat-relic-inscribe-unavailable': '没有待刻印的遗物',
+    'combat-relic-inscribe-invalid': '这张牌不能刻印，请重选',
+    'combat-relic-inscribe-copy-missing': '卡组里已没有这张牌',
     'combat-character-missing': '没有这个角色',
     'combat-item-insufficient': '道具数量不足',
     'combat-use-battle-only': '这件道具只能在战斗中使用',
@@ -113,7 +148,7 @@ const initial = (name) => esc(Array.from(String(name || '?'))[0] || '?');
 const personBtn = (act, id, name, sub, current) => `<button type="button" class="igs-deck-person" data-deck-act="${act}" data-deck-id="${esc(id)}" aria-pressed="${current}">`
     + `<span class="igs-deck-avatar" aria-hidden="true">${initial(name)}</span><span class="igs-deck-person-meta"><span>${esc(name)}</span><small>${esc(sub)}</small></span></button>`;
 function rosterHtml(v) {
-    const people = v.roster.map((r) => personBtn('select', r.id, r.name, `${r.kindLabel} · ${expText(r)}${r.needsAdjust ? ' · 需调整' : ''}`, !v.selectedBuild && r.id === v.selectedId));
+    const people = v.roster.map((r) => personBtn('select', r.id, r.name, `${r.kindLabel} · ${expText(r)}${r.needsAdjust ? ' · 需调整' : ''}${r.freeRewards ? ` · 免费 ${r.freeRewards} 次` : ''}`, !v.selectedBuild && r.id === v.selectedId));
     const builds = (v.builds || []).map((b) => personBtn('select-build', b.name, b.name, '待建档', b.name === v.selectedBuild));
     return `<nav class="igs-deck-roster" aria-label="角色">${[...people, ...builds].join('')}</nav>`;
 }
@@ -131,36 +166,91 @@ function artAction(c, readonly) {
     return err + btn('card-art', a.pending ? '生成中' : a.error ? '重试卡面' : a.url ? '重画卡面' : '生成卡面', { id: c.cardId, disabled: a.pending });
 }
 
-function cardRow(c, readonly) {
+// editable：可加入 / 移出（规则 v6 卡组即持有，只有旧档案卡组需要调整时才开放）。
+function cardRow(c, readonly, editable = !readonly) {
     const err = c.errors.length ? `<span class="igs-deck-err">${esc(c.errors.map((r) => CARD_ERROR[r] || r).join('、'))}</span>` : '';
     const up = c.upgraded ? ` · 已升级 ${c.upgraded}` : '';
-    // 卡牌属性性能预览：要求属性与要求值，倍率高于 1 青绿、低于 1 灰色。
-    const sc = c.scaling;
-    const scale = sc ? `<span class="igs-deck-req${sc.multiplier > 1 ? ' is-up' : sc.multiplier < 1 ? ' is-down' : ''}" data-ability="${esc(sc.ability)}">${esc(sc.label)} ${esc(sc.required)} · ×${esc(sc.multiplier)}</span>` : '';
-    const effectText = (text, cost) => `${cost === 'X' ? '消耗全部能量，每点能量结算一次：' : ''}${text || '暂无效果资料'}`;
-    const upgraded = c.upgradedText ? `<details class="igs-deck-effect"><summary>升级后 · ${esc(c.upgradedCost)} 费</summary>${esc(effectText(c.upgradedText, c.upgradedCost))}</details>` : '';
-    const effect = effectText(c.text, c.cost);
-    // 一张卡一块：费用、卡面、名称与效果在左；来源、属性要求、数量与操作收在右侧一栏（窄屏整栏移到下方），不与下一张卡混在一起。
+    const upgraded = c.upgradedText ? `<details class="igs-deck-effect"><summary>升级后 · ${esc(c.upgradedCost)} 费</summary>${effectHtml({ cost: c.upgradedCost, text: c.upgradedText, textParts: c.upgradedTextParts })}</details>` : '';
+    // 同名牌中带成长或刻印的副本：每种差异一枚标签，数量与卡组计数同格式（草稿未保存时只给拥有张数）。
+    const variants = (c.variants || []).map((x) => `<details class="igs-deck-effect"><summary${x.tip ? ` title="${esc(x.tip)}"` : ''}>${esc(`${x.label} · ${x.inDeck === null ? `×${x.owned}` : `${x.inDeck}/${x.owned}`}`)}</summary>${effectHtml(x)}</details>`).join('');
+    // 一张卡一块：费用、卡面、名称与效果在左；数量与操作收在右侧一栏（窄屏整栏移到下方）。
     const count = `<span class="igs-deck-count" aria-label="卡组中 / 拥有">${c.owned ? `${c.inDeck}/${c.owned}${up}` : '未拥有'}</span>`;
-    const acts = artAction(c, readonly) + (readonly ? '' : `${btn('remove', '移出', { id: c.cardId, disabled: c.inDeck === 0 })}${btn('add', '加入', { id: c.cardId, disabled: !c.canAdd })}`);
-    return `<li class="igs-deck-card${c.errors.length ? ' is-error' : ''}" data-card-type="${esc(c.type)}"${c.rarity ? ` data-rarity="${esc(c.rarity)}"` : ''}><span class="igs-deck-cost">${esc(c.cost)}</span>${artThumb(c.art)}`
-        + `<div class="igs-deck-card-info"><div class="igs-deck-card-title"><span class="igs-deck-name">${esc(c.name)}</span><span class="igs-deck-tag">${esc(c.source)}</span></div><p class="igs-deck-effect">${esc(effect)}</p>${upgraded}${err}</div>`
-        + `<div class="igs-deck-card-side"><div class="igs-deck-card-stats">${scale}${count}</div>${acts ? `<div class="igs-deck-card-acts">${acts}</div>` : ''}</div>`
+    const acts = artAction(c, readonly) + (readonly || !editable ? '' : `${btn('remove', '移出', { id: c.cardId, disabled: c.inDeck === 0 })}${btn('add', '加入', { id: c.cardId, disabled: !c.canAdd })}`);
+    return `<li class="igs-deck-card${c.errors.length ? ' is-error' : ''}" data-card-type="${esc(c.type)}"${c.rarity ? ` data-rarity="${esc(c.rarity)}"` : ''}><span class="igs-deck-cost"><svg viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="12.5"/></svg>${esc(c.cost)}</span>${artThumb(c.art)}`
+        + `<div class="igs-deck-card-info"><div class="igs-deck-card-title"><span class="igs-deck-name">${esc(c.name)}</span><span class="igs-deck-tag">${esc(c.source)}</span></div><p class="igs-deck-effect">${effectHtml(c)}</p>${variants}${upgraded}${err}</div>`
+        + `<div class="igs-deck-card-side"><div class="igs-deck-card-stats">${count}</div>${acts ? `<div class="igs-deck-card-acts">${acts}</div>` : ''}</div>`
         + '</li>';
 }
 
-// 重新生成基础卡组：只主角、不在战斗中且注入了生成能力时给按钮，金钱不足置灰；点后在原处确认或取消。
+// 重新生成基础卡组：只主角、不在战斗中且注入了生成能力时给按钮，积分不足置灰；点后在原处确认或取消。
 function rebuildHtml(v, d) {
     if (v.readonly || !v.canRebuild || !d.canSell) return '';
     const busy = Boolean(v.pending) || v.generationForm?.loading === true;
     const inner = v.rebuild
-        ? btn('rebuild-confirm', v.pending === 'rebuild' ? '生成中' : `确认重新生成 · ${REBUILD_COST} 金钱`, { primary: true, disabled: busy }) + btn('rebuild-cancel', '取消', { disabled: busy })
-        : btn('rebuild-open', `重新生成基础卡组（消耗${REBUILD_COST}金钱）`, { disabled: busy || (d.points || 0) < REBUILD_COST });
+        ? btn('rebuild-confirm', v.pending === 'rebuild' ? '生成中' : `确认重新生成 · ${REBUILD_COST} 积分`, { primary: true, disabled: busy }) + btn('rebuild-cancel', '取消', { disabled: busy })
+        : btn('rebuild-open', `重新生成基础卡组（消耗${REBUILD_COST}积分）`, { disabled: busy || (d.points || 0) < REBUILD_COST });
     return `<p class="igs-deck-help">重新生成只更换个人牌并重组起始卡组，保留当前职业牌；个人卡池不一定全部加入起始卡组。</p>${v.rebuild ? renderCombatGenerationForm(v.generationForm, Boolean(v.pending)) : ''}<div class="igs-deck-actions">${inner}</div>`;
 }
 
+// 规则 v6 积分抽卡（只主角）：没有待翻的牌时给「抽卡」，点后在原处确认或取消，积分不足置灰；
+// 抽到后 3 张牌背面朝上并排（卡背纹样与呼吸光），点一张翻开（翻面爆光，颜色取稀有度），其余两张随后亮出并压暗；
+// 翻开后「加入卡组」收下这张，或「放弃（不退还）」；翻前也可放弃。
+const DRAW_BACK = '<span class="igs-deck-reveal-back igs-deck-draw-back" aria-hidden="true"><i class="igs-deck-draw-sigil"></i></span>';
+const drawFace = (c) => `<span class="igs-deck-reveal-face"><span class="igs-deck-reveal-tag">${esc([TRAIT_RARITY_LABELS[c.rarity] || '', c.cost === '' ? '' : `${c.cost}费`].filter(Boolean).join(' · '))}</span>`
+    + `<span class="igs-deck-reveal-name">${esc(c.name)}</span><span class="igs-deck-draw-text">${effectHtml(c)}</span></span>`;
+function drawOpenHtml(v, w) {
+    const fresh = v.drawShown?.drawId === w.drawId && v.drawShown.fresh === true;
+    const busy = v.readonly || Boolean(v.pending);
+    const canPick = !v.readonly && v.canPickCard;
+    const cards = w.choices.map((c, i) => {
+        const chosen = i === w.flipped;
+        const fx = chosen && fresh ? `<span class="igs-deck-reveal-burst" aria-hidden="true"></span>${dots('igs-deck-reveal-sparks')}` : '';
+        return `<div class="igs-deck-draw-card${chosen ? ' is-chosen' : ' is-dim'}" data-card-type="${esc(c.type)}"${c.rarity ? ` data-rarity="${esc(c.rarity)}"` : ''} role="img" aria-label="${esc(`${chosen ? '翻开' : '未翻'}：${c.name}`)}">${fresh ? DRAW_BACK : ''}${drawFace(c)}${fx}</div>`;
+    }).join('');
+    const got = w.choices[w.flipped];
+    const acts = canPick ? btn('draw-keep', v.pending === 'card-keep' ? '加入中' : '加入卡组', { primary: true, disabled: busy }) + btn('draw-skip', '放弃（不退还）', { disabled: busy }) : '';
+    return `<section class="igs-deck-reveal igs-deck-draw" data-phase="open"${got?.rarity ? ` data-rarity="${esc(got.rarity)}"` : ''}${fresh ? ' data-fresh' : ''}${v.reduced ? ' data-still' : ''}><div class="igs-deck-draw-row">${cards}</div>`
+        + `<p class="igs-deck-reveal-state" role="status">${esc(got ? `翻开了「${got.name}」` : '')}</p>${acts ? `<div class="igs-deck-actions">${acts}</div>` : ''}</section>`;
+}
+function drawHtml(v, d) {
+    if (!d.canSell || d.kind !== 'deck-character') return '';
+    const busy = v.readonly || Boolean(v.pending);
+    const waiting = d.pendingDraw;
+    if (waiting && Number.isInteger(waiting.flipped)) return drawOpenHtml(v, waiting);
+    if (waiting) {
+        const canFlip = !v.readonly && v.canPickCard;
+        const off = busy || !canFlip;
+        const backs = Array.from({ length: waiting.count }, (_, i) => `<button type="button" class="igs-deck-draw-card is-back${v.pending === 'card-flip' && v.drawFlipping === i ? ' is-flipping' : ''}" data-deck-act="card-flip" data-deck-id="${i}" aria-label="翻开第 ${i + 1} 张"${off ? ' aria-disabled="true"' : ''}>${DRAW_BACK}</button>`).join('');
+        const skip = canFlip ? `<div class="igs-deck-actions">${btn('draw-skip', '放弃（不退还）', { disabled: busy })}</div>` : '';
+        return `<section class="igs-deck-reveal igs-deck-draw" data-phase="back"${v.reduced ? ' data-still' : ''}><div class="igs-deck-draw-row">${backs}</div><p class="igs-deck-reveal-state">${esc(v.pending === 'card-flip' ? '翻牌中' : '翻开一张')}</p>${skip}</section>`;
+    }
+    if (v.readonly || !v.canDrawCard) return '';
+    const free = v.draw ? Boolean(v.draw.free) : Boolean(d.freeDraws?.length);
+    const label = free ? `免费抽卡（剩 ${d.freeDraws.length} 次）` : `抽卡（消耗${CARD_DRAW_COST}积分）`;
+    const confirm = free ? '确认免费抽卡' : `确认抽卡 · ${CARD_DRAW_COST} 积分`;
+    const inner = v.draw
+        ? btn('draw-confirm', v.pending === 'card-draw' ? '生成中' : confirm, { primary: true, disabled: busy }) + btn('draw-cancel', '取消', { disabled: busy })
+        : btn('draw-open', label, { disabled: busy || (!free && (d.points || 0) < CARD_DRAW_COST) });
+    return `<div class="igs-deck-actions">${inner}</div>`;
+}
+
+function freeUpgradeHtml(v, d) {
+    if (!d.canSell || d.kind !== 'deck-character' || !v.canUpgradeCard || !d.freeUpgrades?.length) return '';
+    const busy = v.readonly || Boolean(v.pending);
+    const cards = d.upgradeCards || [];
+    if (!v.freeUpgrade) return `<div class="igs-deck-actions">${btn('upgrade-open', `免费升级（剩 ${d.freeUpgrades.length} 次）`, { disabled: busy || !cards.length })}</div>`;
+    const picked = cards.find(card => card.copyId === v.freeUpgrade.copyId);
+    const picks = cards.map(card => btn('upgrade-pick', `${card.name} · 第 ${card.nth} 张`, { id: card.copyId, pressed: picked?.copyId === card.copyId, disabled: busy })).join('');
+    const preview = picked
+        ? row('升级前', faceLineHtml(picked)) + row('升级后', faceLineHtml(picked.after))
+        : '';
+    const actions = btn('upgrade-confirm', v.pending === 'card-upgrade' ? '升级中' : '确认免费升级', { primary: true, disabled: busy || !picked })
+        + btn('upgrade-cancel', '取消', { disabled: busy });
+    return `${row('免费升级', `<div class="igs-deck-actions">${picks}</div>`)}${preview}<div class="igs-deck-actions">${actions}</div>`;
+}
+
 // 转职与职业升阶（只主角、不在战斗中且注入了对应能力时显示）：转职展开后列出其他已登记职业与「新职业」，选定后确认或取消；
-// 升阶按钮写下一阶的等级门槛与花费，已到三阶不显示，等级或金钱不足置灰，点后在原处确认或取消。
+// 升阶按钮写下一阶的等级门槛与花费，已到三阶不显示，等级或积分不足置灰，点后在原处确认或取消。
 function classActionsHtml(v, d) {
     if (v.readonly || !d.canSell || d.kind !== 'deck-character') return '';
     const busy = Boolean(v.pending) || v.generationForm?.loading === true;
@@ -168,33 +258,33 @@ function classActionsHtml(v, d) {
     if (v.respec && v.canRespec) {
         const picks = v.classes.filter((c) => c.id !== d.classRef).map((c) => btn('respec-pick', c.name, { id: c.id, pressed: v.respec.picked && v.respec.classRef === c.id, disabled: busy })).join('')
             + btn('respec-pick', '新职业', { pressed: v.respec.picked && !v.respec.classRef, disabled: busy });
-        const confirm = v.respec.picked ? btn('respec-confirm', v.pending === 'respec' ? '转职中' : `确认转职 · ${RESPEC_COST} 金钱`, { primary: true, disabled: busy }) : '';
-        return `<p class="igs-deck-help">转职切换职业和职业被动，保留已有卡组；新职业牌进入候选池，不会直接获得。职业阶数重置为一阶。</p>${row('转职', picks)}${v.respec.picked && !v.respec.classRef ? renderCombatGenerationForm(v.generationForm, Boolean(v.pending)) : ''}<div class="igs-deck-actions">${confirm}${btn('respec-cancel', '取消', { disabled: busy })}</div>`;
+        const confirm = v.respec.picked ? btn('respec-confirm', v.pending === 'respec' ? '转职中' : `确认转职 · ${RESPEC_COST} 积分`, { primary: true, disabled: busy }) : '';
+        return `<p class="igs-deck-help">转职切换职业和职业被动，保留已有卡组，职业阶数重置为一阶。</p>${row('转职', picks)}${v.respec.picked && !v.respec.classRef ? renderCombatGenerationForm(v.generationForm, Boolean(v.pending)) : ''}<div class="igs-deck-actions">${confirm}${btn('respec-cancel', '取消', { disabled: busy })}</div>`;
     }
     if (v.ascend && v.canAscend && next) {
-        return `${renderCombatGenerationForm(v.generationForm, Boolean(v.pending))}<div class="igs-deck-actions">${btn('ascend-confirm', v.pending === 'ascend' ? '生成中' : `确认升阶 · ${next.cost} 金钱`, { primary: true, disabled: busy })}${btn('ascend-cancel', '取消', { disabled: busy })}</div>`;
+        return `${renderCombatGenerationForm(v.generationForm, Boolean(v.pending))}<div class="igs-deck-actions">${btn('ascend-confirm', v.pending === 'ascend' ? '生成中' : `确认升阶 · ${next.cost} 积分`, { primary: true, disabled: busy })}${btn('ascend-cancel', '取消', { disabled: busy })}</div>`;
     }
     const acts = [];
-    if (v.canRespec) acts.push(btn('respec-open', `转职（消耗${RESPEC_COST}金钱）`, { disabled: busy || (d.points || 0) < RESPEC_COST }));
-    if (v.canAscend && next) acts.push(btn('ascend-open', `职业升阶（需 Lv${next.level} · 消耗${next.cost}金钱）`, { disabled: busy || (d.expLevel || 1) < next.level || (d.points || 0) < next.cost }));
+    if (v.canRespec) acts.push(btn('respec-open', `转职（消耗${RESPEC_COST}积分）`, { disabled: busy || (d.points || 0) < RESPEC_COST }));
+    if (v.canAscend && next) acts.push(btn('ascend-open', `职业升阶（需 Lv${next.level} · 消耗${next.cost}积分）`, { disabled: busy || (d.expLevel || 1) < next.level || (d.points || 0) < next.cost }));
     return acts.length ? `<div class="igs-deck-actions">${acts.join('')}</div>` : '';
 }
 
 function deckHtml(v, d) {
     const c = d.check;
     const sizeBad = c.errors.some((e) => e.reason === 'deck-too-small' || e.reason === 'deck-too-large');
-    const summary = `<span class="igs-deck-size${c.ok ? '' : ' is-error'}" role="status">${c.size} 张 · ${c.min}–${c.max}${sizeBad ? ' · 张数不符' : ''}${c.ok ? '' : ' · 不合规'}</span>`;
+    const summary = `<span class="igs-deck-size${c.ok ? '' : ' is-error'}" role="status">${c.size} 张 · 至少 ${c.min}${sizeBad ? ' · 张数不符' : ''}${c.ok ? '' : ' · 不合规'}</span>`;
+    // 规则 v6：获得的牌直接进卡组，不再自由组卡；只有旧档案卡组不合规（需调整）时保留整理入口。
+    const editable = !v.readonly && d.deckEditable === true;
     const actions = v.readonly ? chip('战斗进行中 · 只读')
-        : `${btn('reset', '还原', { disabled: !d.dirty || Boolean(v.pending) })}${btn('save', v.pending === 'save' ? '保存中' : '保存卡组', { primary: true, disabled: !d.dirty || !c.ok || Boolean(v.pending) })}`;
+        : editable ? `${btn('reset', '还原', { disabled: !d.dirty || Boolean(v.pending) })}${btn('save', v.pending === 'save' ? '保存中' : '保存卡组', { primary: true, disabled: !d.dirty || !c.ok || Boolean(v.pending) })}` : '';
     const locked = (d.signature || []).filter((s) => !s.unlocked);
     // 未解锁的专属卡不透露名称、费用与类型，只标解锁等级（v0.39.2）。
     const sig = locked.length
         ? row('专属', locked.map((s) => `<span class="igs-deck-chip is-locked" data-rarity="signature">??? · Lv${esc(s.level)} 解锁</span>`).join(''))
         : '';
-    const candidates = d.classCandidates || [];
-    const pool = candidates.length ? `<details class="igs-deck-pool"><summary>${esc(d.className)} · 未拥有的职业牌（${candidates.length} 种）</summary><p class="igs-deck-help">以下是候选，并非已持有。可在升级奖励三选一中抽到；转职保留旧牌，不自动换牌。重建基础卡组会按当前职业重新组牌，另收页面标示的费用。</p><ul class="igs-deck-cards">${candidates.map((x) => cardRow(x, true)).join('')}</ul></details>` : '';
     const passive = d.classPassive ? row('职业被动', chip(`${d.classPassive.name}：${d.classPassive.text}`)) : '';
-    return `<section class="igs-deck-build">${row('卡组', summary)}${passive}<p class="igs-deck-help">数量为「卡组中 / 拥有」。效果按当前属性预览，实战还受增益、减益和目标状态影响。</p>${sig}<ul class="igs-deck-cards">${d.owned.map((x) => cardRow(x, v.readonly)).join('')}</ul>${pool}<div class="igs-deck-actions">${actions}</div>${rebuildHtml(v, d)}${classActionsHtml(v, d)}</section>`;
+    return `<section class="igs-deck-build">${row('卡组', summary)}${passive}${drawHtml(v, d)}${freeUpgradeHtml(v, d)}<p class="igs-deck-help">数量为「卡组中 / 拥有」。效果按当前属性预览，实战还受增益、减益和目标状态影响。</p>${sig}<ul class="igs-deck-cards">${d.owned.map((x) => cardRow(x, v.readonly, editable)).join('')}</ul>${actions ? `<div class="igs-deck-actions">${actions}</div>` : ''}${rebuildHtml(v, d)}${classActionsHtml(v, d)}</section>`;
 }
 
 // 装备栏：四个部位各一行内的标签，已装备的可卸下（卸下后进背包页）；道具只列余量。
@@ -214,7 +304,7 @@ function gearHtml(v, d) {
     if (!d.canSell && g.bag.length) {
         parts.push(section('可装备', `<ul class="igs-deck-collection">${g.bag.map((b) => gearRow(b.slotLabel, b, b.rarity, v.readonly ? '' : btn('equip', '装上', { id: b.gearId, disabled: busy }))).join('')}</ul>`));
     }
-    if (g.items.length) parts.push(section('道具', `<ul class="igs-deck-collection">${g.items.map((i) => bagRow('', `<span class="igs-deck-name">${itemArt(i)}${esc(i.name)}</span><span class="igs-deck-count">×${esc(i.count)}</span>`, '')).join('')}</ul>`));
+    if (g.items.length) parts.push(section('道具', `<ul class="igs-deck-collection">${g.items.map((i) => bagRow('', `<span class="igs-deck-name">${itemArt(i)}${esc(i.name)}</span><span class="igs-deck-count is-qty">×${esc(i.count)}</span>`, '')).join('')}</ul>`));
     if (d.canSell) parts.push('<p class="igs-deck-help">背包里的装备在资料菜单「物品」页换装与卖出。</p>');
     return parts.join('');
 }
@@ -252,11 +342,13 @@ const bagRow = (rarity, head, acts) => `<li class="igs-deck-keepsake"${rarity ? 
 
 
 // 人物特性（只主角有）：特性槽（v4）逐槽列出保留着的固有特性（人物技能 / 个人被动）、抽到的特性、空槽与未解锁的槽；按稀有度标色，写名称、种类、效果与联动，来历放在名称提示里。
-// 下一个未解锁的槽给「解锁 · 价格」，金钱不足置灰。主角不在战斗中时给「抽人物特性」，点后在原处确认或取消，金钱不足置灰；
+// 下一个未解锁的槽给「解锁 · 价格」，积分不足置灰。主角不在战斗中时给「抽人物特性」，点后在原处确认或取消，积分不足置灰；
 // 装不下时抽到的新特性列在「新特性」，每个特性给「替换」（替换后会挤掉其他固有特性或主动超上限的置灰）、新特性给「放弃」，被替换或放弃的永久消失。
 const traitTags = (t) => [t.innate ? '固有' : '', t.kind === 'active' ? `主动 · ${t.cost}费` : ''].filter(Boolean);
 const traitHead = (t) => `<span class="igs-deck-name"${t.origin ? ` title="${esc(t.origin)}"` : ''}>${esc(t.name)}</span>`
     + `<span class="igs-deck-count">${esc([...traitTags(t), t.text, t.link ? TRAIT_LINK_LABELS[t.link] : ''].filter(Boolean).join(' · '))}</span>`;
+// 特性行：前面一个圆形首字头像（同角色名单的头像圆），名称与说明上下排在右侧。
+const traitRow = (rarity, mark, head, acts) => bagRow(rarity, `<span class="igs-deck-avatar" aria-hidden="true">${mark}</span><span class="igs-deck-trait-body">${head}</span>`, acts);
 const ownTraits = (d) => [...(d.traitSlots?.innate || []), ...(d.traits || [])];
 const replaceableOf = (d, own) => new Set(d.traitSlots ? d.traitSlots.replaceable : own.map((t) => t.traitId));
 function traitsHtml(v, d) {
@@ -267,24 +359,50 @@ function traitsHtml(v, d) {
     const busy = v.readonly || Boolean(v.pending);
     const canPick = Boolean(fresh) && !v.readonly && v.canPickTrait;
     const ok = replaceableOf(slots ? d : {}, list);
-    const rows = list.map((t) => bagRow(t.rarity, traitHead(t), canPick ? btn('trait-drop', '替换', { id: t.traitId, disabled: busy || !ok.has(t.traitId) }) : ''));
+    const rows = list.map((t) => traitRow(t.rarity, initial(t.name), traitHead(t), canPick ? btn('trait-drop', '替换', { id: t.traitId, disabled: busy || !ok.has(t.traitId) }) : ''));
     if (slots) {
-        for (let i = list.length; i < slots.slots; i += 1) rows.push(bagRow('', '<span class="igs-deck-name is-empty">空槽</span>', ''));
+        for (let i = list.length; i < slots.slots; i += 1) rows.push(traitRow('', '＋', '<span class="igs-deck-name is-empty">空槽</span>', ''));
         slots.locked.forEach((s, i) => {
-            const unlock = i === 0 && !v.readonly && v.canUnlockSlot ? btn('trait-slot', `解锁 · ${s.cost} 金钱`, { id: String(s.slot), disabled: busy || (d.points || 0) < s.cost }) : '';
-            rows.push(bagRow('', `<span class="igs-deck-name is-locked">第 ${s.slot} 槽</span><span class="igs-deck-count">${esc(`未解锁 · ${s.cost} 金钱`)}</span>`, unlock));
+            const unlock = i === 0 && !v.readonly && v.canUnlockSlot ? btn('trait-slot', `解锁 · ${s.cost} 积分`, { id: String(s.slot), disabled: busy || (d.points || 0) < s.cost }) : '';
+            rows.push(traitRow('', esc(s.slot), `<span class="igs-deck-name is-locked">第 ${s.slot} 槽</span><span class="igs-deck-count">${esc(`未解锁 · ${s.cost} 积分`)}</span>`, unlock));
         });
     }
     const parts = [];
     if (rows.length) parts.push(section(slots ? `人物特性 · ${list.length}/${slots.slots}` : '人物特性', `<ul class="igs-deck-collection">${rows.join('')}</ul>`));
-    if (fresh) parts.push(section('新特性', `<ul class="igs-deck-collection">${bagRow(fresh.rarity, traitHead(fresh), canPick ? btn('trait-drop', '放弃', { id: fresh.traitId, disabled: busy }) : '')}</ul>`));
+    if (fresh) parts.push(section('新特性', `<ul class="igs-deck-collection">${traitRow(fresh.rarity, initial(fresh.name), traitHead(fresh), canPick ? btn('trait-drop', '放弃', { id: fresh.traitId, disabled: busy }) : '')}</ul>`));
     if (hero && !fresh && !v.readonly && v.canDrawTrait) {
         const inner = v.trait
-            ? btn('trait-confirm', v.pending === 'trait' ? '生成中' : `确认抽取 · ${TRAIT_DRAW_COST} 金钱`, { primary: true, disabled: busy }) + btn('trait-cancel', '取消', { disabled: busy })
-            : btn('trait-open', `抽人物特性（消耗${TRAIT_DRAW_COST}金钱）`, { disabled: busy || (d.points || 0) < TRAIT_DRAW_COST });
+            ? btn('trait-confirm', v.pending === 'trait' ? '生成中' : `确认抽取 · ${TRAIT_DRAW_COST} 积分`, { primary: true, disabled: busy }) + btn('trait-cancel', '取消', { disabled: busy })
+            : btn('trait-open', `抽人物特性（消耗${TRAIT_DRAW_COST}积分）`, { disabled: busy || (d.points || 0) < TRAIT_DRAW_COST });
         parts.push(`<div class="igs-deck-actions">${inner}</div>`);
     }
+    if (hero && d.relicInscribe?.length) parts.push(sealHtml(v, d));
     return parts.join('');
+}
+
+// 规则 v6 御印（只主角）：待刻的遗物刻印。「选定刻印」后在原处列出可刻副本（同名副本带序号），点一张显示刻印前后的费用与说明，再确认或取消；战斗进行中只列待刻项。
+const effectHtml = (card) => `${card.cost === 'X' ? '消耗全部能量，每点能量结算一次：' : ''}${cardTextHtml(card) || '暂无效果资料'}`;
+const faceLineHtml = (card) => `<span class="igs-deck-count">${card.cost === '' ? '' : `${esc(card.cost)}费 · `}${effectHtml(card)}</span>`;
+
+function sealHtml(v, d) {
+    const busy = v.readonly || Boolean(v.pending);
+    const items = d.relicInscribe.map((item) => {
+        const open = v.seal?.key === item.key;
+        const head = `<span class="igs-deck-name">${esc(item.name)}</span><span class="igs-deck-count">${esc(item.tip || `刻印·${item.label}`)}</span>`;
+        const act = !open && !v.readonly && v.canInscribe ? btn('inscribe-open', '选定刻印', { id: item.key, disabled: busy || !item.copies.length }) : '';
+        const line = bagRow('', head, act);
+        if (!open) return line;
+        const picks = item.copies.map((c) => btn('inscribe-pick', c.nth ? `${c.name} #${c.nth}` : c.name, { id: c.copyId, pressed: v.seal.copyId === c.copyId, disabled: busy }));
+        const pick = item.copies.find((c) => c.copyId === v.seal.copyId);
+        const detail = pick
+            ? `<div class="igs-deck-seal-detail">${row('', chip([pick.name, pick.label].filter(Boolean).join(' · ')))}`
+                + `${row('刻印前', faceLineHtml(pick))}${row('刻印后', faceLineHtml(pick.after))}</div>`
+            : '';
+        const acts = btn('inscribe-confirm', v.pending === 'inscribe' ? '刻印中' : '确认刻印', { primary: true, disabled: busy || !pick })
+            + btn('inscribe-cancel', '取消', { disabled: Boolean(v.pending) });
+        return `${line}<li class="igs-deck-seal"><div class="igs-deck-seal-picks">${picks.join('')}</div>${detail}<div class="igs-deck-actions">${acts}</div></li>`;
+    });
+    return section('待刻印', `<ul class="igs-deck-collection">${items.join('')}</ul>`);
 }
 
 // 抽人物特性揭晓（P-f）：主区换成揭晓舞台，标题栏与关闭保留。蓄力：背面卡居中，光圈旋转、粒子向中心聚拢，颜色按预定稀有度；
@@ -328,11 +446,19 @@ function revealHtml(v) {
 function statusPage(v, d) {
     const a = d.attributes;
     const parts = [];
-    if (a && !a.protagonist && d.relLabel) parts.push(row('相对', chip(d.relLabel)));
+    // 概览一行：相对档、生命、速度、熟练并排成等宽几栏的纯文字（小字名称在上、数值在下），不各自套底色块。
+    const fact = (label, value) => `<div class="igs-deck-fact"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
+    const facts = [];
+    if (a && !a.protagonist && d.relLabel) facts.push(fact('相对', d.relLabel));
     // 生命：当前 / 上限（持续伤势已计入）与伤势词；满血时只写上限。
-    const hp = d.combat && (d.combat.current ?? d.combat.hp) < d.combat.hp ? `生命 ${d.combat.current}/${d.combat.hp}` : `生命 ${d.combat?.hp}`;
-    if (d.combat) parts.push(row('开战', chip(hp) + (d.combat.injury && d.combat.injury !== '无伤' ? chip(d.combat.injury) : '') + chip(`速度 ${d.combat.speed}`)));
-    if (a && Number.isFinite(a.proficiency)) parts.push(row('熟练', chip(`+${a.proficiency}`)));
+    if (d.combat) {
+        const hurt = (d.combat.current ?? d.combat.hp) < d.combat.hp;
+        facts.push(fact('生命', hurt ? `${d.combat.current}/${d.combat.hp}` : `${d.combat.hp}`));
+        if (d.combat.injury && d.combat.injury !== '无伤') facts.push(fact('伤势', d.combat.injury));
+        facts.push(fact('速度', `${d.combat.speed}`));
+    }
+    if (a && Number.isFinite(a.proficiency)) facts.push(fact('熟练', `+${a.proficiency}`));
+    if (facts.length) parts.push(`<dl class="igs-deck-facts">${facts.join('')}</dl>`);
     // 没有属性表时六维是按定位推算的默认值，照常用于战斗；说明写在属性格上方，不与数值并列成「未创建」。
     const abilities = `${a?.table === 'missing' ? '<p class="igs-deck-help">属性表未创建，以下为按定位推算的默认值。</p>' : ''}${abilityGrid(d.abilities, false)}`;
     if (d.abilities?.length) parts.push(section('六维', abilities));
@@ -395,7 +521,7 @@ function tabsHtml(page, d) {
         + `${esc(p === 'deck' && d.kind === 'skill-character' ? '技能' : DECK_PAGE_LABELS[p])}</button>`).join('')}</div>`;
 }
 
-// 详情卡片页头：大号首字头像、名字，下方一行标签（等级、职业、金钱）。生命只在状态页「开战」行写一次（已计入体质与伤势），页头不再另写基础血量。
+// 详情卡片页头：大号首字头像、名字，下方一行标签（等级、职业、积分）。生命只在状态页「开战」行写一次（已计入体质与伤势），页头不再另写基础血量。
 const tag = (text) => `<span class="igs-deck-tag">${esc(text)}</span>`;
 function detailHead(name, tags) {
     return `<header class="igs-deck-detail-head"><span class="igs-deck-avatar is-large" aria-hidden="true">${initial(name)}</span>`
@@ -407,8 +533,8 @@ function detailHtml(v) {
     const d = v.detail;
     if (!d) return '';
     const classText = d.className && d.tierName ? `${d.className} · ${d.tierName}` : d.className;
-    // 金钱只主角有：解锁特性槽、抽特性、转职等按钮按它置灰，页头直接写出余额。
-    const head = detailHead(d.name, [expText(d), classText, d.tierLabel && v.readonly ? `强度 · ${d.tierLabel}` : '', d.canSell ? `金钱 ${d.points || 0}` : '']);
+    // 积分只主角有：解锁特性槽、抽特性、转职等按钮按它置灰，页头直接写出余额。
+    const head = detailHead(d.name, [expText(d), classText, d.tierLabel && v.readonly ? `强度 · ${d.tierLabel}` : '', d.canSell ? `积分 ${d.points || 0}` : '']);
     const page = DECK_PAGES.includes(v.page) ? v.page : 'status';
     return `<section class="igs-deck-detail">${head}${tabsHtml(page, d)}`
         + `<div class="igs-deck-page" id="igs-deck-page" role="tabpanel" aria-labelledby="igs-deck-tab-${page}" data-page="${page}">${PAGE_HTML[page](v, d)}</div></section>`;

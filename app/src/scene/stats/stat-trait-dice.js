@@ -19,6 +19,8 @@ const ARCANE = new Set(['魔法', '魔药', '符咒', '法术']);
 const STREET = new Set(['格斗', '恐吓', '力量', '敏捷', '闪避']);
 const DATING = new Set(['魅惑', '安抚', '穿搭', '化妆', '唱歌']);
 const CHARM = new Set(['魅力', '魅惑']);
+// 共患难关键事件检定可能用到的技能（与 stat-engine 的 KEY_EVENT_SKILLS.共患难 一致；此处不导入 stat-engine）。
+const COMRADE_SKILLS = new Set(['格斗', '剑术', '射击', '体质']);
 // 万事通：任何检定中该技能值不低于此值。
 export const ALL_ROUNDER_FLOOR = 30;
 
@@ -45,7 +47,7 @@ export function diceCategories(skill, { social = false, versus = false } = {}) {
 
 // request：{ actor, skill, toward, social, skillValue }。返回 { edge, favorFrom }：
 // favorFrom 为被求助时「欠你人情」的 NPC 名（本次检定用掉，由结算消耗）。
-export function traitEdgeOf(state, cat, { actor = '主角', skill = '', toward = null, social = false, skillValue = 0, present = [], skillOf = null } = {}) {
+export function traitEdgeOf(state, cat, { actor = '主角', skill = '', toward = null, social = false, skillValue = 0, present = [], skillOf = null, heroSide = false } = {}) {
     if (actor !== '主角' || !state) return { edge: 0, favorFrom: null, floor: 0 };
     const categories = diceCategories(skill, { social, versus: Boolean(toward) });
     const here = toward ? present.includes(toward) : false;
@@ -57,7 +59,7 @@ export function traitEdgeOf(state, cat, { actor = '主角', skill = '', toward =
     for (const category of categories) {
         edge += traitDice(state, cat, actor, category, { skillValue, here, hates }) - traitDice(state, cat, actor, '通用', { skillValue, here, hates });
         // 对方身上写的是「主角对其」的惩罚 / 奖励骰（腹黑、绿茶）。
-        if (toward && state.characters && state.characters[toward]) edge += traitDice(state, cat, toward, category, { skillValue, here });
+        if (toward && state.characters && state.characters[toward]) edge += traitDice(state, cat, toward, category, { skillValue, here, heroSide });
     }
     let favorFrom = null;
     if (toward && state.characters && state.characters[toward]) {
@@ -65,6 +67,8 @@ export function traitEdgeOf(state, cat, { actor = '主角', skill = '', toward =
         edge += extra;
         if (social && bondDice(state, toward)) { edge += 1; favorFrom = toward; }
     }
+    // 生死之交（合成：护短 + 讲义气）：主角对在场持有者做共患难相关检定，多一个奖励骰。
+    if (toward && here && COMRADE_SKILLS.has(skill) && hasTrait(state, cat, toward, 'combo:生死之交')) edge += 1;
     // 羁绊加成：恋人或信任满的在场 NPC 擅长该领域，多一个奖励骰（在场名单由调用方传入，没传则不生效）。
     const bond = bondStrengthEdge(state, { present, categories, has: (name, id) => hasTrait(state, cat, name, id), skillOf });
     if (bond) edge += bond.edge;

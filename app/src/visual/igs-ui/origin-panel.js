@@ -52,6 +52,8 @@ export function createOriginPageController(doc, options = {}) {
     let view = null;
     // 关掉再开回到上次的页签。
     let lastTab = 'task';
+    // 兑换进行中：挂在控制器上，收起重开后仍拦住重复提交。
+    let exchangeBusy = false;
     const readTheme = () => { try { return normalizeSettingsTheme(options.getTheme?.() || ''); } catch (error) { return normalizeSettingsTheme(''); } };
 
     function el(tag, className) {
@@ -104,7 +106,7 @@ export function createOriginPageController(doc, options = {}) {
         // 检测到原插件的旧存档时，顶部给一行导入提示（导入不覆盖原数据）。
         let legacy = false;
         try { legacy = typeof engine.legacyDetected === 'function' && typeof engine.importLegacy === 'function' ? Boolean(engine.legacyDetected()) : false; } catch (error) { legacy = false; }
-        const ui = { icons: ICONS, openRows: view.openRows, taskFilter: view.taskFilter, gachaFilter: view.gachaFilter, ddOpen: view.ddOpen, page, menuOpen: view.menuOpen, canOpenSettings: typeof binding.openSettings === 'function', lastFloor, legacy, turn: state.turn };
+        const ui = { icons: ICONS, openRows: view.openRows, taskFilter: view.taskFilter, gachaFilter: view.gachaFilter, ddOpen: view.ddOpen, page, menuOpen: view.menuOpen, canOpenSettings: typeof binding.openSettings === 'function', canExchange: Boolean(binding.exchange), lastFloor, legacy, turn: state.turn };
         setBox('top', boxes.top, renderOriginHead(state, settings, ui));
         setBox('tabs', boxes.tabs, renderOriginTabs(settings, view.tab, page));
         // 底栏（主按钮 + 小字链接 / 对话输入框）：二级页没有；内容不变不重写，输入中的文字不会丢。
@@ -147,6 +149,7 @@ export function createOriginPageController(doc, options = {}) {
             engine: v.engine,
             get settings() { return v.binding.settings; },
             get modal() { return getModal(); },
+            get exchange() { return v.binding.exchange; },
             notice: (level, text) => notify(level, text),
             setTab: (id) => { if (v.tab !== id || v.page) v.openRows.clear(); v.tab = id; v.page = ''; v.menuOpen = false; v.ddOpen = ''; render(); },
             openPage: (id) => { v.openRows.clear(); v.page = id; v.menuOpen = false; render(); },
@@ -194,9 +197,13 @@ export function createOriginPageController(doc, options = {}) {
             return Promise.resolve();
         }
         const current = view;
+        const exchanging = name === 'exchange' || name === 'exchange-retry';
+        if (exchanging && exchangeBusy) return Promise.resolve();
+        if (exchanging) exchangeBusy = true;
         return runOriginAction(name, target, makeActionCtx())
             .then(() => { if (view === current) render(); })
-            .catch((error) => { notify('warn', `操作没有完成：${error && error.message ? error.message : error}`); });
+            .catch((error) => { notify('warn', `操作没有完成：${error && error.message ? error.message : error}`); })
+            .finally(() => { if (exchanging) exchangeBusy = false; });
     }
 
     function onClick(event) {

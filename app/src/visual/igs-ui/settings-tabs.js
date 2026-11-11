@@ -81,7 +81,6 @@ const IMAGE_SOURCE_TEMPLATE = `
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">图像来源</div>
     {{imageSourceField}}
-    <div class="igs-source-filter-note">{{imageSourceNote}}</div>
     <div class="igs-settings-sub" data-image-feature="sprite-matte-color">
       {{autoMatteField}}
       {{spriteMatteColorField}}
@@ -92,6 +91,7 @@ const IMAGE_SOURCE_TEMPLATE = `
         {{autoNaiModelField}}{{autoNaiEffortField}}{{autoNaiSizeField}}
         {{autoNaiTransportField}}
       </div>
+      {{autoNaiQuotaPanel}}
       {{modelProfileImageRow}}
       <div class="igs-settings-sub" data-image-feature="nai-transparency"{{sourceBuiltinHidden}}>
         {{naiSpriteTransparentField}}
@@ -132,7 +132,6 @@ const IMAGE_LLM_TEMPLATE = `
 <div class="igs-settings-grid" data-image-pane="llm">
   <div class="igs-source-filter" data-image-feature="llm">
     <div class="igs-source-filter-title">备用模型</div>
-    <div class="igs-source-filter-note">{{autoLlmNote}}</div>
     <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
     <div class="igs-source-filter-grid">
       {{autoLlmSourceField}}{{autoLlmContextField}}
@@ -146,14 +145,11 @@ const IMAGE_LLM_TEMPLATE = `
       <div class="igs-settings-result" data-result="llm-models">{{autoLlmModelsMessage}}</div>
       <details class="igs-settings-sub igs-settings-advanced" data-advanced="llm-request"{{autoLlmRequestOpen}}>
         <summary><b>请求参数</b></summary>
-        <div class="igs-source-filter-note">写法同酒馆自定义源，YAML或JSON。</div>
         <div class="igs-settings-full">{{autoLlmIncludeHeadersField}}</div>
         <div class="igs-settings-full">{{autoLlmIncludeBodyField}}</div>
         <div class="igs-settings-full">{{autoLlmExcludeBodyField}}</div>
       </details>
     </div>
-  </div>
-  <div class="igs-source-filter" data-image-feature="llm-prompts">
     <details class="igs-settings-sub igs-settings-advanced" data-advanced="llm-prompts"{{autoLlmPromptsOpen}}>
       <summary><b>附加词</b></summary>
       <div class="igs-settings-full">{{autoLlmJailbreakHeadField}}</div>
@@ -167,9 +163,7 @@ const IMAGE_PROMPT_TEMPLATE = `
 <div class="igs-settings-grid" data-image-pane="img-prompt">
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">生图提示词</div>
-    <div class="igs-source-filter-note">写词走「备用模型」页的连接。</div>
     <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
-    {{globalArtistField}}
     <div class="igs-settings-sub" data-image-feature="external-sprite-dna"{{sourceExternalHidden}}>
       {{externalSpriteDnaField}}
     </div>
@@ -226,10 +220,9 @@ const IMAGE_CG_TEMPLATE = `
 // 生图内容按类别分卡片（角色 / 表情差分 / Q 版 / 场景与物品 / CG / NSFW），开关、模型、画师串都在卡片里，见 settings-prompt-kinds.js。
 const IMAGE_AUTO_TEMPLATE = `
 <div class="igs-settings-grid" data-image-pane="auto">
-  <div class="igs-source-filter-note">{{imageContentNote}}</div>
+  {{imageContentNote}}
   <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
   {{promptKindsPanel}}
-  {{artistLibraryPanel}}
 </div>
 `.trim();
 
@@ -455,13 +448,11 @@ const STATS_TEMPLATE = `
   <div class="igs-source-filter">
     <div class="igs-source-filter-title">数值系统</div>
     <div class="igs-settings-row">{{statsToggle}}</div>
-    <div class="igs-source-filter-note">好感、技能、体力和金钱由脚本掷骰决定，AI只负责把结果写进剧情。</div>
-    <div class="igs-source-filter-note"{{statsCombatNoteHidden}}>卡牌战斗开启中，数值系统随之启用，不能单独关闭。</div>
   </div>
   <div class="igs-settings-sub igs-settings-full"{{statsHidden}}>
-    <div class="igs-source-filter">
-      <div class="igs-source-filter-title">我的角色（本聊天）</div>
-      <div class="igs-source-filter-note" data-result="stats-chat">{{statsChatNote}}</div>
+    <div class="igs-source-filter igs-stats-hero-section">
+      <div class="igs-source-filter-title">我的角色</div>
+      <div class="igs-source-filter-note" data-result="stats-chat"{{statsChatNoteHidden}}>{{statsChatNote}}</div>
       <div class="igs-settings-row"{{statsStartHidden}}>
         <button class="igs-settings-action" data-action="stats-chat-enable" type="button">快速开始</button>
         <button class="igs-settings-action" data-action="stats-build-mode:manual" type="button">自己建卡</button>
@@ -512,7 +503,7 @@ const STATS_SET_TEMPLATE = `
     <div class="igs-source-filter">
       <div class="igs-source-filter-title">玩法</div>
       <div class="igs-source-filter-grid">{{diceFeelField}}{{storyCheckField}}</div>
-      <div class="igs-settings-section">{{autoSkillField}}{{optionChanceField}}{{checkFxField}}{{intimacyField}}{{heroNotePromptField}}</div>
+      <div class="igs-settings-section">{{autoSkillField}}{{optionChanceField}}{{checkFxField}}{{intimacyField}}{{heroFeelingsField}}{{heroNotePromptField}}</div>
       <div class="igs-source-filter-grid">{{favorModeField}}{{intimateCostField}}</div>
       <div class="igs-source-filter-grid">{{healModeField}}{{worldviewField}}</div>
     </div>
@@ -541,10 +532,7 @@ const STATS_SET_TEMPLATE = `
         <div class="igs-source-filter-title">同步到数据库表格</div>
         <div class="igs-settings-section">{{pushField}}</div>
         {{statsMappingFields}}
-        <div class="igs-source-filter-note">表格里的数值只作展示；在表格里改动的数值会在下一次同步时被覆盖。</div>
-        <div class="igs-source-filter-note">推荐导入「IGS数值系统适配版」表格模板：填表AI不再改好感与属性，导入后无需配置。</div>
         <div class="igs-stats-template-actions">
-          <button class="igs-settings-action" data-action="stats-template-import" type="button">导入模板预设</button>
           <button class="igs-settings-action" data-action="stats-template-apply-chat" type="button">用于本聊天</button>
           <button class="igs-settings-action" data-action="stats-template-download" type="button">下载模板到本地</button>
           <button class="igs-settings-action" data-action="stats-table-migrate" type="button">迁移到新表结构</button>
@@ -622,6 +610,7 @@ const ORIGIN_TEMPLATE = `
       <div class="igs-source-filter-note">逐楼存档只保留最近若干个回复楼，更早的楼合并为一份底稿；底稿之前的楼切换回复、编辑或重算都不再影响系统数值。</div>
       <div class="igs-settings-row">
         <button class="igs-settings-action" data-action="origin-op:recalc" type="button">按全部楼层重算</button>
+        <button class="igs-settings-action" data-action="origin-op:retry" type="button"{{originRetryHidden}}>重试保存</button>
         <button class="igs-settings-action" data-action="origin-op:reset" type="button">清空本聊天存档</button>
         <button class="igs-settings-action" data-action="origin-op:import" type="button"{{originLegacyHidden}}>导入原版存档</button>
       </div>

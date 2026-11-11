@@ -1,5 +1,7 @@
 import { esc } from './reader-value-utils.js';
-import { intentIconSvg, portraitSilhouetteSvg } from './combat-card-art.js';
+import { cardTextHtml, partHtml } from './combat-card-text.js';
+export { cardTextHtml } from './combat-card-text.js';
+import { CARD_TYPE_LABELS, describeEffects, describeKeywords, intentIconSvg, portraitSilhouetteSvg } from './combat-card-art.js';
 import { KEYWORD_NAME_TIPS, isItemSelection, isSkillSelection, selectedItemView, selectedSkillView, skillSelection } from './combat-panel-model.js';
 import { LIVE_ICONS } from './danmaku-icons.js';
 import { RECORD_ICONS } from './record-icons.js';
@@ -9,6 +11,9 @@ import { CHALLENGE_LABELS } from '../../combat/challenge-labels.js';
 import { CHALLENGE_ACHIEVEMENTS } from '../../combat/challenge-history.js';
 import { INTIMATE_ENDING_LINE } from '../../scene/intimate-duel.js';
 import { resultStageHtml, stageFxStyle } from './combat-stage-fx.js';
+import { resourceBarHtml } from './combat-resource-bar.js';
+import { INSCRIPTION_LABELS } from '../../combat/mechanics/inscription.js';
+import { rewardCardMarks, rewardCardView } from '../../combat/reward-cards.js';
 
 // 战斗面板的 HTML 片段：只输出字段、状态、错误与操作确认；动作统一走 data-combat-act / data-combat-id。
 const REASON_TEXT = Object.freeze({
@@ -102,9 +107,18 @@ const REASON_TEXT = Object.freeze({
     'combat-flip-already': '这张已经翻开',
     'combat-flip-choose': '从翻开的牌里选一张',
     'combat-flip-position-invalid': '这张牌不能选',
+    'combat-flip-card-required': '先在候选里选一张牌或跳过',
+    'combat-flip-card-unavailable': '这份战利品没有候选牌',
     'combat-reroll-used': '本场已经重抽过',
     'combat-reroll-unavailable': '本场不能重抽',
-    'combat-points-insufficient': '金钱不足',
+    'combat-points-insufficient': '积分不足',
+    'combat-card-upgrade-none': '卡组里没有可升级的牌',
+    'combat-card-upgrade-used': '本场已升级',
+    'combat-card-upgrade-expired': '升级机会已过期',
+    'combat-card-upgrade-required': '先选一张牌升级或不升',
+    'combat-card-upgrade-copy-missing': '这张牌不能升级',
+    'combat-card-upgrade-purge-conflict': '同一张牌不能既删又升',
+    'combat-purge-upgrade-conflict': '同一张牌不能既删又升',
     'combat-choice-pending': '先选完牌',
     'combat-choice-invalid': '这张牌不能选',
     'combat-choice-full': '已选够张数，先取消一张',
@@ -133,8 +147,8 @@ export function generationCauseText(reason) {
     return reason ? GENERATION_CAUSE_TEXT[reason] || '档案校验未通过' : '';
 }
 
-const btn = (act, label, { id = '', primary = false, disabled = false } = {}) =>
-    `<button type="button" class="igs-combat-btn${primary ? ' is-primary' : ''}" data-combat-act="${esc(act)}"${id ? ` data-combat-id="${esc(id)}"` : ''}${disabled ? ' aria-disabled="true"' : ''}>${esc(label)}</button>`;
+const btn = (act, label, { id = '', primary = false, disabled = false, pressed } = {}) =>
+    `<button type="button" class="igs-combat-btn${primary ? ' is-primary' : ''}" data-combat-act="${esc(act)}"${id ? ` data-combat-id="${esc(id)}"` : ''}${pressed === undefined ? '' : ` aria-pressed="${pressed ? 'true' : 'false'}"`}${disabled ? ' aria-disabled="true"' : ''}>${esc(label)}</button>`;
 
 // 回合操作图标按钮：图标是程序常量；文字只放在 aria-label / title，可访问名称与原文字按钮一致。
 const iconBtn = (act, label, icon, { primary = false, disabled = false } = {}) =>
@@ -319,24 +333,12 @@ function cardSlotHtml(c) {
     return value + stack + kw + bonus;
 }
 
-// 牌面说明片段：增强的数字青绿、减弱的数字灰色；带 tip 的数字与关键字（固有、消耗等）带 data-scale-tip，点开由面板弹出加成详情或关键字注释。
-function partHtml(p) {
-    const tip = p.tip ? ` data-scale-tip="${esc(p.tip)}"` : '';
-    if (p.mark === 'up' || p.mark === 'down') return `<span class="igs-scale-${p.mark}"${tip}>${esc(p.text)}</span>`;
-    return tip ? `<span${tip}>${esc(p.text)}</span>` : esc(p.text);
-}
-
-// 没有 textParts 时按原文本输出。
-export function cardTextHtml(c) {
-    if (!Array.isArray(c.textParts)) return esc(c.text || '');
-    return c.textParts.map(partHtml).join('');
-}
-
 // 战前对阵（格斗游戏式）：铺满面板，顶部是遭遇名斜切横幅（带档位），中间 我方 · VS · 敌方（横屏左右、竖屏敌上我下，由样式层按面板方向切换），底部「跳过」与大号「开始战斗」。
 // 舞台底层是斜切分屏（VS 所在一段不铺色块），入场白闪不在本标记里，由面板挂到面板根节点、铺满整个面板；我方每人一块街霸式平行四边形立绘框，相邻框斜边相扣，外侧框斜边以外的底层色块由样式层裁掉，选中的主战者框底提亮（data-picked）。名牌是平行四边形色块：名字在前，Lv 与职业缩小；
 // 我方名牌是框底色带，可操控角色的名牌铺满整框、就是选择按钮（aria-pressed），其余标「托管」；敌人不用立绘框，站立立绘下接名牌，按数量逐个画出、错落排开，首领档放大并加「首领」斜标（data-tier）。
 // intro 只在本次打开后第一次画战前、且未减少动态效果时为 true：双方冲入、白闪与震屏只播一次。--n / data-n 为该侧人数（纯数字）。
-const LOBBY_FOE_MAX = 5;
+// 战前对阵只画开战时上场的普通敌人（规则 v6 场上最多 3 名，其余在场外）。
+const LOBBY_FOE_MAX = 3;
 // 敌人数达到此值时分前后两排，每排保持原立绘宽度。
 const LOBBY_FOE_ROWS_AT = 4;
 // 我方名牌一行：名字、Lv、职业各自成段，放不下的段整段换到被裁掉的第二行（样式层 .igs-combat-plate-row），不出现截断残片。
@@ -477,7 +479,8 @@ function battleHtml(v) {
     // 风格化皮肤：停靠区 = 能量 + 工具组（主动特性、觉醒 / 道具、牌堆文字）；牌堆不再放在回合组里。
     const dock = styled ? `${energy}<div class="igs-combat-dock-tools"><div class="igs-combat-dock-row">${skillHtml}${controls}</div>${piles}</div>` : '';
     // --n 是我方人数（纯数字）：竖向面板按它均分我方一排的立绘宽度。
-    const heroZone = `<div class="igs-combat-hero" style="--n:${b.allies.length || 1}">${heroCore}${matesHtml}</div>`;
+    // 主战者资源条是我方一排的最后一项，样式层让它独占一行，不压缩立绘宽度。
+    const heroZone = `<div class="igs-combat-hero" style="--n:${b.allies.length || 1}">${heroCore}${matesHtml}${ended ? '' : resourceBarHtml(hero?.res)}</div>`;
     // 右下角回合操作组：撤退（透明底，只在允许撤退时出现）或选目标期间的取消、抽牌 / 弃牌数量、结束回合；作为底栏网格区，不压手牌。
     // 横向面板样式层竖排为撤退 / 取消、牌堆数量、结束回合；竖向 / 窄面板牌堆数量在上，撤退与结束回合同排。
     const side = v.selected || picks.length ? iconBtn('cancel', '取消', RECORD_ICONS.undo) : b.canEscape ? (v.intimate === '主导' ? iconBtn('stop', '停下', RECORD_ICONS.back) : '') + iconBtn('escape', v.intimate ? (v.intimate === '主导' ? '甘拜下风' : '停下') : v.challenge ? CHALLENGE_LABELS.escape : '撤退', RECORD_ICONS.retreat) : '';
@@ -499,7 +502,7 @@ const featsHtml = (list) => (list?.length
 // 战利品翻牌（v3 §5.3）：卡背一律相同，不带稀有度与内容；翻开的牌按稀有度着色（data-rarity → --rar）。
 // position 是纯数字，经 data-combat-id 回传。fresh 为本次重绘刚朝上的位置（翻面入场），struck 为本次刚被自己翻开的位置（含透视已亮出的牌）：
 // struck 按稀有度出光效（data-fx 1–4），随后翻开的其余牌降一档。
-const LOOT_KIND_LABELS = Object.freeze({ card: '卡牌', gear: '装备', item: '道具', keepsake: '杂物' });
+const LOOT_KIND_LABELS = Object.freeze({ card: '卡牌', gear: '装备', item: '道具', keepsake: '杂物', inscribe: '刻印' });
 const LOOT_RARITY_LABELS = Object.freeze({ common: '普通', uncommon: '罕见', rare: '稀有', epic: '史诗', mythic: '神话' });
 const LOOT_FX_TIER = Object.freeze({ common: 1, uncommon: 1, rare: 2, epic: 3, mythic: 4 });
 const LOOT_SPARK_COUNT = 10;
@@ -530,7 +533,132 @@ function lootCardHtml(c, f, fresh, struck, pending) {
     const actLabel = act === 'choose' ? `选择 ${label}` : s ? `翻开 ${label}` : `翻开第 ${pos + 1} 张`;
     return `<button type="button" ${attrs} data-combat-act="${act}" data-combat-id="${pos}"${pending ? ' aria-disabled="true"' : ''} aria-label="${esc(actLabel)}">${inner}</button>`;
 }
-// 结算的战利品区：读取中 / 读取失败只出状态行；读到后出牌，选定后才出重新抽取（金钱不足置灰，不能重抽时不出按钮）。没有 offer（status none）时不出。
+// 规则 v6 卡牌槽三选一：选定的战利品带 choices 时，在下方列出候选，点选其一（可改选），或跳过。
+function lootChoicesHtml(f, pending) {
+    const slot = f.done ? f.cards.find((c) => c.chosen)?.slot : null;
+    if (!slot || slot.kind !== 'card' || !Array.isArray(slot.choices) || !slot.choices.length) return '';
+    const cards = slot.choices.map((card, i) => {
+        const marks = rewardCardMarks(slot, i);
+        const view = rewardCardView(slot, i);
+        const name = `${card.name}${marks.upgraded ? '+' : ''}`;
+        const tag = [LOOT_RARITY_LABELS[card.rarity], view.cost === undefined ? '' : `${view.cost}费`, INSCRIPTION_LABELS[marks.inscription]].filter(Boolean).join('·');
+        const text = [describeKeywords(view), describeEffects(view.effects)].filter(Boolean).join('；');
+        const chosen = f.card === i;
+        const cls = `igs-combat-loot-card is-face${chosen ? ' is-chosen' : ''}${f.card === 'skip' ? ' is-dim' : ''}`;
+        const face = `<span class="igs-combat-loot-face"><span class="igs-combat-loot-tag">${esc(tag)}</span><span class="igs-combat-loot-name">${esc(name)}</span>${text ? `<span class="igs-combat-loot-origin">${esc(text)}</span>` : ''}</span>`;
+        return `<button type="button" class="${cls}"${card.rarity ? ` data-rarity="${esc(card.rarity)}"` : ''} data-combat-act="pick-card" data-combat-id="${i}"${pending ? ' aria-disabled="true"' : ''} aria-label="${esc(`选择 ${card.name}${chosen ? '（已选定）' : ''}`)}">${face}</button>`;
+    }).join('');
+    return `<div class="igs-combat-loot-row igs-combat-loot-choices" style="--n:${slot.choices.length}">${cards}</div>`;
+}
+
+// 规则 v6 删牌：本场正好满 5 场普通胜利时，战利品工具行里出一个紧凑按钮（未选时为主按钮），点开浮层选牌或不删；选定后按钮写所选。
+// 机会不可用（积分不足等）时按钮置灰并写原因。
+function purgeButton(f, pending) {
+    const p = f.purge;
+    if (!p) return '';
+    if (!p.available) return btn('purge-open', p.reason === 'combat-points-insufficient' ? `删牌 · 积分不足（需${p.cost}）` : `删牌 · ${combatReasonText(p.reason)}`, { disabled: true });
+    const name = (p.cards || []).find((c) => c.copyId === p.pick)?.name;
+    const label = p.pick === 'skip' ? '删牌：不删' : name ? `删牌：${name}` : `删一张牌（消耗${p.cost}积分）`;
+    return btn('purge-open', label, { primary: f.needPurge === true, disabled: pending });
+}
+
+// 删牌浮层：盖在整个面板上（不进结算画布，各皮肤一致），卡组里的牌逐张列出（同名牌不合并）与「不删」；点遮罩或「关闭」收起。
+// 点一张牌先看详情（牌名、类型·稀有度·费用、关键字、效果、强化 / 成长 / 刻印），再点「删除这张」才记入选择；「不删」直接记入。
+const purgeMarks = (c) => [c.upgraded ? '已强化' : '', c.bonus?.damage ? `伤害 +${c.bonus.damage}` : '', c.bonus?.block ? `格挡 +${c.bonus.block}` : '',
+    c.inscription ? `刻印·${INSCRIPTION_LABELS[c.inscription] || c.inscription}` : ''].filter(Boolean);
+function purgeDetailHtml(c, cost, pending, upgradePick) {
+    const meta = [CARD_TYPE_LABELS[c.type], LOOT_RARITY_LABELS[c.rarity], c.cost === '' || c.cost === undefined ? '' : `${c.cost} 费`].filter(Boolean).join(' · ');
+    const keywords = describeKeywords(c.keywords || {});
+    const text = describeEffects(c.effects);
+    const marks = purgeMarks(c).join(' · ');
+    return `<div class="igs-combat-purge-detail" aria-live="polite"><b class="igs-combat-trait-tip-name">${esc(c.name)}</b>`
+        + (meta ? `<span class="igs-combat-trait-tip-meta">${esc(meta)}</span>` : '')
+        + (keywords ? `<span class="igs-combat-trait-tip-meta">${esc(keywords)}</span>` : '')
+        + `<span class="igs-combat-trait-tip-text">${esc(text || '无效果')}</span>`
+        + (marks ? `<span class="igs-combat-trait-tip-origin">${esc(marks)}</span>` : '')
+        + `<div class="igs-combat-actions">${btn('pick-purge', upgradePick === c.copyId ? '已选为升级' : `删除这张（消耗${cost}积分）`, { id: c.copyId, primary: true, disabled: pending || upgradePick === c.copyId })}</div></div>`;
+}
+function purgeSheetHtml(v) {
+    const f = v.flip;
+    const p = f?.purge;
+    if (!v.purgeOpen || f?.status !== 'ready' || !p?.available) return '';
+    const pending = Boolean(v.pending);
+    const list = p.cards || [];
+    const focusId = v.purgeFocus || (p.pick !== 'skip' ? p.pick : '');
+    const focus = list.find((c) => c.copyId === focusId) || null;
+    const upgradePick = f.upgrade?.pick;
+    const cards = list.map((c) => {
+        const label = [c.name, ...purgeMarks(c)].join(' · ');
+        const tail = p.pick === c.copyId ? '（已选）' : upgradePick === c.copyId ? '（已选升级）' : '';
+        return btn('purge-focus', `${label}${tail}`, { id: c.copyId, pressed: focus?.copyId === c.copyId, disabled: pending });
+    }).join('');
+    const skip = btn('pick-purge', p.pick === 'skip' ? '已选不删' : '不删', { id: 'skip', primary: p.pick === 'skip', disabled: pending });
+    return `<div class="igs-combat-purge-sheet" role="dialog" aria-label="删牌"><i class="igs-combat-purge-veil" data-combat-act="purge-close"></i>`
+        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">删一张牌（消耗${esc(p.cost)}积分）</div><div class="igs-combat-purge">${cards}</div>`
+        + (focus ? purgeDetailHtml(focus, p.cost, pending, upgradePick) : '')
+        + `<div class="igs-combat-actions">${skip}${btn('purge-close', '关闭', { disabled: pending })}</div></div></div>`;
+}
+
+// 规则 v6 G3c 升级：与删牌同场时并列在工具行里（未选时为主按钮），点开浮层选牌或不升；选定后按钮写所选。机会不可用时置灰并写原因。
+function upgradeButton(f, pending) {
+    const u = f.upgrade;
+    if (!u) return '';
+    if (!u.available) return btn('upgrade-open', `升级 · ${combatReasonText(u.reason)}`, { disabled: true });
+    const name = (u.cards || []).find((c) => c.copyId === u.pick)?.name;
+    const label = u.pick === 'skip' ? '升级：不升' : name ? `升级：${name}` : '免费升级一张牌';
+    return btn('upgrade-open', label, { primary: f.needUpgrade === true, disabled: pending });
+}
+
+// 升级浮层：与删牌浮层同一外观，只列可升级的副本。点一张牌先看详情（升级前后的费用与效果并列），再点「升级这张」才记入选择；「不升」直接记入。
+function upgradeDetailHtml(c, pending, purgePick) {
+    const meta = [CARD_TYPE_LABELS[c.type], LOOT_RARITY_LABELS[c.rarity]].filter(Boolean).join(' · ');
+    const keywords = describeKeywords(c.keywords || {});
+    const costText = (value) => (value === '' || value === undefined ? '' : `${value} 费`);
+    const side = (label, cost, effects) => `<div class="igs-combat-upgrade-side"><span class="igs-combat-trait-tip-meta">${esc([label, costText(cost)].filter(Boolean).join(' · '))}</span>`
+        + `<span class="igs-combat-trait-tip-text">${esc(describeEffects(effects) || '无效果')}</span></div>`;
+    const marks = purgeMarks(c).join(' · ');
+    const conflict = purgePick === c.copyId;
+    return `<div class="igs-combat-purge-detail" aria-live="polite"><b class="igs-combat-trait-tip-name">${esc(c.name)}</b>`
+        + (meta ? `<span class="igs-combat-trait-tip-meta">${esc(meta)}</span>` : '')
+        + (keywords ? `<span class="igs-combat-trait-tip-meta">${esc(keywords)}</span>` : '')
+        + `<div class="igs-combat-upgrade-compare">${side('升级前', c.cost, c.effects)}${side('升级后', c.upCost, c.upEffects)}</div>`
+        + (marks ? `<span class="igs-combat-trait-tip-origin">${esc(marks)}</span>` : '')
+        + `<div class="igs-combat-actions">${btn('pick-upgrade', conflict ? '已选为删除' : '升级这张', { id: c.copyId, primary: true, disabled: pending || conflict })}</div></div>`;
+}
+function upgradeSheetHtml(v) {
+    const f = v.flip;
+    const u = f?.upgrade;
+    if (!v.upgradeOpen || f?.status !== 'ready' || !u?.available) return '';
+    const pending = Boolean(v.pending);
+    const list = u.cards || [];
+    const focusId = v.upgradeFocus || (u.pick !== 'skip' ? u.pick : '');
+    const focus = list.find((c) => c.copyId === focusId) || null;
+    const purgePick = f.purge?.pick;
+    const cards = list.map((c) => {
+        const label = [c.name, ...purgeMarks(c)].join(' · ');
+        const tail = u.pick === c.copyId ? '（已选）' : purgePick === c.copyId ? '（已选删除）' : '';
+        return btn('upgrade-focus', `${label}${tail}`, { id: c.copyId, pressed: focus?.copyId === c.copyId, disabled: pending });
+    }).join('');
+    const skip = btn('pick-upgrade', u.pick === 'skip' ? '已选不升' : '不升', { id: 'skip', primary: u.pick === 'skip', disabled: pending });
+    return `<div class="igs-combat-purge-sheet" role="dialog" aria-label="升级"><i class="igs-combat-purge-veil" data-combat-act="upgrade-close"></i>`
+        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">免费升级一张牌</div><div class="igs-combat-purge">${cards}</div>`
+        + (focus ? upgradeDetailHtml(focus, pending, purgePick) : '')
+        + `<div class="igs-combat-actions">${skip}${btn('upgrade-close', '关闭', { disabled: pending })}</div></div></div>`;
+}
+
+// 特质来源小字：「幸运儿：本场多一个可选项」等，只列实际生效的来源。
+const TRAIT_SOURCE_TEXT = Object.freeze({
+    choices: '本场多一个可选项', reveal: '可多看一张牌面', reroll: '本次换一组免费',
+    bias: { attack: '攻击牌', block: '格挡牌', draw: '抽牌或能量牌', debuff: '减益牌', buff: '增益或团队牌', random: '随机效果牌', selfharm: '自伤换收益牌', summon: '召唤牌' },
+});
+function traitSourceHtml(f) {
+    const lines = (Array.isArray(f.traitSources) ? f.traitSources : []).map((s) => {
+        const text = s.kind === 'bias' ? (TRAIT_SOURCE_TEXT.bias[s.category] ? `奖励里${TRAIT_SOURCE_TEXT.bias[s.category]}更常出现` : '') : TRAIT_SOURCE_TEXT[s.kind];
+        return text ? `${esc(s.trait)}：${text}` : '';
+    }).filter(Boolean);
+    return lines.length ? `<p class="igs-combat-state">${lines.join('　')}</p>` : '';
+}
+// 结算的战利品区：读取中 / 读取失败只出状态行；读到后出牌，选定后才出重新抽取（积分不足置灰，不能重抽时不出按钮）。没有 offer（status none）时不出。
 function lootHtml(v) {
     const f = v.flip;
     if (!f || f.status === 'none') return '';
@@ -543,13 +671,16 @@ function lootHtml(v) {
     const pause = f.cards.some((c) => struck.has(c.position) && c.slot?.rarity === 'mythic');
     const r = f.reroll;
     const reroll = f.done && r && (r.available || r.reason === 'combat-points-insufficient')
-        ? btn('reroll', `重新抽取（消耗${r.cost}金钱）`, { disabled: pending || !r.available }) : '';
+        ? btn('reroll', r.cost > 0 ? `重新抽取（消耗${r.cost}积分）` : '重新抽取（免费）', { disabled: pending || !r.available }) : '';
+    const choices = lootChoicesHtml(f, pending);
+    const skip = choices ? btn('pick-card', f.card === 'skip' ? '已跳过' : '跳过', { id: 'skip', disabled: pending }) : '';
+    const tools = `${skip}${reroll}${purgeButton(f, pending)}${upgradeButton(f, pending)}`;
     return `<section class="igs-combat-loot" data-n="${f.cards.length}"${pause ? ' data-pause' : ''}><div class="igs-combat-loot-cap">战利品</div>`
         + `<div class="igs-combat-loot-row" style="--n:${f.cards.length}">${f.cards.map((c) => lootCardHtml(c, f, fresh, struck, pending)).join('')}</div>`
-        + `${reroll ? `<div class="igs-combat-loot-tools">${reroll}</div>` : ''}</section>`;
+        + `${traitSourceHtml(f)}${choices}${tools ? `<div class="igs-combat-loot-tools">${tools}</div>` : ''}</section>`;
 }
-// 有 offer 时选定战利品前不能发战报：读取中或未选定时不出发送按钮；读取失败时仍出（发送前再读一次，读不到照样拦下并提示原因）。
-const lootBlocksSend = (f) => Boolean(f) && (f.status === 'loading' || (f.status === 'ready' && !f.done));
+// 有 offer 时选定战利品前不能发战报：读取中、未选定、三选一卡牌槽还没取牌 / 跳过、删牌机会还没选牌 / 不删时不出发送按钮；读取失败时仍出（发送前再读一次，读不到照样拦下并提示原因）。
+const lootBlocksSend = (f) => Boolean(f) && (f.status === 'loading' || (f.status === 'ready' && (!f.done || f.needCard === true || f.needPurge === true || f.needUpgrade === true)));
 
 // 圆满后的收获：奖金档位与经验牌，只在结算画面显示。
 function harvestHtml(e) {
@@ -585,15 +716,6 @@ function stageResultHtml(v) {
 const restartCtl = (v) => (v.restartArmed
     ? `<span class="igs-combat-restart">${btn('restart', v.pending === 'restart' ? '重开中' : '确认重新开始', { primary: true, disabled: Boolean(v.pending) })}${btn('restart-cancel', '取消', { disabled: Boolean(v.pending) })}</span>`
     : `<span class="igs-combat-restart">${iconBtn('restart', '重新开始', RECORD_ICONS.restart, { disabled: Boolean(v.pending) })}</span>`);
-
-function rewardHtml(r, pending) {
-    if (!r) return '';
-    const cards = r.cards.map((c) => btn('reward', `${c.name}·${c.cost}`, { id: `card:${c.cardId}`, disabled: Boolean(pending) })).join('');
-    const ups = r.upgrades.map((u) => btn('reward', `升级 ${u.name}`, { id: `upgrade:${u.targetId}`, disabled: Boolean(pending) })).join('');
-    return `<section class="igs-combat-reward" data-level="${r.level}"><div class="igs-combat-label">${esc(r.name)} 升至 Lv${r.level}</div>`
-        + `<div class="igs-combat-row">${cards}</div>${ups ? `<div class="igs-combat-row">${ups}</div>` : ''}`
-        + `<div class="igs-combat-actions">${btn('reward', '跳过', { id: 'skip', disabled: Boolean(pending) })}</div></section>`;
-}
 
 // 准备中：三点动画 + 状态文字 + 取消（close 会中止进行中的准备请求）。
 const loadingHtml = (text) => `<div class="igs-combat-loading" role="status" aria-busy="true"><span class="igs-combat-loading-dots" aria-hidden="true"><i></i><i></i><i></i></span><p class="igs-combat-state">${text}</p><div class="igs-combat-actions">${btn('close', '取消')}</div></div>`;
@@ -662,7 +784,12 @@ const intimateResultHtml = (v) => {
     return `<section class="igs-combat-result igs-duel-result" data-outcome="${esc(v.end.outcome)}"><p class="igs-duel-result-line">${esc(line)}</p><div class="igs-combat-actions">${send}</div></section>`;
 };
 
+// 面板 HTML：主体按状态与皮肤出，删牌浮层统一叠在最上层（结算画布外，各皮肤与竖屏都不被裁切）。
 export function renderCombatPanelHtml(v) {
+    return `${renderCombatPanelBody(v)}${purgeSheetHtml(v)}${upgradeSheetHtml(v)}`;
+}
+
+function renderCombatPanelBody(v) {
     const status = v.status;
     const STATUS_LINE = v.challenge ? CHALLENGE_STATUS_LINE : COMBAT_STATUS_LINE;
     if (isCanvasSkin(v.skin) && CANVAS_BATTLE[v.skin] && v.battle && v.pending !== 'prepare' && (status === 'battle' || (status === 'ended' && v.settling))) {
@@ -683,7 +810,7 @@ export function renderCombatPanelHtml(v) {
     else if (status === 'blocked') main = `<div class="igs-combat-blocked"><p class="igs-combat-state">${esc(combatReasonText(v.reason))}${v.cause ? `：${esc(generationCauseText(v.cause))}` : ''}</p>${blockedHtml(v)}</div>`;
     else if (status === 'stale') main = `<p class="igs-combat-state">${esc(combatReasonText(v.reason))}</p>`;
     else if (status === 'send-failed') main = `<p class="igs-combat-state">${STATUS_LINE['send-failed']}</p>${lootHtml(v)}<div class="igs-combat-actions">${lootBlocksSend(v.flip) ? '' : btn('retry-send', v.pending === 'send' ? '发送中' : '重新发送', { primary: true, disabled: Boolean(v.pending) })}</div>`;
-    else if (status === 'done') main = `<p class="igs-combat-state">${STATUS_LINE.done}</p>${rewardHtml(v.rewards, v.pending)}`;
+    else if (status === 'done') main = `<p class="igs-combat-state">${STATUS_LINE.done}</p>`;
     else if (status === 'preparing') main = loadingHtml(STATUS_LINE.preparing);
     else main = STATUS_LINE[status] ? `<p class="igs-combat-state">${STATUS_LINE[status]}</p>` : '';
     // 状态行已经说明同一原因时不再重复提示条。

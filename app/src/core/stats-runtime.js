@@ -19,8 +19,9 @@ import { cocCheckCorrections, cocCheckRollsFor, replayCocChecks } from '../scene
 import { combatPartyLines } from '../scene/combat-prompt.js';
 import { ABILITY_LABELS, abilityKeyOf } from '../combat/abilities.js';
 import { readStatsSettings } from '../scene/stats/stat-settings.js';
-import { createStatsState, grudgeOfCharacter, isRomance } from '../scene/stats/stat-state.js';
-import { aptitudeLevel, applyTraitChange, getTraitDef, hasTrait, listTraits, setTraitAttrReader, slotUsage, traitCatalogOf, withAptitude } from '../scene/stats/stat-traits.js';
+import { createStatsState, grudgeOfCharacter, heroDimsOf, isRomance } from '../scene/stats/stat-state.js';
+import { applyEvolutions, evolveCandidates, evolveText } from '../scene/stats/stat-trait-evolve.js';
+import { aptitudeLevel, applyTraitChange, getTraitDef, hasTrait, isComboKey, listTraits, setTraitAttrReader, slotUsage, traitCatalogOf, withAptitude } from '../scene/stats/stat-traits.js';
 import { buildStatsPrompt, mandatesFromFlags } from '../scene/stats/stat-prompt.js';
 import { pushStats, readSkillAdoptions, readTableAdoptions, withTimeout } from '../data/shujuku/stats-push.js';
 import { statsPushActive } from '../data/shujuku/igs-managed.js';
@@ -28,6 +29,8 @@ import { canonicalAttribute, isSixAttribute } from '../data/shujuku/skill-table.
 import { characterStatMetrics, createStatsMetricsLookup, protagonistStatMetrics } from '../scene/stats/stat-metrics.js';
 import { FAME_BAR_MAX, buildFameFillPrompt, fameDraftText, fameHudMetrics, famePairs, fameRows, fameTemplateBar, fameTier, fameValue, parseFameDraft, parseFameFill } from '../scene/stats/stat-fame.js';
 import { stageLabel } from '../scene/stats/stat-relation-label.js';
+import { swipeTextOf } from '../scene/stats/stat-log.js';
+import { canonPersonName, renameCatalog, renameChangeRows, renameFloorMeta, renameInState, validPersonName } from '../scene/stats/stat-rename.js';
 import { statsRivalSet } from '../scene/stats/stat-rivals.js';
 import { SKILL_TIER_ORDER, describeClockTrail, heroSkillCap, resolveHeroSlots, statsArchiveModel, statsClockTrail, statsFavorOverview, tierWordOfValue } from '../scene/stats/stat-archive.js';
 import { BUILD_PICK_SLOTS, backfillHeroSlots, slotValue } from '../scene/stats/stat-build.js';
@@ -46,6 +49,8 @@ import {
     buildHeroSkillRequest, buildStartRelationRequest, parseBackfillReply, parseHeroSkillReply, parseSheetReply, parseStartRelationReply, sheetAttributeInput, sheetFromTiers, skillTierOfValue, strongSkills, SKILL_TIERS, bandValue,
 } from '../scene/stats/stat-sheets.js';
 import { parseDiceCommand } from '../choices/dice-check.js';
+import { CURRENCY_ATTEMPTS, CURRENCY_CATEGORY, buildCurrencyRequest, currencyBalanceOf, normalizeCurrencyConfig, normalizeCurrencyRecord, normalizeCurrencySettlement, parseCurrencyReply } from '../scene/stats/stat-currency.js';
+import { WORLDVIEWS } from '../scene/worldview.js';
 import { parseStatDirectives, stripStatDirectives } from '../scene/stats/stat-directives.js';
 import { traitEnvOf } from '../scene/stats/stat-trait-env.js';
 import { luckyReroll, traitEdgeOf } from '../scene/stats/stat-trait-dice.js';
@@ -175,6 +180,8 @@ export function createStatsRuntime({
     describePeople = null, sheetStore = null, onCheck = () => {}, onNotices = () => {}, resumeReply = null, worldviewOf = () => '',
     // v0.39 注入点：战斗侧生命/六维来源、数据库表读写通道、战斗提示词输入、战斗扩展是否开启。
     combatSource = () => null, statsTables = () => null, combatPrompt = () => null, combatEnabled = () => false,
+    // 剧情货币所在的物品表读写口（createInventoryTables 的产物：read / changeQuantities）。
+    currencyInventory = () => null, pointsExchange = () => null,
     // 数据库表格里的人物名单（人际关系页同一套读法），供「从表格导入角色」登记。
     tablePeople = null, plotSetting = () => '',
     // 随身系统的原始属性 [{ name, val }]（只读，百分制加成）；随身系统读不到 IGS，这里不回写。
@@ -208,6 +215,9 @@ export function createStatsRuntime({
     let backfillJob = null;
     let heroJob = null;
     let startJob = null;
+    let currency = null;
+    let currencyJob = null;
+    const currencyAsked = new Set();
     const startAsked = { chatId: '', names: new Set() };
     let tail = Promise.resolve();
     let writes = 0;
@@ -260,8 +270,303 @@ export function createStatsRuntime({
     };
     const heroPrefs = () => (ledger && currentStatsState(ledger).protagonist.prefs) || null;
     const userName = () => String((ctx() && ctx().name1) || '');
-    // 积分与金钱分开计算（2026-11-05 用户定）：数值侧金钱不再并入战斗积分，各处 walletExtra 一律为 0。
-    const combatPoints = () => 0;
+    // 共享净流水不含 bars.money，与旧钱包份额相加一次；不受战斗界面开关影响。
+    const combatPoints = () => {
+        const s = life();
+        try { return s && typeof s.readPoints === 'function' ? Number(s.readPoints()) || 0 : 0; } catch (error) { return 0; }
+    };
+
+    // ---- 剧情货币：物品表固定一行（数量即余额），按数据库写法每楼写本楼增量 ----
+    const inventoryOf = () => {
+        let inv = null;
+        try { inv = currencyInventory(); } catch (error) { inv = null; }
+        return inv && typeof inv.read === 'function' && typeof inv.changeQuantities === 'function' ? inv : null;
+    };
+    let currencyTail = Promise.resolve();
+    let currencyEpoch = 0;
+    let currencyBusy = 0;
+
+    function readCurrency(config = currency) {
+        const inv = inventoryOf();
+        if (!inv) return { ok: false, reason: 'stats-currency-no-inventory' };
+        if (!config) return { ok: false, reason: 'stats-currency-unset' };
+        try { return currencyBalanceOf(inv.read(), config.name); } catch { return { ok: false, reason: 'inventory-table-read-failed' }; }
+    }
+
+    function currencyLease(messageId = null) {
+        const chatId = chatIdOf(ctx());
+        const epoch = currencyEpoch;
+        const message = messageId === null ? null : messages(ctx())[messageId];
+        const swipeId = Number(message?.swipe_id) || 0;
+        const tagHash = message ? statTagHash(message.mes) : null;
+        return () => active() && epoch === currencyEpoch && chatIdOf(ctx()) === chatId
+            && (messageId === null || (messages(ctx())[messageId] === message
+                && (Number(message?.swipe_id) || 0) === swipeId && statTagHash(message.mes) === tagHash));
+    }
+
+    function queueCurrency(task) {
+        currencyBusy += 1;
+        const run = currencyTail.then(task, task).catch(() => ({ ok: false, reason: 'stats-currency-threw' }))
+            .finally(() => { currencyBusy -= 1; });
+        currencyTail = run;
+        return run;
+    }
+
+    function currencyContext() {
+        if (!currency || !currency.seeded) return { ready: false, balance: 0, table: currency ? currency.table : undefined };
+        const r = readCurrency();
+        if (!r.ok) { diag('stats-currency-read-failed', { reason: r.reason }); return { ready: false, balance: 0, table: currency.table }; }
+        return { ready: true, balance: r.balance, table: currency.table };
+    }
+
+    async function currencySaved(saved, record, alive) {
+        if (saved) await saved;
+        if (!alive()) return { ok: false, reason: 'request-stale' };
+        const t = tables();
+        const read = t.ok ? t.read({ kinds: ['stats'] }) : t;
+        if (!read?.ok || !Array.isArray(read.stats)) return { ok: false, reason: 'stats-currency-save-unverified' };
+        if (record) return read.stats.some((row) => row.id === record.id && JSON.stringify(row.payload) === JSON.stringify(record.payload))
+            ? { ok: true } : { ok: false, reason: 'stats-currency-save-unverified' };
+        const restored = mergeStatLog(read.stats, { chatId: chatIdOf(ctx()), chat: messages(ctx()) });
+        return JSON.stringify(restored.currency) === JSON.stringify(currency)
+            ? { ok: true } : { ok: false, reason: 'stats-currency-save-unverified' };
+    }
+
+    async function ensureCurrencyInventory(alive) {
+        const inv = inventoryOf();
+        if (!inv) return { ok: false, reason: 'stats-currency-no-inventory' };
+        if (!alive()) return { ok: false, reason: 'request-stale' };
+        if (typeof inv.ensure === 'function') {
+            let made;
+            try { made = await inv.ensure({ shouldStart: alive }); } catch (error) { made = null; }
+            if (!made || made.ok !== true) return { ok: false, reason: (made && made.reason) || 'inventory-ensure-failed' };
+        }
+        if (!alive()) return { ok: false, reason: 'request-stale' };
+        inv.client?.invalidate?.();
+        return { ok: true, inventory: inv };
+    }
+
+    async function applyCurrencyDelta(config, write, alive) {
+        const ready = await ensureCurrencyInventory(alive);
+        if (!ready.ok) return ready;
+        const inv = ready.inventory;
+        const read = readCurrency(config);
+        if (!read.ok) return read;
+        if (read.balance === write.after) return { ok: true, reused: true };
+        if (read.balance !== write.before) return { ok: false, reason: 'inventory-quantity-conflict' };
+        let result;
+        try {
+            result = await inv.changeQuantities([{ name: config.name, delta: write.after - write.before, expectedBefore: write.before, category: CURRENCY_CATEGORY }], { shouldStart: alive });
+        } catch { result = { ok: false, reason: 'inventory-write-failed' }; }
+        if (!alive()) return { ok: false, reason: 'request-stale' };
+        inv.client?.invalidate?.();
+        const verified = readCurrency(config);
+        if (verified.ok && verified.balance === write.after) {
+            if (result?.reason === 'inventory-refresh-failed') diag('stats-currency-refresh-failed');
+            return { ok: true };
+        }
+        return { ok: false, reason: result?.reason || verified.reason || 'inventory-write-unverified' };
+    }
+
+    function currencyFailed(config, reason) {
+        if (reason === 'request-stale') return;
+        diag('stats-currency-write-failed', { reason });
+        setNotice('currency', { kind: 'onboarding', text: `${config.name}结算未完成：${reason}`, actions: [['retry', '重试'], ['later', '稍后']] });
+    }
+
+    function currencyFloorRecord(entry) {
+        const m = messages(ctx())[entry.messageId];
+        return floorRecord({ messageId: entry.messageId, swipeId: entry.swipeId, tagHash: statTagHash(m?.mes), baseId: entry.baseId ?? null,
+            seed: entry.seed, before: entry.before, after: entry.after, changes: entry.changes, meta: entry.meta, createdAt: Date.now() });
+    }
+
+    async function writeCurrency(entry, record, saved, alive) {
+        const money = normalizeCurrencySettlement(entry.meta?.currency);
+        if (!money?.write || money.applied) return { ok: true, skipped: true };
+        const stored = await currencySaved(saved, record, alive);
+        if (!stored.ok) { currencyFailed(currency, stored.reason); return stored; }
+        const written = await applyCurrencyDelta(currency, money.write, alive);
+        if (!written.ok) { currencyFailed(currency, written.reason); return written; }
+        entry.meta = { ...entry.meta, currency: { ...money, applied: true } };
+        const confirmed = currencyFloorRecord(entry);
+        entry.recordId = confirmed.id;
+        const done = await currencySaved(persist([confirmed], { shouldStart: alive }), confirmed, alive);
+        if (!done.ok) {
+            entry.meta = { ...entry.meta, currency: money };
+            entry.recordId = record.id;
+            currencyFailed(currency, done.reason);
+        }
+        if (alive()) push();
+        return done;
+    }
+
+    const exchangeOf = () => {
+        try { return pointsExchange() || null; } catch { return null; }
+    };
+    const sameCurrency = value => JSON.stringify(normalizeCurrencyConfig(value)) === JSON.stringify(normalizeCurrencyConfig(currency));
+
+    async function creditExchange(exchange, alive) {
+        if (!currency?.seeded || !sameCurrency(exchange.currency)) return { ok: false, reason: 'points-exchange-currency-conflict' };
+        return applyCurrencyDelta(currency, exchange.write, alive);
+    }
+
+    async function recoverExchanges(alive) {
+        const service = exchangeOf();
+        if (!service) return { ok: true, skipped: true };
+        return service.recoverExchanges({ credit: exchange => creditExchange(exchange, alive), shouldStart: alive });
+    }
+
+    function runExchange(task) {
+        ensureLoaded();
+        const alive = currencyLease();
+        return queueCurrency(async () => {
+            if (!alive()) return { ok: false, reason: 'stats-chat-not-enabled' };
+            if (!currency?.seeded) return { ok: false, reason: 'stats-currency-unset' };
+            const service = exchangeOf();
+            if (!service) return { ok: false, reason: 'points-exchange-unavailable' };
+            const recovered = await recoverCurrencyWrites(alive);
+            if (!recovered.ok) return recovered;
+            const result = await task(service, alive);
+            if (alive()) {
+                onChange(currentStatsState(ledger), null);
+                push();
+            }
+            return result;
+        });
+    }
+
+    function exchangeInfo() {
+        if (loadedChat !== chatIdOf(ctx()) || !active()) return { ok: false, reason: 'stats-chat-not-enabled' };
+        if (!currency?.seeded) return { ok: false, reason: 'stats-currency-unset' };
+        return { ok: true, name: currency.name, rate: currency.rate };
+    }
+
+    function quoteExchange(points) {
+        return runExchange(service => service.quoteExchange(points, currency));
+    }
+
+    function exchangePoints(quote) {
+        return runExchange((service, alive) => service.exchange(quote, {
+            shouldStart: alive,
+            credit: exchange => creditExchange(exchange, alive),
+            prepare: async () => {
+                if (!sameCurrency(quote?.currency)) return { ok: false, reason: 'points-exchange-currency-conflict' };
+                const ready = await ensureCurrencyInventory(alive);
+                if (!ready.ok) return ready;
+                const read = readCurrency();
+                if (!read.ok) return read;
+                return { ok: true, write: { before: read.balance, after: read.balance + quote.amount } };
+            },
+        }));
+    }
+
+    async function recoverCurrencyWrites(alive, through = Infinity) {
+        const exchanges = await recoverExchanges(alive);
+        if (!exchanges.ok) return exchanges;
+        for (const [messageId, swipeId] of [...ledger.active].sort(([a], [b]) => a - b)) {
+            if (messageId > through) continue;
+            if (!alive()) return { ok: false, reason: 'request-stale' };
+            const entry = ledger.entries.get(ledgerKey(ledger, messageId, swipeId));
+            const money = normalizeCurrencySettlement(entry?.meta?.currency);
+            if (!money?.write || money.applied) continue;
+            const record = currencyFloorRecord(entry);
+            const current = currencyLease(messageId);
+            const shouldStart = () => alive() && current();
+            const recovered = await writeCurrency(entry, record, persist([record], { shouldStart }), shouldStart);
+            if (!recovered.ok) return recovered;
+        }
+        return { ok: true };
+    }
+
+    async function seedCurrency(alive) {
+        if (!currency || currency.seeded || !ledger) return { ok: true, skipped: true };
+        if (!alive()) return { ok: false, reason: 'request-stale' };
+        if (!currency.seed) {
+            const ready = await ensureCurrencyInventory(alive);
+            if (!ready.ok) return ready;
+            const read = readCurrency();
+            if (!read.ok) return read;
+            currency = normalizeCurrencyRecord({ ...currency, seed: { before: read.balance, after: read.balance + currency.initial } });
+            if (!currency) return { ok: false, reason: 'stats-currency-balance-invalid' };
+        }
+        const stored = await currencySaved(persist([], { shouldStart: alive }), null, alive);
+        if (!stored.ok) return stored;
+        const config = currency;
+        const written = await applyCurrencyDelta(config, config.seed, alive);
+        if (!written.ok) return written;
+        currency = normalizeCurrencyRecord({ ...config, seeded: true });
+        const done = await currencySaved(persist([], { shouldStart: alive }), null, alive);
+        if (!done.ok) { if (alive()) currency = config; return done; }
+        onChange(currentStatsState(ledger), null);
+        push();
+        return { ok: true };
+    }
+
+    function currencyStoryText() {
+        const chat = messages(ctx()).filter((m) => m && !m.is_system && typeof m.mes === 'string' && m.mes.trim());
+        const picked = [...new Set([...chat.slice(0, 3), ...chat.slice(-3)])];
+        return picked.map((m) => `${m.is_user ? '用户' : '剧情'}：${m.mes.trim()}`).join('\n');
+    }
+
+    // 进入对话：本聊天还没有货币配置时请辅助模型判定（每个聊天自动问一次，失败可从提示条重试）；有配置未发初始金额时补发。
+    function ensureCurrency({ force = false } = {}) {
+        if (!active() || !inventoryOf()) return null;
+        const chatId = chatIdOf(ctx());
+        if (currencyJob?.chatId === chatId && currencyJob.epoch === currencyEpoch) return currencyJob.promise;
+        if (currency?.seeded && !force && !exchangeOf()) return null;
+        if (!force && currencyAsked.has(chatId)) return null;
+        const alive = currencyLease();
+        const request = currency ? null : requester();
+        if (!currency && !request) {
+            setNotice('currency', { kind: 'onboarding', text: '剧情货币尚未判定：辅助模型不可用', actions: [['retry', '重试'], ['later', '稍后']] });
+            return Promise.resolve({ ok: false, reason: 'stats-no-model' });
+        }
+        currencyAsked.add(chatId);
+        const job = { chatId, epoch: currencyEpoch, promise: null };
+        currencyJob = job;
+        const run = async () => {
+            if (!alive()) return { ok: false, reason: 'request-stale' };
+            if (!currency) {
+                const names = [PROTAGONIST, ...present(currentStatsState(ledger)).slice(0, 5)];
+                const view = WORLDVIEWS.find((w) => w.id === worldviewOf());
+                const source = { protagonist: userName() || PROTAGONIST, worldview: view?.label || '', story: currencyStoryText() };
+                let people = [];
+                try { people = typeof describePeople === 'function' ? await describePeople(names) : []; } catch { /* 仅使用现有剧情 */ }
+                if (!alive()) return { ok: false, reason: 'request-stale' };
+                const prompt = buildCurrencyRequest({ ...source, people }, { prompt: settings().prompts.currency });
+                let parsed = null;
+                setNotice('currency', { kind: 'busy', text: '正在判定剧情货币' });
+                for (let attempt = 0; attempt < CURRENCY_ATTEMPTS && !parsed?.ok; attempt += 1) {
+                    if (!alive()) return { ok: false, reason: 'request-stale' };
+                    try { parsed = parseCurrencyReply(await ask(request, prompt)); } catch { parsed = { ok: false, reason: 'stats-currency-request-failed' }; }
+                }
+                if (!alive()) return { ok: false, reason: 'request-stale' };
+                if (!parsed?.ok) { diag(parsed?.reason || 'stats-currency-request-failed'); return parsed; }
+                currency = normalizeCurrencyRecord({ ...parsed.config, initial: parsed.initial, seeded: false });
+            }
+            const seeded = await seedCurrency(alive);
+            if (!seeded.ok) return seeded;
+            return recoverCurrencyWrites(alive);
+        };
+        job.promise = queueCurrency(run).then((result) => {
+            if (alive()) settleCurrencyNotice(result);
+            return result;
+        }).finally(() => { if (currencyJob === job) currencyJob = null; });
+        return job.promise;
+    }
+
+    function settleCurrencyNotice(r) {
+        if (r?.reason === 'request-stale') return;
+        if (r?.ok) { setNotice('currency', null); return; }
+        setNotice('currency', { kind: 'onboarding', text: currency ? `${currency.name}结算未完成：${r?.reason || 'unknown'}` : '剧情货币判定失败', actions: [['retry', '重试'], ['later', '稍后']] });
+    }
+
+    function currencySnapshot() {
+        if (!currency) return { ready: false, name: '', balance: null, pending: Boolean(currencyJob) };
+        const read = currency.seeded ? readCurrency() : { ok: false };
+        return { name: currency.name, table: currency.table, rate: currency.rate,
+            ready: read.ok === true, balance: read.ok ? read.balance : null, pending: Boolean(currencyJob) };
+    }
     // 引擎读数闭包保持稳定（引用不变引擎缓存才命中）；每次调用时再取战斗源，userName 用 getter 随时取最新。
     const readers = {
         readAbilities: (name) => { const s = life(); return s && typeof s.readAbilities === 'function' ? s.readAbilities(name, { heroPrefs: heroPrefs() }) : null; },
@@ -333,7 +638,7 @@ export function createStatsRuntime({
         return [...new Set(names)].filter((n) => text.includes(n));
     };
     const tableSeedOf = (state, upTo = Infinity) => {
-        const fresh = [...new Set([...tableNames(), ...rosterNames(upTo)])].filter((name) => !state.characters[name]);
+        const fresh = [...new Set([...tableNames(), ...rosterNames(upTo)])].filter((name) => !state.characters[name] && !Object.hasOwn(catalog.renames, name));
         return fresh.length ? Object.fromEntries(fresh.map((name) => [name, {}])) : null;
     };
     // 表格被数据库插件改过后分两种来源：
@@ -433,11 +738,11 @@ export function createStatsRuntime({
 
     function adopt(merged) {
         ledger = merged.ledger; chatEnabled = merged.chatEnabled; buildMode = merged.buildMode ?? null; buildChoices = merged.buildChoices || {};
-        catalog = merged.catalog; learned = merged.learned; baseline = merged.baseline;
+        catalog = merged.catalog; learned = merged.learned; baseline = merged.baseline; currency = merged.currency || null;
     }
 
     function resetLoaded() {
-        ledger = null; chatEnabled = false; buildMode = null; buildChoices = {}; blocked = ''; unavailable = ''; learned = {}; catalog = emptyCatalog(); declined = false;
+        ledger = null; chatEnabled = false; buildMode = null; buildChoices = {}; blocked = ''; unavailable = ''; learned = {}; catalog = emptyCatalog(); declined = false; currency = null;
         baseline = new Map(); pendingOption = null; manualCheck = null; notices.clear();
     }
 
@@ -471,6 +776,7 @@ export function createStatsRuntime({
     function ensureLoaded(explicit = false) {
         // 挂着聊天监听不代表数据库已就绪；失败后和表版本变化后仍需恢复读取。
         if (inflight > 0 && inflightChat === chatIdOf(ctx())) return;
+        if (currencyBusy > 0 && loadedChat === chatIdOf(ctx())) return;
         const chatId = chatIdOf(ctx());
         if (!explicit && !settings().enabled) { if (loadedChat !== chatId) { resetLoaded(); loadedKey = ''; loadedChat = chatId; } return; }
         if (loadedKey && loadedKey === cacheKey(tables())) return;
@@ -527,11 +833,11 @@ export function createStatsRuntime({
     }
 
     // 持久化（v0.39 ms）：算聊天级差分、附上楼层记录，一次追加；追加串行排队。
-    function persist(extra = []) {
+    function persist(extra = [], options = {}) {
         if (!ledger || blocked || unavailable) return null;
         const t = tables();
         if (!t.ok) { writeFailed({ reason: t.reason }); return null; }
-        const next = chatEntries({ chatEnabled, catalog, learned, buildMode, buildChoices });
+        const next = chatEntries({ chatEnabled, catalog, learned, buildMode, buildChoices, currency });
         writeSeq += 1;
         const records = [...extra, ...diffChatRecords(baseline, next, { tag: `${Date.now().toString(36)}${writeSeq}`, createdAt: Date.now() })];
         baseline = next;
@@ -540,10 +846,11 @@ export function createStatsRuntime({
         inflightChat = chatIdOf(ctx());
         const chatId = inflightChat;
         let started;
-        try { started = t.append(records); } catch (error) { started = Promise.reject(error); }
-        const job = Promise.resolve(started).then((r) => { if (!r || r.ok !== true) writeFailed(r); return r; }, () => {
+        const shouldStart = () => chatIdOf(ctx()) === chatId && (!options.shouldStart || options.shouldStart() === true);
+        try { started = t.append(records, { ...options, shouldStart }); } catch (error) { started = Promise.reject(error); }
+        const job = Promise.resolve(started).then((r) => { if (chatIdOf(ctx()) === chatId && (!r || r.ok !== true)) writeFailed(r); return r; }, () => {
             const r = { ok: false, reason: 'stats-log-write-threw' };
-            writeFailed(r);
+            if (chatIdOf(ctx()) === chatId) writeFailed(r);
             return r;
         }).finally(() => {
             inflight -= 1;
@@ -678,15 +985,17 @@ export function createStatsRuntime({
     // 同一时间只跑一次推送，后到的请求排在当前这次之后。
     function push() {
         if (!active() || !pushOn()) return Promise.resolve({ ok: true, skipped: true });
+        const alive = currencyLease();
         let client = null;
         try { client = getPushClient(); } catch (error) { client = null; }
         if (!client) return Promise.resolve({ ok: false, reason: 'stats-push-no-client' });
         const run = () => {
+            if (!alive()) return { ok: false, reason: 'request-stale', wrote: 0 };
             collectOriginSkills();
             const state = currentStatsState(ledger);
             writingTable = true;
             const heroAtPush = { ...(skillValuesOf(state)['主角'] || {}) };
-            return pushStats(client, state, { ...pushOptions, overridesByFingerprint: settings().push.mappings, baseAttributes: baseAttributesOf(state), walletExtra: combatPoints(), isHero, skillValues: () => skillValuesOf(state), heroName: userName(), skillCanon }).then((r) => {
+            return pushStats(client, state, { ...pushOptions, overridesByFingerprint: settings().push.mappings, baseAttributes: baseAttributesOf(state), currency: currencySnapshot(), walletExtra: combatPoints(), isHero, skillValues: () => skillValuesOf(state), heroName: userName(), skillCanon, shouldStart: alive }).then((r) => {
                 writingTable = false;
                 selfWriteUntil = r && r.wrote ? Date.now() + SELF_WRITE_QUIET : 0;
                 if (r && r.ok) pushedHeroSkills = heroAtPush;
@@ -765,7 +1074,12 @@ export function createStatsRuntime({
         try { extra = await describePeople(cards); } catch (error) { extra = []; }
         const more = extra.map((p) => String((p && p.summary) || '').trim()).filter(Boolean).join(' ');
         if (!more) return list;
-        return list.map((p) => (p && p.name === PROTAGONIST ? { ...p, summary: `${String(p.summary || '').trim()} ${more}`.trim() } : p));
+        const ownMore = extra.map((p) => String((p && (p.own ?? p.summary)) || '').trim()).filter(Boolean).join('\n');
+        const worldMore = extra.map((p) => String((p && p.world) || '').trim()).filter(Boolean).join('\n');
+        return list.map((p) => (p && p.name === PROTAGONIST ? {
+            ...p, summary: `${String(p.summary || '').trim()} ${more}`.trim(),
+            own: `${String((p.own ?? p.summary) || '').trim()}\n${ownMore}`.trim(), world: `${String(p.world || '').trim()}\n${worldMore}`.trim(),
+        } : p));
     };
 
     // 回放需要的取数回调。D&D 与 CoC 共用同一份 profile，百分制 = 六维分数 × 5。
@@ -960,9 +1274,9 @@ export function createStatsRuntime({
         const fromCombat = combat && combat.check ? { ...combat.check, actors: (combat.check.actors || []).filter((a) => a && !skip.has(a.name) && !isHero(a.name)) } : null;
         const dice = coc ? null : mergeCheckInputs(own, fromCombat);
         const prompt = buildStatsPrompt(state, {
-            walletExtra: combatPoints(), present: names, shortfall: flags.shortfall, dateRegex: s.dateRegex, mandates: mandatesFromFlags(flags, state.protagonist.bars, { fame: catalog.fameBars.length > 0 }), vitals, fameBars: catalog.fameBars, statusCat: { statuses: catalog.statuses },
+            walletExtra: combatPoints(), currency: currencySnapshot(), present: names, shortfall: flags.shortfall, dateRegex: s.dateRegex, mandates: mandatesFromFlags(flags, state.protagonist.bars, { fame: catalog.fameBars.length > 0 }), vitals, fameBars: catalog.fameBars, statusCat: { statuses: catalog.statuses },
             worlds: worldsNow(), nsfw: isNsfw(), intimacyGate: s.intimacyGate, intimateCost: s.intimateCost, forcedNames: catalog.intimacyForced, prompts: s.prompts, check: g.check || g.display || null, stageText: s.stageText, stageTextPlatonic: s.stageTextPlatonic, traits: catalog.traits, romanceSeen: catalog.romanceSeen,
-            heroNotes: s.heroNotePrompt ? catalog.heroNotes : null,
+            heroNotes: s.heroNotePrompt && !s.heroFeelings ? catalog.heroNotes : null, heroFeelings: s.heroFeelings === true,
             disabled: Object.entries(s.segments || {}).filter(([, on]) => on === false).map(([id]) => id),
             skillsLine: skillsLineOf(engine, state), perceptionLine: perceptionLineOf(engine, state),
             sheetLines: sheetNames.map((n) => ({ name: n, rank: catalog.sheets[n].rank, strong: strongSkills(catalog.sheets[n], state.characters[n] && state.characters[n].skillGrowth), bonus: abilityLine(engine, state, n) })),
@@ -1011,7 +1325,7 @@ export function createStatsRuntime({
     function traitEdgeFor(state, { skill, toward = null, engine = null } = {}) {
         const eng = engine || memoEngineOf();
         const cat = traitCatalogOf(catalog.traits, isNsfw());
-        return traitEdgeOf(state, cat, { actor: PROTAGONIST, skill, toward, social: isSocialSkill(eng, skill), skillValue: Number(profileOf(eng, state, PROTAGONIST, skill).value) || 0, present: present(state), skillOf: (name) => { const p = profileOf(eng, state, name, skill); return p && p.kind === 'skill' && p.learned && !p.provisional ? Number(p.value) || 0 : 0; } });
+        return traitEdgeOf(state, cat, { actor: PROTAGONIST, skill, toward, social: isSocialSkill(eng, skill), skillValue: Number(profileOf(eng, state, PROTAGONIST, skill).value) || 0, present: present(state), heroSide: settings().heroFeelings === true, skillOf: (name) => { const p = profileOf(eng, state, name, skill); return p && p.kind === 'skill' && p.learned && !p.provisional ? Number(p.value) || 0 : 0; } });
     }
     // 主角检定带特质：万事通技能下限、贵人相助失败重掷；favorFrom 随结果一并带上。
     function resolveHeroCheck(engine, state, request) {
@@ -1052,6 +1366,12 @@ export function createStatsRuntime({
         for (const drop of (meta.flags && meta.flags.traitDrops) || []) {
             const r = applyTraitChange(state, catalog, drop.name, drop.id, false, 'story');
             if (r.notices.length) { applyCatalog(r.catalog); notices.push(...r.notices); }
+        }
+        // 进化：原地替换特质，来源沿用原条目。
+        const evolved = Array.isArray(meta.evolve) ? evolveCandidates(state, catalog.traits).filter((c) => meta.evolve.some((m) => m.name === c.name && m.from === c.from)) : [];
+        if (evolved.length) {
+            applyCatalog({ ...catalog, traits: applyEvolutions(catalog.traits, evolved) });
+            announceTraits([], evolved.map(evolveText));
         }
         const ach = achievementPass(catalog, state, entry, catalog.romanceSeen);
         if (ach.catalog !== catalog) applyCatalog(ach.catalog);
@@ -1123,9 +1443,14 @@ export function createStatsRuntime({
                 const persona = new Map((Array.isArray(people) ? people : []).filter(Boolean).map((p) => [p.name, String(p.summary || '')]));
                 for (const p of Array.isArray(people) ? people : []) {
                     if (!p) continue;
-                    personaReport.set(p.name, { len: String(p.summary || '').length, from: p.from || '' });
+                    personaReport.set(p.name, { len: String((p.own ?? p.summary) || '').length, world: String(p.world || '').length, from: p.from || '' });
                     if (Array.isArray(p.errors) && p.errors.length) diag('stats-trait-persona-read-failed', { name: p.name, reasons: p.errors });
                 }
+                // 角色自己的资料逐人发送；世界观资料整批只发一份，按行去重（各人扫到的常驻条目相同）。
+                const ownOf = new Map((Array.isArray(people) ? people : []).filter(Boolean).map((p) => [p.name, String((p.own ?? p.summary) || '')]));
+                const seenLines = new Set();
+                const world = (Array.isArray(people) ? people : []).filter(Boolean).flatMap((p) => String(p.world || '').split('\n'))
+                    .map((line) => line.trim()).filter((line) => line && !seenLines.has(line) && seenLines.add(line)).join('\n');
                 const c = ctx();
                 const state = currentStatsState(ledger);
                 const nsfw = isNsfw();
@@ -1137,12 +1462,12 @@ export function createStatsRuntime({
                 let aliases = {};
                 try { aliases = characterAliases() || {}; } catch (error) { aliases = {}; }
                 const chars = batch.map((n) => ({
-                    name: n, aliases: aliases[n] || [], protagonist: n === PROTAGONIST, persona: persona.get(n) || '', note: catalog.traitNotes[n] || '',
+                    name: n, aliases: aliases[n] || [], protagonist: n === PROTAGONIST, persona: ownOf.get(n) || '', note: catalog.traitNotes[n] || '',
                     relation: state.characters[n] ? stageLabel(Number(state.characters[n].dims.好感) || 0, isRomance(state.characters[n], n, catalog.romanceSeen)) : '',
                     traits: listTraits(catalog, n).filter((t) => !t.id.startsWith('combo:')).map((t) => ({ id: t.id, src: t.src })),
                     attrs: gateAttrsOf(n),
                 }));
-                const payload = buildReviewPayload({ floors, tables: client ? () => client.readTables() : null, chars, catalog, defs, N: settings().traitReviewN, nsfw });
+                const payload = buildReviewPayload({ floors, tables: client ? () => client.readTables() : null, chars, catalog, defs, N: settings().traitReviewN, nsfw, world });
                 const prompt = { system: '你是角色设定评定助手，只依据人设与正文作答，只输出指定的 JSON。', user: buildReviewPrompt(payload, defs, 'initial', [], null, WORLD_GENRES) };
                 let text;
                 try {
@@ -1268,7 +1593,21 @@ export function createStatsRuntime({
         }).catch(() => { diag('stats-trait-review-failed'); return { ok: false }; }).finally(() => { reviewing = false; });
     }
 
-    function settleAt(messageId, { redo = false, plan = null } = {}) {
+    function settleAt(messageId, options = {}) {
+        if (!inventoryOf()) return settleAtNow(messageId, options);
+        const alive = currencyLease(messageId);
+        return queueCurrency(async () => {
+            if (!alive()) return { ok: false, reason: 'request-stale' };
+            const recovered = await recoverCurrencyWrites(alive, messageId);
+            if (!recovered.ok) return recovered;
+            const result = settleAtNow(messageId, { ...options, alive });
+            if (result?.saved) await result.saved;
+            if (result?.currencySaved) await result.currencySaved;
+            return result;
+        });
+    }
+
+    function settleAtNow(messageId, { redo = false, plan = null, alive = currencyLease(messageId) } = {}) {
         const c = ctx();
         const m = messages(c)[messageId];
         if (!m || m.is_user || m.is_system) return null;
@@ -1289,16 +1628,22 @@ export function createStatsRuntime({
         const favorTier = prior ? (FAVOR_TIERS.includes(priorMeta.favorTier) ? priorMeta.favorTier : null) : normalizeFavorTier(s.favorMode);
         // 好感强度规则版本：新楼写 1；重算同一楼沿用 meta.strengthRev，没有则按旧规则（改档或升级只影响之后的楼）。
         // rev 2：悟性、顿悟、交心、误会解除、离体、随身与无实体、恋爱判定、十年跳跃上限等；新楼写 2，重算沿用 meta 值（旧楼 0、1 不变）。
-        const strengthRev = prior ? (Number(priorMeta.strengthRev) >= 2 ? 2 : Number(priorMeta.strengthRev) >= 1 ? 1 : 0) : 2;
+        const strengthRev = prior ? (Number(priorMeta.strengthRev) >= 3 ? 3 : Number(priorMeta.strengthRev) >= 2 ? 2 : Number(priorMeta.strengthRev) >= 1 ? 1 : 0) : 3;
         const favorMode = prior && !favorTier ? (priorMeta.favorMode === 'hard' ? 'hard' : 'normal') : undefined;
         // 亲密体力：重算旧楼按当时写进 meta 的档位，旧楼没有该字段就不结算；新楼（含新 swipe）取当前设置。
         const intimateCost = prior ? priorMeta.intimateCost : s.intimateCost;
+        const heroSide = prior ? priorMeta.heroSide === true : s.heroFeelings === true;
         // 手改关系挂在楼上：重算、重 roll 同一楼都沿用，否则一重 roll 就丢。
         const manual = priorMeta.manual || manualOfFloor(messageId);
         // 同一楼同一 swipe 的结算种子与骰序都由「聊天 + 楼序号 + swipe」决定（确定性）。
         const ordinal = floorCheckOrdinal(messages(c), messageId);
         const seed = settleSeed(chatId, ordinal, floor.swipeId);
         const rollPairs = ordinal ? rollsFor(IS_COC(engine), chatId, ordinal, floor.swipeId) : null;
+        // 重算先排除本楼旧增量；写入意图始终锚定物品表实余额，不从截断后的模拟余额反推。
+        const priorCurrency = Math.trunc(Number(priorMeta.currency && priorMeta.currency.delta) || 0);
+        const money = currencyContext();
+        const available = { ...money, balance: Math.max(0, money.balance - priorCurrency) };
+        let currencyFailure = '';
         const settle = (before0, random) => {
             // 旧档修复：起始关系·恋人漏记的恋爱对象、开局猜忌 / 心结没有关系状态、吃醋记录，按账本里的变动记录补上。
             const before = repairLegacyStart(before0, legacyStartInfo());
@@ -1312,21 +1657,39 @@ export function createStatsRuntime({
             const r = settleFloorText(before, body, {
                 env: traitEnvOf(body, previousBodies(c, messageId)), bondEvents: priorMeta.bondEvents || takeBondEvents(), reviewEvents: priorMeta.reviewEvents || takeReviewEvents(),
                 traitEdge: strengthRev >= 2 ? (st, req) => traitEdgeFor(st, { ...req, engine }) : null,
-                random, nsfw: isNsfw(), resolveCharacter: (name) => resolve(name, before), engine,
-                check, preroll: p.preroll || null, rollPairs, storyChecks, npcChecks, favorTier, favorMode, strengthRev, aptitudeOf: (name) => aptitudeLevel(catalog, name), traits: catalog.traits, romanceSeen: catalog.romanceSeen, moodGroups: moodGroups(), intimateCost, dateRegex: s.dateRegex, timeRegex: s.timeRegex, manual, catalog, settings: s, floor: messageId, noBattle: combatOn(), walletExtra: combatPoints(), extraDirectives: challengeDirectivesBefore(messages(c), messageId), present: present(before),
+                check, preroll: p.preroll || null, rollPairs, storyChecks, npcChecks, favorTier, favorMode, strengthRev, aptitudeOf: (name) => aptitudeLevel(catalog, name), traits: catalog.traits, romanceSeen: catalog.romanceSeen, moodGroups: moodGroups(), intimateCost, dateRegex: s.dateRegex, timeRegex: s.timeRegex, manual, catalog, settings: s, floor: messageId, noBattle: combatOn(), currency: available, extraDirectives: challengeDirectivesBefore(messages(c), messageId), present: present(before),
+                random, nsfw: isNsfw(), resolveCharacter: (name) => resolve(canonPersonName(catalog.renames, name), before), engine,
+                expenses: catalog.expenses, heroSide,
                 seedCharacters: autoTable ? tableSeedOf(before, messageId) : null, fameBars: catalog.fameBars,
             });
             const meta = { ...r.meta };
+            let changes = r.changes;
             if (p.preroll) meta.preroll = p.preroll;
             const note = { ...(p.note || {}) };
             if (meta.check && !check) note.source = 'roll';
             if (!meta.check && !storyChecks.length && (p.preroll || note.source === 'preroll')) note.reason = r.meta.rollTag ? 'roll-unresolved' : 'stats-roll-skipped';
             if (Object.keys(note).length) meta.note = note;
-            return { ...r, meta };
+            if (money.ready && meta.currency) {
+                const delta = meta.currency.delta - priorCurrency;
+                const after = money.balance + delta;
+                if (!Number.isSafeInteger(after) || after < 0) {
+                    currencyFailure = after < 0 ? 'stats-currency-resettle-insufficient' : 'stats-currency-balance-invalid';
+                    if (priorMeta.currency) meta.currency = priorMeta.currency;
+                    else delete meta.currency;
+                    changes = [...changes.filter((row) => row.key !== 'money'), ...(prior?.changes || []).filter((row) => row.key === 'money')];
+                    meta.diagnostics = [...(meta.diagnostics || []), { code: currencyFailure }];
+                } else {
+                    meta.currency = { ...meta.currency, write: { before: money.balance, after }, applied: delta === 0 };
+                }
+            } else if (priorMeta.currency) {
+                meta.currency = priorMeta.currency;
+            }
+            return { ...r, changes, meta };
         };
         const r = redo ? resettleFloor(ledger, floor, settle) : settleFloor(ledger, floor, settle, seed === null ? undefined : seed);
         if (r.reused) return r;
         const meta = r.entry.meta || {};
+        if (currencyFailure) currencyFailed(currency, currencyFailure);
         if (meta.note && meta.note.reason === 'stats-roll-skipped') diag('stats-roll-skipped', { messageId });
         // 状态（B 批）：本楼标签与日推进改动经 meta.statuses 带回，写回聊天级目录。
         if ((meta.statuses && typeof meta.statuses === 'object') || (meta.cycles && typeof meta.cycles === 'object')) catalog = sanitizeCatalog({ ...catalog, ...(meta.statuses && typeof meta.statuses === 'object' ? { statuses: meta.statuses } : {}), ...(meta.cycles && typeof meta.cycles === 'object' ? { cycles: meta.cycles } : {}) });
@@ -1345,6 +1708,19 @@ export function createStatsRuntime({
             for (const { name, key } of mines) if (!(known[name] && Object.hasOwn(known[name], key))) known[name] = { ...(known[name] || {}), [key]: messageId };
             catalog = sanitizeCatalog({ ...catalog, landmineKnown: known });
         }
+        // 已知软肋：写法同已知雷点。
+        const prevSoft = catalog.softKnown || {};
+        const softStale = Object.values(prevSoft).some((own) => Object.values(own).some((at) => Number(at) === Number(messageId)));
+        const softs = Array.isArray(meta.softspots) ? meta.softspots : [];
+        if (softStale || softs.length) {
+            const known = {};
+            for (const [name, own] of Object.entries(prevSoft)) {
+                const kept = Object.fromEntries(Object.entries(own).filter(([, at]) => Number(at) !== Number(messageId)));
+                if (Object.keys(kept).length) known[name] = kept;
+            }
+            for (const { name, key } of softs) if (!(known[name] && Object.hasOwn(known[name], key))) known[name] = { ...(known[name] || {}), [key]: messageId };
+            catalog = sanitizeCatalog({ ...catalog, softKnown: known });
+        }
         for (const entry of meta.newSkills || []) commitSkill(entry.name, { attribute: entry.attribute, floor: messageId });
         // 楼层记录接在上一条存活记录之后；重算同一楼时沿用原来的上游。
         const before = activeEntryBefore(ledger, messageId);
@@ -1352,7 +1728,9 @@ export function createStatsRuntime({
         const record = floorRecord({ messageId, swipeId: floor.swipeId, tagHash: statTagHash(body), baseId, seed: r.entry.seed, before: r.entry.before, after: r.entry.after, changes: r.entry.changes, meta: r.entry.meta, createdAt: Date.now() });
         r.entry.recordId = record.id;
         r.entry.baseId = baseId;
-        persist([record]);
+        const saved = persist([record], { shouldStart: alive });
+        r.saved = saved;
+        if (meta.currency?.write && !meta.currency.applied) r.currencySaved = writeCurrency(r.entry, record, saved, alive);
         onChange(currentStatsState(ledger), r.entry);
         push();
         const hurt = meta.flags && meta.flags.battleHurt;
@@ -1480,6 +1858,8 @@ export function createStatsRuntime({
     }
 
     function onChatChanged() {
+        currencyEpoch += 1;
+        currencyAsked.delete(chatIdOf(ctx()));
         managedCache = null;
         pushedHeroSkills = {};
         generating = null;
@@ -1489,9 +1869,11 @@ export function createStatsRuntime({
         onChange(ledger ? currentStatsState(ledger) : null, null, { chatChanged: true });
         refreshOnboarding();
         if (active()) refreshLife();
+        ensureCurrency();
     }
 
     function detach() {
+        currencyEpoch += 1;
         for (const off of offs) { try { off(); } catch (error) { /* */ } }
         offs = [];
         generating = null;
@@ -1538,7 +1920,7 @@ export function createStatsRuntime({
     // 设置变化后调用：总开关开就挂监听并读存档，关就全部解绑（易错点 H1）。战斗开启时总开关强制为开。
     function sync() {
         const on = settings().enabled;
-        if (on && !offs.length) { if (attach()) { load(); autoEnable(); refreshOnboarding(); if (active()) refreshLife(); } }
+        if (on && !offs.length) { if (attach()) { load(); autoEnable(); refreshOnboarding(); if (active()) refreshLife(); ensureCurrency(); } }
         else if (on && offs.length && combatOn()) { autoEnable(); refreshOnboarding(); }
         else if (!on && offs.length) { detach(); notices.clear(); emitNotices(); }
         return { attached: offs.length > 0 };
@@ -1579,6 +1961,7 @@ export function createStatsRuntime({
         onChange(currentStatsState(ledger), null);
         refreshOnboarding();
         detectNewCharacters();
+        ensureCurrency();
         return { ok: true };
     }
 
@@ -2101,7 +2484,7 @@ export function createStatsRuntime({
         const c = ctx();
         const resolve = resolveCharacter || defaultResolver(c, settings().register, worldRoles, tableNameSet(), isHero);
         const engine = memoEngineOf();
-        const req = resolveDiceRequest(engine, state, command, { resolveCharacter: (name) => resolve(name, state) });
+        const req = resolveDiceRequest(engine, state, command, { resolveCharacter: (name) => resolve(canonPersonName(catalog.renames, name), state) });
         if (!req) return null;
         const ensure = (skill) => (BUILTIN_SKILLS[skill] || engine.registry.has(skill) ? skill : commitSkill(skill) || skill);
         if (req.kind === 'check') {
@@ -2176,6 +2559,7 @@ export function createStatsRuntime({
         }
         if (id === 'sheets' && action === 'generate') { setNotice('sheets', null); return generateSheets(); }
         if (id === 'roll' && action === 'roll') return manualRoll();
+        if (id === 'currency' && action === 'retry') return ensureCurrency({ force: true });
         setNotice(id, null);
         return { ok: true };
     }
@@ -2198,7 +2582,7 @@ export function createStatsRuntime({
     function diagnose(messageId) {
         const text = diagnoseFloor(messageId);
         const trail = ledger && chatEnabled && settings().enabled ? describeClockTrail(statsClockTrail(ledger)) : '';
-        const persona = personaReport.size ? `特质评定人设字数：${[...personaReport].map(([n, r]) => `${n} ${r.len}${r.from === 'floors' ? '（取自正文）' : ''}`).join('、')}` : '';
+        const persona = personaReport.size ? `特质评定人设字数：${[...personaReport].map(([n, r]) => `${n} ${r.len}${r.world ? `+世界书${r.world}` : ''}${r.from === 'floors' ? '（取自正文）' : ''}`).join('、')}` : '';
         return [text, trail, persona].filter(Boolean).join('\n');
     }
 
@@ -2320,6 +2704,53 @@ export function createStatsRuntime({
         return null;
     }
 
+    // 角色改名（路人揭晓真名）：账本各楼状态、变动记录、手改记录与聊天级目录一并换名；旧名记进改名表，之后正文写旧名仍记到此人身上。
+    // 新名已有档案时须带 merge：两份并成一人。存档按差分链重写受影响的楼层记录。
+    function renamePerson(from, rawTo, merge) {
+        if (generating) return { ok: false, reason: 'stats-generating' };
+        const to = String(rawTo || '').trim();
+        if (!knownPerson(from)) return { ok: false, reason: 'stats-relation-missing' };
+        if (to === from) return { ok: true, cancelled: true };
+        if (!validPersonName(to)) return { ok: false, reason: 'stats-rename-invalid' };
+        if (to === PROTAGONIST || isHero(to)) return { ok: false, reason: 'stats-rename-hero' };
+        const exists = knownPerson(to);
+        if (exists && !merge) return { ok: false, reason: 'stats-rename-exists' };
+        const memo = new Map();
+        const moved = (state) => { if (!memo.has(state)) memo.set(state, renameInState(state, from, to)); return memo.get(state); };
+        const chat = messages(ctx());
+        const records = [];
+        const idMap = new Map();
+        const initial = moved(ledger.initial);
+        if (initial !== ledger.initial) { ledger.initial = initial; records.push(initRecord(initial, { createdAt: Date.now() })); }
+        const ordered = [...ledger.entries.entries()].sort((a, b) => a[1].messageId - b[1].messageId || a[1].swipeId - b[1].swipeId);
+        for (const [key, entry] of ordered) {
+            const next = { ...entry, before: moved(entry.before), after: moved(entry.after), changes: renameChangeRows(entry.changes, from, to), meta: renameFloorMeta(entry.meta, from, to) };
+            const baseId = entry.baseId != null && idMap.has(entry.baseId) ? idMap.get(entry.baseId) : entry.baseId ?? null;
+            const text = swipeTextOf(chat, entry.messageId, entry.swipeId);
+            if (text !== null && entry.recordId) {
+                const record = floorRecord({ messageId: entry.messageId, swipeId: entry.swipeId, tagHash: statTagHash(text), baseId, seed: entry.seed, before: next.before, after: next.after, changes: next.changes, meta: next.meta, createdAt: Date.now() });
+                if (record.id !== entry.recordId) { records.push(record); idMap.set(entry.recordId, record.id); next.recordId = record.id; }
+            }
+            next.baseId = baseId;
+            ledger.entries.set(key, next);
+        }
+        ledger.log = renameChangeRows(ledger.log, from, to);
+        catalog = sanitizeCatalog(renameCatalog(catalog, from, to));
+        persist(records);
+        onChange(currentStatsState(ledger), null);
+        push();
+        return { ok: true, merged: exists };
+    }
+
+    // 移除曾用名：之后正文再写这个名字不再记到现用名身上，已结算的楼不变。
+    function dropAlias(alias) {
+        if (!Object.hasOwn(catalog.renames, alias)) return { ok: true, cancelled: true };
+        const { [alias]: gone, ...renames } = catalog.renames;
+        catalog = sanitizeCatalog({ ...catalog, renames });
+        persist();
+        return { ok: true };
+    }
+
     // 手改关系数值：写进最近一楼的结算结果，并记在该楼 meta.manual 上，之后重算或重 roll 这一楼仍保留。
     function relationOp(op, name, payload = {}) {
         if (!ledger) return { ok: false, reason: 'stats-no-ledger' };
@@ -2330,16 +2761,25 @@ export function createStatsRuntime({
         if (op === 'trait') return setTrait(name, payload && payload.key, payload && payload.on === true);
         if (op === 'trait-id') return setTraitById(name, payload && payload.id, payload && payload.on === true);
         if (op === 'aptitude') return setAptitude(name, payload && payload.level);
+        if (op === 'rename') return renamePerson(name, payload && payload.to, payload && payload.merge === true);
+        if (op === 'rename-drop') return dropAlias(name);
         if (op === 'note') return setHeroNote(name, payload && payload.text);
         if (op === 'note-prompt') return heroNotePrompt(name);
+        if (op === 'hero-prompt') return heroNotePrompt(name, true);
         if (op === 'trait-note') return setTraitNote(name, payload && payload.text);
         if (op === 'set-worlds') return setWorlds(payload && payload.worlds);
+        if (op === 'money-config-read') return currency ? { ok: true, config: { name: currency.name, table: { ...currency.table } } } : { ok: false, reason: 'stats-currency-unset' };
+        if (op === 'money-config') return setCurrencyTable(payload && payload.table);
+        if (op === 'expenses-read') return { ok: true, expenses: catalog.expenses.map((e) => ({ ...e })) };
+        if (op === 'expenses-set') { catalog = sanitizeCatalog({ ...catalog, expenses: payload && payload.expenses }); persist(); return { ok: true }; }
+        if (op === 'money-set') return setMoneyBalance(name, payload && payload.value);
+        if (op === 'address-set') return setAddress(name, payload || {});
         if (op.startsWith('status-') || op.startsWith('cycle-')) return statusEditOp(op, name, payload || {});
         if (op === 'fame-add') return addFameBar(payload || {});
         if (op === 'fame-fill') return fameFill(payload && payload.sentence);
         if (op === 'fame-draft') { const bar = payload && payload.template ? fameTemplateBar(payload.template) : catalog.fameBars.find((b) => b.name === name); return bar ? { ok: true, draft: fameDraftText(bar) } : { ok: false, reason: 'stats-fame-kind' }; }
         if (op === 'fame-remove') return removeFameBar(name);
-        if (op !== 'set') return { ok: false, reason: 'stats-relation-op-unknown' };
+        if (op !== 'set' && op !== 'set-hero') return { ok: false, reason: 'stats-relation-op-unknown' };
         if (generating) return { ok: false, reason: 'stats-generating' };
         const entry = activeEntryBefore(ledger, Infinity);
         if (!(entry ? entry.after : ledger.initial).characters[name]) return { ok: false, reason: 'stats-relation-missing' };
@@ -2350,7 +2790,8 @@ export function createStatsRuntime({
             if (Object.hasOwn(payload, key)) dims[key] = v;
         }
         if (!Object.keys(dims).length) return { ok: true, cancelled: true };
-        return entry ? commitManualRelations(entry, { [name]: dims }) : commitInitialRelations({ [name]: dims });
+        const manual = { [name]: op === 'set-hero' ? { hero: dims } : dims };
+        return entry ? commitManualRelations(entry, manual) : commitInitialRelations(manual);
     }
 
     // 亲密门槛豁免（剧情需要）：记在聊天级目录里，与楼层无关，swipe、删楼不丢。
@@ -2419,6 +2860,73 @@ export function createStatsRuntime({
         if (!Array.isArray(list) || !list.length || JSON.stringify(list) === JSON.stringify(catalog.worlds)) return;
         catalog = sanitizeCatalog({ ...catalog, worlds: list });
         persist();
+    }
+    // 货币设置：只改本聊天剧情货币的四档价格（货币名与兑换比例不变）；整表提交，按逐档递增与初始金额上限校验，确认存档后生效。
+    function setCurrencyTable(table) {
+        if (generating) return { ok: false, reason: 'stats-generating' };
+        const alive = currencyLease();
+        return queueCurrency(async () => {
+            if (!alive()) return { ok: false, reason: 'stats-chat-not-enabled' };
+            if (!currency) return { ok: false, reason: 'stats-currency-unset' };
+            // 未落账的楼层写入与积分兑换按改动前的配置核对，先补完再改价格。
+            if (currency.seeded) { const recovered = await recoverCurrencyWrites(alive); if (!recovered.ok) return recovered; }
+            const prev = currency;
+            const next = normalizeCurrencyRecord({ ...prev, table });
+            if (!next) return { ok: false, reason: 'stats-relation-invalid' };
+            if (JSON.stringify(next.table) === JSON.stringify(prev.table)) return { ok: true, cancelled: true };
+            currency = next;
+            const done = await currencySaved(persist([], { shouldStart: alive }), null, alive);
+            if (!done.ok) { if (alive()) currency = prev; return done; }
+            onChange(currentStatsState(ledger), null);
+            push();
+            return { ok: true };
+        });
+    }
+    // 手改金钱余额：主角改的是剧情货币，按填入的新余额直接写物品表（等同在表里改数量，不随楼层回退）；其他角色改各自的数值侧金钱并记一条手动修改。
+    function setMoneyBalance(name, value) {
+        if (!ledger) return { ok: false, reason: 'stats-no-ledger' };
+        if (generating) return { ok: false, reason: 'stats-generating' };
+        // 只收非负整数；空值与 null 不当作 0。
+        const v = typeof value === 'number' ? value : NaN;
+        if (!Number.isSafeInteger(v) || v < 0) return { ok: false, reason: 'stats-relation-invalid' };
+        const who = name || PROTAGONIST;
+        if (who === PROTAGONIST) return setCurrencyBalance(v);
+        const entry = activeEntryBefore(ledger, Infinity);
+        const state = entry ? entry.after : ledger.initial;
+        if (!state.characters[who]) return { ok: false, reason: 'stats-relation-missing' };
+        if (v === (Number((state.characters[who].bars || {}).money) || 0)) return { ok: true, cancelled: true };
+        const manual = { [who]: { bars: { money: v } } };
+        return entry ? commitManualRelations(entry, manual) : commitInitialRelations(manual);
+    }
+    // 主角的剧情货币余额：先补完未落账的楼层写入，再按「当前余额 → 新余额」写物品表。
+    function setCurrencyBalance(value) {
+        const alive = currencyLease();
+        return queueCurrency(async () => {
+            if (!alive()) return { ok: false, reason: 'stats-chat-not-enabled' };
+            if (!currency?.seeded) return { ok: false, reason: 'stats-currency-unset' };
+            const recovered = await recoverCurrencyWrites(alive);
+            if (!recovered.ok) return recovered;
+            const read = readCurrency();
+            if (!read.ok) return read;
+            if (read.balance === value) return { ok: true, cancelled: true };
+            const written = await applyCurrencyDelta(currency, { before: read.balance, after: value }, alive);
+            if (!written.ok) { currencyFailed(currency, written.reason); return written; }
+            onChange(currentStatsState(ledger), null);
+            push();
+            return { ok: true };
+        });
+    }
+    // 手改称呼：payload = { private?, public? }，空串删除；走手动修改通道并留记录。
+    function setAddress(name, payload) {
+        if (!ledger) return { ok: false, reason: 'stats-no-ledger' };
+        if (generating) return { ok: false, reason: 'stats-generating' };
+        const entry = activeEntryBefore(ledger, Infinity);
+        const state = entry ? entry.after : ledger.initial;
+        if (!name || !state.characters[name]) return { ok: false, reason: 'stats-relation-missing' };
+        const address = {};
+        for (const key of ['private', 'public']) if (typeof payload[key] === 'string') address[key] = payload[key];
+        const manual = { [name]: { address } };
+        return entry ? commitManualRelations(entry, manual) : commitInitialRelations(manual);
     }
     function setWorlds(list) {
         catalog = sanitizeCatalog({ ...catalog, worldsManual: Array.isArray(list) ? list : [] });
@@ -2506,7 +3014,7 @@ export function createStatsRuntime({
     const heroFameMetrics = (s) => (s.hudFame && catalog.fameBars.length ? fameHudMetrics(currentStatsState(ledger), catalog.fameBars, { detail: s.hudFameDetail === true }) : []);
 
     // 「按剧情拟写」的请求内容：最近若干楼正文（去掉数值标签与网页标签），由设置页交给副模型。
-    function heroNotePrompt(name) {
+    function heroNotePrompt(name, estimate = false) {
         if (!knownPerson(name)) return { ok: false, reason: 'stats-relation-missing' };
         const hero = userName() || PROTAGONIST;
         const lines = messages(ctx()).filter((m) => m && !m.is_system && typeof m.mes === 'string').slice(-HERO_NOTE_FLOORS)
@@ -2515,7 +3023,9 @@ export function createStatsRuntime({
         if (!lines.length) return { ok: false, reason: 'stats-note-no-text' };
         const user = lines.join('\n').slice(-HERO_NOTE_CHARS);
         const system = `根据下面的剧情正文，用一句话写出${hero}（主角）对${name}的态度，以及两人之间已经发生的事。只写正文里明确出现的内容，不推测，不按身份套路补写。不超过四十字，只输出这句话。`;
-        return { ok: true, system, user };
+        if (!estimate) return { ok: true, system, user };
+        const desire = isNsfw() ? '、欲望' : '';
+        return { ok: true, user, system: `根据下面的剧情正文，估算${hero}（主角）对${name}的态度。只依据正文里明确写出的主角心理、选择与言行，不推测，不按身份套路补写，看不出的项填0。好感、信任、了解取-100到100的整数，芥蒂${desire}取0到100的整数。好感的参考：0为无感，1到25为初步好感，26到50为明确喜欢，51到75为强烈在意，76以上为深爱，负数为反感。只输出一行，格式为：好感=数值，信任=数值，了解=数值，芥蒂=数值${desire ? '，欲望=数值' : ''}` };
     }
 
     // 演出层 romance 第 3 栏出现过的对象：names 为候选写法（场景素材键、原文），取已登记的那个；都未登记时记第一个。去重后存聊天级目录。
@@ -2526,6 +3036,7 @@ export function createStatsRuntime({
         const known = currentStatsState(ledger).characters;
         const name = list.find((n) => known[n]) || list[0];
         if (catalog.romanceSeen.includes(name)) return { ok: true, skipped: true };
+        if (settings().heroFeelings === true && known[name] && (Number(heroDimsOf(known[name], { nsfw: isNsfw() }).好感) || 0) <= 25) return { ok: true, skipped: true };
         catalog = sanitizeCatalog({ ...catalog, romanceSeen: [...catalog.romanceSeen, name] });
         persist();
         return { ok: true };
@@ -2537,7 +3048,7 @@ export function createStatsRuntime({
         if (generating) return { ok: false, reason: 'stats-generating' };
         const entry = activeEntryBefore(ledger, Infinity);
         const known = entry ? entry.after.characters : ledger.initial.characters;
-        const fresh = [...new Set([...tableNames({ fresh: true }), ...rosterNames()])].filter((name) => !known[name]);
+        const fresh = [...new Set([...tableNames({ fresh: true }), ...rosterNames()])].filter((name) => !known[name] && !Object.hasOwn(catalog.renames, name));
         if (!fresh.length) return { ok: false, reason: 'stats-table-none' };
         const manual = Object.fromEntries(fresh.map((name) => [name, {}]));
         const result = entry ? commitManualRelations(entry, manual) : commitInitialRelations(manual);
@@ -2554,8 +3065,20 @@ export function createStatsRuntime({
         // 表格里有、账本还没有的人物先登记，补填时一并算上。
         importTablePeople();
         const entry = activeEntryBefore(ledger, Infinity);
-        const blank =(c) => START_FILL_DIMS.every((key) => Math.abs(Number(c.dims && c.dims[key]) || 0) <= START_FILL_SPAN);
-        const pending = Object.entries((entry ? entry.after : ledger.initial).characters).filter(([name, c]) => !isHero(name) && blank(c)).map(([name]) => name);
+        // 数值在小范围内但剧情里已有过关系变动的角色不算空白，避免在已有进展上再叠一次初值。
+        const touched = () => {
+            const names = new Set();
+            for (const [messageId, swipeId] of ledger.active) {
+                const e = ledger.entries.get(ledgerKey(ledger, messageId, swipeId));
+                for (const c of (e && e.changes) || []) {
+                    if (c && c.target && (START_FILL_DIMS.includes(c.key) || (typeof c.note === 'string' && c.note.startsWith('起始关系·')))) names.add(String(c.target));
+                }
+            }
+            return names;
+        };
+        const moved = touched();
+        const blank = (c, name) => !moved.has(name) && START_FILL_DIMS.every((key) => Math.abs(Number(c.dims && c.dims[key]) || 0) <= START_FILL_SPAN);
+        const pending = Object.entries((entry ? entry.after : ledger.initial).characters).filter(([name, c]) => !isHero(name) && blank(c, name)).map(([name]) => name);
         if (!pending.length) return Promise.resolve({ ok: false, reason: 'stats-start-none' });
         const request = requester();
         if (!request) return Promise.resolve({ ok: false, reason: 'stats-no-model' });
@@ -2570,7 +3093,7 @@ export function createStatsRuntime({
             const mods = {};
             // 主角资料（用户人设）只取一次，每批都带上。
             let hero = '';
-            try { if (typeof describePeople === 'function') hero = String(((await describeWithHero([PROTAGONIST]))[0] || {}).summary || ''); }
+            try { if (typeof describePeople === 'function') { const h = (await describeWithHero([PROTAGONIST]))[0] || {}; hero = String((h.own ?? h.summary) || ''); } }
             catch (error) { hero = ''; }
             let plot = '';
             try { plot = String(plotSetting() || ''); } catch (error) { plot = ''; }
@@ -2596,11 +3119,12 @@ export function createStatsRuntime({
             if (!Object.keys(relations).length) return { ok: false, reason: 'stats-start-failed' };
             // 等回复期间可能又结算了新楼，按最新一楼重新取当前值。
             const latest = activeEntryBefore(ledger, Infinity);
+            for (const n of touched()) moved.add(n);
             const manual = {};
             for (const [name, tier] of Object.entries(relations)) {
                 const cur = (latest ? latest.after : ledger.initial).characters[name];
                 const fix = startFixOffsets(mods[name]);
-                if (!cur || !blank(cur) || (tier === '陌生' && !Object.keys(fix).length)) continue;
+                if (!cur || !blank(cur, name) || (tier === '陌生' && !Object.keys(fix).length)) continue;
                 const dims = {};
                 for (const key of START_FILL_DIMS) dims[key] = Math.max(-100, Math.min(100, (Number(cur.dims[key]) || 0) + (START_DIMS[tier][key] || 0) + (fix[key] || 0)));
                 if (fix.芥蒂) dims.芥蒂 = Math.max(-100, Math.min(100, (Number(cur.dims.芥蒂) || 0) + fix.芥蒂));
@@ -2634,6 +3158,8 @@ export function createStatsRuntime({
         for (const [name, dims] of Object.entries(manual)) {
             merged[name] = { ...(prev[name] || {}), ...dims };
             if (dims && dims.bars) merged[name].bars = { ...((prev[name] && prev[name].bars) || {}), ...dims.bars };
+            if (dims && dims.hero) merged[name].hero = { ...((prev[name] && prev[name].hero) || {}), ...dims.hero };
+            if (dims && dims.address) merged[name].address = { ...((prev[name] && prev[name].address) || {}), ...dims.address };
         }
         const meta = { ...(entry.meta || {}), manual: merged };
         const m = messages(ctx())[entry.messageId];
@@ -2792,8 +3318,8 @@ export function createStatsRuntime({
     // 设置页「存档」区用：只用缓存（总开关关闭时不读表），暂停的聊天也显示冻结的数值。
     function archiveModel() {
         ensureLoaded();
-        const model = ledger ? statsArchiveModel(ledger, { catalog, engine: memoEngineOf(), heroSkills: heroSkillNames(), hasBackup: store.read().hasBackup, walletExtra: combatPoints(), isHero, heroName: userName() }) : null;
-        return model ? { ...model, needsPick: needsHeroPick(), heroAttrs: heroAttrs(), aptitude: Object.fromEntries(Object.entries(catalog.aptitude).map(([n, v]) => [n, v.v])), traits: traitSwitchModel(catalog.traits), traitList: Object.fromEntries(Object.keys(catalog.traits).map((n) => [n, { items: listTraits(catalog, n), ...slotUsage(catalog, n) }])), traitNsfw: isNsfw(), statusMap: catalog.statuses || {}, relMap: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).map(([n, c]) => [n, Array.isArray(c.relStates) ? c.relStates : []])), traitAttrs: Object.fromEntries([PROTAGONIST, ...Object.keys(currentStatsState(ledger).characters || {}), ...Object.keys(catalog.sheets || {})].map((n) => [n, gateAttrsOf(n)])), traitCodex: traitCodexStore ? traitCodexStore.get() : null, heroNotes: { ...catalog.heroNotes }, traitNotes: { ...catalog.traitNotes }, landmineKnown: { ...(catalog.landmineKnown || {}) }, fame: fameRows(currentStatsState(ledger), catalog.fameBars), cycleMap: catalog.cycles || {}, statusDay: Number(currentStatsState(ledger).clock && currentStatsState(ledger).clock.day) || 0, worlds: [...(catalog.worlds || [])], worldsManual: [...(catalog.worldsManual || [])] } : null;
+        const model = ledger ? statsArchiveModel(ledger, { catalog, engine: memoEngineOf(), heroSkills: heroSkillNames(), hasBackup: store.read().hasBackup, walletExtra: combatPoints(), currency: currencySnapshot(), isHero, heroName: userName() }) : null;
+        return model ? { ...model, expenses: catalog.expenses, needsPick: needsHeroPick(), heroAttrs: heroAttrs(), aptitude: Object.fromEntries(Object.entries(catalog.aptitude).map(([n, v]) => [n, v.v])), traits: traitSwitchModel(catalog.traits), traitList: Object.fromEntries(Object.keys(catalog.traits).map((n) => [n, { items: listTraits(catalog, n), ...slotUsage(catalog, n) }])), traitNsfw: isNsfw(), combatCardOn: combatOn(), statusMap: catalog.statuses || {}, relMap: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).map(([n, c]) => [n, Array.isArray(c.relStates) ? c.relStates : []])), traitAttrs: Object.fromEntries([PROTAGONIST, ...Object.keys(currentStatsState(ledger).characters || {}), ...Object.keys(catalog.sheets || {})].map((n) => [n, gateAttrsOf(n)])), traitCodex: traitCodexStore ? traitCodexStore.get() : null, heroNotes: { ...catalog.heroNotes }, renames: { ...catalog.renames }, heroFeelings: settings().heroFeelings === true, confessed: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).filter(([, c]) => c.confessed === true).map(([n]) => [n, true])), heroDims: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).map(([n, c]) => [n, { ...heroDimsOf(c, { nsfw: isNsfw() }) }])), traitNotes: { ...catalog.traitNotes }, landmineKnown: { ...(catalog.landmineKnown || {}) }, softKnown: { ...(catalog.softKnown || {}) }, fame: fameRows(currentStatsState(ledger), catalog.fameBars), cycleMap: catalog.cycles || {}, statusDay: Number(currentStatsState(ledger).clock && currentStatsState(ledger).clock.day) || 0, worlds: [...(catalog.worlds || [])], worldsManual: [...(catalog.worldsManual || [])] } : null;
     }
     // 对外接口的入口统一包一层 inEvent：同一次调用内战斗开关只取一次。
     const ev = inEvent;
@@ -2843,6 +3369,11 @@ export function createStatsRuntime({
         diagnose: ev(diagnose),
         sheetOp: ev(sheetOp),
         relationOp: ev(relationOp),
+        retryCurrency: ev(() => { ensureLoaded(true); return ensureCurrency({ force: true }) || Promise.resolve({ ok: false, reason: 'stats-chat-not-enabled' }); }),
+        exchangeInfo: ev(exchangeInfo),
+        quoteExchange: ev(quoteExchange),
+        exchangePoints: ev(exchangePoints),
+        retryExchange: ev(() => runExchange(() => ({ ok: true }))),
         noteRomanceSeen: ev(noteRomanceSeen),
         skillOp: ev(skillOp),
         heroOp: ev(heroOp),
@@ -2880,6 +3411,7 @@ export function createStatsRuntime({
                 return {
                     ...p,
                     romance,
+                    hero: s.heroFeelings === true ? { ...heroDimsOf(c, { nsfw }) } : null,
                     kin: hasTrait(state, traitCatalogOf(catalog.traits), p.name, 'kin'),
                     metrics: characterStatMetrics(c, { hudLabel: s.hudLabel, nsfw, stamina: npcStaminaShown(), favorTier: normalizeFavorTier(s.favorMode) }),
                     stage: stageLabel(Number(p.dims.好感) || 0, romance),
@@ -2887,13 +3419,19 @@ export function createStatsRuntime({
             });
             return { nsfw, people };
         }),
-        // 状态栏主角条（生命、体力、压力、金钱；金钱为合并余额）：只在总开关与本聊天都启用时返回 lookup，其余名字返回 null。
+        // 状态栏主角条：积分沿用原余额，剧情货币单独读取物品表。
         protagonistLookup: ev(() => {
             if (!active()) return null;
             const s = settings();
-            const metrics = protagonistStatMetrics(currentStatsState(ledger).protagonist.bars, { enabledBars: s.bars, vitals: combatOn() ? protagonistVitals(memoEngineOf()) : null, walletExtra: combatPoints() }).concat(heroFameMetrics(s));
+            const metrics = protagonistStatMetrics(currentStatsState(ledger).protagonist.bars, { enabledBars: s.bars, vitals: combatOn() ? protagonistVitals(memoEngineOf()) : null, walletExtra: combatPoints(), currency: currencySnapshot() }).concat(heroFameMetrics(s));
             return (name) => (isHero(name) && metrics.length ? { metrics, stages: [] } : null);
         }),
+        // 角色当前挂的特质名（含主角；不含合成占位与成就），供战斗生成按人设偏向模板；没有启用时为 null。
+        traitNamesOf: (name) => {
+            if (!active()) return null;
+            const key = isHero(name) ? '主角' : String(name || '').trim();
+            return listTraits(catalog, key).filter((t) => !isComboKey(t.id) && t.src !== 'achieve').map((t) => t.id);
+        },
         // 好战者名单：主角与在场角色里挂有「战斗狂」的名字；没有启用数值系统或没有人时为 null。
         combatEager: () => {
             if (!active()) return null;
@@ -2921,10 +3459,10 @@ export function createStatsRuntime({
         protagonistBlock: ev(() => {
             if (!active()) return null;
             const s = settings();
-            const metrics = protagonistStatMetrics(currentStatsState(ledger).protagonist.bars, { enabledBars: s.bars, vitals: combatOn() ? protagonistVitals(memoEngineOf()) : null, walletExtra: combatPoints() }).concat(heroFameMetrics(s));
+            const metrics = protagonistStatMetrics(currentStatsState(ledger).protagonist.bars, { enabledBars: s.bars, vitals: combatOn() ? protagonistVitals(memoEngineOf()) : null, walletExtra: combatPoints(), currency: currencySnapshot() }).concat(heroFameMetrics(s));
             return metrics.length ? { name: userName() || PROTAGONIST, metrics } : null;
         }),
-        // 合并余额里数值侧的那一份（战斗账本的主角余额用）；没启用时为 0。
+        // 积分中的旧数值侧份额保留原存储；战斗账本按需合并，未启用时为 0。
         walletMoney: () => {
             ensureLoaded();
             return active() ? Number(currentStatsState(ledger).protagonist.bars.money) || 0 : 0;
@@ -2941,7 +3479,14 @@ export function createStatsRuntime({
             persist();
             return { ok: true };
         }),
-        // 等写库与旧存档导入都落完（测试与导出前用）。
-        whenSaved: () => Promise.all([tail, importJob ? importJob.promise : null]).then(() => {}),
+        // 等写库与旧存档导入落完，再限时等待当前推送（测试与导出前用）。
+        whenSaved: async () => {
+            let pending;
+            do {
+                pending = [tail, currencyTail, currencyJob?.promise, importJob?.promise];
+                await Promise.all(pending);
+            } while (pending[0] !== tail || pending[1] !== currencyTail);
+            if (pushing) await withTimeout(pushing);
+        },
     };
 }

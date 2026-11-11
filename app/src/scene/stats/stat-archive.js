@@ -130,7 +130,7 @@ function groupLogRows(rows, logMax) {
         .map((g) => ({ name: g.name, hero: g.hero, total: g.rows.length, log: g.rows.slice(-logMax).reverse() }));
 }
 
-export function statsArchiveModel(ledger, { logMax = ARCHIVE_LOG_MAX, catalog = null, engine = null, hasBackup = false, walletExtra = 0, heroSkills = [], isHero = null, heroName = '' } = {}) {
+export function statsArchiveModel(ledger, { logMax = ARCHIVE_LOG_MAX, catalog = null, engine = null, hasBackup = false, walletExtra = 0, heroSkills = [], currency = null, isHero = null, heroName = '' } = {}) {
     if (!ledger) return null;
     const state = currentStatsState(ledger);
     const rows = [];
@@ -143,17 +143,18 @@ export function statsArchiveModel(ledger, { logMax = ARCHIVE_LOG_MAX, catalog = 
         const entry = ledger.entries.get(ledgerKey(ledger, messageId, swipeId));
         for (const c of (entry && entry.changes) || []) {
             // 生活条在账本里存英文键（stamina/stress/money），记录里显示中文名。
-            const key = String(c.key ?? '');
-            const target = String(c.target ?? '');
-            const hero = heroOf(target);
-            rows.push({ messageId, target: hero ? heroLabel : target, hero, key: BAR_LABEL[key] || key, from: c.from, to: c.to, note: String(c.note ?? ''), ...(Array.isArray(c.calc) ? { calc: c.calc } : {}), ...(c.capped ? { capped: c.capped } : {}), ...(c.dropped ? { dropped: c.dropped } : {}), ...(Array.isArray(c.traitTags) ? { traitTags: c.traitTags } : {}) });
+            const key = String(c.key ?? '').replace(/^my:/, '');
+            const hero = heroOf(String(c.target ?? ''));
+            const target = c.heroSide ? `${PROTAGONIST}→${c.target}` : String(c.target ?? '');
+            rows.push({ messageId, target: hero ? heroLabel : target, hero, key: key === 'address' ? '称呼' : BAR_LABEL[key] || key, ...(key === 'address' ? { text: true } : {}), from: c.from, to: c.to, note: String(c.note ?? ''), ...(Array.isArray(c.calc) ? { calc: c.calc } : {}), ...(c.capped ? { capped: c.capped } : {}), ...(c.dropped ? { dropped: c.dropped } : {}), ...(Array.isArray(c.traitTags) ? { traitTags: c.traitTags } : {}) });
         }
         const ck = entry && entry.meta && entry.meta.check;
         if (ck) checks.push({ messageId, skill: ck.skill, difficulty: ck.difficulty || '普通', detail: ck.detail || (ck.die === 20 ? `d20(${ck.roll})` : `1d100=${ck.roll}`), outcome: ck.outcome || ck.tier, ruleset: ck.ruleset || 'coc7', source: ck.source || '' });
     }
     // 旧存档里可能已把用户登记成人际角色：数据保留，列表不显示。
     const characters = Object.entries(state.characters || {}).filter(([name]) => !(typeof isHero === 'function' && isHero(name))).map(([name, c]) => ({
-        name, stage: stageOf(Number(c.dims && c.dims.好感) || 0).name, dims: { ...(c.dims || {}) }, intimacyForced: ((catalog && catalog.intimacyForced) || []).includes(name),
+        name, stage: stageOf(Number(c.dims && c.dims.好感) || 0).name, dims: { ...(c.dims || {}) }, money: c.bars && Number.isFinite(Number(c.bars.money)) ? Number(c.bars.money) : null, intimacyForced: ((catalog && catalog.intimacyForced) || []).includes(name),
+        address: { private: (c.address && c.address.private) || '', public: (c.address && c.address.public) || '' },
     }));
     // 主角技能：账本里的加上补全、分配的底数与手改；生效值不到入门（25）的不列（含「编辑技能」里填了未学的）。
     const owned = (state.protagonist && state.protagonist.skills) || {};
@@ -175,10 +176,14 @@ export function statsArchiveModel(ledger, { logMax = ARCHIVE_LOG_MAX, catalog = 
     return {
         day: state.clock ? state.clock.day : null,
         bars: { ...((state.protagonist && state.protagonist.bars) || {}) },
-        // 金钱显示合并余额（数值侧金钱 + 战斗侧积分），bars.money 仍是数值侧原值。
+        // 积分保留原合并余额；剧情货币只投影物品表快照。
         wallet: walletBalance(state.protagonist && state.protagonist.bars, walletExtra),
+        currency,
         vitals: vitalsOf(engine),
-        attributes: engine ? BASE_ATTRIBUTES.map((name) => ({ name, display: displaySkill(engine, profileOf(engine, state, PROTAGONIST, name)) })) : [],
+        attributes: engine ? BASE_ATTRIBUTES.map((name) => {
+            const profile = profileOf(engine, state, PROTAGONIST, name);
+            return { name, value: profile.value, display: displaySkill(engine, profile) };
+        }) : [],
         skills,
         characters,
         log: rows.slice(-logMax).reverse(),

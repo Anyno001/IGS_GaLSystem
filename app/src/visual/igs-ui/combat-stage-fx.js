@@ -27,10 +27,14 @@ const WRAP_CSS = `
 #igs-overlay .igs-sfx.is-clash.out{background:transparent;transition:background 300ms;}
 #igs-overlay .igs-sfx .sfx-canvas{position:absolute;left:50%;top:50%;width:var(--cw);height:var(--ch);margin:calc(var(--ch) / -2) 0 0 calc(var(--cw) / -2);transform:scale(var(--cx-scale,1));transform-origin:50% 50%;}
 #igs-overlay .igs-sfx-result{position:absolute;inset:0;z-index:1;pointer-events:none;}
-#igs-overlay .igs-sfx-result .rs-ui{position:absolute;z-index:5;right:14px;top:600px;width:226px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;}
-#igs-overlay .igs-sfx-result.land .rs-ui{right:120px;top:560px;width:380px;}
-#igs-combat-panel:not([data-igs-combat-result-in]) .igs-sfx-result :is(.veil,.hband,.fig,.plate,.big,.grade,.row){animation-duration:0s;animation-delay:0s;}
-#igs-combat-panel[data-igs-combat-reduced] .igs-sfx-result :is(.veil,.hband,.fig,.plate,.big,.grade,.row){animation-duration:0s;animation-delay:0s;}
+/* 可点区贴画布底边向上长：战利品、候选、工具行与发送按钮多了也不越出画布 */
+#igs-overlay .igs-sfx-result .rs-ui{position:absolute;z-index:5;right:14px;bottom:14px;width:226px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;}
+#igs-overlay .igs-sfx-result.land .rs-ui{right:120px;bottom:16px;width:380px;}
+#igs-overlay .igs-sfx-result .rs-ui .igs-combat-loot-row{--loot-w:min(104px,calc((100% - (var(--n,3) - 1) * 12px) / var(--n,3)));}
+#igs-overlay .igs-sfx-result .rs-ui .igs-combat-loot-tools{flex-wrap:wrap;gap:8px;}
+/* 入场播完或减少动态效果时定格：立绘位规则（.result .fig.lead）选择器更具体，须 !important，否则每次重绘（点删牌、选牌）立绘都重播升起 */
+#igs-combat-panel:not([data-igs-combat-result-in]) .igs-sfx-result :is(.veil,.hband,.shaft,.fig,.plate,.big,.grade,.row){animation-duration:0s !important;animation-delay:0s !important;}
+#igs-combat-panel[data-igs-combat-reduced] .igs-sfx-result :is(.veil,.hband,.shaft,.fig,.plate,.big,.grade,.row){animation-duration:0s !important;animation-delay:0s !important;}
 /* VS 对撞站位：主战者放大到基本铺满自己那一半（上半身是重心，头在画内，脚可出画），同伴等比放大压在身后、在外侧；竖屏我方偏上、敌方偏下，按接缝斜向错开 */
 #igs-overlay .igs-sfx .clash .half .fig.lead{left:-36px;right:auto;top:52px;bottom:auto;width:432px;height:576px;}
 #igs-overlay .igs-sfx .clash .half .fig.mate{left:-150px;right:auto;top:24px;bottom:auto;width:330px;height:440px;}
@@ -62,7 +66,6 @@ const WRAP_CSS = `
 #igs-overlay .igs-sfx .fig .igs-combat-art{position:absolute;inset:0;}
 #igs-overlay .igs-sfx .fig-sil{position:absolute;inset:0;display:flex;align-items:flex-end;justify-content:center;color:var(--text,#fff);opacity:.14;}
 #igs-overlay .igs-sfx .fig-sil svg{width:auto;height:100%;max-width:100%;}
-#igs-overlay .igs-sfx .fig-char{position:absolute;inset:0;display:grid;place-items:center;color:var(--text);font:900 min(60%,180px)/1 var(--display);opacity:.45;}
 `;
 export const COMBAT_STAGE_FX_STYLE_TEXT = `${COMBAT_STAGE_FX_BASE_CSS}\n${Object.values(COMBAT_STAGE_FX_STYLE_CSS).join('\n')}\n${WRAP_CSS}\n${COMBAT_STAGE_FX_POLISH_CSS}
 ${RESULT_SKINS_CSS}`;
@@ -403,7 +406,8 @@ export function resultStageHtml({ skin = '', orient = 'port', end = {}, order = 
     const args = { skin, orient, end, order, pics, ui, esc, style, size, won, heroes, english: ENGLISH[end.outcome] || '', cssUrl, plateSvg };
     const custom = own?.html?.(args);
     if (custom) return custom;
-    const fig = (cls, n) => (n ? `<i class="fig ${cls}"${pics[n] ? ` style="background-image:${esc(cssUrl(pics[n]))}"` : ''}>${pics[n] ? '' : `<b class="fig-char">${esc(Array.from(n)[0] || '')}</b>`}</i>` : '');
+    // 缺立绘时与开场 / 特写一致画人形剪影（SVG 只来自程序常量），左侧立绘位不留空。
+    const fig = (cls, n) => (n ? `<i class="fig ${cls}"${pics[n] ? ` style="background-image:${esc(cssUrl(pics[n]))}"` : ''}>${pics[n] ? '' : `<span class="fig-sil">${portraitSilhouetteSvg(n)}</span>`}</i>` : '');
     // 行上带种类（战功 / 队员）、伤情冷暖与头像，供要画行首图标、数值配色的皮肤取用；其余皮肤不读这些属性。
     const tone = (v) => (/重创|濒死|倒下|力竭/.test(v) ? 'bad' : /无伤|轻伤|从容/.test(v) ? 'good' : '');
     const rows = [...(end.feats || []).map((f) => ['战功', f.title || '', 'feat']), ...(end.allies || []).map((a) => [a.name, a.injury || '', 'ally'])].slice(0, 3)

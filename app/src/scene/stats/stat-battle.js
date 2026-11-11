@@ -1,6 +1,6 @@
 // 战斗整场速算（§6A、v2 §7.3）与打工检定（§4.2 work）。胜负、伤势、战利品由脚本决定；逐招动作由 AI 正文决定。
 // 掷骰走检定引擎：CoC 为对抗（主角反击时同级攻击方胜），D&D 为攻击检定对 AC、闪避为敏捷豁免。
-import { applyBarDirective, walletBalance, workIncomeTier } from './stat-bars.js';
+import { applyBarDirective, applyCurrencyDirective, shiftCurrency, walletBalance, workIncomeTier } from './stat-bars.js';
 import { applyKeyEvent } from './stat-favor-events.js';
 import { extraGatesOf } from './stat-traits.js';
 import { matchSkill } from './stat-skill-match.js';
@@ -94,6 +94,10 @@ function shiftBar(bars, key, delta, changes, note) {
 
 // 伤势不再扣主角生命条：只把伤势档记进 flags.battleHurt，交战斗侧写入生命账本。
 function applyBar(bars, directive, ctx, note) {
+    if (directive.kind === 'money' && ctx.currency) {
+        applyCurrencyDirective(ctx, directive, { source: 'battle', note });
+        return bars;
+    }
     const r = applyBarDirective(bars, directive, ctx.moneyTable, ctx.walletExtra);
     if (r.hurt) ctx.flags.battleHurt = r.hurt;
     if (r.change) ctx.changes.push({ source: 'battle', target: '主角', key: r.change.key, from: r.change.from, to: r.change.to, note });
@@ -115,8 +119,9 @@ export function applyBattle(state, directive, ctx) {
     if (result.outcome === '败') {
         bars = applyBar(bars, { kind: 'hurt', value: enemy.hurt }, ctx, note);
         bars = shiftBar(bars, 'stamina', DEFEAT_STAMINA, ctx.changes, note);
-        // 两成按合并余额算（金钱 + 战斗积分），扣在数值侧金钱上。
-        bars = shiftBar(bars, 'money', -Math.floor(Math.max(0, walletBalance(bars, ctx.walletExtra)) * DEFEAT_MONEY_LOSS), ctx.changes, note);
+        // 两成：有剧情货币时按物品表余额扣；否则按旧合并余额扣在数值侧金钱上。
+        if (ctx.currency) shiftCurrency(ctx, -Math.floor(ctx.currency.balance * DEFEAT_MONEY_LOSS), { source: 'battle', note });
+        else bars = shiftBar(bars, 'money', -Math.floor(Math.max(0, walletBalance(bars, ctx.walletExtra)) * DEFEAT_MONEY_LOSS), ctx.changes, note);
     } else {
         bars = shiftBar(bars, 'stamina', WIN_STAMINA[result.outcome], ctx.changes, note);
         if (result.outcome === '险胜') bars = applyBar(bars, { kind: 'hurt', value: '轻伤' }, ctx, note);
@@ -125,7 +130,7 @@ export function applyBattle(state, directive, ctx) {
     let next = withBars(state, bars);
     if (result.outcome !== '败') next = markSkill(next, result.attack);
     if (result.ally && result.outcome !== '败' && next.characters[result.ally]) {
-        const roll = () => resolveCheck(engine, next, { actor: PROTAGONIST, skill: keyEventSkill(engine, next, '共患难', ctx.rev), toward: result.ally }, ctx.random);
+        const roll = () => comradeRoll(engine, next, result.ally, ctx);
         const { character, result: ev } = applyKeyEvent(next.characters[result.ally], '共患难', { roll, random: ctx.random, extraGates: ctx.rev >= 2 ? extraGatesOf(next, ctx.traitCat, result.ally) : [] });
         if (ev.success) ctx.changes.push({ source: 'battle', target: result.ally, key: '好感', from: ev.gate, to: ev.gate + 1, note: '共患难突破' });
         ctx.events.push({ target: result.ally, ...ev });
@@ -136,6 +141,13 @@ export function applyBattle(state, directive, ctx) {
     return next;
 }
 
+
+// 共患难突破检定：带上特质奖惩骰（生死之交等，rev ≥ 2 由运行时传入 traitEdge）。
+function comradeRoll(engine, state, ally, ctx) {
+    const skill = keyEventSkill(engine, state, '共患难', ctx.rev);
+    const te = ctx.rev >= 2 && typeof ctx.traitEdge === 'function' ? ctx.traitEdge(state, { skill, toward: ally }) : null;
+    return resolveCheck(engine, state, { actor: PROTAGONIST, skill, toward: ally, ...(te && te.edge ? { edge: te.edge } : {}) }, ctx.random);
+}
 // 卡牌战斗战报合成的战斗事件：只产出事件、标记与伤势档，交给特质、成就与共患难使用；
 // 经验、战利品与生命已由战斗账本结算，这里不掷骰、不扣钱、不给战利品。同一份战报只结算一次（clock.lastBattleReport）。
 export const REPORT_BATTLE_STRESS_LOSE = 10;
@@ -159,14 +171,14 @@ export function applyBattleReport(state, directive, ctx) {
     }
     if (outcome !== '败' && outcome !== '撤' && ally) {
         const engine = ctx.engine || createEngine();
-        const roll = () => resolveCheck(engine, next, { actor: PROTAGONIST, skill: keyEventSkill(engine, next, '共患难', ctx.rev), toward: ally }, ctx.random);
+        const roll = () => comradeRoll(engine, next, ally, ctx);
         const { character, result: ev } = applyKeyEvent(next.characters[ally], '共患难', { roll, random: ctx.random, extraGates: ctx.rev >= 2 ? extraGatesOf(next, ctx.traitCat, ally) : [] });
         if (ev.success) ctx.changes.push({ source: 'battle', target: ally, key: '好感', from: ev.gate, to: ev.gate + 1, note: '共患难突破' });
         ctx.events.push({ target: ally, ...ev });
         next = withCharacter(next, ally, character);
     }
     ctx.events.push({ kind: 'battle', outcome, tier: '卡牌', count: 1, ally, allies, fromReport: true, reportId: directive.reportId });
-    ctx.flags.battle = { outcome, tier: '卡牌', count: 1, ally, allies, fromReport: true };
+    ctx.flags.battle = { outcome, tier: '卡牌', count: 1, ally, allies, fromReport: true, heroStatus: directive.heroStatus || '无伤', party: Array.isArray(directive.party) ? directive.party : [], fallen: Array.isArray(directive.fallen) ? directive.fallen : [], weak: directive.weak === true, foes: Array.isArray(directive.foes) ? directive.foes : [] };
     return withClock(next, { lastBattleReport: directive.reportId });
 }
 

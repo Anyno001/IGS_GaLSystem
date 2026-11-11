@@ -1,6 +1,6 @@
 // 电脑侧决策：同伴（AI 控制的卡牌单位）怎么出牌、敌人下回合出什么技能、「选牌」类效果的自动选择。
 // 纯函数，不改 state。随机数由调用方给（chooseSkillIntent 的 roll）。
-import { canAfford, cardView, effectsNeedTarget, estimateBlock, estimateDamage, livingIds, opposite, weakestId } from './battle-state.js';
+import { canPlay, cardView, effectsNeedTarget, estimateBlock, estimateDamage, livingIds, opposite, weakestId } from './battle-state.js';
 import { estimateEffectsValue } from './rules.js';
 
 // 前几个回合优先打出能力牌。
@@ -8,9 +8,9 @@ export const POWER_TURNS = 2;
 // 同一技能连续出现达到这个次数后，下次尽量换一个。
 export const MAX_SKILL_REPEAT = 2;
 
-// X 费牌按全部能量计费，并按能量次数结算；其余牌结算一次。
+// X 费牌按全部能量计费，并按能量次数结算；其余牌结算一次。规则 v5 的重演牌再乘 1 + 重演次数。
 const spentCost = (card, energy) => (card.cost === 'X' ? energy : card.cost);
-const runTimes = (card, energy) => (card.cost === 'X' ? energy : 1);
+const runTimes = (card, energy, rulesVersion) => (card.cost === 'X' ? energy : 1) * (rulesVersion >= 5 && Number.isInteger(card.replay) && card.replay > 0 ? 1 + card.replay : 1);
 
 // unitId 这一方的敌人按已定意图，预计这回合总共能打出多少伤害。
 export function incomingDamage(state, unitId) {
@@ -65,12 +65,13 @@ export function chooseAllyPlay(state, unitId) {
     const unit = state.units[unitId];
     if (!unit?.alive || unit.kind !== 'deck' || state.outcome) return null;
     const foes = livingIds(state, opposite(unit.side));
-    const playable = (state.piles[unitId]?.hand || []).map((inst) => cardView(state, inst)).filter((card) => card && canAfford(card, unit.energy));
+    // 规则 v5 出牌限制（E18 等）与 validatePlay / legalActions 共用 canPlay；v3/v4 与 canAfford 相同。
+    const playable = (state.piles[unitId]?.hand || []).map((inst) => cardView(state, inst)).filter((card) => card && canPlay(state, unit, card));
     if (!foes.length || !playable.length) return null;
-    const perCost = (card, value) => (value * runTimes(card, unit.energy)) / Math.max(0.5, spentCost(card, unit.energy));
+    const perCost = (card, value) => (value * runTimes(card, unit.energy, state.rulesVersion)) / Math.max(0.5, spentCost(card, unit.energy));
 
     if (incomingDamage(state, unitId) > unit.block) {
-        const guard = bestBy(playable, (card) => perCost(card, estimateBlock(unit, card.effects)));
+        const guard = bestBy(playable, (card) => perCost(card, estimateBlock(unit, card.effects, state.rulesVersion, 'card', unit.attributePolicy ? state : undefined)));
         if (guard) return playFor(state, unit, guard);
     }
 
@@ -79,7 +80,7 @@ export function chooseAllyPlay(state, unitId) {
         const cost = spentCost(card, unit.energy);
         for (const foeId of foes) {
             const foe = state.units[foeId];
-            const damage = estimateDamage(state, unit, foe, card.effects, foeId) * runTimes(card, unit.energy);
+            const damage = estimateDamage(state, unit, foe, card.effects, foeId, card) * runTimes(card, unit.energy, state.rulesVersion);
             if (damage > 0 && damage >= foe.hp + foe.block && (!kill || cost < kill.cost)) kill = { card, id: foeId, cost };
         }
     }
@@ -90,7 +91,7 @@ export function chooseAllyPlay(state, unitId) {
 
     const weakest = weakestId(state, opposite(unit.side));
     const weakestUnit = state.units[weakest];
-    const strike = bestBy(playable, (card) => perCost(card, estimateDamage(state, unit, weakestUnit, card.effects, weakest)));
+    const strike = bestBy(playable, (card) => perCost(card, estimateDamage(state, unit, weakestUnit, card.effects, weakest, card)));
     if (strike) return playFor(state, unit, strike, weakest);
 
     if (!(state.rulesVersion >= 4)) return playFor(state, unit, playable[0], weakest);

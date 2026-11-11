@@ -14,7 +14,7 @@ import { createDuelLowGate } from '../../scene/intimate-duel.js';
 import { combatPortraitNames } from '../../scene/creature-battle.js';
 import { ensureFxLayers } from './fx-layer.js';
 import { COMBAT_HIT_REACT_ATTR, COMBAT_HIT_REACT_MS, applyHitMarks, cloneCardGhost, hpSnapshot, launchCardGhost, paintUnitHp, playedActionName, playedCardFx, reactUnit, showHitFloats, showRarityFx, showWindupFx, windupFx } from './combat-hit-fx.js';
-import { battleView, challengeLobbyView, combatCutins, combatFxSource, combatHitMarks, combatLandings, endView, isItemSelection, isSkillSelection, itemSelection, lobbyView, pendingChoice, resolveHeroSkill, resolveItem, resolvePlay, rewardChoices, selectedItemView, selectedSkillView, selectionItemId, selectionSkillId, skillSelection, unitDetailView, unitView, volleyTargets } from './combat-panel-model.js';
+import { battleView, challengeLobbyView, combatCutins, combatFxSource, combatHitMarks, combatLandings, endView, isItemSelection, isSkillSelection, itemSelection, lobbyView, pendingChoice, resolveHeroSkill, resolveItem, resolvePlay, selectedItemView, selectedSkillView, selectionItemId, selectionSkillId, skillSelection, unitDetailView, unitView, volleyTargets } from './combat-panel-model.js';
 import { cardTipHtml, combatIntroUiHtml, combatReasonText, renderCombatPanelHtml, ringFront, tintTriplet, traitTipHtml, unitTipHtml } from './combat-panel-render.js';
 import { actionProgress } from '../../combat/engine.js';
 import { autoTargetFor, openTargetPicker, skinPickerVars } from './combat-target-picker.js';
@@ -97,6 +97,13 @@ export function createCombatPanelController(doc, options = {}) {
     let abandonTimer = null;
     let leaving = false;
     let historyOpen = false;
+    // 结算页删牌浮层是否展开；选定、关闭或开合面板时收起。
+    let purgeOpen = false;
+    // 删牌浮层里正在查看详情的副本 ID（只在浮层内有效，不写进选择）。
+    let purgeFocus = '';
+    // 规则 v6 G3c 升级浮层是否展开与正在查看详情的副本 ID（同删牌浮层，只在浮层内有效）。
+    let upgradeOpen = false;
+    let upgradeFocus = '';
     let notice = '';
     let selected = null;
     // v4 待选阶段：已选的候选牌实例（只在引擎 pending 属于操控角色时有内容）。
@@ -119,7 +126,7 @@ export function createCombatPanelController(doc, options = {}) {
     let canvasOrient = 'port';
     let controlledId = null;
     let fxSeq = 0;
-    let rewards = null;
+
     let abort = null;
     // 上次渲染时的能量液面（0–1）；重绘后从这里过渡到新液面。
     let lastFill = null;
@@ -207,8 +214,8 @@ export function createCombatPanelController(doc, options = {}) {
         },
     });
     const duelFx = createIntimateDuelFx({
-        doc, getRoot: () => root, getOverlay: () => pageOverlay, sfx: (kind) => { try { options.playSfx?.(kind); } catch (error) { /* 音效失败不影响演出 */ } },
-        getRhythmSound: () => options.getDuelFx?.()?.rhythmSound !== false, reduced: () => reduced() || lowQuality(),
+        doc, getRoot: () => root, sfx: (kind) => { try { options.playSfx?.(kind); } catch (error) { /* 音效失败不影响演出 */ } },
+        reduced: () => reduced() || lowQuality(),
     });
     const duelLowGate = createDuelLowGate();
     const syncDuel = (view) => {
@@ -218,7 +225,7 @@ export function createCombatPanelController(doc, options = {}) {
         const ratio = foe.maxHp ? foe.hp / foe.maxHp : 0;
         const cur = session()?.state();
         try { options.onDuelProgress?.(ratio); } catch (error) { /* 立绘切换失败不影响对决 */ }
-        duelFx.sync({ ratio, turn: view.battle.turn, rounds: Number(cur?.challengeSetup?.challenge?.rounds ?? cur?.challenge?.rounds) || 0, ended: view.status === 'ended' });
+        duelFx.sync({ ratio, ended: view.status === 'ended' });
         if (view.status !== 'ended' && duelLowGate(cur?.combatId, ratio)) unitSay(foe.id, 'down');
     };
     // 登记判定（见 combat-ko-fall.js koFallKind）：宿主 options.isRegisteredCharacter(name)、正文写了台词的角色、日常挑战的「对方」。
@@ -390,13 +397,15 @@ export function createCombatPanelController(doc, options = {}) {
         const s = session();
         const cur = s ? s.state() : { status: 'unavailable' };
         // 留档写入失败只提示、不阻断：面板自己没有提示时显示留档原因。
-        const view = { status: cur.status, reason: cur.reason || '', notice: notice || (cur.recordError ? combatReasonText(cur.recordError) : ''), pending, selected, controlledId, rewards, skin: skinOf(), front: frontFoe, orient: canvasOrient, abandonArmed };
+        const view = { status: cur.status, reason: cur.reason || '', notice: notice || (cur.recordError ? combatReasonText(cur.recordError) : ''), pending, selected, controlledId, skin: skinOf(), front: frontFoe, orient: canvasOrient, abandonArmed };
         if (cur.status === 'blocked' && Array.isArray(cur.rejected)) {
             const lead = cur.rejected.find((r) => r?.fallback?.kind === 'blocked') || cur.rejected[0];
             view.cause = lead?.errors?.[0]?.reason || '';
         }
         const challenge = cur.kind === 'challenge';
         if (historyOpen) { view.historyOpen = true; view.challenge = true; view.history = typeof options.challengeHistory === 'function' ? options.challengeHistory() : null; }
+        if (purgeOpen) { view.purgeOpen = true; if (purgeFocus) view.purgeFocus = purgeFocus; }
+        if (upgradeOpen) { view.upgradeOpen = true; if (upgradeFocus) view.upgradeFocus = upgradeFocus; }
         if (challenge) view.challenge = true;
         const mechanic = challenge ? cur.challenge?.intimate?.mechanic || cur.challengeSetup?.challenge?.intimate?.mechanic || '' : '';
         if (mechanic) view.intimate = mechanic;
@@ -735,7 +744,7 @@ export function createCombatPanelController(doc, options = {}) {
         if (v?.status === drawnStatus && (v?.recordError || '') === drawnRecordError && flipSig(v) === drawnFlip) return;
         if (settling) return;
         onCardArtUpdated();
-        if (v?.status === 'done') loadRewards();
+
     }
 
     function clearCutins() {
@@ -1591,7 +1600,7 @@ export function createCombatPanelController(doc, options = {}) {
         say(r);
         if (r.session?.lobby) controlledId = r.session.lobby.heroId ?? 'hero';
         render();
-        if (r.session?.status === 'done') loadRewards();
+
         runFollowUp(r.session);
         return r;
     }
@@ -1640,7 +1649,7 @@ export function createCombatPanelController(doc, options = {}) {
         pending = '';
         say(r);
         render();
-        if (r.ok && r.session?.status === 'done') loadRewards();
+
         return r;
     }
 
@@ -1901,39 +1910,6 @@ export function createCombatPanelController(doc, options = {}) {
         return true;
     }
 
-    // 升级三选一：账本里仍有未领取的等级奖励时逐级给出；只接受本次给出的选项。
-    async function loadRewards() {
-        const ledger = typeof options.getLedger === 'function' ? options.getLedger() : null;
-        if (!ledger) return;
-        const my = token;
-        let st;
-        try { st = await ledger.effectiveState(); } catch (error) { st = { ok: false, reason: 'combat-ledger-read-failed' }; }
-        if (my !== token) return;
-        rewards = null;
-        if (!st.ok) notice = combatReasonText(st.reason);
-        else {
-            const seed = session()?.state().reportId || '';
-            for (const view of st.characters.values()) {
-                if (view.kind !== 'deck-character' || !view.pendingRewards.length) continue;
-                rewards = { characterId: view.id, name: view.name, ...rewardChoices(view, view.pendingRewards[0], seed) };
-                break;
-            }
-        }
-        render();
-    }
-
-    async function claimReward(id) {
-        const ledger = typeof options.getLedger === 'function' ? options.getLedger() : null;
-        if (!ledger || !rewards || pending) return { ok: false, reason: pending ? 'combat-busy' : 'combat-reward-unavailable' };
-        const [kind, value = ''] = String(id || '').split(':');
-        const offered = kind === 'card' ? rewards.cards.some((c) => c.cardId === value)
-            : kind === 'upgrade' ? rewards.upgrades.some((u) => u.targetId === value) : kind === 'skip';
-        if (!offered) return { ok: false, reason: 'combat-reward-choice-invalid' };
-        const choice = kind === 'card' ? { kind, cardId: value } : kind === 'upgrade' ? { kind, targetId: value } : { kind: 'skip' };
-        const r = await runAsync('reward', () => ledger.claimReward(rewards.characterId, rewards.level, choice));
-        if (r.ok) await loadRewards();
-        return r;
-    }
 
     // 「重试」：阻断原因来自数据库表（缺表、未载入、建表失败等）时，先经服务再补建一次（清掉上次建表失败的记忆），再重新准备。
     async function retryPrepare() {
@@ -2006,6 +1982,46 @@ export function createCombatPanelController(doc, options = {}) {
                 if (position < 0) return { ok: false, reason: 'combat-flip-position-invalid' };
                 return runAsync('flip', () => (name === 'flip' ? s.flip(position) : s.choose(position)));
             }
+            case 'pick-card': {
+                const value = id === 'skip' ? 'skip' : /^\d+$/.test(id) ? Number(id) : -1;
+                if (value === -1) return { ok: false, reason: 'combat-flip-position-invalid' };
+                if (typeof s.pickCard !== 'function') return { ok: false, reason: 'combat-flip-card-unavailable' };
+                return runAsync('flip', () => s.pickCard(value));
+            }
+            case 'pick-purge': {
+                const value = typeof id === 'string' && /^[A-Za-z0-9_:.-]{1,200}$/.test(id) ? id : '';
+                if (!value) return { ok: false, reason: 'combat-purge-copy-missing' };
+                if (typeof s.pickPurge !== 'function') return { ok: false, reason: 'combat-purge-unavailable' };
+                return runAsync('flip', () => s.pickPurge(value)).then((picked) => {
+                    if (picked?.ok === true && purgeOpen) { purgeOpen = false; purgeFocus = ''; render(); }
+                    return picked;
+                });
+            }
+            case 'purge-focus': {
+                if (!purgeOpen || typeof id !== 'string' || !/^[A-Za-z0-9_:.-]{1,200}$/.test(id)) return { ok: false, reason: 'combat-purge-copy-missing' };
+                purgeFocus = id; render(); return { ok: true };
+            }
+            case 'purge-open':
+                if (typeof s.pickPurge !== 'function') return { ok: false, reason: 'combat-purge-unavailable' };
+                purgeOpen = true; purgeFocus = ''; upgradeOpen = false; upgradeFocus = ''; render(); return { ok: true };
+            case 'purge-close': purgeOpen = false; purgeFocus = ''; render(); return { ok: true };
+            case 'pick-upgrade': {
+                const value = typeof id === 'string' && /^[A-Za-z0-9_:.-]{1,200}$/.test(id) ? id : '';
+                if (!value) return { ok: false, reason: 'combat-card-upgrade-copy-missing' };
+                if (typeof s.pickUpgrade !== 'function') return { ok: false, reason: 'combat-card-upgrade-unavailable' };
+                return runAsync('flip', () => s.pickUpgrade(value)).then((picked) => {
+                    if (picked?.ok === true && upgradeOpen) { upgradeOpen = false; upgradeFocus = ''; render(); }
+                    return picked;
+                });
+            }
+            case 'upgrade-focus': {
+                if (!upgradeOpen || typeof id !== 'string' || !/^[A-Za-z0-9_:.-]{1,200}$/.test(id)) return { ok: false, reason: 'combat-card-upgrade-copy-missing' };
+                upgradeFocus = id; render(); return { ok: true };
+            }
+            case 'upgrade-open':
+                if (typeof s.pickUpgrade !== 'function') return { ok: false, reason: 'combat-card-upgrade-unavailable' };
+                upgradeOpen = true; upgradeFocus = ''; purgeOpen = false; purgeFocus = ''; render(); return { ok: true };
+            case 'upgrade-close': upgradeOpen = false; upgradeFocus = ''; render(); return { ok: true };
             case 'reroll': return runAsync('flip', () => s.reroll());
             case 'retry-reward': return runAsync('reward', () => s.retryReward());
             case 'skip': return runAsync('skip', () => s.skip());
@@ -2033,7 +2049,7 @@ export function createCombatPanelController(doc, options = {}) {
                 clearTimeout(abandonTimer);
                 return sendAndLeave(() => s.abandon());
             }
-            case 'reward': return claimReward(id);
+
             default: return { ok: false, reason: 'combat-action-unknown' };
         }
     }
@@ -2046,7 +2062,10 @@ export function createCombatPanelController(doc, options = {}) {
         const tipAnchor = event.target?.closest?.('[data-scale-tip]');
         if (tipAnchor && root?.contains?.(tipAnchor)) {
             event.preventDefault?.();
-            if (scaleTip?.anchor === tipAnchor) hideScaleTip(); else showScaleTip(tipAnchor);
+            if (scaleTip?.anchor === tipAnchor) {
+                if (scaleTip.hover) delete scaleTip.hover;
+                else hideScaleTip();
+            } else showScaleTip(tipAnchor);
             return;
         }
         // 点在头像详情浮层里（可滚动阅读）不收起；点特性圆球或头像时由它们自己切换详情（再点同一个收起），不先收起。
@@ -2106,6 +2125,10 @@ export function createCombatPanelController(doc, options = {}) {
         event.preventDefault?.();
     }
 
+    function onContextMenu(event) {
+        event.preventDefault?.();
+    }
+
     // 炉石式拖牌：按住手牌拖过 DRAG_SLOP 后按点选流程选中这张牌，影子卡跟随指针；松在高亮的承受方上按点选同一条路径打出（影子卡从松手处飞出），松在别处撤销选中。
     // 主动特性圆球同样可拖（助手 10-28）：拖过阈值按点选流程选中这项技能，影子圆球跟随指针，松在高亮的承受方上发动，不选目标的技能松在战场上也发动，松在别处撤销。
     // 不可出的牌与不可用的技能照常给出原因提示；点选、取消按钮与 Esc 不变，Esc 在拖动中同样撤销。drag.sel 为对应的选中标记（牌为实例 ID，技能为 skillSelection）。
@@ -2122,6 +2145,7 @@ export function createCombatPanelController(doc, options = {}) {
     function onPointerDown(event) {
         dragClickUntil = 0;
         if (drag || event.isPrimary === false || (event.button ?? 0) !== 0) return;
+        if (event.target?.closest?.('[data-scale-tip]')) return;
         const el = event.target?.closest?.(DRAG_SOURCES);
         if (!el || !root?.contains?.(el)) return;
         // 待选阶段不拖：点候选牌走点击切换已选。
@@ -2262,9 +2286,15 @@ export function createCombatPanelController(doc, options = {}) {
         if (event.pointerType === 'touch') return;
         const el = event.target?.closest?.(`${SEL.hand} [data-combat-act="card"]`);
         setHover(el && root?.contains?.(el) ? el.getAttribute('data-combat-id') || '' : '');
+        const anchor = event.target?.closest?.('[data-scale-tip]');
+        if (!drag && anchor && root?.contains?.(anchor) && !scaleTip) {
+            showScaleTip(anchor);
+            if (scaleTip) scaleTip.hover = true;
+        }
     }
     function onPointerOut(event) {
         const to = event.relatedTarget;
+        if (scaleTip?.hover && !scaleTip.anchor.contains?.(to) && !scaleTip.node.contains?.(to)) hideScaleTip();
         if (!to || !root?.contains?.(to)) setHover('');
     }
 
@@ -2322,7 +2352,8 @@ export function createCombatPanelController(doc, options = {}) {
         followUp = ['auto', 'abandon'].includes(openOptions.then) ? openOptions.then : '';
         preview = openOptions.preview && typeof openOptions.preview === 'object' ? openOptions.preview : null;
         historyOpen = openOptions.history === true;
-        notice = ''; pending = ''; selected = null; chosen = []; controlledId = null; rewards = null; settling = false; lobbyShown = false; autoGen = -1; flipShown = null; resultShown = null;
+        purgeOpen = false; purgeFocus = ''; upgradeOpen = false; upgradeFocus = '';
+        notice = ''; pending = ''; selected = null; chosen = []; controlledId = null; settling = false; lobbyShown = false; autoGen = -1; flipShown = null; resultShown = null;
         frontFoe = '';
         token += 1;
         pageOverlay = overlay;
@@ -2348,6 +2379,8 @@ export function createCombatPanelController(doc, options = {}) {
         root.addEventListener('click', onClick);
         // 战斗演出全程（战前、开战过场、战斗、结算）不拖动立绘、卡面等素材；框选文字由样式层禁止。
         root.addEventListener('dragstart', onDragStart);
+        // 右键不弹浏览器菜单（长按菜单由样式层的 -webkit-touch-callout 处理）。
+        root.addEventListener('contextmenu', onContextMenu);
         // 拖牌的指针事件挂在根节点：拖动中指针捕获到根节点，移出手牌区也能跟随。
         for (const [type, fn] of pointerListeners) root.addEventListener(type, fn);
         root.addEventListener('touchmove', onTouchMove, { passive: false });
@@ -2372,8 +2405,7 @@ export function createCombatPanelController(doc, options = {}) {
         // 鞭尸中途关掉面板：重开时敌人已全灭，停顿后照常结束回合判胜。
         maybeFinish();
         if (messageId !== null && !busy && !same) prepare();
-        else if (cur.status === 'done') loadRewards();
-        else runFollowUp(cur);
+        else if (cur.status !== 'done') runFollowUp(cur);
         // 焦点落在面板本身而不是关闭按钮：打开时右上角不画焦点环，按 Tab 仍从关闭按钮开始。
         root.focus?.();
         return { ok: true };
@@ -2412,6 +2444,7 @@ export function createCombatPanelController(doc, options = {}) {
         if (speedWatch) { speedWatch.disconnect(); speedWatch = null; }
         root.removeEventListener?.('click', onClick);
         root.removeEventListener?.('dragstart', onDragStart);
+        root.removeEventListener?.('contextmenu', onContextMenu);
         for (const [type, fn] of pointerListeners) root.removeEventListener?.(type, fn);
         root.removeEventListener?.('touchmove', onTouchMove);
         closePicker();
@@ -2439,7 +2472,7 @@ export function createCombatPanelController(doc, options = {}) {
         setStagePauseReason(pageOverlay, PAUSE_REASON, false);
         battleMusic(pageOverlay, false);
         pageOverlay = null;
-        pending = ''; rewards = null; selected = null; chosen = []; settling = false; lobbyShown = false; autoGen = -1; flipShown = null; resultShown = null;
+        pending = ''; selected = null; chosen = []; settling = false; lobbyShown = false; autoGen = -1; flipShown = null; resultShown = null; purgeOpen = false; purgeFocus = ''; upgradeOpen = false; upgradeFocus = '';
         const focus = previousFocus;
         previousFocus = null;
         focus?.focus?.();
