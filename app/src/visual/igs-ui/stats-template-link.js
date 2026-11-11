@@ -2,7 +2,7 @@
 // 发布包里 bundle 位于 dist/ 根目录，build.js 把模板复制到 dist/templates/，因此按 ./templates/ 相对解析。
 import { STATS_TEMPLATE_FILE } from '../../data/shujuku/stats-template-adapt.js';
 
-const REPOSITORY = 'Anyno001/IGS_GaLSystem';
+const REPOSITORY = 'Anyno001/Immersive-Galgame-System-AnyNo001';
 const TEMPLATE_REF = 'main';
 
 export function statsTemplateUrl(base = import.meta.url) {
