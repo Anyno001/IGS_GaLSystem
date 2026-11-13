@@ -1,3 +1,4 @@
+import { formatCaptureTime, formatPromptCapture, listPromptCaptures, promptCaptureKindLabel } from '../../generated-images/image-prompt-capture.js';
 import { renderNaiQuota } from './settings-nai-quota.js';
 import { renderTtsVoiceLibrary } from './tts-voice-library-view.js';
 import { renderTtsVoicePoolGroups, ttsVoiceSelectInput } from './tts-voice-options.js';
@@ -38,7 +39,7 @@ import { renderModelProfileRow } from './settings-model-profiles.js';
 import { normalizeSettingsTheme, renderSettingsThemeSwitch } from './settings-theme.js';
 import { fontOptionsWith, loadCustomFonts, registerCustomFonts } from '../../media/custom-fonts.js';
 import { DIALOG_FONT_OPTIONS, PROMPT_RULE_OFF_HINT, PROMPT_RULE_PRESET_HINT, scenePromptRuleOutfitHint, SETTINGS_PANEL_REQUIRED_SELECTORS, SETTINGS_PANEL_TAB_CONTRACT } from './reader-host-constants.js';
-import { PUBLIC_READER_MODES, getReaderModeLabel } from '../../schemas/reader-mode.js';
+import { FRAME_RADIUS_CHOICES, PUBLIC_READER_MODES, getReaderModeLabel } from '../../schemas/reader-mode.js';
 import { esc, toHex } from './reader-value-utils.js';
 
 import { normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale } from './settings-normalize.js';
@@ -51,7 +52,7 @@ import { normalizeImageJobLogSettings, formatImageJobLogTime, imageJobLogLevelLa
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
 import { CREATURE_DISPLAY_RANGE, normalizeCreatureDisplaySettings } from '../../scene/creature-profile.js';
 import { normalizeStatsSettings } from '../../scene/stats/stat-settings.js';
-import { ORIGIN_CREDIT, ORIGIN_DEFAULT_NAME, ORIGIN_MODS, ORIGIN_MOD_LABELS, ORIGIN_PERSONALITIES, ORIGIN_REPO_URL, normalizeOriginSettings } from './origin-settings.js';
+import { ORIGIN_CREDIT, ORIGIN_DEFAULT_NAME, ORIGIN_MODS, ORIGIN_MOD_LABELS, ORIGIN_PERSONALITIES, ORIGIN_REPO_URL, ORIGIN_ECON_STYLES, normalizeOriginSettings, originEconStyle } from './origin-settings.js';
 import { originChatStatus } from './origin-attach.js';
 import { rulesetOptions } from '../../scene/stats/rulesets/index.js';
 import { COMBAT_DIFFICULTY_KEYS, COMBAT_RULES } from '../../combat/rules.js';
@@ -368,7 +369,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 originPersonaTextField: field('bridge.origin.personaText', '自定义人格', textareaInput('bridge.origin.personaText', origin.personaText, '填写后覆盖上面的人格腔调'), '留空使用人格腔调'),
                 originBindToField: field('bridge.origin.bindTo', '系统绑定对象', textInput('bridge.origin.bindTo', origin.bindTo, '宿主')),
                 originRpChatField: field('bridge.origin.rpChat', '反串私聊', selectInput('bridge.origin.rpChat', origin.rpChat, [['auto', '随正文生成'], ['manual', '仅手动生成']])),
-                originAutoEconField: checkbox('bridge.origin.autoEcon', origin.autoEcon, '允许角色自主使用系统（购买、抽奖、使用道具）'),
+                originEconStyleField: field('bridge.origin.econStyle', '使用策略', selectInput('bridge.origin.econStyle', originEconStyle(origin), ORIGIN_ECON_STYLES)),
+                originEconTextField: field('bridge.origin.econText', '自定义策略', textareaInput('bridge.origin.econText', origin.econText, '例如：只在任务卡住时买道具，抽奖留到剧情转折'), '填写后覆盖使用策略'),
                 originChatToStoryField: checkbox('bridge.origin.chatToStory', origin.chatToStory, '宿主与系统的对话结果写入剧情'),
                 originRouteField: field('bridge.origin.route', '系统请求', selectInput('bridge.origin.route', origin.route, [['tavern', '跟随酒馆当前连接'], ['llm', '使用备用模型']])),
                 originModelField: field('bridge.origin.llmProfile', '备用模型预设', selectInput('bridge.origin.llmProfile', origin.llmProfile, originProfileChoices(origin.llmProfile))),
@@ -446,6 +448,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 advancedImageLogOpen: advancedOpen('image-log-retain'),
                 imageLogStatus: esc(asyncState.imageLogStatus || ''),
                 imageLogList: page === 'logs' && !idx ? renderImageJobLogList() : '',
+                imagePromptCaptureStatus: esc(asyncState.imagePromptCaptureStatus || ''),
+                imagePromptCaptureList: page === 'logs' && !idx ? renderPromptCaptureList() : '',
                 imageCacheCountField: field('bridge.imageCache.maxCount', '本地缓存张数', numberInput('bridge.imageCache.maxCount', normalizeImageCacheCount(bridge.imageCache && bridge.imageCache.maxCount), 1, 2000)),
                 imageCompressionField: checkbox('bridge.imageCache.compressDisplay', bridge.imageCache?.compressDisplay !== false, '压缩显示图片（WebP）'),
                 ttsCacheField: field('readerSettings.tts.cacheMax', '朗读缓存保留条数', numberInput('readerSettings.tts.cacheMax', normalizeTtsSettings(reader && reader.tts).cacheMax, 0, TTS_CACHE_LIMIT)),
@@ -459,7 +463,6 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 imageContentNote: contentNotes[sourceMode] ? `<div class="igs-source-filter-note">${esc(contentNotes[sourceMode])}</div>` : '',
                 sourceNaiHidden: hiddenAttr(sourceMode !== 'nai'),
                 sourceBuiltinHidden: hiddenAttr(sourceMode !== 'nai'),
-                sourceConsistencyHidden: hiddenAttr(sourceMode !== 'nai' && sourceMode !== 'dbgen'),
                 sourceExtensionHidden: hiddenAttr(sourceMode !== 'extension'),
                 sourceDbgenHidden: hiddenAttr(sourceMode !== 'dbgen'),
                 sourceExternalHidden: hiddenAttr(sourceMode === 'nai'),
@@ -467,6 +470,9 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                     imageApi.spriteMatteColor || 'auto', [['auto', '自动'], ['white', '白底'], ['grey', '灰底'], ['green', '绿底'], ['purple', '紫底']], '抠图底色'),
                     '立绘与物品图未出透明底时按此底色出图后抠除，角色主色与底色相近时可更换。自动：内置NAI与数据库生图用白底，其余用浅灰底。'),
                 autoMatteField: !isMatteUnlocked() ? '' : checkbox('bridge.imageApi.autoMatte', imageApi.autoMatte !== false, '自动抠图（关闭后保留原图底色）'),
+                directorEmotionField: field('bridge.autoIllustration.nai.expressionRoute', '表情差分方式', segmentedInput('bridge.autoIllustration.nai.expressionRoute',
+                    auto.nai.expressionRoute, [['full', '整张生成'], ['face', '只改脸部'], ['director', '导演工具']], '表情差分方式'),
+                    '只改脸部：其余像素与默认立绘一致，与剧情CG局部重绘共用下方强度与模型。导演工具：需官方NAI或支持该接口的中转。'),
                 externalSpriteDnaField: checkbox('bridge.imageApi.externalSpriteDna', imageApi.externalSpriteDna === true, '外部生图前补齐角色 DNA'),
                 naiSpriteTransparentField: checkbox('bridge.imageApi.naiSpriteTransparent', imageApi.naiSpriteTransparent !== false, '立绘透明底'),
                 dbgenSpriteTransparentField: checkbox('bridge.imageApi.dbgenSpriteTransparent', imageApi.dbgenSpriteTransparent !== false, '立绘透明底（V4.5 请关闭）'),
@@ -541,8 +547,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 autoNaiSizeField: field('bridge.autoIllustration.nai.size', '尺寸', textInput('bridge.autoIllustration.nai.size', auto.nai.size, '832x1216')),
                 autoNaiStepsField: field('bridge.autoIllustration.nai.steps', '步数', numberInput('bridge.autoIllustration.nai.steps', effectiveNai.steps, 1, 50, medium)),
                 autoNaiScaleField: field('bridge.autoIllustration.nai.scale', 'CFG', numberInput('bridge.autoIllustration.nai.scale', auto.nai.scale, 0, 10, false, 'any')),
-                consistencyStrengthField: field('bridge.autoIllustration.consistencyStrength', '一致性重绘强度', numberInput('bridge.autoIllustration.consistencyStrength', auto.consistencyStrength, 0.1, 1, false, '0.05')),
-                consistencyModelField: field('bridge.autoIllustration.consistencyModel', '一致性重绘模型', selectInput('bridge.autoIllustration.consistencyModel', auto.consistencyModel, CONSISTENCY_MODEL_OPTIONS)),
+                consistencyStrengthField: field('bridge.autoIllustration.consistencyStrength', '重绘强度', numberInput('bridge.autoIllustration.consistencyStrength', auto.consistencyStrength, 0.1, 1, false, '0.05')),
+                consistencyModelField: field('bridge.autoIllustration.consistencyModel', '重绘模型', selectInput('bridge.autoIllustration.consistencyModel', auto.consistencyModel, CONSISTENCY_MODEL_OPTIONS)),
                 autoNaiSamplerField: field('bridge.autoIllustration.nai.sampler', '采样器', textInput('bridge.autoIllustration.nai.sampler', effectiveNai.sampler, 'k_euler_ancestral', 'text', medium)),
             };
             const anchorViewportField = (autoSettings) => {
@@ -589,6 +595,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                         + `<div class="igs-settings-sub" data-image-feature="backfill"${hiddenAttr(!auto.interludeEnabled && !auto.nsfwEnabled)}>${imageFields.autoBackfillField}</div>`,
                     nsfw: imageFields.autoNsfwField
                         + `<div class="igs-settings-sub" data-image-feature="nsfw"${imageFields.autoNsfwHidden}>${grid(imageFields.autoNsfwCountField)}</div>`,
+                    inpaint: sourceMode === 'nai' || sourceMode === 'dbgen'
+                        ? imageFields.directorEmotionField + grid(imageFields.consistencyStrengthField, imageFields.consistencyModelField) : '',
                 },
             });
             return imageFields;
@@ -877,7 +885,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             };
         });
         // 阅读器打开方式：「界面 › 阅读器」和仪表盘共用这一段，同一个存储路径 bridge.openMode。
-        const openModeHtml = () => `<div class="igs-segmented-field igs-key-block">${field(
+        const openModeHtml = () => `<div class="igs-segmented-field igs-open-mode-field igs-key-block">${field(
             'bridge.openMode',
             '打开方式',
             segmentedInput(
@@ -886,7 +894,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 PUBLIC_READER_MODES.map((id) => [id, getReaderModeLabel(id), getReaderModeIcon(id)]),
                 '打开方式',
             ),
-        )}</div>${bridge.openMode === 'embedded' ? field('readerSettings.embeddedHeight', '内嵌高度', selectInput('readerSettings.embeddedHeight', reader.embeddedHeight ?? 1, [[0.8, '矮'], [1, '标准'], [1.25, '高'], [1.5, '更高']])) : ''}`;
+        )}</div>${bridge.openMode === 'embedded' ? field('readerSettings.embeddedHeight', '内嵌高度', selectInput('readerSettings.embeddedHeight', reader.embeddedHeight ?? 1, [[0.8, '矮'], [1, '标准'], [1.25, '高'], [1.5, '更高']])) : ''}${bridge.openMode === 'dock' ? checkbox('readerSettings.dockCoverStatusBar', reader.dockCoverStatusBar, '盖住手机状态栏') : ''}${['pc', 'mobile', 'embedded'].includes(bridge.openMode) ? field('readerSettings.frameRadius', '外框圆角', selectInput('readerSettings.frameRadius', reader.frameRadius ?? 'null', [['null', '默认'], ...FRAME_RADIUS_CHOICES.map((n) => [n, n ? `${n}px` : '直角'])])) : ''}`;
         const getReaderValues = memo(() => {
         const sceneEnabled = !!(bridge.sceneAssets && bridge.sceneAssets.enabled);
         const classicDialog = reader.dialogSkin === DIALOG_SKIN_WESTERN_CLASSIC;
@@ -1191,6 +1199,17 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
         }
     }
 
+    function renderPromptCaptureList() {
+        const list = listPromptCaptures();
+        if (!list.length) return '<div class="igs-image-log-empty">暂无记录。内置通道发出生图请求后，完整请求会记录在这里。</div>';
+        return list.map((e) => {
+            const head = String(e.body?.input ?? e.body?.prompt ?? '').replace(/\s+/g, ' ').slice(0, 40);
+            const version = String(e.serverModel || '').replace(/^NovelAI Diffusion\s*/i, '');
+            const summary = [formatCaptureTime(e.at), promptCaptureKindLabel(e.kind), e.model || '未知', version, head].filter(Boolean).join(' · ');
+            return `<details class="igs-prompt-capture-item"><summary>${esc(summary)}</summary><pre class="igs-prompt-capture-text">${esc(formatPromptCapture(e))}</pre></details>`;
+        }).join('');
+    }
+
     function renderImageJobLogList() {
         const log = options.imageJobLog;
         const list = log && typeof log.list === 'function' ? log.list() : [];
@@ -1268,7 +1287,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
         const tiles = s.entries.map((entry, index) => {
             const label = entry.kind === 'photo' ? '照片' : `第 ${entry.messageId} 楼`;
             const on = selected.has(entry.key);
-            return `<article class="igs-image-cg-tile"><label class="igs-image-cg-check"><input type="checkbox" data-action="image-cg-toggle:${index}" ${on ? 'checked' : ''} aria-label="选择${esc(label)}"></label><button type="button" class="igs-image-cg-view" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图"><span class="igs-image-cg-pic" data-image-cg-thumb="${esc(entry.key)}">${imageCgThumbHtml(view, entry)}</span><span>${esc(label)}</span></button><button type="button" class="igs-image-cg-delete" data-action="image-cg-delete:${index}">删除</button></article>`;
+            return `<article class="igs-image-cg-tile"><label class="igs-image-cg-check"><input type="checkbox" data-action="image-cg-toggle:${index}" ${on ? 'checked' : ''} aria-label="选择${esc(label)}"></label><button type="button" class="igs-image-cg-view" data-action="image-cg-view:${index}" aria-label="查看${esc(label)}大图"><span class="igs-image-cg-pic" data-image-cg-thumb="${esc(entry.key)}">${imageCgThumbHtml(view, entry)}</span><span>${esc(label)}</span></button><span class="igs-image-cg-ops"><button type="button" class="igs-image-cg-download" data-action="image-cg-download:${index}">下载</button><button type="button" class="igs-image-cg-delete" data-action="image-cg-delete:${index}">删除</button></span></article>`;
         }).join('');
         const empty = s.phase === 'ready' && !s.entries.length ? '<div class="igs-scene-empty">还没有生成过CG</div>' : '';
         return pager + line + (tiles || empty);
