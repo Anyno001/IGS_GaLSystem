@@ -12,6 +12,7 @@ import { CANVAS_STYLE_TEXT } from './combat-skin-registry.js';
 import { INTIMATE_DUEL_STYLE_TEXT } from './intimate-duel-style.js';
 import { INTIMATE_DUEL_FX_STYLE_TEXT } from './intimate-duel-fx.js';
 import { COMBAT_ENTRY_SKIN_STYLE_TEXT } from './combat-entry-skin-style.js';
+import { COMBAT_POWER_STYLE_TEXT } from './combat-power-badges.js';
 
 // 战斗面板与卡组构筑面板共用的视觉 token：墨色、填充、圆角、字体取自 ui-material，与资料页、地图、设置一致；
 // 语义色沿用状态栏数值条色板（reader-dom-render 的 STATUS_HUD_COLOR_VARS），类型只用色点与图标着色区分，不铺整块底色。
@@ -325,6 +326,8 @@ ${C} .igs-combat-unit-badges>.igs-combat-block{max-width:100%;box-sizing:border-
 ${C} .igs-combat-statuses{display:flex;flex-wrap:wrap-reverse;justify-content:flex-end;gap:3px;max-width:100%;max-height:33px;overflow:hidden;pointer-events:none;}
 ${C} .igs-combat-statuses span{height:15px;padding:0 5px;border-radius:var(--igs-cb-r-s);background:var(--igs-cb-veil);color:var(--igs-cb-ink-soft);font-size:11px;font-weight:500;line-height:15px;white-space:nowrap;font-variant-numeric:tabular-nums;text-shadow:none;}
 ${C} .igs-combat-statuses b{color:var(--igs-cb-ink);font-weight:700;}
+/* 带注释的状态片与资源项：悬停或点按弹出 .igs-combat-scale-tip；外层容器不接收指针，这里单独打开。 */
+${C} :is(.igs-combat-statuses,.igs-cx-canvas) [data-status][data-scale-tip],${C} .cx-res[data-scale-tip]{pointer-events:auto;cursor:help;}
 /* 规则 v5 主战者资源条：我方一排末尾独占一行、居中；每项为深色小底加图形与数值，无描边。法珠 16px 一颗，10 槽约 178px，竖屏 320px 宽仍放得下。 */
 ${C} .igs-combat-hero:has(>.igs-combat-res){flex-wrap:wrap;row-gap:6px;}
 ${C} .igs-combat-hero>.igs-combat-res{order:9;flex:0 0 100%;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:4px 6px;min-width:0;}
@@ -361,11 +364,11 @@ ${C} #igs-cx-canvas .cx-res-row .cx-orb{width:12px;height:12px;}
 ${C} #igs-cx-canvas .cx-res-row .cx-res-ico{width:11px;height:11px;}
 
 ${C} .igs-combat-intent{--it:var(--igs-cb-warm);position:relative;z-index:1;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:0 4px;align-self:center;box-sizing:border-box;width:max-content;max-width:calc(100% + var(--e-gap,0px) - 4px);min-height:24px;margin-bottom:-4px;padding:2px 8px;border-radius:var(--igs-cb-r-m);background:var(--igs-cb-veil);color:var(--igs-cb-ink-soft);font-size:12px;font-weight:600;letter-spacing:.04em;line-height:1.25;text-align:center;box-shadow:0 6px 14px -8px rgba(0,0,0,.7);}
-${C} .igs-combat-intent[data-intent="attack"]{--it:var(--igs-cb-attack);}
-${C} .igs-combat-intent[data-intent="defend"]{--it:var(--igs-cb-skill);}
+${C} .igs-combat-intent:is([data-intent^="attack"],[data-intent="explode"]){--it:var(--igs-cb-attack);}
+${C} .igs-combat-intent[data-intent^="defend"]{--it:var(--igs-cb-skill);}
 ${C} .igs-combat-intent[data-intent="heal"]{--it:var(--igs-cb-life);}
 ${C} .igs-combat-intent[data-intent="debuff"]{--it:var(--igs-cb-power);}
-${C} .igs-combat-intent-icon{flex:none;display:grid;place-items:center;color:var(--it);}
+${C} .igs-combat-intent-icon{flex:none;display:inline-flex;align-items:center;gap:3px;color:var(--it);}
 ${C} .igs-combat-intent-icon svg{width:16px;height:16px;stroke-width:1.8;}
 ${C} .igs-combat-intent :is(.igs-combat-intent-value,.igs-combat-intent-kind){flex:none;color:var(--it);font-weight:700;}
 ${C} .igs-combat-intent-value{font-size:17px;line-height:1;font-variant-numeric:tabular-nums;}
@@ -740,12 +743,19 @@ ${C} .igs-combat-loot-face{display:flex;flex-direction:column;align-items:center
 ${C} .igs-combat-loot-tag{color:var(--rar);font-size:11px;font-weight:700;letter-spacing:.12em;}
 ${C} .igs-combat-loot-name{max-width:100%;font-size:15px;font-weight:700;line-height:1.3;overflow-wrap:anywhere;}
 ${C} .igs-combat-loot-origin{max-width:100%;color:var(--igs-cb-ink-soft);font-size:11px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+${C} .igs-combat-loot-choices:not(.is-full){align-items:stretch;}
+${C} .igs-combat-loot-choices:not(.is-full)>.igs-combat-loot-card{width:min(260px,calc((100% - (var(--n,1) - 1) * 12px) / var(--n,1)));aspect-ratio:auto;}
+${C} .igs-combat-loot-choices:not(.is-full) .igs-combat-loot-face{position:relative;min-height:180px;height:100%;gap:8px;padding:16px 12px;}
+${C} .igs-combat-loot-effect{max-width:100%;font-size:13px;line-height:1.6;overflow-wrap:anywhere;white-space:normal;}
+${C} .igs-combat-loot-choices .igs-combat-loot-origin{display:block;-webkit-line-clamp:unset;overflow:visible;overflow-wrap:anywhere;}
+${C} .igs-combat-loot-choices.is-full{flex-direction:column;align-items:center;gap:8px;}
+${C} .igs-combat-loot-description{max-width:100%;margin:0;color:var(--igs-cb-ink-soft);font-size:12px;line-height:1.5;text-align:center;overflow-wrap:anywhere;}
 ${combatRarityStyle(`${C} .igs-combat-loot-card`)}
 ${C} .igs-combat-loot-card:is([data-rarity="epic"],[data-rarity="mythic"]) .igs-combat-loot-name{color:var(--rar);}
 ${C} .igs-combat-loot-card.is-chosen{transform:translateY(-6px);}
 ${C} .igs-combat-loot-card.is-chosen .igs-combat-loot-face{box-shadow:0 0 22px -2px color-mix(in srgb,var(--rar) 70%,transparent),0 14px 28px -14px rgba(0,0,0,.7),inset 0 1.5px 0 var(--rar);}
 ${C} .igs-combat-loot-card.is-dim{opacity:.6;}
-${C} .igs-combat-loot-tools{display:flex;justify-content:center;}
+${C} .igs-combat-loot-tools{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;}
 ${C} .igs-combat-purge-sheet{position:absolute;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;}
 ${C} .igs-combat-purge-veil{position:absolute;inset:0;background:rgba(0,0,0,.6);cursor:pointer;}
 ${C} .igs-combat-purge-box{position:relative;display:flex;flex-direction:column;gap:12px;width:min(520px,100%);max-height:100%;padding:16px;box-sizing:border-box;overflow:auto;border-radius:var(--igs-cb-r-m);background:rgba(${N},.96);}
@@ -825,6 +835,21 @@ ${COMBAT_PANEL_SKIN_VEIL_STYLE_TEXT}
 ${COMBAT_ENTRY_SKIN_STYLE_TEXT}
 ${COMBAT_PANEL_LAYOUT_STYLE_TEXT}
 ${CANVAS_STYLE_TEXT}
+${P} .igs-combat-loot-detail{--loot-detail-bg:rgba(17,22,29,.36);--loot-detail-ink:var(--igs-cb-ink);--loot-detail-soft:var(--igs-cb-ink-soft);position:absolute;z-index:5;left:var(--loot-detail-left,0px);top:var(--loot-detail-top,0px);width:var(--loot-detail-width,420px);max-width:calc(100% - 16px);max-height:var(--loot-detail-height,260px);box-sizing:border-box;display:flex;flex-direction:column;gap:12px;padding:14px 18px;border:0;border-radius:var(--igs-cb-r-m);background:var(--loot-detail-bg);color:var(--loot-detail-ink);box-shadow:none;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);text-align:center;pointer-events:auto;visibility:hidden;overflow:auto;}
+${P} .igs-combat-loot-detail[data-positioned]{visibility:visible;}
+${P} .igs-combat-loot-detail-text{display:flex;flex-direction:column;align-items:center;gap:8px;min-height:0;overflow:auto;}
+${P} .igs-combat-loot-detail-text>*{flex:none;max-width:100%;margin:0;text-align:center;white-space:normal;overflow-wrap:anywhere;}
+${P} .igs-combat-loot-detail-meta{color:var(--loot-detail-soft);font-size:11px;line-height:1.4;letter-spacing:.08em;}
+${P} .igs-combat-loot-detail-name{font-size:18px;line-height:1.35;}
+${P} .igs-combat-loot-detail-effect{font-size:13px;line-height:1.6;}
+${P} .igs-combat-loot-detail-origin{color:var(--loot-detail-soft);font-size:12px;line-height:1.5;}
+${P} .igs-combat-loot-detail-tools{flex:none;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;}
+${P} .igs-combat-loot-detail-tools .igs-combat-btn{flex:none;width:auto;min-width:64px;min-height:32px;height:auto;padding:7px 16px;background:var(--loot-detail-button,rgba(255,255,255,.09));color:var(--loot-detail-ink);font-size:13px;line-height:1.3;letter-spacing:0;}
+${P} .igs-combat-loot-detail-tools .igs-combat-btn.is-primary{background:var(--loot-detail-action,#e9e3d6);color:var(--loot-detail-action-ink,#192128);}
+${P} .igs-combat-loot-detail[data-skin^="soft-"]{--loot-detail-bg:rgba(255,250,240,.48);--loot-detail-ink:#263841;--loot-detail-soft:#526568;--loot-detail-button:rgba(61,91,87,.1);--loot-detail-action:#b8d9cd;--loot-detail-action-ink:#263841;}
+${P} .igs-combat-loot-detail[data-skin="ink"]{--loot-detail-bg:rgba(18,20,22,.36);--loot-detail-ink:#ece7dd;--loot-detail-soft:#9aa6a1;--loot-detail-action:#b8402e;--loot-detail-action-ink:#f3ead8;border-radius:3px;font-family:var(--font-song);}
+${P} .igs-combat-loot-detail[data-skin="mystic"]{--loot-detail-bg:rgba(15,16,21,.36);--loot-detail-ink:#ebe7da;--loot-detail-soft:#a8a595;--loot-detail-action:#e3d49c;}
+${COMBAT_POWER_STYLE_TEXT}
 ${C} :is(.igs-combat-unit,.cx-unit)[data-swap="out"]{animation:igs-combat-swap-out 520ms var(--igs-cb-ease) var(--swap-t,0ms) both;pointer-events:none;}
 ${C} :is(.igs-combat-unit,.cx-unit)[data-swap="in"]{animation:igs-combat-swap-in 620ms cubic-bezier(.2,.9,.25,1.15) var(--swap-t,0ms) both;}
 @keyframes igs-combat-swap-out{0%{opacity:.4;translate:0 0;}100%{opacity:0;translate:0 18%;}}

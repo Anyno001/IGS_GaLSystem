@@ -13,7 +13,7 @@ import { createIntimateDuelFx } from './intimate-duel-fx.js';
 import { createDuelLowGate } from '../../scene/intimate-duel.js';
 import { combatPortraitNames } from '../../scene/creature-battle.js';
 import { ensureFxLayers } from './fx-layer.js';
-import { COMBAT_HIT_REACT_ATTR, COMBAT_HIT_REACT_MS, applyHitMarks, cloneCardGhost, hpSnapshot, launchCardGhost, paintUnitHp, playedActionName, playedCardFx, reactUnit, showHitFloats, showRarityFx, showWindupFx, windupFx } from './combat-hit-fx.js';
+import { COMBAT_HEAVY_HIT, COMBAT_HIT_REACT_ATTR, COMBAT_HIT_REACT_MS, applyHitMarks, cloneCardGhost, heavyHitRank, hpSnapshot, launchCardGhost, paintUnitHp, playedActionName, playedCardFx, reactUnit, showHeavyBurst, showHitFloats, showRarityFx, showWindupFx, windupFx } from './combat-hit-fx.js';
 import { battleView, challengeLobbyView, combatCutins, combatFxSource, combatHitMarks, combatLandings, endView, isItemSelection, isSkillSelection, itemSelection, lobbyView, pendingChoice, resolveHeroSkill, resolveItem, resolvePlay, selectedItemView, selectedSkillView, selectionItemId, selectionSkillId, skillSelection, unitDetailView, unitView, volleyTargets } from './combat-panel-model.js';
 import { cardTipHtml, combatIntroUiHtml, combatReasonText, renderCombatPanelHtml, ringFront, tintTriplet, traitTipHtml, unitTipHtml } from './combat-panel-render.js';
 import { actionProgress } from '../../combat/engine.js';
@@ -441,6 +441,10 @@ export function createCombatPanelController(doc, options = {}) {
             if (Object.keys(tints).length) view.tints = tints;
         }
         if (cur.status === 'send-failed' || cur.status === 'done') view.report = cur.report ? { result: cur.report.result } : null;
+        if (cur.status === 'send-failed') {
+            view.reportDelivered = cur.reportDelivered === true;
+            if (cur.settlementError) view.settlementError = cur.settlementError;
+        }
         // 胜利翻牌：读取中、读取失败、读到 offer 时追加 flip；没有 offer 时不追加（视图形状不变）。
         if ((cur.status === 'ended' || cur.status === 'send-failed') && cur.flip && cur.flip.status !== 'none') view.flip = cur.flip;
         view.encounter = cur.start?.encounter || cur.start?.event || cur.record?.encounter || '';
@@ -461,7 +465,7 @@ export function createCombatPanelController(doc, options = {}) {
 
     // 整块重绘会换掉单位块：重绘前把单位块上还在播的演出（飘字、受击形态）与受击反馈收起来，重绘后挂回同一单位的新节点，
     // 并按挪动前的播放进度接上（样式动画换了位置会从头再播）；连续出牌时上一张牌的演出不被下一张的重绘清掉。
-    const UNIT_FX = '.igs-combat-float, .igs-combat-rarity-fx';
+    const UNIT_FX = '.igs-combat-float, .igs-combat-rarity-fx, .igs-combat-heavy-burst';
     const animationsOf = (n, subtree) => { try { return (subtree ? n?.getAnimations?.({ subtree: true }) : n?.getAnimations?.()) || []; } catch (error) { return []; } };
     function liftUnitFx() {
         const out = [];
@@ -542,6 +546,7 @@ export function createCombatPanelController(doc, options = {}) {
         if (view.battle && hoverInst) view.hovered = hoverInst;
         if (view.battle && itemsOpen) view.itemsOpen = true;
         // 暂存中的单位已在 snapshot 里按暂存血量写进视图：新节点首帧就是显示值，不会先按结算后的血量算一次样式再补画（那样受击前血条会先跌再回弹）。
+        root.querySelector(':scope > .igs-combat-loot-detail')?.remove();
         body.innerHTML = renderCombatPanelHtml(view);
         // 画布皮肤共用控制器补位状态，不覆盖各套自身的站位与取景。
         for (const u of view.battle?.enemies || []) {
@@ -552,6 +557,7 @@ export function createCombatPanelController(doc, options = {}) {
         }
         restoreUnitFx(lifted);
         syncControlDock();
+        syncLootDetail();
         if (view.intro && !stageFxStyle(skinOf())) flashScreen(false);
         syncIntro(view);
         syncDuel(view);
@@ -566,8 +572,32 @@ export function createCombatPanelController(doc, options = {}) {
         else if (view.battle && selected && !isItemSelection(selected) && !drag?.live && showCardTip(selected)) { /* 截断的牌面说明已弹出 */ }
         else if (view.battle && keepUnit) showUnitTip(keepUnit);
         if (!had) return;
-        const same = act ? [...(body.querySelectorAll?.(`[data-combat-act="${act}"]`) || [])].find((n) => (n.getAttribute('data-combat-id') || '') === id) : null;
+        const same = act ? [...(root.querySelectorAll?.(`[data-combat-act="${act}"]`) || [])].find((n) => (n.getAttribute('data-combat-id') || '') === id) : null;
         (same || root)?.focus?.();
+    }
+
+    function syncLootDetail() {
+        const detail = root?.querySelector('.igs-combat-loot-detail');
+        if (!detail) return;
+        if (detail.parentNode !== root) root.appendChild(detail);
+        const row = root.querySelector('.igs-combat-loot > .igs-combat-loot-row:not(.igs-combat-loot-choices)');
+        if (!row || !root.clientWidth || !root.clientHeight) return;
+        const host = root.getBoundingClientRect();
+        const sx = host.width / root.clientWidth;
+        const sy = host.height / root.clientHeight;
+        if (!(sx > 0 && sy > 0)) return;
+        const cards = [...row.children].map((card) => card.getBoundingClientRect());
+        if (!cards.length) return;
+        const left = (Math.min(...cards.map((r) => r.left)) - host.left) / sx;
+        const right = (Math.max(...cards.map((r) => r.right)) - host.left) / sx;
+        const width = Math.min(right - left, root.clientWidth - 16);
+        const top = (row.getBoundingClientRect().bottom - host.top) / sy + 10;
+        if (!(width > 0)) return;
+        detail.style.setProperty('--loot-detail-left', `${Math.max(8, Math.min(left, root.clientWidth - width - 8))}px`);
+        detail.style.setProperty('--loot-detail-top', `${top}px`);
+        detail.style.setProperty('--loot-detail-width', `${width}px`);
+        detail.style.setProperty('--loot-detail-height', `${Math.max(0, root.clientHeight - top - 8)}px`);
+        detail.setAttribute('data-positioned', '');
     }
 
     function syncControlDock() {
@@ -618,7 +648,7 @@ export function createCombatPanelController(doc, options = {}) {
     function watchControlDock() {
         const host = root;
         const win = doc.defaultView;
-        const sync = () => { if (root === host) syncControlDock(); };
+        const sync = () => { if (root === host) { syncControlDock(); syncLootDetail(); } };
         if (typeof win?.ResizeObserver === 'function') {
             const observer = new win.ResizeObserver(sync);
             observer.observe(host);
@@ -1123,15 +1153,32 @@ export function createCombatPanelController(doc, options = {}) {
     function rarityImpact(fx, targetId) {
         if (!root || !fx?.rank) return;
         const el = root;
-        if (fx.hold) {
-            el.setAttribute('data-igs-combat-hold', '');
-            later(() => el.removeAttribute('data-igs-combat-hold'), fx.hold);
-        }
+        if (fx.hold) holdPanel(el, fx.hold);
         later(() => {
             if (root !== el) return;
             if (fx.shake) shakePanel(el, strikeDirection(fx.unitId, targetId), fx.shake, fx.rank);
             sfx(fx.sfx);
         }, fx.hold);
+    }
+    // 停顿标记按最后一次挂上的时长撤掉：稀有停顿之后再挂更长的大伤害停顿时，不被前一次的计时提前摘除。
+    let holdGen = 0;
+    function holdPanel(el, ms) {
+        const gen = ++holdGen;
+        el.setAttribute('data-igs-combat-hold', '');
+        later(() => { if (gen === holdGen) el.removeAttribute('data-igs-combat-hold'); }, ms);
+    }
+    // 对敌大伤害（COMBAT_HEAVY_HIT）：本段第一次落下时补足停顿、震屏与冲击声；稀有命中已给出的不重复、只取更强的一项。
+    // 低画质不震屏，减少动态效果不停顿、不震、不出声。
+    function heavyImpact(tier, fx, targetId) {
+        if (!root || !tier || reduced()) return;
+        const el = root;
+        const base = fx?.rank ? fx.hold || 0 : 0;
+        if (tier.hold > base) holdPanel(el, tier.hold);
+        later(() => {
+            if (root !== el) return;
+            if (!lowQuality() && tier.shake > (fx?.rank ? fx.shake || 0 : 0)) shakePanel(el, strikeDirection(fx?.unitId, targetId), tier.shake, Math.max(1, fx?.rank || 0));
+            if (!(fx?.rank && fx.sfx)) sfx(tier.sfx);
+        }, Math.max(tier.hold, base));
     }
 
     // 整面板朝 dir 方向推一下再回弹（--igs-shake-x / -y 为方向，--shake 为幅度，data-igs-combat-shake 为档位，380ms 后撤掉）；稀有命中与觉醒收尾共用。
@@ -1458,6 +1505,7 @@ export function createCombatPanelController(doc, options = {}) {
         const strikes = landing?.strikes || new Map();
         const sounded = new Set();
         let impacted = false;
+        let heavied = false;
         for (const { unitId, marks: all } of marks) {
             const name = String(units[unitId]?.name || '').trim();
             let match;
@@ -1482,10 +1530,18 @@ export function createCombatPanelController(doc, options = {}) {
                     const stop = struck && !impacted ? rarity.hold : 0;
                     const ko = defer && entry && list.some((mark) => mark.kind === 'ko');
                     const shown = ko ? list.filter((mark) => mark.kind !== 'ko') : list;
+                    // 对敌大伤害（heavyHitRank）：按这次落下的掉血合计与敌人最大生命定档，飘字砸落、受击重抖、爆点；本段第一次另补停顿与震屏。
+                    const heavy = units[unitId]?.side === 'enemy' ? heavyHitRank(shown, entry?.maxHp || units[unitId]?.maxHp) : 0;
+                    const tier = heavy ? COMBAT_HEAVY_HIT[heavy] : null;
+                    const hold = Math.max(stop, tier && !heavied && !reduced() ? tier.hold : 0);
                     if (entry) { applyHitMarks(entry, shown); if (ko) { entry.hp = 0; entry.ko = true; } paintUnitHp(el, entry); }
-                    showHitFloats(doc, el, shown, { reduced: reduced(), schedule: later, rarity, fresh: hxOn() });
+                    showHitFloats(doc, el, shown, { reduced: reduced(), schedule: later, rarity, fresh: hxOn(), heavy });
                     // 停顿期间受击动画暂停，摘除受击反馈的计时顺延同样时长，动画不被截短。
-                    reactUnit(el, list, { reduced: reduced() || lowQuality(), schedule: stop ? (fn, ms) => later(fn, ms + stop) : later });
+                    reactUnit(el, list, { reduced: reduced() || lowQuality(), schedule: hold ? (fn, ms) => later(fn, ms + hold) : later, heavy: heavy > 0 });
+                    if (heavy) for (const node of showHeavyBurst(doc, el, heavy, { reduced: reduced(), low: lowQuality(), schedule: later })) {
+                        cutinNodes.add(node);
+                        later(() => cutinNodes.delete(node), tier.life);
+                    }
                     hxHitCues(unitId, shown, { struck, rarity, enemyActs });
                     // 倒下（鞭尸推迟的由 revealDowns 出）：敌方按登记与否出两类姿态与倒地声、说倒下台词；其余掉血的单位说受击台词（同单位节流）。
                     if (shown.some((mark) => mark.kind === 'ko')) koFallCue(unitId);
@@ -1494,6 +1550,7 @@ export function createCombatPanelController(doc, options = {}) {
                         rarityNodes(el, rarity, 'hit');
                         if (!impacted) { impacted = true; rarityImpact(rarity, unitId); }
                     }
+                    if (tier && !heavied) { heavied = true; heavyImpact(tier, impacted ? rarity : null, unitId); }
                     if (wave && !wave.first && typeof onWave === 'function' && !sounded.has(wave)) { sounded.add(wave); onWave(wave.event, list); }
                 };
                 if (at > 0) later(land, at); else land();
@@ -1627,17 +1684,15 @@ export function createCombatPanelController(doc, options = {}) {
     }
 
     // 发送属于会话，不随面板关闭取消；失败可重开重发，升级奖励在重开时领取。
-    // 发送成功才关闭；失败留在结算页显示原因，否则重开仍是同一结算页、点发送又静默失败，形成循环。
     function sendAndLeave(fn) {
         if (pending) return { ok: false, reason: 'combat-busy' };
         const my = token;
-        return runAsync('send', fn).then((r) => {
-            if (r?.ok === true && my === token && root) {
-                leaving = true;
-                try { close(); } finally { leaving = false; }
-            }
-            return r;
-        });
+        const task = runAsync('send', fn);
+        if (my === token && root) {
+            leaving = true;
+            try { close(); } finally { leaving = false; }
+        }
+        return task;
     }
 
     async function runAsync(kind, fn) {
@@ -1973,6 +2028,7 @@ export function createCombatPanelController(doc, options = {}) {
             case 'item': return useItem(id);
             case 'target': return pickTarget(id);
             case 'cancel': selected = null; chosen = []; render(); return { ok: true };
+            case 'choose-pick': return pendingChoice(s.state().battle) ? toggleChoice(id) : { ok: false, reason: 'no-choice-pending' };
             case 'choose-confirm': return confirmChoice();
             case 'end-turn': return act({ type: 'end-turn' });
             case 'escape': return act({ type: 'escape' });
@@ -2062,8 +2118,9 @@ export function createCombatPanelController(doc, options = {}) {
         // 拖牌松手后浏览器补发的 click 不当作点选。
         if (dragClickUntil && Date.now() < dragClickUntil) { dragClickUntil = 0; event.preventDefault?.(); return; }
         // 牌面上带加成 / 减益的数字：弹出（再点收起）加成详情，不选中、不打出这张牌；点面板其他地方先收起详情。
+        // 选目标时单位身上的状态片与资源项不拦截点击，整块照常作为目标（悬停仍弹注释）。
         const tipAnchor = event.target?.closest?.('[data-scale-tip]');
-        if (tipAnchor && root?.contains?.(tipAnchor)) {
+        if (tipAnchor && root?.contains?.(tipAnchor) && !tipAnchor.closest?.('[data-combat-act="target"]')) {
             event.preventDefault?.();
             if (scaleTip?.anchor === tipAnchor) {
                 if (scaleTip.hover) delete scaleTip.hover;

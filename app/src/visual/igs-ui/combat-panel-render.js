@@ -1,7 +1,8 @@
 import { esc } from './reader-value-utils.js';
 import { cardTextHtml, partHtml } from './combat-card-text.js';
 export { cardTextHtml } from './combat-card-text.js';
-import { CARD_TYPE_LABELS, describeEffects, describeKeywords, intentIconSvg, portraitSilhouetteSvg } from './combat-card-art.js';
+import { CARD_TYPE_LABELS, describeEffects, describeKeywords, portraitSilhouetteSvg } from './combat-card-art.js';
+import { intentDamageText, intentIconsHtml, intentTip } from './combat-intent.js';
 import { KEYWORD_NAME_TIPS, rewardHandView, isItemSelection, isSkillSelection, selectedItemView, selectedSkillView, skillSelection } from './combat-panel-model.js';
 import { LIVE_ICONS } from './danmaku-icons.js';
 import { RECORD_ICONS } from './record-icons.js';
@@ -14,6 +15,9 @@ import { resultStageHtml, stageFxStyle } from './combat-stage-fx.js';
 import { resourceBarHtml } from './combat-resource-bar.js';
 import { INSCRIPTION_LABELS } from '../../combat/mechanics/inscription.js';
 import { rewardCardMarks, rewardCardView } from '../../combat/reward-cards.js';
+import { rewardCardChoices } from '../../combat/flip.js';
+import { powerBadgesHtml } from './combat-power-badges.js';
+import { statusChipAttrs } from './combat-status-tips.js';
 
 // 战斗面板的 HTML 片段：只输出字段、状态、错误与操作确认；动作统一走 data-combat-act / data-combat-id。
 const REASON_TEXT = Object.freeze({
@@ -51,6 +55,7 @@ const REASON_TEXT = Object.freeze({
     'combat-profile-write-failed': '角色档案写入失败',
     'combat-protagonist-generation-failed': '主角卡组生成失败',
     'combat-protagonist-missing': '没有主角卡组档案',
+    'combat-encounter-unavailable': '该遭遇的敌人模板尚未就绪',
     'combat-deck-needs-adjust': '主角卡组需要调整后才能出战',
     'combat-llm-config-incomplete': '副 LLM 配置不完整',
     'combat-session-save-failed': '战斗进度保存失败，本步未生效',
@@ -65,6 +70,7 @@ const REASON_TEXT = Object.freeze({
     'combat-entry-invalid': '记录格式无效',
     'combat-outbox-save-failed': '战报暂存失败，未发送',
     'combat-report-send-failed': '战报发送失败',
+    'combat-settlement-failed': '战报已发送，结果入账失败，请重试结算',
     'combat-send-unavailable': '当前无法发送消息',
     'combat-skip-send-failed': '发送失败',
     'combat-rules-version-mismatch': '战斗规则已更新，旧进度无法继续',
@@ -85,7 +91,7 @@ const REASON_TEXT = Object.freeze({
     'item-used': '本回合已经用过道具',
     'item-empty': '这个道具已经用完',
     'item-unavailable': '本场没有这个道具',
-    'combat-item-unusable': '本回合已经用过道具或道具已用完',
+    'combat-item-unusable': '道具已用完或当前目标不可用',
     'combat-items-empty': '没有可用的道具',
     'insufficient-energy': '能量不足',
     'combat-target-invalid': '目标无效',
@@ -185,7 +191,7 @@ const hpBar = (u) => {
 };
 
 const statusesHtml = (list) => (list.length
-    ? `<div class="igs-combat-statuses">${list.map((s) => `<span data-status="${esc(s.key)}">${esc(s.label)} <b>${esc(s.stacks)}</b></span>`).join('')}</div>` : '');
+    ? `<div class="igs-combat-statuses">${list.map((s) => `<span${statusChipAttrs(s)}>${esc(s.label)} <b>${esc(s.stacks)}</b></span>`).join('')}</div>` : '');
 
 // 立绘：素材库有图时用 <img>（地址已经 safePortraitUrl 过滤）；没有图的敌人用通用敌人图集的一格（cell 只给图集与格位坐标，图集地址在样式表里）；其余用程序剪影。
 const artHtml = (cell) => `<span class="igs-combat-art" data-atlas="${esc(cell.atlas)}" style="--ea-x:${esc(cell.x)};--ea-y:${esc(cell.y)}" aria-hidden="true"></span>`;
@@ -199,11 +205,11 @@ export function tintTriplet(value) {
     return rgb.length === 3 && rgb.every((n) => n <= 255) ? rgb.join(',') : '';
 }
 
-// 敌方意图：深色底小标签，图标与数值按意图着色；有伤害时显示伤害数，否则显示意图类别，后接招式名。
+// 敌方意图：逐组显示每段伤害与段数，各皮肤共用数值与图标内容。
 function intentHtml(it) {
-    const head = it.damage ? `<b class="igs-combat-intent-value">${esc(it.damage)}</b>` : `<span class="igs-combat-intent-kind">${esc(it.label)}</span>`;
-    const tip = `${it.label}·${it.name}${it.damage ? `，${it.damage} 点${it.unit || '伤害'}` : ''}`;
-    return `<div class="igs-combat-intent" data-intent="${esc(it.kind)}" title="${esc(tip)}"><span class="igs-combat-intent-icon">${intentIconSvg(it.kind)}</span>${head}<span class="igs-combat-intent-name">${esc(it.name)}</span></div>`;
+    const value = intentDamageText(it);
+    const head = value ? `<b class="igs-combat-intent-value">${esc(value)}</b>` : `<span class="igs-combat-intent-kind">${esc(it.label)}</span>`;
+    return `<div class="igs-combat-intent" data-intent="${esc(it.kind)}" title="${esc(intentTip(it))}"><span class="igs-combat-intent-icon">${intentIconsHtml(it)}</span>${head}<span class="igs-combat-intent-name">${esc(it.name)}</span></div>`;
 }
 
 // 单位块：敌人是站立立绘、意图浮在上方；我方是圆框头像（样式层按 size 裁成主战者半身 / 队友头肩）。名字 / 格挡 / 血条 / 状态在下方。size 为 sm（队友）/ md（敌人）/ lg（主战者）。
@@ -212,7 +218,8 @@ function unitHtml(u, { targetable = false, portrait = '', art = null, size = 'md
     const intent = u.intent ? intentHtml(u.intent) : '';
     const block = u.block ? `<span class="igs-combat-block" role="img" aria-label="格挡 ${u.block}">${RECORD_ICONS.armor}${u.block}</span>` : '';
     const statuses = statusesHtml(u.statuses);
-    const badges = block || statuses ? `<div class="igs-combat-unit-badges">${block}${statuses}</div>` : '';
+    const powers = powerBadgesHtml(u, { compact: size === 'sm' });
+    const badges = block || statuses || powers ? `<div class="igs-combat-unit-badges">${block}${statuses}${powers}</div>` : '';
     const attrs = targetable ? ` data-combat-act="target" data-combat-id="${esc(u.id)}" role="button" tabindex="0"` : '';
     const info = targetable ? '' : ` data-combat-act="unit-info" data-combat-id="${esc(u.id)}" data-unit-info="${esc(u.id)}" role="button" tabindex="0" aria-label="${esc(`查看${u.name}的技能与被动`)}"`;
     // 场外补位：退场（out）/ 入场（in）中的格子带 data-swap，--swap-t 为负的已过时长（重绘时动画接着播）。
@@ -536,26 +543,37 @@ function lootCardHtml(c, f, fresh, struck, pending) {
     const actLabel = act === 'choose' ? `选择 ${label}` : s ? `翻开 ${label}` : `翻开第 ${pos + 1} 张`;
     return `<button type="button" ${attrs} data-combat-act="${act}" data-combat-id="${pos}"${pending ? ' aria-disabled="true"' : ''} aria-label="${esc(actLabel)}">${inner}</button>`;
 }
-// 规则 v6 卡牌槽三选一：选定的战利品带 choices 时，在下方列出候选，点选其一（可改选），或跳过。
-function lootChoicesHtml(f, pending, v = {}) {
+// 单张卡牌接受或放弃；多候选沿用已保存的牌，不重新抽取。
+function lootChoicesHtml(f, pending, v = {}, tools = '') {
     const slot = f.done ? f.cards.find((c) => c.chosen)?.slot : null;
-    if (!slot || slot.kind !== 'card' || !Array.isArray(slot.choices) || !slot.choices.length) return '';
-    if (isCanvasSkin(v.skin) && CANVAS_REWARD[v.skin]) {
-        const views = slot.choices.map((_, i) => rewardHandView(rewardCardView(slot, i), rewardCardMarks(slot, i)));
-        return `<div class="igs-combat-loot-row igs-combat-loot-choices is-full" style="--n:${slot.choices.length}">${CANVAS_REWARD[v.skin](views, { orient: v.orient === 'land' ? 'land' : 'port', chosen: f.card, dim: f.card === 'skip', pending })}</div>`;
+    const choices = rewardCardChoices(slot);
+    if (!choices.length) return '';
+    const single = choices.length === 1;
+    if (single && f.card !== undefined) return '';
+    if (!single && isCanvasSkin(v.skin) && CANVAS_REWARD[v.skin]) {
+        const views = choices.map((_, i) => rewardHandView(rewardCardView(slot, i), rewardCardMarks(slot, i)));
+        const origin = slot.origin ? `<p class="igs-combat-loot-description">${esc(slot.origin)}</p>` : '';
+        return `<div class="igs-combat-loot-row igs-combat-loot-choices is-full" style="--n:${choices.length}">${CANVAS_REWARD[v.skin](views, { orient: v.orient === 'land' ? 'land' : 'port', chosen: f.card, dim: f.card === 'skip', pending })}${origin}</div>`;
     }
-    const cards = slot.choices.map((card, i) => {
+    const cards = choices.map((card, i) => {
         const marks = rewardCardMarks(slot, i);
         const view = rewardCardView(slot, i);
         const name = `${card.name}${marks.upgraded ? '+' : ''}`;
         const tag = [LOOT_RARITY_LABELS[card.rarity], view.cost === undefined ? '' : `${view.cost}费`, INSCRIPTION_LABELS[marks.inscription]].filter(Boolean).join('·');
         const text = [describeKeywords(view), describeEffects(view.effects)].filter(Boolean).join('；');
+        if (single) {
+            return `<section class="igs-combat-loot-detail" data-skin="${esc(v.skin || 'initial')}" role="region" aria-label="${esc(`${name} 奖励详情`)}">`
+                + `<div class="igs-combat-loot-detail-text"><span class="igs-combat-loot-detail-meta">${esc(tag)}</span><strong class="igs-combat-loot-detail-name">${esc(name)}</strong>`
+                + `<p class="igs-combat-loot-detail-effect">${esc(text || '无效果')}</p>${slot.origin ? `<p class="igs-combat-loot-detail-origin">${esc(slot.origin)}</p>` : ''}</div>`
+                + `<div class="igs-combat-loot-detail-tools">${tools}</div></section>`;
+        }
         const chosen = f.card === i;
         const cls = `igs-combat-loot-card is-face${chosen ? ' is-chosen' : ''}${f.card === 'skip' ? ' is-dim' : ''}`;
-        const face = `<span class="igs-combat-loot-face"><span class="igs-combat-loot-tag">${esc(tag)}</span><span class="igs-combat-loot-name">${esc(name)}</span>${text ? `<span class="igs-combat-loot-origin">${esc(text)}</span>` : ''}</span>`;
+        const face = `<span class="igs-combat-loot-face"><span class="igs-combat-loot-tag">${esc(tag)}</span><span class="igs-combat-loot-name">${esc(name)}</span>`
+            + `<span class="igs-combat-loot-effect">${esc(text || '无效果')}</span>${slot.origin ? `<span class="igs-combat-loot-origin">${esc(slot.origin)}</span>` : ''}</span>`;
         return `<button type="button" class="${cls}"${card.rarity ? ` data-rarity="${esc(card.rarity)}"` : ''} data-combat-act="pick-card" data-combat-id="${i}"${pending ? ' aria-disabled="true"' : ''} aria-label="${esc(`选择 ${card.name}${chosen ? '（已选定）' : ''}`)}">${face}</button>`;
     }).join('');
-    return `<div class="igs-combat-loot-row igs-combat-loot-choices" style="--n:${slot.choices.length}">${cards}</div>`;
+    return single ? cards : `<div class="igs-combat-loot-row igs-combat-loot-choices" style="--n:${choices.length}">${cards}</div>`;
 }
 
 // 规则 v6 删牌：本场正好满 5 场普通胜利时，战利品工具行里出一个紧凑按钮（未选时为主按钮），点开浮层选牌或不删；选定后按钮写所选。
@@ -626,16 +644,14 @@ function upgradeButton(f, pending) {
 // 升级浮层：与删牌浮层同一外观，只列可升级的副本。点一张牌先看详情（升级前后的费用与效果并列），再点「升级这张」才记入选择；「不升」直接记入。
 function upgradeDetailHtml(c, pending, purgePick) {
     const meta = [CARD_TYPE_LABELS[c.type], LOOT_RARITY_LABELS[c.rarity]].filter(Boolean).join(' · ');
-    const keywords = describeKeywords(c.keywords || {});
     const costText = (value) => (value === '' || value === undefined ? '' : `${value} 费`);
-    const side = (label, cost, effects) => `<div class="igs-combat-upgrade-side"><span class="igs-combat-trait-tip-meta">${esc([label, costText(cost)].filter(Boolean).join(' · '))}</span>`
+    const side = (label, cost, effects, flags) => `<div class="igs-combat-upgrade-side"><span class="igs-combat-trait-tip-meta">${esc([label, costText(cost), describeKeywords(flags || {})].filter(Boolean).join(' · '))}</span>`
         + `<span class="igs-combat-trait-tip-text">${esc(describeEffects(effects) || '无效果')}</span></div>`;
     const marks = purgeMarks(c).join(' · ');
     const conflict = purgePick === c.copyId;
     return `<div class="igs-combat-purge-detail" aria-live="polite"><b class="igs-combat-trait-tip-name">${esc(c.name)}</b>`
         + (meta ? `<span class="igs-combat-trait-tip-meta">${esc(meta)}</span>` : '')
-        + (keywords ? `<span class="igs-combat-trait-tip-meta">${esc(keywords)}</span>` : '')
-        + `<div class="igs-combat-upgrade-compare">${side('升级前', c.cost, c.effects)}${side('升级后', c.upCost, c.upEffects)}</div>`
+        + `<div class="igs-combat-upgrade-compare">${side('升级前', c.cost, c.effects, c.keywords)}${side('升级后', c.upCost, c.upEffects, c.upKeywords ?? c.keywords)}</div>`
         + (marks ? `<span class="igs-combat-trait-tip-origin">${esc(marks)}</span>` : '')
         + `<div class="igs-combat-actions">${btn('pick-upgrade', conflict ? '已选为删除' : '升级这张', { id: c.copyId, primary: true, disabled: pending || conflict })}</div></div>`;
 }
@@ -686,12 +702,17 @@ function lootHtml(v) {
     const r = f.reroll;
     const reroll = f.done && r && (r.available || r.reason === 'combat-points-insufficient')
         ? btn('reroll', r.cost > 0 ? `重抽·${r.cost}积分` : '重抽·免费', { disabled: pending || !r.available, full: r.cost > 0 ? `重新抽取（消耗${r.cost}积分）` : '重新抽取（免费）' }) : '';
-    const choices = lootChoicesHtml(f, pending, v);
-    const skip = choices ? btn('pick-card', f.card === 'skip' ? '已跳过' : '跳过', { id: 'skip', disabled: pending }) : '';
-    const tools = `${skip}${reroll}${purgeButton(f, pending)}${upgradeButton(f, pending)}`;
+    const count = f.done ? rewardCardChoices(f.cards.find((c) => c.chosen)?.slot).length : 0;
+    const single = count === 1;
+    const singlePending = single && f.card === undefined;
+    const accept = singlePending ? btn('pick-card', '接受', { id: '0', primary: f.needCard === true, disabled: pending }) : '';
+    const skipLabel = single ? '放弃' : (f.card === 'skip' ? '已跳过' : '跳过');
+    const skip = count && (!single || singlePending) ? btn('pick-card', skipLabel, { id: 'skip', disabled: pending }) : '';
+    const tools = `${accept}${skip}${reroll}${purgeButton(f, pending)}${upgradeButton(f, pending)}`;
+    const choices = lootChoicesHtml(f, pending, v, singlePending ? tools : '');
     return `<section class="igs-combat-loot" data-n="${f.cards.length}"${pause ? ' data-pause' : ''}><div class="igs-combat-loot-cap">战利品</div>`
         + `<div class="igs-combat-loot-row" style="--n:${f.cards.length}">${f.cards.map((c) => lootCardHtml(c, f, fresh, struck, pending)).join('')}</div>`
-        + `${traitSourceHtml(f)}${choices}${tools ? `<div class="igs-combat-loot-tools">${tools}</div>` : ''}</section>`;
+        + `${traitSourceHtml(f)}${choices}${!singlePending && tools ? `<div class="igs-combat-loot-tools">${tools}</div>` : ''}</section>`;
 }
 // 有 offer 时选定战利品前不能发战报：读取中、未选定、三选一卡牌槽还没取牌 / 跳过、删牌机会还没选牌 / 不删时不出发送按钮；读取失败时仍出（发送前再读一次，读不到照样拦下并提示原因）。
 const lootBlocksSend = (f) => Boolean(f) && (f.status === 'loading' || (f.status === 'ready' && (!f.done || f.needCard === true || f.needPurge === true || f.needUpgrade === true)));
@@ -798,9 +819,23 @@ const intimateResultHtml = (v) => {
     return `<section class="igs-combat-result igs-duel-result" data-outcome="${esc(v.end.outcome)}"><p class="igs-duel-result-line">${esc(line)}</p><div class="igs-combat-actions">${send}</div></section>`;
 };
 
-// 面板 HTML：主体按状态与皮肤出，删牌浮层统一叠在最上层（结算画布外，各皮肤与竖屏都不被裁切）。
+// M7 二选一诅咒浮层：挂起的选择带 curses 时出现，必须选一项再确认（不能关闭或跳过）；各皮肤与竖屏共用，叠在最上层。
+function curseSheetHtml(v) {
+    const choice = v.status === 'battle' ? v.battle?.choice : null;
+    const candidates = choice?.candidates || choice?.curses;
+    if (!candidates?.length || v.battle.outcome) return '';
+    const draw = choice.kind === 'draw-play';
+    const picks = Array.isArray(v.chosen) ? v.chosen : [];
+    const busy = Boolean(v.pending);
+    const items = candidates.map((c) => btn('choose-pick', `${c.name}｜${c.text}`, { id: c.id, pressed: picks.includes(c.id), disabled: busy })).join('');
+    return `<div class="igs-combat-purge-sheet" role="dialog" aria-label="${draw ? '选择抽牌堆中的牌' : '二选一诅咒'}"><i class="igs-combat-purge-veil"></i>`
+        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">${draw ? '选择一张牌打出' : '承受一道诅咒（只限本场）'}</div><div class="igs-combat-purge">${items}</div>`
+        + `<div class="igs-combat-actions">${btn('choose-confirm', draw ? '打出' : '承受', { primary: true, disabled: busy || picks.length !== choice.count })}</div></div></div>`;
+}
+
+// 面板 HTML：主体按状态与皮肤出，删牌与诅咒浮层统一叠在最上层（结算画布外，各皮肤与竖屏都不被裁切）。
 export function renderCombatPanelHtml(v) {
-    return `${renderCombatPanelBody(v)}${purgeSheetHtml(v)}${upgradeSheetHtml(v)}`;
+    return `${renderCombatPanelBody(v)}${purgeSheetHtml(v)}${upgradeSheetHtml(v)}${curseSheetHtml(v)}`;
 }
 
 function renderCombatPanelBody(v) {
@@ -823,7 +858,10 @@ function renderCombatPanelBody(v) {
     else if ((status === 'battle' || status === 'ended') && v.battle) main = battleHtml(v);
     else if (status === 'blocked') main = `<div class="igs-combat-blocked"><p class="igs-combat-state">${esc(combatReasonText(v.reason))}${v.cause ? `：${esc(generationCauseText(v.cause))}` : ''}</p>${blockedHtml(v)}</div>`;
     else if (status === 'stale') main = `<p class="igs-combat-state">${esc(combatReasonText(v.reason))}</p>`;
-    else if (status === 'send-failed') main = `<p class="igs-combat-state">${STATUS_LINE['send-failed']}</p>${lootHtml(v)}<div class="igs-combat-actions">${lootBlocksSend(v.flip) ? '' : btn('retry-send', v.pending === 'send' ? '发送中' : '重新发送', { primary: true, disabled: Boolean(v.pending) })}</div>`;
+    else if (status === 'send-failed') {
+        const delivered = v.reportDelivered === true;
+        main = `<p class="igs-combat-state">${delivered ? combatReasonText('combat-settlement-failed') : STATUS_LINE['send-failed']}</p>${delivered ? '' : lootHtml(v)}<div class="igs-combat-actions">${!delivered && lootBlocksSend(v.flip) ? '' : btn('retry-send', v.pending === 'send' ? (delivered ? '结算中' : '发送中') : (delivered ? '重试结算' : '重新发送'), { primary: true, disabled: Boolean(v.pending) })}</div>`;
+    }
     else if (status === 'done') main = `<p class="igs-combat-state">${STATUS_LINE.done}</p>`;
     else if (status === 'preparing') main = loadingHtml(STATUS_LINE.preparing);
     else main = STATUS_LINE[status] ? `<p class="igs-combat-state">${STATUS_LINE[status]}</p>` : '';

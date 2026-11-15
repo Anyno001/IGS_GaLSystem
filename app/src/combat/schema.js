@@ -3,7 +3,7 @@
 // 常量数组均冻结只读。字段范围、文案与规则常量原样来自 v0.39.0，不要顺手调整玩法。
 import {
     ALLY_SKILL_CAP_MAX, BASIC_CARDS, BASIC_DEFEND_ID, BASIC_STRIKE_ID, COMBAT_RULES, SKILL_COUNT_MAX, TOKEN_KEYS,
-    cardCopyLimit, evaluateCardBudget,
+    cardCopyLimit, evaluateCardBudget, evaluateStoredCardBudget,
 } from './rules.js';
 import { hashString } from './random.js';
 import { BATTLE_POINTS_RANGE, BATTLE_POINT_TIERS, battlePoints, weakBattlePoints } from './points.js';
@@ -15,12 +15,16 @@ import { INSCRIPTION_KEYS, inscribable } from './mechanics/inscription.js';
 import { rewardUpgradable } from './reward-cards.js';
 import { APPLY_STATUSES } from './mechanics/apply-status.js';
 import { TREASURE_SLOT_MAX } from './gear-slots.js';
-import { fixedCard, fixedClassPool, isFixedCardId } from './fixed-cards/index.js';
+import { compatibleFixedClassPool, fixedCard, isFixedCardId } from './fixed-cards/index.js';
 import { RELIC_MODELS, isCombatModel, relicById } from './relics/index.js';
 import { winPointsBonus } from './relics/off-combat.js';
 import { BIAS_CATEGORIES, TRAIT_FLIPS, biasCategoryOf, traitFlipIssue } from './trait-reward-bias.js';
 import { CLASS_PASSIVE_VERSION } from './class-passives.js';
 import { CARD_ARCHETYPES } from './attribute-policy.js';
+import { SCRIPT_CONDITION_MAX, isScriptCondition } from './script-conditions.js';
+import { UPGRADE_FIELDS, UPGRADE_FLAGS } from './card-upgrade.js';
+import { SOURCE_CARD_MODELS, TEMPLATE_UPGRADE_MODEL_KEYS, sourceCardMatches, templateUpgradeMatches } from './card-source-models.js';
+import { DEATH_SPAWN_LIMIT, KIN_DEF_FIELDS, KIN_FIELDS, KIN_LIMIT, kitEffects, kitKinRefs, validKinKey } from './kin.js';
 // 规则 v5 机制登记入口：先于 reserveBuiltins 完成登记，机制占用内置名时在此抛错。
 import './mechanics/index.js';
 
@@ -41,7 +45,10 @@ export const SUPPORT_TARGETS = Object.freeze(['self', 'ally', 'all-allies']);
 export const CARD_TYPES = Object.freeze(['attack', 'skill', 'power']);
 export const RARITIES = Object.freeze(['basic', 'common', 'uncommon', 'rare', 'epic', 'mythic', 'personal', 'signature']);
 export const CARD_COSTS = Object.freeze([0, 1, 2, 3, 'X']);
-export const SKILL_INTENTS = Object.freeze(['attack', 'defend', 'buff', 'debuff', 'heal', 'special']);
+export const SKILL_INTENTS = Object.freeze([
+    'attack', 'defend', 'buff', 'debuff', 'heal', 'special',
+    'attack-debuff', 'attack-defend', 'attack-buff', 'idle',
+]);
 export const PASSIVE_TRIGGERS = Object.freeze([
     'battle-start', 'turn-start', 'turn-end', 'on-hit', 'on-low-hp', 'card-played', 'discard', 'exhaust', 'kill', 'shuffle',
     'hp-loss', 'block-gain', 'foe-card-played',
@@ -49,6 +56,8 @@ export const PASSIVE_TRIGGERS = Object.freeze([
     'draw', 'create', 'debuff-applied', 'block-broken',
     // 规则 v6 G5b（只在 v6 战斗中触发）：敌人倒下（任意死因）、获得状态后、使用道具后、预知后、凝结法珠后、消耗圣辉后、随从出手后。
     'defeated', 'status-gained', 'item-used', 'foresee', 'orb-channel', 'radiance-spent', 'minion-act',
+    // 敌人模板 M8（规则 v5 起）：同一遭遇分组的同伴倒下时（组内其余存活单位各触发一次）。
+    'mate-down',
 ]);
 // 被动过滤字段（规则 v6 G5b）可用的触发器：status 限获得状态 / 使敌人陷入减益，orb 限凝结法珠，cause 限敌人倒下。
 const FILTER_TRIGGERS = Object.freeze({ status: ['status-gained', 'debuff-applied'], orb: ['orb-channel'], cause: ['defeated'] });
@@ -56,7 +65,7 @@ export const PROFILE_KINDS = Object.freeze(['class', 'deck-character', 'skill-ch
 export const LEDGER_TYPES = Object.freeze([
     'profile', 'exp', 'learn', 'upgrade', 'class', 'reward', 'deck', 'revoke', 'equip', 'unequip', 'item', 'consume', 'offer',
     'loot', 'sell', 'rebuild', 'respec', 'ascend', 'trait', 'trait-pick', 'trait-slot', 'wound', 'heal', 'hurt', 'keepsake', 'lose', 'battle-growth', 'inscribe',
-    'purge', 'card-upgrade', 'card-draw', 'card-flip', 'card-pick', 'battle-points', 'relic-inscribe',
+    'purge', 'card-upgrade', 'card-draw', 'card-flip', 'card-pick', 'battle-points', 'relic-inscribe', 'card-lost', 'card-implant',
 ]);
 export const GEAR_SLOTS = Object.freeze(['weapon', 'armor', 'accessory', 'treasure']);
 // 按剧情给的初始装备锚定开战楼、不来自标签，锚点 tagHash 固定为此值。
@@ -72,8 +81,8 @@ export const HURT_TIER_KEYS = Object.freeze(['轻伤', '中伤', '重伤']);
 export const REWARD_KINDS = Object.freeze(['card', 'gear', 'item', 'keepsake', 'inscribe']);
 export const REWARD_SLOT_COUNT = 3;
 export const REWARD_SLOT_MAX = 4;
-// 基础奖励三候选；积分抽卡独立固定为三候选。
-export const REWARD_CARD_CHOICES = 3;
+// 战利品卡牌槽基础为一张预定牌（旧 offer 为三候选，上限 4 照旧通过）；积分抽卡独立固定为三候选。
+export const REWARD_CARD_CHOICES = 1;
 export const REWARD_CARD_CHOICES_MAX = 4;
 export const CARD_DRAW_CHOICES = 3;
 export const REWARD_ORIGIN_MAX = 30;
@@ -163,8 +172,8 @@ function objectField(value, path, state) {
 }
 
 // 跑一个校验器：有问题返回 { ok:false, errors }，否则 { ok:true, value }。
-function runValidator(validate, input) {
-    const state = { errors: [] };
+function runValidator(validate, input, { stored = false } = {}) {
+    const state = { errors: [], cardBudget: stored === true ? evaluateStoredCardBudget : evaluateCardBudget };
     const value = validate(input, '', state);
     return state.errors.length ? { ok: false, errors: state.errors } : { ok: true, value, errors: [] };
 }
@@ -195,6 +204,10 @@ function pickMode(value, path, state, allowed, scope) {
     return mode;
 }
 
+// 多段攻击的段数上限：缺省 5；只有带 template 的敌人档案（程序从原版条目物化）放宽到 12，容纳原作敌人的多段攻击，不裁段。
+const CARD_HITS_MAX = 5;
+export const SKILL_HITS_MAX = 12;
+
 // 交给已登记机制的字段校验工具，与内置算子共用同一套规则与错误码。
 const FIELD_KIT = Object.freeze({ addIssue, checkKnownFields, intField, enumField, arrayField, idField, joinPath, STATUSES, OFFENSE_TARGETS, SUPPORT_TARGETS });
 
@@ -210,7 +223,7 @@ function validateEffect(effect, path, state, depth = 0, scope) {
             return {
                 op,
                 amount: intField(effect.amount, at('amount'), state, 1, 99),
-                hits: intField(effect.hits, at('hits'), state, 1, 5, 1),
+                hits: intField(effect.hits, at('hits'), state, 1, state.hitsMax ?? CARD_HITS_MAX, 1),
                 target: enumField(effect.target, at('target'), state, OFFENSE_TARGETS, 'enemy'),
                 ...(effect.strengthScale === undefined ? {} : { strengthScale: intField(effect.strengthScale, at('strengthScale'), state, 1, 5) }),
             };
@@ -307,7 +320,7 @@ function validateEffect(effect, path, state, depth = 0, scope) {
             return { op, amount: intField(effect.amount, at('amount'), state, 1, 3), from: pickMode(effect.from, at('from'), state, PICK_MODES, scope), to: enumField(effect.to, at('to'), state, PILES, 'hand') };
         case 'create':
             checkKnownFields(effect, ['op', 'card', 'amount', 'to'], path, state);
-            return { op, card: enumField(effect.card, at('card'), state, TOKEN_KEYS), amount: intField(effect.amount, at('amount'), state, 1, 3, 1), to: enumField(effect.to, at('to'), state, PILES, 'hand') };
+            return { op, card: enumField(effect.card, at('card'), state, TOKEN_KEYS), amount: intField(effect.amount, at('amount'), state, 1, 4, 1), to: enumField(effect.to, at('to'), state, PILES, 'hand') };
         case 'repeat-last':
             checkKnownFields(effect, ['op', 'amount'], path, state);
             return { op, amount: intField(effect.amount, at('amount'), state, 1, 2, 1) };
@@ -316,7 +329,7 @@ function validateEffect(effect, path, state, depth = 0, scope) {
             return { op, amount: intField(effect.amount, at('amount'), state, 1, 2, 1), ...(effect.cardType === undefined ? {} : { cardType: enumField(effect.cardType, at('cardType'), state, CARD_TYPES) }) };
         case 'grow':
             checkKnownFields(effect, ['op', 'amount'], path, state);
-            return scope ? { op, amount: intField(effect.amount, at('amount'), state, 1, 5) } : addIssue(state, path, 'card-only');
+            return scope ? { op, amount: intField(effect.amount, at('amount'), state, 1, 10) } : addIssue(state, path, 'card-only');
         case 'cost-mod':
             checkKnownFields(effect, ['op', 'amount', 'mode', 'scope'], path, state);
             return { op, amount: intField(effect.amount, at('amount'), state, -3, -1), mode: pickMode(effect.mode, at('mode'), state, PICK_MODES, scope), scope: enumField(effect.scope, at('scope'), state, COST_SCOPES, 'turn') };
@@ -336,7 +349,7 @@ function validateEffect(effect, path, state, depth = 0, scope) {
         }
         default:
             if (!handler) return;
-            return handler.validate(effect, path, state, { ...FIELD_KIT, depth, scope, nested: (item, itemPath, st) => validateEffect(item, itemPath, st, depth + 1, scope ? 'card' : undefined) });
+            return handler.validate(effect, path, state, { ...FIELD_KIT, hitsMax: state.hitsMax ?? CARD_HITS_MAX, depth, scope, nested: (item, itemPath, st) => validateEffect(item, itemPath, st, depth + 1, scope ? 'card' : undefined) });
     }
 }
 
@@ -363,7 +376,7 @@ function validateCardEntry(card, path, state, rarities = RARITIES) {
     if (!objectField(card, path, state)) return;
     const errorsBefore = state.errors.length;
     const at = (key) => joinPath(path, key);
-    checkKnownFields(card, ['id', 'name', 'type', 'cost', 'rarity', 'effects', 'upgraded', 'flavor', 'skillRef', ...CARD_FLAGS, 'onDiscard', 'replay', 'radiance', 'model', 'archetype'], path, state);
+    checkKnownFields(card, ['id', 'name', 'type', 'cost', 'rarity', 'effects', 'upgraded', 'flavor', 'skillRef', ...CARD_FLAGS, 'onDiscard', 'replay', 'radiance', 'model', 'archetype', 'sourceModel', 'upgradeModel', 'upgradeReason'], path, state);
     const name = textField(card.name, at('name'), state, 20);
     const unplayable = card.unplayable === true;
     const result = {
@@ -396,27 +409,49 @@ function validateCardEntry(card, path, state, rarities = RARITIES) {
     }
     if (card.upgraded !== undefined && !unplayable && objectField(card.upgraded, at('upgraded'), state)) {
         const upPath = at('upgraded');
-        checkKnownFields(card.upgraded, ['cost', 'effects'], upPath, state);
+        checkKnownFields(card.upgraded, UPGRADE_FIELDS, upPath, state);
         const upgraded = {};
         if (card.upgraded.cost !== undefined) upgraded.cost = enumField(card.upgraded.cost, joinPath(upPath, 'cost'), state, CARD_COSTS);
         if (card.upgraded.effects !== undefined) upgraded.effects = arrayField(card.upgraded.effects, joinPath(upPath, 'effects'), state, 1, 4, validateTopEffect);
-        if (card.upgraded.cost === undefined && card.upgraded.effects === undefined) addIssue(state, upPath, 'empty-upgrade');
+        for (const flag of UPGRADE_FLAGS) {
+            if (card.upgraded[flag] === undefined) continue;
+            if (typeof card.upgraded[flag] !== 'boolean') addIssue(state, joinPath(upPath, flag), 'expected-boolean');
+            else upgraded[flag] = card.upgraded[flag];
+        }
+        if (card.upgraded.onDiscard !== undefined) upgraded.onDiscard = arrayField(card.upgraded.onDiscard,
+            joinPath(upPath, 'onDiscard'), state, 0, 2, validateEffect);
+        if (!Object.keys(upgraded).length) addIssue(state, upPath, 'empty-upgrade');
         result.upgraded = upgraded;
+    }
+    if (card.sourceModel !== undefined) {
+        result.sourceModel = enumField(card.sourceModel, at('sourceModel'), state, Object.keys(SOURCE_CARD_MODELS));
+        if (state.errors.length === errorsBefore && !sourceCardMatches(result)) addIssue(state, at('sourceModel'), 'source-model-mismatch');
+    }
+    if (card.upgradeReason !== undefined) {
+        result.upgradeReason = textField(card.upgradeReason, at('upgradeReason'), state, 80);
+        if (card.upgradeModel === undefined) addIssue(state, at('upgradeReason'), 'upgrade-model-required');
+    }
+    if (card.upgradeModel !== undefined) {
+        result.upgradeModel = enumField(card.upgradeModel, at('upgradeModel'), state, TEMPLATE_UPGRADE_MODEL_KEYS);
+        if (card.sourceModel !== undefined || (state.errors.length === errorsBefore && !templateUpgradeMatches(result)))
+            addIssue(state, at('upgradeModel'), 'upgrade-model-mismatch');
     }
     // 结构都合法时再做数值预算校验。
     if (state.errors.length === errorsBefore) {
-        const budget = evaluateCardBudget(result);
+        const budget = state.cardBudget(result);
         if (!budget.ok) addIssue(state, joinPath(path, budget.path), budget.reason, budget.detail);
     }
     return result;
 }
 
+// 技能使用次数上限（敌人模板 maxUses）：1–SKILL_USES_MAX，建局校验共用。
+export const SKILL_USES_MAX = 9;
 // 技能（敌人/技能角色用）。
 function validateSkill(skill, path, state) {
     if (!objectField(skill, path, state)) return;
     const at = (key) => joinPath(path, key);
-    checkKnownFields(skill, ['id', 'name', 'intent', 'effects', 'weight', 'cooldown', 'description'], path, state);
-    return {
+    checkKnownFields(skill, ['id', 'name', 'intent', 'effects', 'weight', 'cooldown', 'maxRepeat', 'maxUses', 'description'], path, state);
+    const result = {
         id: idField(skill.id, at('id'), state),
         name: textField(skill.name, at('name'), state, 20),
         intent: enumField(skill.intent, at('intent'), state, SKILL_INTENTS),
@@ -425,6 +460,10 @@ function validateSkill(skill, path, state) {
         cooldown: intField(skill.cooldown, at('cooldown'), state, 0, 5, 0),
         description: textField(skill.description, at('description'), state, 80, ''),
     };
+    // 连用上限：0 表示不限连用；缺省沿用 MAX_SKILL_REPEAT，只在写了时保留字段。
+    if (skill.maxRepeat !== undefined) result.maxRepeat = intField(skill.maxRepeat, at('maxRepeat'), state, 0, 3);
+    if (skill.maxUses !== undefined) result.maxUses = intField(skill.maxUses, at('maxUses'), state, 1, SKILL_USES_MAX);
+    return result;
 }
 
 // 被动。cardType 只在出牌类触发器下允许。
@@ -452,17 +491,209 @@ function validatePassive(passive, path, state) {
     return result;
 }
 
-// 敌人阶段：血量低于阈值时增删技能/被动。
+// 敌人行动脚本：首招 opener（固定）或 openers（加权抽一次）；之后 cycle 固定循环（走到末尾回到 loopFrom）
+// 或 next 转移表（按上一次出手的技能取加权候选行）。技能 ID 是否存在由档案层统一核对。
+export const SCRIPT_CYCLE_MAX = 12;
+function validateScript(script, path, state) {
+    if (!objectField(script, path, state)) return;
+    const at = (key) => joinPath(path, key);
+    checkKnownFields(script, ['opener', 'openers', 'cycle', 'loopFrom', 'next', 'sleep', 'interrupts', 'inserts', 'reroll'], path, state);
+    if ([script.opener, script.openers, script.cycle, script.next].every((part) => part === undefined)) return addIssue(state, path, 'empty-script');
+    if (script.opener !== undefined && script.openers !== undefined) return addIssue(state, at('openers'), 'script-conflict');
+    if (script.cycle !== undefined && script.next !== undefined) return addIssue(state, at('next'), 'script-conflict');
+    const result = {};
+    if (script.opener !== undefined) result.opener = idField(script.opener, at('opener'), state);
+    if (script.openers !== undefined) result.openers = validatePickList(script.openers, at('openers'), state);
+    if (script.cycle !== undefined) result.cycle = arrayField(script.cycle, at('cycle'), state, 1, SCRIPT_CYCLE_MAX,
+        (node, nodePath, st) => (Array.isArray(node) ? validatePickList(node, nodePath, st) : isObject(node) ? validateCondStep(node, nodePath, st) : idField(node, nodePath, st)));
+    if (script.loopFrom !== undefined) {
+        if (!Array.isArray(result.cycle)) addIssue(state, at('loopFrom'), 'unknown-field');
+        else result.loopFrom = intField(script.loopFrom, at('loopFrom'), state, 0, result.cycle.length - 1);
+    }
+    if (script.next !== undefined) {
+        if (!isObject(script.next)) return addIssue(state, at('next'), 'expected-object');
+        const rows = Object.entries(script.next);
+        if (!rows.length || rows.length > SCRIPT_CYCLE_MAX) return addIssue(state, at('next'), 'length-out-of-range', { min: 1, max: SCRIPT_CYCLE_MAX, size: rows.length });
+        result.next = Object.fromEntries(rows.map(([id, list]) => [idField(id, at(`next.${id}`), state), validatePickList(list, at(`next.${id}`), state)]));
+    }
+    if (script.sleep !== undefined) result.sleep = validateSleep(script.sleep, at('sleep'), state);
+    if (script.interrupts !== undefined) result.interrupts = arrayField(script.interrupts, at('interrupts'), state, 1, INTERRUPT_MAX, validateInterrupt);
+    if (script.inserts !== undefined) {
+        result.inserts = arrayField(script.inserts, at('inserts'), state, 1, INSERT_MAX, (item, itemPath, st) => {
+            if (!objectField(item, itemPath, st)) return;
+            checkKnownFields(item, ['skill', 'pct'], itemPath, st);
+            return { skill: idField(item.skill, joinPath(itemPath, 'skill'), st), pct: intField(item.pct, joinPath(itemPath, 'pct'), st, 1, 99) };
+        });
+    }
+    // 受击重掷（M4）：受到对方攻击伤害后，在对方这次出手结束时避开当前意图的技能重新规划。
+    if (script.reroll !== undefined) {
+        if (script.reroll !== true) addIssue(state, at('reroll'), 'invalid-enum', { allowed: [true] });
+        else result.reroll = true;
+    }
+    return result;
+}
+
+// 概率插招（M4）：脚本开场后每次规划按序检查，pct%（1–99）机会插入该技能（插入的招不推进脚本）；一次性用技能的 maxUses 表达。
+export const INSERT_MAX = 3;
+
+// 睡眠（M4）：开战带 turns 层 asleep，持有期间每次行动都用 skill（不推进脚本）；层数在自身回合结束减 1，走完醒来。
+// hurt 决定失血的作用：'wake'（缺省）一失血即醒；'tick' 每次失血减 1 层，减完醒来。醒来移除 shed 里的状态，
+// groggy 为真时因失血醒来附带 1 层晕厥。只能写在档案顶层脚本，阶段脚本不收。
+export const SLEEP_SHED_MAX = 3;
+export const SLEEP_HURT_MODES = Object.freeze(['wake', 'tick']);
+function validateSleep(sleep, path, state) {
+    if (!objectField(sleep, path, state)) return;
+    checkKnownFields(sleep, ['skill', 'turns', 'shed', 'groggy', 'hurt'], path, state);
+    const result = { skill: idField(sleep.skill, joinPath(path, 'skill'), state), turns: intField(sleep.turns, joinPath(path, 'turns'), state, 1, 5) };
+    if (sleep.shed !== undefined) {
+        const allowed = [...STATUSES, ...Object.keys(APPLY_STATUSES)];
+        result.shed = arrayField(sleep.shed, joinPath(path, 'shed'), state, 1, SLEEP_SHED_MAX, (key, keyPath, st) => enumField(key, keyPath, st, allowed));
+    }
+    if (sleep.groggy !== undefined) {
+        if (sleep.groggy !== true) addIssue(state, joinPath(path, 'groggy'), 'invalid-enum', { allowed: [true] });
+        else result.groggy = true;
+    }
+    if (sleep.hurt !== undefined) result.hurt = enumField(sleep.hurt, joinPath(path, 'hurt'), state, SLEEP_HURT_MODES);
+    return result;
+}
+
+// 打断（M4）：事件发生时把已公示的意图立即改写为 seq 的首招，之后依次出完 seq（插入的招，不推进脚本），
+// then 为 restart 时从首招重来，main 时跳过首招并从常规脚本起点继续，缺省接着原进度。只能写在档案顶层脚本，阶段脚本不收。
+// on：'status-lost' 一次伤害让 status 从有到无（飞行被打落、镀甲被打光）；'block-broken' 一次伤害把格挡打空（写 status 时须持有该状态）；
+// 'hp-lost' 累计失去生命达到 amount + step × 已触发次数（序列进行中不累计，出完重新累计）。
+// once 每场只触发一次；block 触发时获得格挡；shed 触发时移除的状态；unstun 清掉同一事件附带的晕厥（序列里自带不行动的一招时用）。
+// rearm（1 至 seq 长度 - 1）：序列出完前 rearm 招后即重新布防（累计失血恢复计数、规则可再次触发并打断剩余序列）。
+export const INTERRUPT_MAX = 3;
+export const INTERRUPT_SEQ_MAX = 4;
+export const INTERRUPT_EVENTS = Object.freeze(['status-lost', 'block-broken', 'hp-lost']);
+export const INTERRUPT_THEN = Object.freeze(['restart', 'main']);
+function validateInterrupt(rule, path, state) {
+    if (!objectField(rule, path, state)) return;
+    const at = (key) => joinPath(path, key);
+    checkKnownFields(rule, ['on', 'status', 'amount', 'step', 'seq', 'then', 'once', 'block', 'shed', 'unstun', 'rearm'], path, state);
+    const statusKeys = [...STATUSES, ...Object.keys(APPLY_STATUSES)];
+    const result = { on: enumField(rule.on, at('on'), state, INTERRUPT_EVENTS) };
+    if (rule.status !== undefined || rule.on === 'status-lost') {
+        if (rule.on === 'hp-lost') addIssue(state, at('status'), 'unknown-field');
+        else result.status = enumField(rule.status, at('status'), state, statusKeys);
+    }
+    if (rule.on === 'hp-lost' || rule.amount !== undefined) {
+        if (rule.on !== 'hp-lost') addIssue(state, at('amount'), 'unknown-field');
+        else result.amount = intField(rule.amount, at('amount'), state, 1, 999);
+    }
+    if (rule.step !== undefined) {
+        if (rule.on !== 'hp-lost') addIssue(state, at('step'), 'unknown-field');
+        else result.step = intField(rule.step, at('step'), state, 1, 99);
+    }
+    result.seq = arrayField(rule.seq, at('seq'), state, 1, INTERRUPT_SEQ_MAX, (id, idPath, st) => idField(id, idPath, st));
+    if (rule.then !== undefined) result.then = enumField(rule.then, at('then'), state, INTERRUPT_THEN);
+    for (const flag of ['once', 'unstun']) {
+        if (rule[flag] === undefined) continue;
+        if (rule[flag] !== true) addIssue(state, at(flag), 'invalid-enum', { allowed: [true] });
+        else result[flag] = true;
+    }
+    if (rule.block !== undefined) result.block = intField(rule.block, at('block'), state, 1, 99);
+    if (rule.shed !== undefined) result.shed = arrayField(rule.shed, at('shed'), state, 1, SLEEP_SHED_MAX, (key, keyPath, st) => enumField(key, keyPath, st, statusKeys));
+    if (rule.rearm !== undefined) {
+        const max = Array.isArray(rule.seq) ? Math.max(1, rule.seq.length - 1) : INTERRUPT_SEQ_MAX - 1;
+        if (Array.isArray(rule.seq) && rule.seq.length < 2) addIssue(state, at('rearm'), 'out-of-range', { min: 1, max: 0 });
+        else result.rearm = intField(rule.rearm, at('rearm'), state, 1, max);
+    }
+    return result;
+}
+
+// 加权候选表：[{ skill, weight }]，1–6 项，权重 1–100 的整数。
+export const SCRIPT_PICK_MAX = 6;
+// 脚本条件：随从数 / 同伴数（kin-lt、kin-gte、allies-lt、allies-gte，取值 1–5）或沿用效果条件。
+function validateScriptWhen(when, path, state) {
+    if (!isScriptCondition(when)) return validateCondition(when, path, state);
+    checkKnownFields(when, ['kind', 'value'], path, state);
+    return { kind: when.kind, value: intField(when.value, joinPath(path, 'value'), state, 1, SCRIPT_CONDITION_MAX) };
+}
+// 条件步：{ skill, when }，规划到这一步时条件成立才出，否则跳过。
+function validateCondStep(node, path, state) {
+    checkKnownFields(node, ['skill', 'when'], path, state);
+    return { skill: idField(node.skill, joinPath(path, 'skill'), state), when: validateScriptWhen(node.when, joinPath(path, 'when'), state) };
+}
+// 加权候选可带 when：条件不成立时该候选不入选。
+function validatePickList(list, path, state) {
+    return arrayField(list, path, state, 1, SCRIPT_PICK_MAX, (item, itemPath, st) => {
+        if (!objectField(item, itemPath, st)) return;
+        checkKnownFields(item, ['skill', 'weight', 'when'], itemPath, st);
+        const result = { skill: idField(item.skill, joinPath(itemPath, 'skill'), st), weight: intField(item.weight, joinPath(itemPath, 'weight'), st, 1, 100) };
+        if (item.when !== undefined) result.when = validateScriptWhen(item.when, joinPath(itemPath, 'when'), st);
+        return result;
+    });
+}
+
+// 脚本引用的技能必须出现在技能或阶段技能里。
+function checkScriptRefs(script, path, state, skillIds) {
+    if (!script) return;
+    if (script.opener && !skillIds.has(script.opener)) addIssue(state, joinPath(path, 'opener'), 'unknown-skill');
+    if (script.sleep?.skill && !skillIds.has(script.sleep.skill)) addIssue(state, joinPath(path, 'sleep.skill'), 'unknown-skill');
+    (Array.isArray(script.inserts) ? script.inserts : []).forEach((item, index) => {
+        if (item?.skill && !skillIds.has(item.skill)) addIssue(state, `${joinPath(path, 'inserts')}[${index}].skill`, 'unknown-skill');
+    });
+    (Array.isArray(script.interrupts) ? script.interrupts : []).forEach((rule, index) => (Array.isArray(rule?.seq) ? rule.seq : []).forEach((id, k) => {
+        if (id && !skillIds.has(id)) addIssue(state, `${joinPath(path, 'interrupts')}[${index}].seq[${k}]`, 'unknown-skill');
+    }));
+    const checkPicks = (list, base) => (Array.isArray(list) ? list : []).forEach((item, index) => {
+        if (item?.skill && !skillIds.has(item.skill)) addIssue(state, `${base}[${index}].skill`, 'unknown-skill');
+    });
+    checkPicks(script.openers, joinPath(path, 'openers'));
+    for (const [id, list] of Object.entries(script.next || {})) {
+        if (!skillIds.has(id)) addIssue(state, joinPath(path, `next.${id}`), 'unknown-skill');
+        checkPicks(list, joinPath(path, `next.${id}`));
+    }
+    (Array.isArray(script.cycle) ? script.cycle : []).forEach((id, index) => {
+        if (Array.isArray(id)) checkPicks(id, `${joinPath(path, 'cycle')}[${index}]`);
+        else if (isObject(id)) { if (id.skill && !skillIds.has(id.skill)) addIssue(state, `${joinPath(path, 'cycle')}[${index}].skill`, 'unknown-skill'); }
+        else if (id && !skillIds.has(id)) addIssue(state, `${joinPath(path, 'cycle')}[${index}]`, 'unknown-skill');
+    });
+}
+
+// 敌人阶段：血量低于阈值（hpBelowPct）、血量不高于阈值（hpAtMostPct）、第 N 个自身回合（afterTurns）或生命归零（onDefeat），四选一，
+// 增删技能/被动，可带 script 切换循环，可带 intent 把当前已公示的意图改写为指定技能（执行前保留）。
+// 归零重生（M4）：onDefeat 阶段在致命伤害时取代倒下，最大生命变为当前最大生命的 maxHpPct%（10–500，缺省 100）并回满，
+// 格挡清零，clear 为 'all'（缺省，清除全部状态）或 'debuffs'（只清减益），另移除 shed 里的状态。不发倒下、不算击杀。
+export const REBIRTH_CLEAR = Object.freeze(['all', 'debuffs']);
 function validatePhase(phase, path, state) {
     if (!objectField(phase, path, state)) return;
     const at = (key) => joinPath(path, key);
-    checkKnownFields(phase, ['hpBelowPct', 'addSkills', 'removeSkills', 'passives'], path, state);
-    return {
-        hpBelowPct: intField(phase.hpBelowPct, at('hpBelowPct'), state, 10, 90),
+    checkKnownFields(phase, ['hpBelowPct', 'hpAtMostPct', 'afterTurns', 'onDefeat', 'maxHpPct', 'clear', 'shed', 'needs', 'brace', 'addSkills', 'removeSkills', 'passives', 'script', 'intent'], path, state);
+    const byTurns = phase.afterTurns !== undefined;
+    const atMost = phase.hpAtMostPct !== undefined;
+    const onDefeat = phase.onDefeat !== undefined;
+    if (byTurns && phase.hpBelowPct !== undefined) addIssue(state, at('afterTurns'), 'phase-trigger-conflict');
+    if (atMost && (byTurns || phase.hpBelowPct !== undefined)) addIssue(state, at('hpAtMostPct'), 'phase-trigger-conflict');
+    if (onDefeat && (byTurns || atMost || phase.hpBelowPct !== undefined)) addIssue(state, at('onDefeat'), 'phase-trigger-conflict');
+    const result = {
+        ...(onDefeat ? { onDefeat: true }
+            : byTurns ? { afterTurns: intField(phase.afterTurns, at('afterTurns'), state, 1, 20) }
+                : atMost ? { hpAtMostPct: intField(phase.hpAtMostPct, at('hpAtMostPct'), state, 10, 90) }
+                    : { hpBelowPct: intField(phase.hpBelowPct, at('hpBelowPct'), state, 10, 90) }),
         addSkills: phase.addSkills === undefined ? [] : arrayField(phase.addSkills, at('addSkills'), state, 0, 3, validateSkill),
         removeSkills: phase.removeSkills === undefined ? [] : arrayField(phase.removeSkills, at('removeSkills'), state, 0, 3, (id, idPath, st) => idField(id, idPath, st)),
         passives: phase.passives === undefined ? [] : arrayField(phase.passives, at('passives'), state, 0, 2, validatePassive),
     };
+    if (onDefeat && phase.onDefeat !== true) addIssue(state, at('onDefeat'), 'invalid-enum', { allowed: [true] });
+    for (const key of ['maxHpPct', 'clear', 'shed', 'needs', 'brace']) if (phase[key] !== undefined && !onDefeat) addIssue(state, at(key), 'unknown-field');
+    // 致死转爆炸（M4）：needs 为必须持有的状态（没有时正常倒下），重生前把其层数记入 res.stored；brace 为真时重生后挂「将爆」不再失去生命。
+    if (onDefeat && phase.needs !== undefined) result.needs = enumField(phase.needs, at('needs'), state, [...STATUSES, ...Object.keys(APPLY_STATUSES)]);
+    if (onDefeat && phase.brace !== undefined) {
+        if (phase.brace !== true) addIssue(state, at('brace'), 'invalid-enum', { allowed: [true] });
+        else result.brace = true;
+    }
+    if (onDefeat && phase.maxHpPct !== undefined) result.maxHpPct = intField(phase.maxHpPct, at('maxHpPct'), state, 10, 500);
+    if (onDefeat && phase.clear !== undefined) result.clear = enumField(phase.clear, at('clear'), state, REBIRTH_CLEAR);
+    if (onDefeat && phase.shed !== undefined) {
+        result.shed = arrayField(phase.shed, at('shed'), state, 1, SLEEP_SHED_MAX, (key, keyPath, st) => enumField(key, keyPath, st, [...STATUSES, ...Object.keys(APPLY_STATUSES)]));
+    }
+    if (phase.script !== undefined) result.script = validateScript(phase.script, at('script'), state);
+    if (phase.script?.sleep !== undefined) addIssue(state, at('script.sleep'), 'unknown-field');
+    if (phase.script?.interrupts !== undefined) addIssue(state, at('script.interrupts'), 'unknown-field');
+    if (phase.intent !== undefined) result.intent = idField(phase.intent, at('intent'), state);
+    return result;
 }
 
 // 别名列表：最多 5 个，去空去重。
@@ -506,7 +737,7 @@ function validateHeroSkill(skill, path, state) {
         description: textField(skill.description, at('description'), state, 80, ''),
     };
     if (state.errors.length === errorsBefore) {
-        const budget = evaluateCardBudget({ cost: COMBAT_RULES.heroSkillCost, rarity: 'personal', effects: result.effects });
+        const budget = state.cardBudget({ cost: COMBAT_RULES.heroSkillCost, rarity: 'personal', effects: result.effects });
         if (!budget.ok) addIssue(state, joinPath(path, budget.path), budget.reason, budget.detail);
     }
     return result;
@@ -526,7 +757,7 @@ function validateTraitSkill(skill, path, state, rarity) {
         description: textField(skill.description, at('description'), state, 80, ''),
     };
     if (state.errors.length === errorsBefore) {
-        const budget = evaluateCardBudget({ cost: result.cost, rarity, effects: result.effects });
+        const budget = state.cardBudget({ cost: result.cost, rarity, effects: result.effects });
         if (!budget.ok) addIssue(state, joinPath(path, budget.path), budget.reason, budget.detail);
     }
     return result;
@@ -607,16 +838,111 @@ function validateSkillCharacter(profile, path, state) {
     return result;
 }
 
-// 敌人档案。血量范围随阶级定（阶级基础血量的 0.5 到 1.5 倍），首领必须有阶段。
+// 敌人模板来源：条目 ID 与特性池中的项类型（original 原版 / stitched 程序缝合）。
+export const ENEMY_TEMPLATE_MODELS = Object.freeze(['original', 'stitched']);
+function validateEnemyTemplate(template, path, state) {
+    if (!objectField(template, path, state)) return;
+    checkKnownFields(template, ['enemyId', 'model'], path, state);
+    return {
+        enemyId: idField(template.enemyId, joinPath(path, 'enemyId'), state),
+        model: enumField(template.model, joinPath(path, 'model'), state, ENEMY_TEMPLATE_MODELS),
+    };
+}
+
+function checkKitScriptRefs(def, path, state) {
+    const phases = Array.isArray(def.phases) ? def.phases : [];
+    const skills = [...(Array.isArray(def.skills) ? def.skills : []), ...phases.flatMap((p) => p?.addSkills || [])];
+    const ids = new Set(skills.map((s) => s?.id).filter(Boolean));
+    checkDuplicateIds(skills, joinPath(path, 'skills'), state);
+    checkScriptRefs(def.script, joinPath(path, 'script'), state, ids);
+    phases.forEach((p, i) => {
+        checkScriptRefs(p?.script, joinPath(path, `phases[${i}].script`), state, ids);
+        if (p?.intent && !ids.has(p.intent)) addIssue(state, joinPath(path, `phases[${i}].intent`), 'unknown-skill');
+    });
+}
+
+function validateKinDef(def, path, state) {
+    if (!objectField(def, path, state)) return;
+    const at = (key) => joinPath(path, key);
+    checkKnownFields(def, KIN_DEF_FIELDS, path, state);
+    if (Array.isArray(def.skills) && !def.skills.length) addIssue(state, at('skills'), 'missing-skills');
+    const result = {
+        maxHp: intField(def.maxHp, at('maxHp'), state, 1, 9999),
+        skills: arrayField(def.skills, at('skills'), state, 1, SKILL_COUNT_MAX, validateSkill),
+        ...(def.name === undefined ? {} : { name: textField(def.name, at('name'), state, 20) }),
+        ...(def.art === undefined ? {} : { art: enumField(def.art, at('art'), state, ENEMY_ART_KEYS) }),
+        ...(def.speed === undefined ? {} : { speed: intField(def.speed, at('speed'), state, 1, 999) }),
+    };
+    if (def.minion !== undefined) {
+        if (typeof def.minion !== 'boolean') addIssue(state, at('minion'), 'invalid-enum', { allowed: [true, false] });
+        else result.minion = def.minion;
+    }
+    if (def.passives !== undefined) result.passives = arrayField(def.passives, at('passives'), state, 0, 2, validatePassive);
+    if (def.phases !== undefined) result.phases = arrayField(def.phases, at('phases'), state, 0, 2, validatePhase);
+    if (def.script !== undefined) result.script = validateScript(def.script, at('script'), state);
+    if (def.deathSpawns !== undefined) result.deathSpawns = validateDeathSpawns(def.deathSpawns, at('deathSpawns'), state);
+    checkKitScriptRefs(result, path, state);
+    return result;
+}
+
+const validateDeathSpawns = (value, path, state) => arrayField(value, path, state, 1, DEATH_SPAWN_LIMIT, idField);
+function validateKinFields(def, path, state) {
+    const result = {};
+    const at = (key) => joinPath(path, key);
+    if (def.kin !== undefined) {
+        const table = objectField(def.kin, at('kin'), state);
+        if (table) {
+            const entries = Object.entries(table);
+            if (!entries.length || entries.length > KIN_LIMIT) addIssue(state, at('kin'), 'length-out-of-range', { min: 1, max: KIN_LIMIT });
+            const hitsMax = state.hitsMax;
+            state.hitsMax = SKILL_HITS_MAX;
+            result.kin = Object.fromEntries(entries.filter(([id]) => {
+                if (validKinKey(id)) return true;
+                addIssue(state, at(`kin.${id}`), 'invalid-id');
+                return false;
+            }).map(([id, value]) => [id, validateKinDef(value, at(`kin.${id}`), state)]));
+            if (hitsMax === undefined) delete state.hitsMax;
+            else state.hitsMax = hitsMax;
+        }
+    }
+    if (def.kinScale !== undefined) {
+        if (!Number.isFinite(def.kinScale) || def.kinScale <= 0 || def.kinScale > 5 || !result.kin) addIssue(state, at('kinScale'), 'invalid-kin');
+        else result.kinScale = def.kinScale;
+    }
+    if (def.deathSpawns !== undefined) result.deathSpawns = validateDeathSpawns(def.deathSpawns, at('deathSpawns'), state);
+    const checkEffects = (effects, base) => (Array.isArray(effects) ? effects : []).forEach((effect, i) => {
+        const effectPath = `${base}[${i}]`;
+        if (opHandler(effect?.op)?.refs) validateEffect(effect, effectPath, state);
+        else for (const key of ['then', 'a', 'b']) {
+            if (Array.isArray(effect?.[key])) checkEffects(effect[key], joinPath(effectPath, key));
+        }
+    });
+    checkEffects(kitEffects(def), at('effects'));
+    const checkRefs = (kit, base) => {
+        if (kitKinRefs(kit).some((key) => !Object.hasOwn(result.kin || {}, key))) addIssue(state, base, 'invalid-kin');
+    };
+    checkRefs(def, path);
+    for (const [key, value] of Object.entries(result.kin || {})) checkRefs(value, at(`kin.${key}`));
+    return result;
+}
+
+export const normalizeKinFields = (input) => runValidator((def, path, state) => {
+    if (objectField(def, path, state)) return validateKinFields(def, path, state);
+}, input);
+
+// 敌人档案。血量范围随阶级定（阶级基础血量的 0.5 到 1.5 倍），首领必须有阶段；带 template 的档案技能最少 1 个、首领不强制阶段。
 function validateEnemyProfile(profile, path, state) {
     const at = (key) => joinPath(path, key);
-    checkKnownFields(profile, ['kind', 'v', 'id', 'name', 'tier', 'art', 'base', 'skills', 'passives', 'phases', 'generated'], path, state);
+    checkKnownFields(profile, ['kind', 'v', 'id', 'name', 'tier', 'art', 'base', 'skills', 'passives', 'phases', 'generated', 'template', 'script', ...KIN_FIELDS], path, state);
     const base = objectField(profile.base, at('base'), state) || {};
     if (isObject(profile.base)) checkKnownFields(profile.base, ['hp', 'speed'], at('base'), state);
     const tier = enumField(profile.tier, at('tier'), state, Object.keys(COMBAT_RULES.tiers));
     const tierRule = COMBAT_RULES.tiers[tier];
     const hpMax = tierRule ? Math.round(tierRule.hp * 1.5) : 999;
     const hpMin = tierRule ? Math.round(tierRule.hp * 0.5) : 1;
+    const templated = profile.template !== undefined;
+    // 段数放宽只作用于本档案的技能与阶段技能，校验完即撤回。
+    if (templated) state.hitsMax = SKILL_HITS_MAX;
     const result = {
         kind: 'enemy',
         v: SCHEMA_VERSION,
@@ -625,17 +951,26 @@ function validateEnemyProfile(profile, path, state) {
         tier,
         ...(profile.art === undefined ? {} : { art: enumField(profile.art, at('art'), state, ENEMY_ART_KEYS) }),
         base: { hp: intField(base.hp, at('base.hp'), state, hpMin, hpMax), ...speedField(base, path, state) },
-        skills: arrayField(profile.skills, at('skills'), state, 2, SKILL_COUNT_MAX, validateSkill),
+        skills: arrayField(profile.skills, at('skills'), state, templated ? 1 : 2, SKILL_COUNT_MAX, validateSkill),
         passives: profile.passives === undefined ? [] : arrayField(profile.passives, at('passives'), state, 0, 2, validatePassive),
         phases: profile.phases === undefined ? [] : arrayField(profile.phases, at('phases'), state, 0, 2, validatePhase),
         generated: profile.generated !== false,
     };
-    checkDuplicateIds(result.skills, at('skills'), state);
+    delete state.hitsMax;
+    if (templated) result.template = validateEnemyTemplate(profile.template, at('template'), state);
+    if (profile.script !== undefined) result.script = validateScript(profile.script, at('script'), state);
+    Object.assign(result, validateKinFields(profile, path, state));
+    checkKitScriptRefs(result, path, state);
     if (tierRule) {
         checkDamageCap(result.skills, at('skills'), state, tierRule.damageCap);
         (result.phases || []).forEach((phase, index) => checkDamageCap(phase?.addSkills, at(`phases[${index}].addSkills`), state, tierRule.damageCap));
+        for (const [key, def] of Object.entries(result.kin || {})) {
+            checkDamageCap(def?.skills, at(`kin.${key}.skills`), state, tierRule.damageCap);
+            (def?.phases || []).forEach((phase, i) => checkDamageCap(phase?.addSkills, at(`kin.${key}.phases[${i}].addSkills`), state, tierRule.damageCap));
+        }
     }
-    if (tier === 'boss' && !(result.phases || []).length) addIssue(state, at('phases'), 'boss-needs-phase');
+    const phaseList = Array.isArray(result.phases) ? result.phases : [];
+    if (tier === 'boss' && !templated && !phaseList.length) addIssue(state, at('phases'), 'boss-needs-phase');
     return result;
 }
 
@@ -650,8 +985,10 @@ function validateProfile(profile, path, state) {
     if (kind === 'enemy') return validateEnemyProfile(profile, path, state);
 }
 
-export const normalizeProfile = (input) => runValidator(validateProfile, input);
+export const normalizeProfile = (input, options) => runValidator(validateProfile, input, options);
 export const normalizeCard = (input) => runValidator((card, path, state) => validateCardEntry(card, path, state), input);
+export const normalizeEffect = (input) => runValidator(validateEffect, input);
+export const normalizeEnemyTemplate = (input) => runValidator(validateEnemyTemplate, input);
 export const normalizeSkill = (input) => runValidator(validateSkill, input);
 // 被动单独规范化（补默认字段）：遗物被动比对时让程序还原值与账本值走同一套归一。
 export const normalizePassive = (input) => runValidator(validatePassive, input);
@@ -710,7 +1047,7 @@ export function validateStarterDeck(deckCharacter, classProfile) {
     const signatureIds = new Set((deckCharacter.signatureCards || []).map((card) => card.id));
     for (const id of personalIds) if (classIds.has(id) || BASIC_CARDS[id]) errors.push({ path: 'personalPool', reason: 'id-collision', cardId: id });
     for (const id of signatureIds) if (classIds.has(id) || personalIds.has(id) || BASIC_CARDS[id]) errors.push({ path: 'signatureCards', reason: 'id-collision', cardId: id });
-    const fixedIds = new Set(fixedClassPool(classProfile.archetype).map((card) => card.id));
+    const fixedIds = new Set(compatibleFixedClassPool(classProfile.archetype).map((card) => card.id));
     const v6 = deckCharacter.starterDeck.some((id) => fixedIds.has(id));
     const shape = { basicAttack: 0, basicDefend: 0, classCards: 0, personalCards: 0 };
     const counts = new Map();
@@ -807,7 +1144,7 @@ function validateItem(item, path, state) {
 }
 
 // 战利品槽位里除公共字段外允许的载荷字段。
-// 卡牌槽的 choices（规则 v6）：REWARD_CARD_CHOICES 张候选（固定卡与随机卡 2:1），card 为其中的随机卡；旧槽位不带。
+// 卡牌槽的 choices（规则 v6）：1–REWARD_CARD_CHOICES_MAX 张（新 offer 为一张预定牌，加成时二选一；旧 offer 为三选一），card 必须是其中一张；旧槽位不带。
 // 杂物槽的 junk（规则 v6 G3d 弱敌战）：劣等杂物，卖价按 1/4；只在为真时写。
 const REWARD_PAYLOAD_FIELDS = Object.freeze({ card: ['card', 'choices', 'marks', 'upgradeNoDamage'], gear: ['gear'], item: ['item'], keepsake: ['junk'], inscribe: ['inscription', 'cardId', 'copyId', 'cardName'] });
 
@@ -1180,6 +1517,23 @@ function validateLedgerPayload(type, payload, path, state) {
                 reportId: textField(payload.reportId, at('reportId'), state, 40),
                 ...(payload.costVersion === undefined ? {} : { costVersion: intField(payload.costVersion, at('costVersion'), state, 1, 1) }),
             };
+        // 敌人模板 M7 偷牌：被撤离或残存的敌人带走的长期副本，锚定战报楼（胜、败、撤退都记），按副本 ID 从卡组移除。
+        case 'card-lost': {
+            checkKnownFields(payload, ['copyId', 'cardId', 'reportId'], path, state);
+            return {
+                copyId: idField(payload.copyId, at('copyId'), state, LEDGER_ID_PATTERN),
+                cardId: idField(payload.cardId, at('cardId'), state),
+                reportId: textField(payload.reportId, at('reportId'), state, 40),
+            };
+        }
+        // 敌人模板 M7 永久寄生：敌人植入长期卡组的牌，锚定战报楼（胜、败、撤退都记），按固定表补目录并新增一张副本。
+        case 'card-implant': {
+            checkKnownFields(payload, ['cardId', 'reportId'], path, state);
+            return {
+                cardId: idField(payload.cardId, at('cardId'), state),
+                reportId: textField(payload.reportId, at('reportId'), state, 40),
+            };
+        }
         // 规则 v6 G5g 战斗胜利积分：锚定胜利战报楼，amount 由程序按档位与战斗 ID 定额（10–30）。
         // G5f-4c：bonus 为写入时持有的加金币遗物特性快照（relics），points / hpMax 必须等于按引用与定额重算的值。
         case 'battle-points': {
@@ -1299,7 +1653,7 @@ function validateLedgerEntry(entry, path, state) {
     return result;
 }
 
-export const normalizeLedgerEntry = (input) => runValidator(validateLedgerEntry, input);
+export const normalizeLedgerEntry = (input, options) => runValidator(validateLedgerEntry, input, options);
 
 // 属性记录里可加点的属性：六维 + 自由点。
 const ATTRIBUTE_ABILITIES = Object.freeze([...ABILITY_KEYS, 'free']);
