@@ -18,11 +18,13 @@ export function modelReply(prompt) {
         else if (e.kind === 'profile-gear') value = { gear: [['长剑', 'weapon', 'common']] };
         else if (e.kind === 'draw-card') value = { card: ['雷光斩', 'strike'] };
         else if (e.kind === 'trait') value = { name: '雷光特性', origin: '战斗中的领悟' };
+        else if (e.kind === 'profile-init') value = {};
+        if (e.input?.combatInit) value = { ...value, init: { className: '剑士', role: 'warrior', major: 'str', minor: 'con', weak: 'int' } };
         return { key: e.key, value };
     }) });
 }
 
-export async function createGenerationFixture({ seedHero = true, chatId: initialChatId = 'fixture-chat', metadata = {} } = {}) {
+export async function createGenerationFixture({ seedHero = true, chatId: initialChatId = 'fixture-chat', metadata = {}, serviceOptions = {} } = {}) {
     const db = createLedgerMockHost({ supportCallbacks: true });
     db.sheets.sheet_userbag = userInventorySheet();
     db.sheets.sheet_skills = { uid: 'sheet_skills', name: '人物技能表', content: [['所属角色', '技能', '状态'], ['艾拉', '雷步', '已掌握']] };
@@ -54,6 +56,7 @@ export async function createGenerationFixture({ seedHero = true, chatId: initial
         readLore: async () => [{ name: '艾拉', text: '擅长用剑' }],
         readStoryContext: async () => ({ story: '雷光围绕剑刃。' }), retryDelays: [],
         request: async (p) => { requests.push(JSON.parse(p.user)); if (callback) await callback(); if (failure) throw Error('模拟模型故障'); return reply(p); },
+        ...serviceOptions,
     });
     await services.getLedger().scan();
     const state = await services.getLedger().effectiveState();
@@ -63,5 +66,5 @@ export async function createGenerationFixture({ seedHero = true, chatId: initial
         hero: () => services.getLedger().effectiveState().then((s) => s.characters.get(s.attributes.heroId)),
         setFailure: (value) => { failure = value; }, setCallback: (value) => { callback = value; }, setChat: (id) => { chatId = id; },
         setReply: (value) => { reply = value; },
-        dispose: () => services.resetChat() };
+        dispose: () => { services.dispose(); tables.client.dispose(); } };
 }

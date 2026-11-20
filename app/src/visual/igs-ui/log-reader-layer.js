@@ -10,15 +10,15 @@ const REPLAY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 import { cachedSpriteNameColor, spriteNameColor } from './character-name-color.js';
 import { armTextFx, disarmTextFx } from './text-fx.js';
 import { LOG_SPEEDS } from './log-reader-settings.js';
-const FLOW_STEP_MS = 18;
-const FLOW_FADE_MS = 260;
-const TYPE_STEP_MS = 30;
-const TYPE_PAUSE_MS = 120;
+export const FLOW_STEP_MS = 18;
+export const FLOW_FADE_MS = 260;
+export const TYPE_STEP_MS = 30;
+export const TYPE_PAUSE_MS = 120;
 const FADE_MS = 260;
 const ONCE_MS = 1600;
 // 「吼」的弹出时长（text-fx 里 igs-tfx-roar .56s），出字计时至少等它播完。
 const TFX_POP_MS = 560;
-const PAUSE_CHARS = /[，。！？…,.!?]/;
+export const PAUSE_CHARS = /[，。！？…,.!?]/;
 
 function stateOf(overlay) {
     let s = states.get(overlay);
@@ -109,6 +109,11 @@ function bindLog(overlay, log) {
         if (row && target.closest('.igs-fx-symbol,.igs-log-chip')) {
             event.stopPropagation();
             replayMood(overlay, row);
+            return;
+        }
+        if (target.closest('.igs-log-live')) {
+            event.stopPropagation();
+            if (s.view && s.view.onLiveRoom) s.view.onLiveRoom();
             return;
         }
         if (!target.closest('.igs-log-scroll')) return;
@@ -252,7 +257,8 @@ function paintAvatar(overlay, av) {
     target.style.backgroundSize = `${crop.size}px auto`;
     // 破框的头像层往上多出 room：同一取景整体下移 room。
     const lift = shape === 'break' ? (LOG_AVATAR_BOX.break.room || 0) : 0;
-    target.style.backgroundPosition = `${crop.x}px ${crop.y + lift}px`;
+    const shift = shape === 'break' ? (LOG_AVATAR_BOX.break.side || 0) : 0;
+    target.style.backgroundPosition = `${crop.x + shift}px ${crop.y + lift}px`;
     // 情绪符号锚在头顶右侧（与舞台上的符号同一口径）；取景框外的部分收回框边。
     const head = probed && probed.head;
     if (head && aspect > 0) {
@@ -445,7 +451,7 @@ function observeRow(overlay, log, node) {
     if (s.observer) s.observer.observe(node);
 }
 // 把文字节点拆成逐字 span（保留注音、心里话等标签），返回字数。
-function splitChars(doc, root, delayOf) {
+export function splitChars(doc, root, delayOf, cls = 'igs-log-fl') {
     const walker = doc.createTreeWalker(root, 4);
     const nodes = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) if (n.nodeValue) nodes.push(n);
@@ -454,7 +460,7 @@ function splitChars(doc, root, delayOf) {
     for (const node of nodes) {
         const frag = doc.createDocumentFragment();
         for (const ch of Array.from(node.nodeValue)) {
-            const span = el(doc, 'span', 'igs-log-fl');
+            const span = el(doc, 'span', cls);
             span.style.animationDelay = `${at}ms`;
             span.textContent = ch;
             frag.append(span);
@@ -529,11 +535,29 @@ function scrollEnd(log, smooth) {
     else scroll.scrollTop = scroll.scrollHeight;
 }
 
+const LIVE_PHONE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="18.2" r="1" fill="currentColor"/><path d="M10 7.2 15 10l-5 2.8z" fill="currentColor"/></svg>';
+
+// 本页在直播时右上角给一个手机按钮：列表里不放直播手机，点它才切到普通直播间。
+function syncLiveButton(overlay, log, view) {
+    let btn = log.querySelector('.igs-log-live');
+    const room = view.liveRoom;
+    if (!room) { if (btn) btn.remove(); return; }
+    if (!btn) {
+        btn = el(overlay.ownerDocument, 'button', 'igs-log-live');
+        btn.type = 'button';
+        btn.innerHTML = LIVE_PHONE_SVG;
+        log.appendChild(btn);
+    }
+    const label = `进入直播间${room.name ? `：${room.name}` : ''}`;
+    if (btn.getAttribute('aria-label') !== label) { btn.setAttribute('aria-label', label); btn.title = label; }
+}
+
 function applyLogAttrs(overlay, log, view) {
     const set = (name, value, node = log) => { if (node.getAttribute(name) !== value) node.setAttribute(name, value); };
     set('data-igs-log-skin', view.skin, overlay);
     set('data-tone', view.tone);
     set('data-shape', view.settings.avatarShape);
+    set('data-plate', view.settings.breakPlate);
     set('data-mood-size', view.settings.moodSize);
     set('data-igs-log-edge', view.settings.edge, overlay);
     set('data-user-side', view.settings.userSide);
@@ -565,6 +589,7 @@ export function syncLogReader(overlay, view) {
     const s = stateOf(overlay);
     s.view = view;
     applyLogAttrs(overlay, log, view);
+    syncLiveButton(overlay, log, view);
     const list = log.querySelector('.igs-log-list');
     const sig = JSON.stringify([view.floorKey, view.settings.avatarShape, view.settings.userAvatar, view.settings.chip, view.settings.emotion, view.skin, view.nameColorSig || '']);
     // 换楼、换头像样式等：清空重建；往回退批：删掉多出的行。

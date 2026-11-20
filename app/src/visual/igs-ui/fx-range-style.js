@@ -8,8 +8,6 @@ export const RANGE_FX_STYLE_TEXT = `
 @property --igs-lg{syntax:'<number>';inherits:false;initial-value:0;}
 .igs-fx-letterbox-bar{height:11%;}
 #igs-stage-motion[data-igs-fx-letterbox] #igs-bg{scale:1.03;transition:scale .8s ease;}
-.igs-fx-flashback-tag{position:absolute;left:14px;top:13%;padding:2px 10px 2px 12px;font-size:12px;letter-spacing:.3em;color:#f2e2bd;background:#3a2a14;border:1px solid #c9a96a;opacity:0;transition:opacity .5s ease;pointer-events:none;}
-#igs-stage-motion[data-igs-fx-flashback] .igs-fx-flashback-tag{opacity:1;transition-delay:.5s;}
 @keyframes igs-fx-film-flick{0%,100%{opacity:1;}46%{opacity:1;}48%{opacity:.7;}50%{opacity:1;}83%{opacity:.86;}}
 #igs-stage-motion[data-igs-fx-flashback] .igs-fx-flashback-grain{animation:igs-fx-grain .5s steps(2) infinite,igs-fx-film-flick 5s linear infinite;background:radial-gradient(ellipse at 50% 50%,transparent 50%,rgba(40,24,8,.55) 100%),repeating-linear-gradient(90deg,transparent 0 31%,rgba(255,240,210,.16) 31% 31.12%,transparent 31.12% 68%,rgba(255,240,210,.12) 68% 68.1%,transparent 68.1% 100%),repeating-radial-gradient(circle at 30% 40%,rgba(255,240,210,.08) 0 1px,transparent 1px 3px);}
 .igs-fx-dream-mist::after{content:'';position:absolute;left:0;right:0;top:0;bottom:-120px;opacity:.6;background:radial-gradient(circle,#fff 0 1.5px,transparent 2.5px) 0 0/90px 120px,radial-gradient(circle,#e6ddff 0 1px,transparent 2px) 40px 60px/70px 60px;}
@@ -17,11 +15,7 @@ export const RANGE_FX_STYLE_TEXT = `
 @keyframes igs-fx-dream-rise{to{transform:translate3d(0,-120px,0);}}
 #igs-stage-motion[data-igs-fx-dream] #igs-sprite{filter:saturate(.78) brightness(1.02) contrast(.96) drop-shadow(0 0 12px #c9bdff)!important;-webkit-filter:saturate(.78) brightness(1.02) contrast(.96) drop-shadow(0 0 12px #c9bdff)!important;}
 .igs-fx-range-flash{position:absolute;inset:0;pointer-events:none;}
-.igs-fx-range-flash[data-kind="flashback"]{background:radial-gradient(ellipse at 50% 50%,#fffaf0 0,#fff0d0 55%,#d9b97a 100%);animation:igs-fx-range-in var(--igs-fx-life,500ms) ease-out both;}
-.igs-fx-range-flash[data-kind="flashback"][data-dir="out"]{animation-name:igs-fx-range-out;}
 .igs-fx-range-flash[data-kind="dream"]{background:#f1edff;animation:igs-fx-range-dream var(--igs-fx-life,900ms) ease-in-out both;}
-@keyframes igs-fx-range-in{0%{opacity:0;scale:1.5;}22%{opacity:1;scale:1.15;}100%{opacity:0;scale:1;}}
-@keyframes igs-fx-range-out{0%{opacity:0;scale:1;}30%{opacity:.9;scale:1.1;}100%{opacity:0;scale:1.4;}}
 @keyframes igs-fx-range-dream{0%{opacity:0;}35%{opacity:.8;}100%{opacity:0;}}
 #igs-stage-motion[data-igs-fx-whisper="1"] .igs-dialog{scale:.97;box-shadow:0 0 22px 6px rgba(0,0,0,.28);transition:scale .5s ease;}
 #igs-stage-motion[data-igs-fx-whisper="1"] #igs-fx-stage{background:rgba(0,0,0,.2);}

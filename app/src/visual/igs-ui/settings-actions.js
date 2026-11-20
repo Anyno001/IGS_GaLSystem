@@ -928,6 +928,7 @@ const RISKY_ACTIONS = [
     ['feed-prompt-reset:', () => '这个平台的写法恢复默认？当前修改过的内容将被覆盖。'],
     ['prompt-entry-reset:', () => '这条写法恢复默认？关键词、位置、深度和正文都会恢复默认。'],
     ['feed-storm-prompt-reset', () => '舆论风暴的写法恢复默认？当前修改过的内容将被覆盖。'],
+    ['forum-prompt-reset', () => '论坛提示词恢复默认？当前修改过的内容将被覆盖。'],
     ['live-platform-prompt-reset', () => '直播平台栏的写法恢复默认？当前修改过的内容将被覆盖。'],
     ['remove-virtual-regex:', () => '删除这条正文格式化规则？'],
     ['image-log-clear', () => '清空生图日志？'],
@@ -2649,6 +2650,15 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    if (normalizedAction === 'status-avatar-follow-sprite') {
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        readerDraft.statusHud = { ...normalizeStatusHudSettings(readerDraft.statusHud), avatarSource: 'sprite' };
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        showGeneratedNotice(options.global || globalThis, '状态栏头像已改为跟随立绘（对所有角色生效）。', 'info');
+        return rerenderSettings();
+    }
+
     if (normalizedAction.startsWith('status-avatar-crop-clear:')) {
         const charName = decodeSeg(normalizedAction.slice('status-avatar-crop-clear:'.length));
         const root = settingsState.draft.bridge.sceneAssets = settingsState.draft.bridge.sceneAssets || {};
@@ -2988,6 +2998,14 @@ export async function handleSettingsAction(action, ctx) {
     }
 
     // 直播提示词里平台栏的写法恢复默认（自定义留空即用默认）。
+    if (normalizedAction === 'forum-prompt-reset') {
+        const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
+        readerDraft.forumReader = { ...(readerDraft.forumReader || {}), promptRule: '' };
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     if (normalizedAction === 'live-platform-prompt-reset') {
         const readerDraft = settingsState.draft.readerSettings = settingsState.draft.readerSettings || {};
         readerDraft.liveFx = { ...(readerDraft.liveFx || {}), platformPrompt: '' };

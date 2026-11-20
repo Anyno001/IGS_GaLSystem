@@ -26,7 +26,8 @@ import { categoryOfPage, currentSettingsPage, defaultPageOfCategory, isSettingsC
 import { recordSettingsRecent, settingsRecentLabel } from './settings-recent.js';
 import { migrateTables, MIGRATE_BACKUP_KEY } from '../../data/shujuku/table-migrate.js';
 import { downloadStatsTemplate, fetchStatsTemplate, importStatsTemplate, statsTemplateChatDiff, STATS_TEMPLATE_PRESET_NAME } from './stats-template-link.js';
-import { FAME_TEMPLATES, FAME_TEMPLATE_GROUPS } from '../../scene/stats/stat-fame.js';
+import { FAME_TEMPLATES, FAME_TEMPLATE_GROUPS, fameDraftText, parseFameDraft } from '../../scene/stats/stat-fame.js';
+import { fameBarFromForm, fameFormFields, fameFormProblem } from './fame-form.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { VN_THEME_PRESETS } from './reader-host-constants.js';
 import { cloneData } from './reader-value-utils.js';
@@ -56,13 +57,15 @@ import { previewStatusHudAvatarFraming, previewStatusHudPosition } from './statu
 import { listSystemVoices, onSystemVoicesChanged } from './tts.js';
 import { BUILD_CUSTOM_OPTION, normalizeBuild, pickSummary, validCustomSkillName } from '../../scene/stats/stat-build.js';
 import { BASE_ATTRIBUTES } from '../../scene/stats/stat-state.js';
+import { describeCurrencyFailure } from '../../scene/stats/stat-currency.js';
 import { getStatusDef } from '../../scene/stats/stat-status-defs.js';
+import { refreshStatsWallets } from './stats-hero-card.js';
 import { refreshStatsBuildStatus } from './stats-settings-fields.js';
 import { ABILITY_KEYS, ABILITY_LABELS, MANUAL_BUILD, MANUAL_TOTAL } from '../../combat/abilities.js';
 import { BATTLE_MODE_PATH, COMBAT_PRESET_PATH, checkCombatExpansionReady, planBattleMode, planCombatPreset } from './combat-settings.js';
 import { ensureEnemyAtlas } from './combat-enemy-atlas.js';
 import { probeCombatTableSupport } from '../../data/shujuku/combat-tables.js';
-import { originChatStatus, runAttachedOriginOp } from './origin-attach.js';
+import { getAttachedOrigin, originChatStatus, runAttachedOriginOp } from './origin-attach.js';
 import { resolveSecondaryLlm } from '../../scene/mood-classify.js';
 import { secondaryLlmText } from '../../host/secondary-llm-result.js';
 
@@ -84,7 +87,7 @@ export function createSettingsHost(deps) {
     const {
         flushDeferredImageRefresh, normalizeUnifiedSettings, onboarding, openCgGallery, options, pageModal,
         playReaderUiSfx, rerenderActiveReader, resolveBridgeConfigSnapshot, scheduleMoodAutoClassify, sourceCache,
-        state, takeReaderStaleBehindSettings, invalidateFloorAssetPlan, openLive2dManager,
+        state, takeReaderStaleBehindSettings, invalidateFloorAssetPlan, openLive2dManager, forumRegistry,
     } = deps;
     const settingsDialogs = createSettingsDialogs({
         getContainer: () => (state.activeSettings && state.activeSettings.dom ? state.activeSettings.dom.root : null),
@@ -96,7 +99,7 @@ export function createSettingsHost(deps) {
     // 手指按着或 ⋯ 菜单开着时不整页重绘：重绘会收掉菜单、换掉按下的按钮，点击落空。
     let settingsPointerDown = false;
     const { buildSettingsSnapshot, renderSettingsBody, renderPageForIndex, renderImageJobLogList, buildRegexPreview, settingsLowQuality } = createSettingsRenderer({
-        normalizeUnifiedSettings, options, rerenderSettings, settingsShellHtml, state,
+        normalizeUnifiedSettings, options, rerenderSettings, settingsShellHtml, state, forumRegistry,
     });
 
     function settingsInteracting() {
@@ -178,6 +181,24 @@ export function createSettingsHost(deps) {
             if (!initialized.ok) editor.state.status = `初始化失败：${initialized.reason}`;
         }
         settingsState.dom = mountSettingsDom(controller);
+        const eventHost = options.global || doc.defaultView;
+        let walletQueued = false;
+        const syncWallet = () => {
+            if (walletQueued || state.activeSettings !== settingsState) return;
+            walletQueued = true;
+            queueMicrotask(() => {
+                walletQueued = false;
+                if (state.activeSettings !== settingsState || settingsState.recoveryController.signal.aborted) return;
+                const root = settingsState.dom?.root;
+                if (!root?.querySelector('.igs-stats-wallets')) return;
+                try { refreshStatsWallets(root, options.statsArchive?.()); } catch { /* 下次状态更新时重读。 */ }
+            });
+        };
+        if (typeof eventHost?.addEventListener === 'function') {
+            eventHost.addEventListener('igs:stats-changed', syncWallet);
+            settingsState.recoveryController.signal.addEventListener('abort',
+                () => eventHost.removeEventListener('igs:stats-changed', syncWallet), { once: true });
+        }
         // 浏览器的系统声音是异步加载的：打开时还是空的就等 voiceschanged，到了就刷新设置页，设置关闭时取消。
         if (!listSystemVoices().length) {
             const stop = onSystemVoicesChanged(() => {
@@ -208,11 +229,45 @@ export function createSettingsHost(deps) {
         if (current) current.draftRevision = (current.draftRevision || 0) + 1;
     }
 
+    function syncOriginWatch(panel) {
+        const signal = panel.recoveryController.signal;
+        const engine = !signal.aborted && currentSettingsPage(panel) === 'origin' ? getAttachedOrigin()?.engine : null;
+        if (panel.originWatch?.engine === engine) return;
+        panel.originWatch?.off();
+        panel.originWatch = null;
+        if (!engine) return;
+        const status = () => {
+            try { return JSON.stringify(typeof options.originChat === 'function' ? options.originChat() : originChatStatus()); }
+            catch { return 'null'; }
+        };
+        const watch = { engine, signature: status(), pending: false, off: () => {} };
+        panel.originWatch = watch;
+        const unsubscribe = engine.subscribe(() => {
+            if (watch.pending || state.activeSettings !== panel || panel.originWatch !== watch) return;
+            watch.pending = true;
+            queueMicrotask(() => {
+                watch.pending = false;
+                if (state.activeSettings !== panel || panel.originWatch !== watch || panel.recoveryController.signal.aborted) return;
+                const signature = status();
+                if (signature === watch.signature) return;
+                watch.signature = signature;
+                rerenderSettings({ draftUnchanged: true });
+            });
+        });
+        watch.off = () => {
+            unsubscribe();
+            signal.removeEventListener('abort', watch.off);
+            if (panel.originWatch === watch) panel.originWatch = null;
+        };
+        signal.addEventListener('abort', watch.off, { once: true });
+    }
+
     // renderOptions.draftUnchanged：只换页、展开折叠这类不碰草稿的重绘，草稿修订号没变就复用上次整理结果。
     function rerenderSettings(renderOptions) {
         if (!state.activeSettings) {
             return { ok: false, reason: 'settings-not-open' };
         }
+        syncOriginWatch(state.activeSettings);
         state.activeSettings.reuseNormalized = Boolean(renderOptions && renderOptions.draftUnchanged === true);
         syncNaiQuota(state.activeSettings);
         const snapshot = buildSettingsSnapshot(state.activeSettings);
@@ -312,6 +367,8 @@ export function createSettingsHost(deps) {
         settingsDialogs.cancel();
         if (current.stopVoicesWatch) current.stopVoicesWatch();
         current.stopVoicesWatch = null;
+        current.originWatch?.off();
+        current.originWatch = null;
         if (current.dom && typeof current.dom.dispose === 'function') {
             current.dom.dispose();
         }
@@ -512,6 +569,40 @@ export function createSettingsHost(deps) {
             const nextMode = normalizeReaderMode(value, draft.bridge);
             setPath(draft, path, nextMode);
             return rerenderSettings();
+        }
+
+        // 论坛登记（标题、板块、代号）随聊天存在 chatMetadata，不进设置草稿：虚拟 path 直接写登记。
+        const forumField = /^forum\.(title|board|alias)(?:\.(t\d+))?(?:\.(.+))?$/.exec(path);
+        if (forumField && forumRegistry) {
+            const registry = forumRegistry;
+            const data = registry.read();
+            const text = String(value == null ? '' : value).trim();
+            if (forumField[1] === 'board') {
+                registry.commit({ ...data, board: text, manualBoard: Boolean(text) });
+                return { ok: true };
+            }
+            const thread = data.threads.find((t) => t.id === forumField[2]);
+            if (!thread) return { ok: true };
+            const manual = { ...thread.manual, alias: { ...thread.manual.alias } };
+            const next = { ...thread, manual };
+            if (forumField[1] === 'alias') {
+                const key = decodeURIComponent(forumField[3] || '');
+                next.alias = { ...thread.alias };
+                if (text) { next.alias[key] = text; manual.alias[key] = true; } else { delete next.alias[key]; delete manual.alias[key]; }
+            } else {
+                // 手动改的是当前生效的标题：覆盖最后一条（标记为非兜底）；留空则恢复自动。
+                manual.title = Boolean(text);
+                const titles = thread.titles.filter((t) => !text || t !== thread.titles[thread.titles.length - 1]);
+                if (text) titles.push({ from: (thread.titles[thread.titles.length - 1] || { from: 0 }).from, title: text });
+                next.titles = titles;
+            }
+            registry.commit({ ...data, threads: data.threads.map((t) => (t.id === thread.id ? next : t)) });
+            return { ok: true };
+        }
+        // 纵向阅读、线上聊天、论坛体三种模式并列互斥：打开一个，自动关掉另外两个。
+        const readerModePath = /^readerSettings\.(logReader|chatReader|forumReader)\.on$/.exec(path);
+        if (readerModePath && value === true) {
+            for (const name of ['logReader', 'chatReader', 'forumReader']) if (name !== readerModePath[1]) setPath(draft, `readerSettings.${name}.on`, false);
         }
 
         // 对话框高度下拉里的「自适应 / 固定」：写 dialogAutoHeight，不动高度比例；选具体比例时顺手关掉自适应。
@@ -740,6 +831,7 @@ export function createSettingsHost(deps) {
         const op = typeof options.statsOp === 'function' ? options.statsOp : null;
         if (!op) return { ok: false, reason: 'stats-runtime-missing' };
         const [kind, raw = ''] = spec.split(/:(.*)/s);
+        const panel = state.activeSettings;
         // hero-set 的参数是「编码后的技能名|数值」，数值为空表示清除手改。
         // relation-set 的参数是「编码后的角色名|好感,信任,了解[,欲望]」（当前值，用来预填数字框）。
         // skill-attr 的参数是「编码后的技能名|属性」（来自剧情技能的属性下拉）。
@@ -799,6 +891,8 @@ export function createSettingsHost(deps) {
                 // 开条或改条：模板、一句话补全、已有条各自生成草稿文本，用户确认可改后再写入。
                 let draft = null;
                 const editing = kind === 'fame-edit';
+                // 新建时参数是归属角色名（从角色卡里点进来），空为主角。
+                const presetOwner = editing ? '' : name;
                 if (editing) { const got = await op('relation', 'fame-draft', name, {}); draft = got && got.ok ? got.draft : null; }
                 else {
                     const way = await settingsDialogs.choose('选择开条方式：', [{ value: 'template', label: '模板', note: '按世界观分组，一键填好' }, { value: 'sentence', label: '一句话', note: '由辅助模型补全' }], 'template');
@@ -806,9 +900,9 @@ export function createSettingsHost(deps) {
                         const group = await settingsDialogs.choose('选择世界观分组：', FAME_TEMPLATE_GROUPS.map((value) => ({ value, label: value })), FAME_TEMPLATE_GROUPS[0], { dropdown: true });
                         const list = FAME_TEMPLATES.filter((t) => t.group === group);
                         const picked = list.length ? await settingsDialogs.choose('选择模板：', list.map((t) => ({ value: t.name, label: t.name, note: `${t.cls} · ${t.zero}到${t.full}` })), list[0].name, { dropdown: true }) : null;
-                        if (picked && list.some((t) => t.name === picked)) { const got = await op('relation', 'fame-draft', '', { template: picked }); draft = got && got.ok ? got.draft : null; }
+                        if (picked && list.some((t) => t.name === picked)) { const got = await op('relation', 'fame-draft', '', { template: picked, owner: presetOwner }); draft = got && got.ok ? got.draft : null; }
                     } else if (way === 'sentence') {
-                        const sentence = await settingsDialogs.prompt('用一句话描述这条声望，如「哪吒在陈塘关百姓中的声望」：', '');
+                        const sentence = await settingsDialogs.prompt(presetOwner ? `用一句话描述「${presetOwner}」的这条声望，如「${presetOwner}在陈塘关百姓中的声望」：` : '用一句话描述这条声望，如「哪吒在陈塘关百姓中的声望」：', '');
                         if (sentence != null && String(sentence).trim()) {
                             const busy = typeof settingsDialogs.busy === 'function' ? settingsDialogs.busy('正在补全。') : null;
                             let got;
@@ -821,8 +915,17 @@ export function createSettingsHost(deps) {
                 if (result) { /* 补全失败，沿用其原因提示 */ }
                 else if (typeof draft !== 'string') result = { ok: true, cancelled: true };
                 else {
-                    const confirmed = await settingsDialogs.edit(editing ? `修改声望「${name}」，每行一项：` : '确认这条声望的设定，可直接修改，每行一项：', draft, { okLabel: editing ? '保存' : '建立' });
-                    result = confirmed == null ? { ok: true, cancelled: true } : await op('relation', 'fame-add', '', { draft: String(confirmed), replace: editing ? name : '' });
+                    const parsed = parseFameDraft(draft);
+                    const context = await op('relation', 'fame-context', '', {});
+                    if (!parsed.ok) result = { ok: false, reason: 'stats-fame-draft', field: parsed.field };
+                    else {
+                        const values = await settingsDialogs.form(editing ? `修改声望「${name}」` : '确认这条声望的设定，可直接修改', fameFormFields(parsed.bar, { editing, presetOwner, people: context && context.people }), {
+                            okLabel: editing ? '保存' : '建立',
+                            advancedLabel: '各档描写与满格归零事项（留空则按上面的设定自动生成）',
+                            validate: (v) => fameFormProblem(v, editing ? [] : (context && context.names) || []),
+                        });
+                        result = values == null ? { ok: true, cancelled: true } : await op('relation', 'fame-add', '', { draft: fameDraftText(fameBarFromForm(values)), replace: editing ? name : '' });
+                    }
                 }
             }
             else if (kind === 'fame-remove') {
@@ -974,9 +1077,10 @@ export function createSettingsHost(deps) {
                 else {
                     const cur = model.config;
                     const tiers = ['少量', '普通', '昂贵', '巨额'];
-                    const values = await settingsDialogs.numbers(`${cur.name}档位金额`, tiers.map((key) => ({ key, label: key, value: cur.table[key], min: 1, max: 100000000 })), { okLabel: '保存' });
-                    result = values && tiers.some((key) => values[key] !== cur.table[key])
-                        ? await op('relation', 'money-config', '', { table: Object.fromEntries(tiers.map((key) => [key, values[key]])) }) : { ok: true, cancelled: true };
+                    const values = await settingsDialogs.currency(cur);
+                    result = values && (values.name !== cur.name || values.rate !== cur.rate
+                        || tiers.some((key) => values.table[key] !== cur.table[key]))
+                        ? await op('relation', 'money-config', '', { ...values, base: model.base }) : { ok: true, cancelled: true };
                 }
             } else if (kind === 'expenses-toggle') {
                 const open = state.activeSettings.asyncState.advancedOpen || {};
@@ -1016,6 +1120,8 @@ export function createSettingsHost(deps) {
                 if (result && result.reason === 'stats-rename-exists') {
                     result = await settingsDialogs.confirm(`已有名为「${to}」的角色。是否把「${name}」并入「${to}」？两份数值相加，特质、角色卡与备注以「${to}」为准。`) ? await op('relation', 'rename', name, { to, merge: true }) : { ok: true, cancelled: true };
                 }
+            } else if (kind === 'person-remove') {
+                result = await settingsDialogs.confirm(`删除角色「${name}」？人际数值、角色卡、特质、声望和变动记录都会清掉。之后正文若再写到「${name}」，会重新建档。`) ? await op('relation', 'remove', name, {}) : { ok: true, cancelled: true };
             } else if (kind === 'alias-drop') {
                 result = await settingsDialogs.confirm(`移除曾用名「${name}」？之后正文再写「${name}」会当作另一个人。`) ? await op('relation', 'rename-drop', name, {}) : { ok: true, cancelled: true };
             } else if (kind === 'sheet-remove') {
@@ -1024,7 +1130,10 @@ export function createSettingsHost(deps) {
         } catch (error) {
             result = { ok: false, reason: 'stats-op-threw', thrown: error };
         }
-        if (result && result.ok === false && result.reason && !result.cancelled && typeof settingsDialogs.alert === 'function') {
+        if (['currency-retry', 'money-config'].includes(kind) && result?.ok === false) {
+            if (state.activeSettings === panel && result.reason !== 'request-stale' && typeof settingsDialogs.alert === 'function')
+                await settingsDialogs.alert(describeCurrencyFailure(result));
+        } else if (result && result.ok === false && result.reason && !result.cancelled && typeof settingsDialogs.alert === 'function') {
             const text = { 'stats-no-model': '没有可用的辅助模型，请先在自动插图设置里接好写词模型。', 'stats-generating': '正在生成回复，结束后再试。', 'stats-sheet-edit-invalid': '格式不对，请写成「项目 档位」。', 'stats-relation-invalid': '关系数值须为-100到100的整数。', 'stats-relation-missing': '该角色还没有结算记录，下一楼回复后再改。', 'stats-note-no-text': '还没有可参考的剧情正文。', 'stats-estimate-failed': '估算失败，辅助模型未返回结果，可稍后重试。', 'stats-note-failed': '拟写失败，辅助模型未返回结果，可稍后重试。', 'stats-table-none': '数据库表格里没有可导入的新角色。', 'stats-import-no-floor': '本聊天启用数值后还没有结算过回复，下一楼回复后再导入。', 'stats-inactive': '本聊天未启用数值系统。', 'stats-no-ledger': '本聊天还没有数值存档。', 'stats-start-none': '没有需要补填的角色：已登记角色的关系数值都已定过。', 'stats-start-failed': `补填失败${result.detail ? `：${result.detail}` : '，辅助模型的回复无法解析'}。可稍后重试。`, 'stats-chat-changed': '计算期间切换了聊天，未写入。','stats-hero-skill-invalid': '技能值须为1到99的整数。', 'stats-hero-edit-invalid': '格式不对，请写成「技能 档位」或「技能 数值」。', 'stats-hero-edit-attribute': '六维属性不能在这里修改。', 'stats-hero-tier-over-cap': '熟练度不能高于当前成长档位。', 'stats-hero-edit-unknown': '没有这项技能，请在擅长技能八格里选择。', 'stats-build-skill-invalid': '技能名须为1到8个字，不含数字和符号。', 'stats-hero-skills-coc-only': '主角技能分配仅适用于CoC规则。', 'stats-hero-skills-busy': '另一个聊天的分配尚未完成。', 'stats-hero-skills-invalid': '分配失败，回复无法解析。', 'stats-hero-skills-empty': '分配失败，回复中没有有效档位。', 'stats-build-pick-duplicate': '同一项技能只能选一次。', 'stats-build-strong-missing': '擅长技能须选满3项。', 'stats-build-over-total': `六维合计不能超过${MANUAL_TOTAL}。`, 'stats-build-score-range': `每项须在${MANUAL_BUILD.min}到${MANUAL_BUILD.max}之间。`, 'combat-attribute-table-missing': '战斗属性表尚未建立，暂时无法修改属性。', 'combat-init-write-failed': '属性写入失败，请稍后重试。', 'stats-fame-name': '条名须为1到8个字，不含数字和符号。', 'stats-fame-dup': '已有同名的声望。', 'stats-fame-max': '声望最多开十条。', 'stats-fame-draft': '声望设定不完整，请检查条名、谁在看、类与两端叫法。', 'stats-fame-missing': '该声望已不存在。', 'stats-fame-fill-bad': '辅助模型返回的内容无法使用，未建立声望，可稍后重试。', 'stats-fame-fill-failed': '补全失败，辅助模型未返回结果，可稍后重试。', 'stats-fame-sentence': '请先写一句话。', 'stats-fame-kind': '请选择声望的性质。', 'stats-trait-full': '特质已满格，请先摘下一项。', 'stats-trait-refused': '该特质当前无法挂上。', 'stats-trait-initial-failed': '评定失败，辅助模型未返回结果，可稍后重试。', 'stats-trait-busy': '正在复核特质，稍后再试。', 'stats-rename-invalid': '名字须为1到20个字，不含竖线、方括号和冒号。', 'stats-rename-hero': '不能改成主角的名字。' }[result.reason];
             if (text) await settingsDialogs.alert(text);
         }
@@ -1038,7 +1147,7 @@ export function createSettingsHost(deps) {
         const op = typeof options.originOp === 'function' ? options.originOp : runAttachedOriginOp;
         let result;
         try {
-            if (kind === 'recalc' || kind === 'retry') result = await op(kind);
+            if (kind === 'recalc' || kind === 'retry' || kind === 'retry-read') result = await op(kind);
             else if (kind === 'reset') result = await settingsDialogs.confirm('清空本聊天的随身系统存档？任务、积分、属性与记录都会移除。') ? await op('reset') : { ok: true, cancelled: true };
             else if (kind === 'pause' || kind === 'resume' || kind === 'import') result = await op(kind);
             else if (kind === 'world') {

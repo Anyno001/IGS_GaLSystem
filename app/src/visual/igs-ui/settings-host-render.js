@@ -101,7 +101,7 @@ const READER_SCOPE_CATEGORIES = new Set(['dash', 'style', 'text', 'ui', 'perf', 
 
 const ASSET_MOVE_ALL_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg>';
 
-export function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSettings, settingsShellHtml, state }) {
+export function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSettings, settingsShellHtml, state, forumRegistry = null }) {
     // 草稿可被原地修改，整理结果按「草稿引用 + 修订号」缓存；只有调用方声明草稿没动（reuseNormalized）时才复用，
     // 任何写草稿的入口都会递增 draftRevision，缓存因此不会让改过的设置显示旧值。
     function normalizeSettingsDraft(settingsState) {
@@ -337,7 +337,9 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             const llmSource = (bridge.autoIllustration && bridge.autoIllustration.llm && bridge.autoIllustration.llm.source) || 'tavern';
             const chatReady = Boolean(origin.enabled && chat && chat.hasChat && !chat.blocked);
             const chatNote = !chat || !chat.hasChat ? '打开一个聊天后可以在这里暂停或恢复。'
-                : chat.blocked ? `本聊天的系统存档无法读取（${chat.blocked}），已停止写入，原存档保留。`
+                : chat.recovery?.status === 'waiting' ? `等待本聊天数据库就绪（${chat.blocked}）。`
+                    : chat.recovery?.busy ? (chat.recovery.stage === 'save' ? '正在重试保存。' : '正在读取本聊天存档。')
+                    : chat.blocked ? `${chat.recovery?.stage === 'save' ? '保存未完成' : '读取失败'}（${chat.blocked}）。`
                     : chat.paused ? '本聊天已暂停：系统退出剧情，不派任务、不计时，存档保留。' : '本聊天正在运行。暂停后时限冻结，恢复时顺延。';
             const intField = (key, label, min, max, note) => field(`bridge.origin.${key}`, label, numberInput(`bridge.origin.${key}`, origin[key], min, max), note);
             return {
@@ -347,7 +349,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 originChatNote: esc(chatNote),
                 originWorldText: esc(chat && chat.world ? chat.world : '未设定'),
                 originWorldHidden: hiddenAttr(!chatReady),
-                originRetryHidden: hiddenAttr(!origin.enabled || !chat?.blocked || chat.blocked === 'origin-database-loading'),
+                originRetryHidden: hiddenAttr(!origin.enabled || !chat?.recovery?.canRetrySave),
+                originReadRetryHidden: hiddenAttr(!origin.enabled || !chat?.recovery?.canRetryRead),
                 originResumeHidden: hiddenAttr(!chatReady || !chat.paused),
                 originPauseHidden: hiddenAttr(!chatReady || chat.paused),
                 originFreqField: intField('freq', '任务频率（回合）', 1, 10, '每隔几回合最多派发一个任务'),
@@ -710,6 +713,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 moodGroups: sceneAssets.moodGroups || [],
                 expandedSlots: asyncState.expandedSpriteSlots instanceof Set ? asyncState.expandedSpriteSlots : new Set(),
                 statusAvatars: sceneAssets.statusAvatars || {},
+                statusAvatarSource: normalizeStatusHudSettings(draft.readerSettings && draft.readerSettings.statusHud).avatarSource,
                 statusAvatarCrops: (draft.bridge && draft.bridge.sceneAssets && draft.bridge.sceneAssets.statusAvatarCrops) || {},
                 // 角色学院只在魔法世界观下有意义；其他世界观的魔法星夜只当星空框用，不显示这一行。
                 magicHouse: reader.dialogSkin === DIALOG_SKIN_MAGIC_ACADEMY && resolveWorldview(worldviewAssets) === 'magic' ? { sceneAssets, fallback: reader.magicHouse } : null,
@@ -966,6 +970,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             get resumePromptField() { return field('readerSettings.resumePrompt', '续读提示', selectInput('readerSettings.resumePrompt', reader.resumePrompt === 'simple' ? 'simple' : 'title', [['title', '主界面样式'], ['simple', '简易弹窗']])); },
             get toolbarSplitField() { return field('readerSettings.toolbarSplit', '按钮分布', selectInput('readerSettings.toolbarSplit', reader.toolbarSplit || 'split', [['split', '顶栏+对话框下'], ['top', '全在顶栏'], ['dialog', '全在对话框下']])); },
             get toolbarPlateField() { return field('readerSettings.toolbarPlate', '工具栏底板', selectInput('readerSettings.toolbarPlate', reader.toolbarPlate || 'off', [['blur', '模糊（毛玻璃）'], ['solid', '清晰（实色）'], ['off', '关闭（无底板）']])); },
+            get toolbarColorField() { const bc = reader.toolbarColor; return field('readerSettings.toolbarColor', '工具栏颜色', colorInput('readerSettings.toolbarColor', /^#[0-9a-fA-F]{6}$/.test(bc) ? bc : '#a9a3b2')); },
             get dialogBarAlignField() { return reader.toolbarSplit === 'top' ? '' : field('readerSettings.dialogBarAlign', '对话框下按钮位置', selectInput('readerSettings.dialogBarAlign', reader.dialogBarAlign || 'auto', [['auto', '自动'], ['left', '靠左'], ['center', '居中'], ['right', '靠右']])); },
             get imgModeField() { return field('readerSettings.imgMode', '图像显示模式', selectInput('readerSettings.imgMode', reader.imgMode, [['adaptive', '自适应'], ['contain', '完整']])); },
             get imgBrightnessField() { return field('readerSettings.imgBrightness', '图片亮度', selectInput('readerSettings.imgBrightness', reader.imgBrightness, [50, 60, 70, 80, 88, 90, 100].map((n) => [n, `${n}%`]))); },
@@ -1070,6 +1075,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
         const perfExtras = () => {
             const readerValues = getReaderValues();
             return ({ worldviewId: resolveWorldview(worldviewAssets), fontOptions: readerValues.fontOptions,
+                forumRegistry: forumRegistry ? forumRegistry.read() : null,
                 // 直播间是现代专属：非现代世界观没开随身手机时整块被拨掉，行内提示一句。
                 liveBlocked: applyFxWorldview({ liveFx: { enabled: true } }, resolveWorldview(worldviewAssets), { carryPhone: Boolean(worldviewAssets && worldviewAssets.carryPhone === true) }).liveFx.enabled !== true,
                 canUndo: Boolean(asyncState.perfPresetUndo),
