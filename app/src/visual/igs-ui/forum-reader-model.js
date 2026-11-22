@@ -2,6 +2,7 @@ import { storyClock } from './phone-sense.js';
 import { feedStableCount } from '../../scene/feed-platforms.js';
 import { FORUM_BOARDS, FORUM_BOARD_DEFAULT, FORUM_IMAGE_REF_LINES, FORUM_KAOMOJI, FORUM_KAOMOJI_ONLY_RATE, FORUM_KAOMOJI_TAIL_RATE, FORUM_LINES } from './forum-reader-lines.js';
 import { normalizeForumReaderSettings } from './forum-reader-settings.js';
+import { REPLY_BODY_SOURCE } from '../../scene/directive-tags.js';
 import { isContinuation } from './log-reader-model.js';
 import { describePo, samePo, threadAt, titleAt } from './forum-reader-threads.js';
 
@@ -43,7 +44,8 @@ export function forumSlot(messageId, k) {
 }
 
 export function forumNo(chatId, messageId, k) {
-    return NO_BASE + forumSlot(messageId, k) * NO_STEP + (forumHash(chatId) % NO_STEP);
+    const overflow = Math.max(0, Math.round(Number(k) || 0) - (FLOOR_SLOTS - 1));
+    return NO_BASE + forumSlot(messageId, k) * NO_STEP + (forumHash(chatId) % NO_STEP) + overflow;
 }
 
 export function forumPoId(chatId, threadId = '') {
@@ -87,9 +89,10 @@ export function forumClock({ sceneTime, sendDate, seed = '', k = 0 }) {
 // chatMetadata.igs_forum = { board, manualBoard, threads:[{ id, po, poId, titles:[{from,title,fb?}], alias, seq, manual }], timeline:[{ from, thread }] }。
 // 每个楼主一个帖子；from 是酒馆楼 messageId。第 N 楼用哪个帖子、哪个标题由 threadAt / titleAt 查表算出，不存排版结果。
 const MAX_THREADS = 12;
+const MAX_TAILS = 30;
 
 export function emptyForum() {
-    return { board: '', manualBoard: false, threads: [], timeline: [] };
+    return { board: '', manualBoard: false, threads: [], timeline: [], tails: {} };
 }
 
 function plain(value) {
@@ -137,6 +140,31 @@ export function cleanThread(value) {
     };
 }
 
+function cleanTailItem(value) {
+    const r = plain(value);
+    if (!r.no || !r.id) return null;
+    return {
+        k: wholeFrom(r.k), no: String(r.no).slice(0, 16), id: String(r.id).slice(0, 12), po: r.po === true, time: String(r.time || '').slice(0, 8),
+        text: String(r.text || '').slice(0, 600), quote: String(r.quote || '').slice(0, 80), ref: wholeFrom(r.ref),
+    };
+}
+
+// tails：{ [messageId]: { sig, items } }，每楼末尾回帖的显示结果，只留最近 MAX_TAILS 个楼。
+function cleanTails(value) {
+    const out = {};
+    const ids = Object.keys(plain(value)).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(b) - Number(a)).slice(0, MAX_TAILS);
+    for (const id of ids) {
+        const entry = plain(value[id]);
+        const items = (Array.isArray(entry.items) ? entry.items : []).slice(-3).map(cleanTailItem).filter(Boolean);
+        if (typeof entry.sig === 'string' && entry.sig && items.length) out[id] = { sig: entry.sig.slice(0, 80), items };
+    }
+    return out;
+}
+
+export function forumWithTail(data, messageId, entry) {
+    return normalizeForum({ ...data, tails: { ...(data && data.tails), [wholeFrom(messageId)]: entry } });
+}
+
 export function normalizeForum(value) {
     const src = plain(value);
     const threads = [];
@@ -154,6 +182,7 @@ export function normalizeForum(value) {
         manualBoard: src.manualBoard === true,
         threads,
         timeline: [...byFrom.values()].sort((a, b) => a.from - b.from),
+        tails: cleanTails(src.tails),
     };
 }
 
@@ -186,30 +215,45 @@ export function parseForumTag(body) {
     return out;
 }
 
-// AI 写的回帖 [igs-reply:谁|>N|内容]：谁 = 楼主 或 路人代称（同名即同一个 ID）；>N 可省，表示回本轮第 N 条回帖；>上N 表示回上一轮第 N 条回帖；只写内容则当作一个新路人。
-// 返回 [{ who, to, prev, text }]，who 以 # 开头表示匿名新路人（已按序号编成不重复的名字）。
+// AI 写的回帖 [igs-reply:谁|>N|#正文片段|内容]：谁 = 楼主 或 路人代称（同名即同一个 ID）；>N 可省，表示回本轮第 N 条回帖；>上N 表示回上一轮第 N 条回帖；#片段 可省，引用正文里的一句原话；只写内容则当作一个新路人。
+// 返回 [{ who, to, prev, cite, text }]，who 以 # 开头表示匿名新路人（已按序号编成不重复的名字）。
 export function forumRepliesOf(source) {
     const out = [];
     let anon = 0;
-    for (const m of String(source || '').matchAll(/[\[【［]\s*igs\s*-?\s*reply\s*[:：]([^\]】］\n]*)[\]】］]/gi)) {
+    for (const m of String(source || '').matchAll(new RegExp(`[\\[【［]\\s*igs\\s*-?\\s*reply\\s*[:：](${REPLY_BODY_SOURCE})[\\]】］]`, 'gi'))) {
         const fields = m[1].split('|').map((f) => f.trim());
         let who = '';
         let to = 0;
         let prev = 0;
-        if (fields.length > 1) who = fields.shift();
-        const ref = fields.length > 1 ? fields[0].match(/^[>＞]\s*(上)?\s*(\d+)$/) : null;
-        if (ref) {
+        let cite = '';
+        if (fields.length > 1 && !/^[>＞#＃]/.test(fields[0])) who = fields.shift();
+        while (fields.length > 1) {
+            const ref = fields[0].match(/^[>＞]\s*(上)?\s*(\d+)$/);
+            if (ref) {
+                if (ref[1]) prev = Number(ref[2]);
+                else to = Number(ref[2]);
+            } else if (/^[#＃]/.test(fields[0])) cite = fields[0].slice(1).trim();
+            else break;
             fields.shift();
-            if (ref[1]) prev = Number(ref[2]);
-            else to = Number(ref[2]);
         }
-        const text = Array.from(fields.join('|').trim()).slice(0, 60).join('');
+        const text = fields.join('|').trim();
         if (!text) continue;
         if (/^(楼主|po主?|lz)$/i.test(who)) who = '楼主';
         else if (!who) who = `#${anon++}`;
-        out.push({ who, to, prev, text });
+        out.push({ who, to, prev, cite, text });
     }
     return out;
+}
+
+// 安价标签 [igs-anke:问题|选项1|选项2|…]：取本楼最后一条，至少 2 个选项，最多 8 个；返回 { question, options } 或 null。
+export function forumAnkeOf(source) {
+    let found = null;
+    for (const m of String(source || '').matchAll(new RegExp(`[\\[【［]\\s*igs\\s*-?\\s*anke\\s*[:：](${REPLY_BODY_SOURCE})[\\]】］]`, 'gi'))) {
+        const fields = m[1].split(/[|｜]/).map((f) => f.trim()).filter(Boolean);
+        if (fields.length < 3) continue;
+        found = { question: fields[0].slice(0, 80), options: fields.slice(1, 9).map((o) => o.slice(0, 120)) };
+    }
+    return found;
 }
 
 // 上一轮 AI 回帖：从当前楼往前找最近一个有 [igs-reply] 的 AI 楼。chat 为酒馆聊天数组。
@@ -220,6 +264,31 @@ export function forumPrevRepliesOf(chat, beforeId) {
         if (!m || m.is_user || m.is_system) continue;
         const found = forumRepliesOf(m.mes);
         if (found.length) return found;
+    }
+    return [];
+}
+
+// 一个计划里按显示顺序排的全部回帖，取末尾 count 条。
+export function forumTailOf(plan, count) {
+    const all = (Array.isArray(plan) ? plan : []).flatMap((post) => post.replies || []);
+    return count > 0 ? all.slice(-count) : [];
+}
+
+// 新楼开头搬来的条数：1~3，按本楼定死。
+export function forumTailCount(chatId, messageId) {
+    return 1 + (forumHash(`${chatId}:${messageId}:tail`) % 3);
+}
+
+// 本楼开头接上的上一 AI 楼末尾回帖：本楼是帖子首楼、聊天里没有更早的 AI 楼、上一楼不同帖或没有缓存时为空。
+// lookup(id) 取上一楼已算好的末尾回帖；sameThread(id) 判断上一楼与本楼同帖。
+export function forumChainTail({ chat, messageId, start = false, lookup, sameThread, count }) {
+    if (start || !Array.isArray(chat)) return [];
+    for (let i = Math.min(chat.length, Math.round(Number(messageId) || 0)) - 1; i >= 0; i--) {
+        const m = chat[i];
+        if (!m || m.is_user || m.is_system) continue;
+        if (!sameThread(i)) return [];
+        const found = lookup(i);
+        return Array.isArray(found) ? found.slice(-count) : [];
     }
     return [];
 }
@@ -241,14 +310,24 @@ export function forumTagsOf(source) {
 }
 
 // 设置里「双楼主」的两个人都填了才生效；每项写法同标签（角色名 / {{user}} / 路人:身份）。返回 [po, po] 或 null。
+export function forumPoFromText(text, keyOfName = (n) => n) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    const po = /^user$/i.test(raw) ? { kind: 'user' } : parseForumTag(`楼主=${raw}`).po;
+    return po ? resolveTagPo(po, keyOfName, true) : null;
+}
+
 export function forumPairOf(settings, keyOfName = (n) => n) {
     const st = normalizeForumReaderSettings(settings);
     if (st.poster !== 'pair') return null;
-    const list = st.posterPair.map((text) => {
-        const po = text ? parseForumTag(`楼主=${text}`).po : null;
-        return po ? resolveTagPo(po, keyOfName, true) : null;
-    });
+    const list = st.posterPair.map((text) => forumPoFromText(text, keyOfName));
     return list[0] && list[1] ? list : null;
+}
+
+// 设置里只填了一个人：楼主锁定为此人，AI 的「楼主=」标签不再生效。
+export function forumFixedOf(settings, keyOfName = (n) => n) {
+    const st = normalizeForumReaderSettings(settings);
+    return st.poster === 'fixed' ? forumPoFromText(st.posterFixed, keyOfName) : null;
 }
 
 export function forumKeyResolver(known, userNames = []) {
@@ -270,7 +349,7 @@ function resolveTagPo(po, keyOfName, keepRaw = false) {
 // 一楼自己的标签写进登记，写在本楼 messageId 上，与渲染顺序无关：先清掉本楼旧条目（swipe / 重写后重算，幂等），再按本楼标签重新登记。
 // opts：chatId、known、userNames、posterLock、pair（[po,po] 或 null）、fallbackPo、firstFloor、fallbackTitle。返回 { data, dropped, threadId }。
 export function applyFloorTags(data, messageId, tags, opts = {}) {
-    const { known = (n) => n, userNames = [], posterLock = 'auto', pair = null, fallbackPo = null, firstFloor = messageId, fallbackTitle = '', chatId = '' } = opts;
+    const { known = (n) => n, userNames = [], posterLock = 'auto', pair = null, fixed = null, fallbackPo = null, firstFloor = messageId, fallbackTitle = '', chatId = '' } = opts;
     const id = wholeFrom(messageId);
     const next = normalizeForum(data);
     const dropped = [];
@@ -287,6 +366,10 @@ export function applyFloorTags(data, messageId, tags, opts = {}) {
             else if (tag.po && tag.po.kind === 'char') dropped.push(tag.po.name);
         }
         if (po && pair && !pair.some((p) => samePo(p, po))) { dropped.push(describePo(po)); po = null; }
+    }
+    if (fixed) {
+        const anyWitness = fixed.kind === 'witness' && !fixed.note ? next.threads.find((t) => t.po && t.po.kind === 'witness') : null;
+        po = anyWitness ? anyWitness.po : fixed;
     }
     const create = (who) => {
         let n = 1;
@@ -341,13 +424,10 @@ export function floorMarks(data, messageId) {
 }
 
 // 楼主：设置锁定 > 本帖登记 > 兜底（双楼主取第一个人，再到本卡主角，再到第一个非 User 说话人）。
-export function resolvePoster({ thread, settings, defaultChar = '', firstSpeaker = '', pair = null }) {
-    const st = normalizeForumReaderSettings(settings);
+export function resolvePoster({ thread, settings, defaultChar = '', firstSpeaker = '', pair = null, fixed = forumFixedOf(settings) }) {
     const stored = thread && thread.po;
     const fallbackChar = defaultChar || firstSpeaker || '';
-    if (st.poster === 'user') return { kind: 'user' };
-    if (st.poster === 'witness') return { kind: 'witness', note: stored && stored.kind === 'witness' ? stored.note : '' };
-    if (st.poster === 'char') return stored && stored.kind === 'char' ? stored : (fallbackChar ? { kind: 'char', key: fallbackChar } : { kind: 'witness', note: '' });
+    if (fixed) return fixed.kind === 'witness' && !fixed.note && stored && stored.kind === 'witness' ? stored : fixed;
     if (stored) return stored;
     if (pair) return pair[0];
     return fallbackChar ? { kind: 'char', key: fallbackChar } : { kind: 'witness', note: '' };
@@ -510,27 +590,66 @@ export function forumPlan(rows, ctx) {
     let k = 0;
     const perGap = { off: [0, 0], few: [0, 1], normal: [0, 2] }[st.replies];
     const clock = (n) => forumClock({ sceneTime, sendDate, seed: seedBase, k: n });
-    // AI 写了回帖就用 AI 的（均摊到各楼之后，最多 FLOOR_SLOTS 条）；没写才用内置短句。
-    const written = st.replies === 'off' ? [] : aiReplies.slice(0, Math.max(0, FLOOR_SLOTS - posts.length));
-    const writtenAt = posts.map(() => []);
+    // AI 写了回帖就用 AI 的：#片段 排在含该片段的楼之后 1–2 楼，>N 排在它回复的那条之后，>上N 排在开头 1–2 楼之后，其余排在最后；另掺 1–2 条内置纯颜文字。
+    const written = st.replies === 'off' || !posts.length ? [] : aiReplies;
+    const last = posts.length - 1;
+    const slotsAt = posts.map(() => []);
     const passerSlots = new Map();
-    const writtenNos = [];
-    written.forEach((text, i) => writtenAt[Math.max(0, Math.floor(((i + 1) * posts.length) / written.length) - 1)].push(text));
-    return posts.map((post, n) => {
+    const made = [];
+    const squash = (text) => String(text || '').replace(/[\s\p{P}\p{S}]/gu, '');
+    const postTexts = posts.map((post) => rows.slice(post.start, post.end + 1).filter((r) => !r.hidden).map((r) => r.text).join('\n'));
+    const citeAt = (cite) => {
+        if (!cite) return -1;
+        const exact = postTexts.findIndex((t) => t.includes(cite));
+        if (exact >= 0) return exact;
+        const flat = squash(cite);
+        return flat ? postTexts.findIndex((t) => squash(t).includes(flat)) : -1;
+    };
+    const cited = written.map((item) => citeAt(item.cite));
+    const placed = [];
+    const place = (j, seen = new Set()) => {
+        if (placed[j]) return placed[j];
+        const item = written[j];
+        const h = 1 + (forumHash(`${seedBase}:w${j}:${item.text}`) % 2);
+        const target = item.to > 0 && item.to !== j + 1 && item.to <= written.length && !seen.has(item.to - 1) ? item.to - 1 : -1;
+        let out;
+        if (target >= 0) {
+            const base = place(target, new Set([...seen, j]));
+            out = { at: base.at, depth: base.depth + 1 };
+        } else if (cited[j] >= 0) out = { at: Math.min(last, cited[j] + h), depth: 0 };
+        else if (item.prev > 0) out = { at: Math.min(last, h - 1), depth: 0 };
+        else out = { at: last, depth: 0 };
+        placed[j] = out;
+        return out;
+    };
+    written.forEach((item, j) => {
+        slotsAt[place(j).at].push({ item, j });
+        if (item.who !== '楼主' && !passerSlots.has(item.who)) passerSlots.set(item.who, passerSlots.size);
+    });
+    for (const list of slotsAt) list.sort((a, b) => placed[a.j].depth - placed[b.j].depth || a.j - b.j);
+    if (written.length) {
+        const kao = 1 + (forumHash(`${seedBase}:kao`) % 2);
+        for (let r = 0; r < kao; r++) slotsAt[forumHash(`${seedBase}:kaoAt${r}`) % posts.length].unshift({ kaomoji: pick(FORUM_KAOMOJI, `${seedBase}:kaoFace${r}`), r });
+    }
+    const result = posts.map((post, n) => {
         const own = k;
         k += 1;
         const text = rows.slice(post.start, post.end + 1).filter((r) => !r.hidden).map((r) => r.text).filter(Boolean);
         const tail = text.length ? text[text.length - 1] : '';
         const out = { start: post.start, end: post.end, k: own, no: forumNo(chatId, messageId, own), id: poId, time: clock(own), replies: [] };
         if (written.length) {
-            for (const item of writtenAt[n]) {
-                const po = item.who === '楼主';
-                if (!po && !passerSlots.has(item.who)) passerSlots.set(item.who, passerSlots.size);
+            for (const slot of slotsAt[n]) {
                 const no = forumNo(chatId, messageId, k);
-                const target = item.to > 0 && item.to <= writtenNos.length ? writtenNos[item.to - 1] : 0;
-                const earlier = item.prev > 0 ? prevReplies[item.prev - 1] : null;
-                writtenNos.push(no);
-                out.replies.push({ k, no, id: po ? poId : writtenPasserId(chatId, item.who, passerSlots.get(item.who) || 0, threadId), po, time: clock(k), text: item.text, quote: earlier ? forumReplyQuote(earlier.text) : '', ref: target });
+                if (slot.kaomoji) {
+                    out.replies.push({ k, no, id: forumPasserId(chatId, forumHash(`${seedBase}:p${k}`), threadId), time: clock(k), text: slot.kaomoji, quote: '', ref: 0 });
+                } else {
+                    const { item, j } = slot;
+                    const po = item.who === '楼主';
+                    const earlier = item.prev > 0 ? prevReplies[item.prev - 1] : null;
+                    const reply = { k, no, id: po ? poId : writtenPasserId(chatId, item.who, passerSlots.get(item.who) || 0, threadId), po, time: clock(k), text: item.text, quote: earlier ? forumReplyQuote(earlier.text) : cited[j] >= 0 ? item.cite : '', ref: 0 };
+                    made[j] = reply;
+                    out.replies.push(reply);
+                }
                 k += 1;
             }
             return out;
@@ -559,6 +678,11 @@ export function forumPlan(rows, ctx) {
         }
         return out;
     });
+    written.forEach((item, j) => {
+        const target = item.to > 0 && item.to !== j + 1 ? made[item.to - 1] : null;
+        if (target && made[j]) made[j].ref = target.no;
+    });
+    return result;
 }
 
 export function forumSettingsOf(readerSettings) {

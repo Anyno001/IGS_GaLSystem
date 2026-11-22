@@ -5,7 +5,7 @@ import { normalizeFxReaderSettings } from '../src/visual/igs-ui/fx-settings.js';
 import { normalizeSettingsValue } from '../src/visual/igs-ui/settings-normalize.js';
 import { logRowsOf } from '../src/visual/igs-ui/log-reader-model.js';
 import {
-    FORUM_USER_KEY, applyFloorTags, emptyForum, ensureAliases, floorMarks, forumClock, forumNo, forumPairOf, forumPasserId, forumPlan, forumPoId, forumPrevRepliesOf, forumRepliesOf, forumRowsOf, forumTagsOf,
+    FORUM_USER_KEY, applyFloorTags, emptyForum, ensureAliases, forumWithTail, floorMarks, forumChainTail, forumClock, forumFixedOf, forumNo, forumPairOf, forumPasserId, forumPlan, forumPoId, forumPrevRepliesOf, forumRepliesOf, forumRowsOf, forumTagsOf, forumTailCount, forumTailOf,
     normalizeForum, parseForumTag, replaceNames, resolvePoster, sendClock, threadAt, titleAt,
 } from '../src/visual/igs-ui/forum-reader-model.js';
 import { normalizeForumReaderSettings } from '../src/visual/igs-ui/forum-reader-settings.js';
@@ -227,10 +227,10 @@ test('AI 回帖跨轮接话：>上N 摘引上一轮那条，同名路人跨轮�
     assert.deepEqual(prev.map((r) => r.who), ['路人甲', '路人乙']);
     const rows = forumRowsOf(rowsOf([page('narration', '一句。')]), { poster: { kind: 'witness' }, alias: {}, userKey: '我', settings: {} });
     const plan = forumPlan(rows, { chatId: 'c', messageId: 2, settings: { replies: 'normal' }, threadId: 't1', aiReplies: forumRepliesOf(chat[2].mes), prevReplies: prev });
-    const [back, again] = plan[0].replies;
+    const [back, again] = plan[0].replies.filter((r) => /^(你吃瓜|我又来)/.test(r.text));
     assert.equal(back.quote, '前排吃瓜，这瓜保熟吗我先尝一口再说，…');
     const first = forumPlan(rows, { chatId: 'c', messageId: 0, settings: { replies: 'normal' }, threadId: 't1', aiReplies: forumRepliesOf(chat[0].mes) });
-    assert.equal(again.id, first[0].replies[0].id);
+    assert.equal(again.id, first[0].replies.find((r) => r.text === '真的假的').id);
     const block = collectGrammarBlocks({ forumReader: { on: true }, _forumPrev: prev }).find((b) => b.key === 'forum').full;
     assert.ok(block.includes('上一轮回帖：1.路人甲：真的假的') && block.includes('>上第几条'));
     assert.ok(!collectGrammarBlocks({ forumReader: { on: true, replies: 'off' }, _forumPrev: prev }).find((b) => b.key === 'forum').full.includes('上一轮回帖'));
@@ -241,9 +241,33 @@ test('正文分成很多段时 AI 写的回帖一条不丢，楼号不重复', (
     const mes = Array.from({ length: 6 }, (_, i) => `[igs-reply:路人${i}|第${i}条]`).join('');
     const plan = forumPlan(rows, { chatId: 'c', messageId: 5, settings: { perPost: 2, replies: 'normal' }, aiReplies: forumRepliesOf(mes) });
     assert.equal(plan.length, 8);
-    assert.deepEqual(plan.flatMap((p) => p.replies).map((r) => r.text), Array.from({ length: 6 }, (_, i) => `第${i}条`));
+    const all = plan.flatMap((p) => p.replies);
+    assert.deepEqual(all.filter((r) => /^第\d条$/.test(r.text)).map((r) => r.text), Array.from({ length: 6 }, (_, i) => `第${i}条`));
+    assert.ok([1, 2].includes(all.length - 6));
+    assert.equal(plan.at(-1).replies.at(-1).text, '第5条');
     const nos = plan.flatMap((p) => [p.no, ...p.replies.map((r) => r.no)]);
     assert.equal(new Set(nos).size, nos.length);
+});
+
+test('AI 回帖排位：#片段 排在含该句的楼之后 1–2 楼并带引用，>N 跟在目标回帖之后，>上N 排在开头，其余在最后，不截断 60 字', () => {
+    const rows = forumRowsOf(rowsOf(Array.from({ length: 24 }, (_, i) => page('narration', `第${i}句。`))), { poster: { kind: 'witness' }, alias: {}, userKey: '我', settings: {} });
+    const long = '长'.repeat(80);
+    assert.deepEqual(forumRepliesOf('[igs-reply:路人|>1|#第7句|内容][igs-reply:#第3 句|嗯]').map((r) => [r.who, r.to, r.cite, r.text]), [['路人', 1, '第7句', '内容'], ['#0', 0, '第3 句', '嗯']]);
+    const mes = `[igs-reply:路人甲|#第7句|引用七句${long}][igs-reply:路人乙|>1|接甲][igs-reply:路人丙|>上1|旧话回应][igs-reply:路人丁|#不存在的话|收尾][igs-reply:路人戊|#第 3 句|宽松匹配]`;
+    const plan = forumPlan(rows, { chatId: 'c', messageId: 5, settings: { perPost: 2, replies: 'normal' }, aiReplies: forumRepliesOf(mes), prevReplies: [{ who: '路人丙', text: '旧话' }] });
+    const at = (prefix) => plan.findIndex((p) => p.replies.some((r) => r.text.startsWith(prefix)));
+    const reply = (prefix) => plan.flatMap((p) => p.replies).find((r) => r.text.startsWith(prefix));
+    const postOf = (text) => plan.findIndex((p) => rows.slice(p.start, p.end + 1).some((r) => r.text === text));
+    assert.ok([postOf('第7句。') + 1, postOf('第7句。') + 2].includes(at('引用七句')));
+    assert.equal(reply('引用七句').quote, '第7句');
+    assert.ok([postOf('第3句。') + 1, postOf('第3句。') + 2].includes(at('宽松匹配')));
+    assert.equal(at('接甲'), at('引用七句'));
+    assert.ok(plan.flatMap((p) => p.replies).findIndex((r) => r.text.startsWith('接甲')) > plan.flatMap((p) => p.replies).findIndex((r) => r.text.startsWith('引用七句')));
+    assert.equal(reply('接甲').ref, reply('引用七句').no);
+    assert.ok([0, 1].includes(at('旧话回应')));
+    assert.equal(at('收尾'), plan.length - 1);
+    assert.equal(reply('收尾').quote, '');
+    assert.ok(reply('引用七句').text.length > 80);
 });
 
 test('登记读写：写之前核对聊天没换；读不到元数据时留在内存不报错', () => {
@@ -297,10 +321,13 @@ test('论坛层：帖子头、楼拆分、点缀回帖与引用格式落到 DOM�
     syncForumReader(overlay, view);
     assert.equal(overlay.getAttribute('data-igs-forum-reader'), 'on');
     assert.equal(overlay.getAttribute('data-igs-log-reader'), 'on');
-    assert.equal(overlay.querySelector('.igs-fm-bar').textContent, '综合版1');
+    assert.equal(overlay.querySelector('.igs-fm-bar-board').textContent, '综合版1');
     assert.equal(overlay.querySelector('.igs-fm-thread h1').textContent, '【求助】在线等');
     assert.equal(overlay.querySelectorAll('.igs-fm-post').length, 2);
-    assert.ok(overlay.querySelector('.igs-fm-po').textContent.includes('Neko4Ka'));
+    assert.ok(overlay.querySelector('.igs-fm-id').textContent.includes('Neko4Ka'));
+    assert.equal(overlay.querySelector('.igs-fm-pobadge').textContent, 'Po');
+    assert.equal(overlay.querySelectorAll('.igs-fm-boardtag').length, 0);
+    assert.equal(overlay.querySelector('.igs-fm-meta .igs-fm-nm').textContent, '无名氏');
     assert.ok(overlay.querySelector('.igs-fm-line .igs-fm-who').textContent.includes('我'));
     assert.equal(overlay.querySelectorAll('.igs-fm-line').length, 6);
     syncForumReader(overlay, null);
@@ -415,4 +442,54 @@ test('台词引号：默认关，可选中文引号或直角引号，非法值�
     assert.equal(normalizeForumReaderSettings({ quote: 'jp' }).quote, 'jp');
     assert.equal(normalizeForumReaderSettings({ quote: 'x' }).quote, 'off');
     assert.ok(/is-say[^}]*border-left/.test(FORUM_READER_STYLE_TEXT));
+});
+
+test('新楼开头接上楼末尾回帖：取计划末尾 1~3 条、按楼定死、同帖才接', () => {
+    const rows = ['甲', '乙', '丙'].map((text, i) => ({ kind: 'narr', text, index: i, hidden: false }));
+    const plan = forumPlan(rows, { chatId: 'c', messageId: 4, settings: { perPost: 1 }, aiReplies: ['a', 'b', 'c', 'd'].map((t) => ({ who: '#1', to: 0, prev: 0, cite: '', text: t })), threadStart: false });
+    const all = plan.flatMap((p) => p.replies);
+    assert.ok(all.length >= 4);
+    assert.deepEqual(forumTailOf(plan, 2), all.slice(-2));
+    assert.deepEqual(forumTailOf(plan, 3).map((r) => r.no), all.slice(-3).map((r) => r.no));
+    assert.deepEqual(forumTailOf([], 2), []);
+    const counts = new Set();
+    for (let id = 0; id < 40; id++) { const n = forumTailCount('c', id); counts.add(n); assert.equal(n, forumTailCount('c', id)); }
+    assert.deepEqual([...counts].sort(), [1, 2, 3]);
+    const chat = [{ mes: 'x' }, { is_user: true }, { mes: 'y' }, { is_system: true }, { is_user: true }, { mes: 'z' }];
+    const tails = new Map([[2, all.slice(-3)]]);
+    const base = { chat, messageId: 5, lookup: (id) => tails.get(id) || null, sameThread: () => true, count: 2 };
+    assert.deepEqual(forumChainTail(base), all.slice(-2));
+    assert.deepEqual(forumChainTail({ ...base, start: true }), []);
+    assert.deepEqual(forumChainTail({ ...base, sameThread: () => false }), []);
+    assert.deepEqual(forumChainTail({ ...base, messageId: 0 }), []);
+    assert.deepEqual(forumChainTail({ ...base, messageId: 2 }), []);
+    assert.deepEqual(forumChainTail({ ...base, lookup: () => null }), []);
+});
+
+test('末尾回帖落进登记：内存缓存空也能读出，只留最近 30 楼，坏形状丢掉', () => {
+    const item = (n) => ({ k: n, no: `No.${n}`, id: 'abcd1234', po: false, time: '12:00', text: `回${n}`, quote: '', ref: 0 });
+    let data = emptyForum();
+    for (let id = 1; id <= 35; id++) data = forumWithTail(data, id, { sig: `s${id}`, items: [item(id)] });
+    assert.deepEqual(Object.keys(data.tails).map(Number).sort((a, b) => a - b), Array.from({ length: 30 }, (_, i) => i + 6));
+    const back = normalizeForum(JSON.parse(JSON.stringify(data)));
+    const lookup = (id) => (back.tails[id] || {}).items || null;
+    const chat = Array.from({ length: 40 }, () => ({ mes: 'x' }));
+    assert.deepEqual(forumChainTail({ chat, messageId: 36, count: 2, sameThread: () => true, lookup }), [item(35)]);
+    assert.deepEqual(forumChainTail({ chat, messageId: 4, count: 2, sameThread: () => true, lookup }), []);
+    assert.deepEqual(normalizeForum({ tails: { 3: { sig: 'x', items: [{ foo: 1 }] }, x: { sig: 'y', items: [item(1)] }, 4: 'z' } }).tails, {});
+});
+
+test('楼主文本框：留空自动、一人锁定、两人交替；旧按钮折算；锁定后换人从本楼起生效且短提示词写明楼主', () => {
+    assert.equal(normalizeForumReaderSettings({ posterText: '' }).poster, 'auto');
+    assert.deepEqual(forumPairOf({ posterText: '阿吒、霜见' }), [A, B]);
+    assert.deepEqual(forumFixedOf({ posterText: 'User' }), { kind: 'user' });
+    assert.equal(normalizeForumReaderSettings({ poster: 'user' }).posterText, '{{user}}');
+    assert.equal(normalizeForumReaderSettings({ poster: 'char' }).poster, 'auto');
+    const before = applyFloorTags(emptyForum(), 3, [], { known, fallbackPo: A, firstFloor: 3, chatId: 'c' }).data;
+    const fixed = forumFixedOf({ posterText: '霜见' });
+    const after = applyFloorTags(before, 5, tagsOf('[igs-forum:新帖|楼主=阿吒]'), { known, posterLock: 'fixed', fixed, firstFloor: 3, chatId: 'c' }).data;
+    assert.equal(threadAt(after, 3).po.key, '阿吒');
+    assert.equal(threadAt(after, 5).po.key, '霜见');
+    const block = collectGrammarBlocks({ forumReader: { on: true, posterText: '霜见' }, _forum: after }).find((b) => b.key === 'forum');
+    assert.match(block.full, /楼主是霜见，不要改/);
 });

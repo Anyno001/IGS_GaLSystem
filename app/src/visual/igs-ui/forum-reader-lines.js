@@ -54,13 +54,17 @@ function pairText(settings) {
     return a && b ? `${a}、${b}` : '两位当事人';
 }
 
-function posterLine(settings, data) {
+function fixedText(settings) {
+    const raw = String(settings.posterFixed || '').trim();
+    if (/^(user|\{\{\s*user\s*\}\})$/i.test(raw)) return '{{user}}';
+    const witness = raw.match(/^路人\s*[:：]?\s*(.*)$/);
+    if (witness) return `围观路人${witness[1].trim() ? `（${witness[1].trim()}）` : ''}`;
+    return raw;
+}
+
+function posterLine(settings) {
     const poster = settings.poster;
-    const thread = threadAt(data, Infinity);
-    const po = thread && thread.po;
-    if (poster === 'char') return `楼主是${po && po.kind === 'char' && po.key ? po.key : '剧中的角色本人'}，不要改`;
-    if (poster === 'user') return '楼主是{{user}}，不要改';
-    if (poster === 'witness') return `楼主是围观路人${po && po.kind === 'witness' && po.note ? `（${po.note}）` : ''}，不要改`;
+    if (poster === 'fixed') return `楼主是${fixedText(settings)}，不要改`;
     if (poster === 'pair') return `楼主只在 ${pairText(settings)} 之间交替，${SWITCH_NOTE}`;
     return `楼主是发这个帖子的人，从剧中角色本人、{{user}}、围观路人里挑最有戏的一个；${AUTO_NOTE}；${SWITCH_NOTE}`;
 }
@@ -86,8 +90,16 @@ export function forumRegistered(data) {
     return Boolean(t && t.po && t.titles.length);
 }
 
-const REPLY_NOTE = '再在末尾另起几行写回帖，每行一条 [igs-reply:发言人|>回第几条|内容]：发言人写「楼主」或一个路人代称（同一代称视为同一个网友），「>回第几条」按回帖出现顺序编号、可省，内容是匿名网友口吻的一句话（不超过 40 字，吐槽、追问或接话）。让路人追问、楼主简短回应、路人之间互相接话（路人可以提一句隔壁帖子，如「隔壁帖的楼主是不是就是你说的 A」，一条以内，不强求），写 2–5 条，例：[igs-reply:路人甲|真的假的] [igs-reply:楼主|>1|真的，我亲眼看见的] [igs-reply:路人乙|>2|前排吃瓜]';
+const REPLY_NOTE = '再在末尾另起几行写回帖，每行一条 [igs-reply:发言人|>回第几条|#正文片段|内容]：发言人写「楼主」或一个路人代称（同一代称视为同一个网友），「>回第几条」按回帖出现顺序编号、可省，「#正文片段」可省，回应正文里的某句时写那句原话（2–12 字），内容是匿名网友口吻的一句话（不超过 40 字，吐槽、追问或接话）。让路人追问、楼主简短回应、路人之间互相接话（路人可以提一句隔壁帖子，如「隔壁帖的楼主是不是就是你说的 A」，一条以内，不强求），写 2–5 条，例：[igs-reply:路人甲|真的假的] [igs-reply:楼主|>1|真的，我亲眼看见的] [igs-reply:路人乙|>2|前排吃瓜] [igs-reply:路人丙|#原话片段|这句我笑了]';
 const replyLine = (settings) => (settings.replies === 'off' ? '' : REPLY_NOTE);
+
+// 安科（安价）：开启后给 AI 的写法与常驻规则。mode 为 key（关键节点）或 every（每层），off 返回空串。
+export function forumAnkePromptText(mode, rule = '') {
+    if (mode !== 'key' && mode !== 'every') return '';
+    if (rule) return rule;
+    const when = mode === 'every' ? '每一层' : '只在剧情走到关键节点、值得让网友替楼主拿主意的那一层（由你判断，不必每层都写）';
+    return `【安价】${when}，在楼主回复 {{user}} 之后、整段正文的最末尾另起一行写 [igs-anke:问题|选项1|选项2|选项3]：问题是楼主向网友提的一句话；选项 3–5 个，每个都是楼主本人此刻能立刻做出的具体行动；方向必须真正分叉，不能是同一件事的不同程度；必须有一个离谱选项（出格、作死或荒唐，但在这个世界里做得到），不要标明是哪一个；不写「其他」。{{user}} 的消息里出现【安价】的，本楼必须照此推进，不许绕开或改写结果。`;
+}
 
 const PREV_SHOWN = 8;
 
@@ -100,7 +112,7 @@ export function forumPrevPromptText(settings, prev) {
 
 // 登记齐了：只留事实与改写入口，不再重复整段格式。
 export function forumShortPromptText(settings, data) {
-    return `【论坛体】正文以匿名论坛帖展示。已登记：${forumFactsText(data)}。仅需改动时在正文末尾写一行 ${settings.poster === 'char' || settings.poster === 'user' || settings.poster === 'witness' ? TAG_FORMAT_SHORT_LOCKED : TAG_FORMAT_SHORT}，不写则沿用。${settings.poster === 'auto' ? `${AUTO_NOTE}；${SWITCH_NOTE}。` : settings.poster === 'pair' ? `楼主只在 ${pairText(settings)} 之间交替；${SWITCH_NOTE}。` : ''}${replyLine(settings) ? `每段正文${replyLine(settings)}。` : ''}`;
+    return `【论坛体】正文以匿名论坛帖展示。已登记：${forumFactsText(data)}。仅需改动时在正文末尾写一行 ${settings.poster === 'fixed' ? TAG_FORMAT_SHORT_LOCKED : TAG_FORMAT_SHORT}，不写则沿用。${settings.poster === 'auto' ? `${AUTO_NOTE}；${SWITCH_NOTE}。` : `${posterLine(settings)}。`}${replyLine(settings) ? `每段正文${replyLine(settings)}。` : ''}`;
 }
 
 // 设置里自填的提示词（非空）整段替换内置写法，登记前后都用它；留空用内置。
@@ -114,12 +126,12 @@ export function forumDefaultPromptText(settings) {
 }
 
 export function forumPromptText(settings, data) {
-    const locked = ['char', 'user', 'witness'].includes(settings.poster);
+    const locked = settings.poster === 'fixed';
     const facts = forumFactsText(data);
     return [
         '【论坛体】本段正文会以匿名论坛帖的形式展示。仅在以下信息尚未确定或剧情需要改变时，在正文末尾写一行（不写则沿用已有）：',
         locked ? TAG_FORMAT_LOCKED : TAG_FORMAT,
-        `${posterLine(settings, data)}；标题用楼主口吻；${CODE_NOTE}。${facts ? `已登记：${facts}。` : ''}`,
+        `${posterLine(settings)}；标题用楼主口吻；${CODE_NOTE}。${facts ? `已登记：${facts}。` : ''}`,
         replyLine(settings) ? `每段正文${replyLine(settings)}。` : '',
     ].filter(Boolean).join('\n');
 }
