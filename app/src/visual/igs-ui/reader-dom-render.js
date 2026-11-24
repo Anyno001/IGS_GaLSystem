@@ -6,7 +6,7 @@ import { resolveSpeakerMagicHouse } from './magic-house.js';
 import { normalizeSkinDialogScale } from './dialog-skin-frame.js';
 import { RECORD_ICONS } from './record-icons.js';
 import { SETTINGS_NAV_GROUPS } from './settings-pages.js';
-import { normalizeCombatExpansionSettings } from './combat-settings.js';
+import { combatBattleOn, normalizeCombatExpansionSettings } from './combat-settings.js';
 import { resolveOriginBinding } from './origin-panel.js';
 import { ORIGINAL_READER_ICONS, ORIGINAL_READER_TOOLBAR_BUTTONS } from './original-reader-source.js';
 import { DIALOG_ONLY_BUTTONS, TOOLBAR_ACTIONS } from './reader-host-constants.js';
@@ -517,9 +517,8 @@ export function applyToolbarState(root, current) {
     if (!ttsConfig.enabled || (ttsConfig.provider !== 'api' && !ttsConfig.narratorApi.enabled)) hiddenSet.add('tts-reroll');
     // 等待页与工具栏共用独立的小游戏开关。
     if (!getWaitStageGamePack() || readerSettings.waitStage?.games === false) hiddenSet.add('mini-games');
-    // 「人物状态」在卡牌战斗扩展开启时显示；只开数值系统、本聊天为手动建档时也显示（P8c，只有建档页）。用户的排序、隐藏与固定照常生效。
-    const buildEntry = typeof current.buildEntry === 'function' && current.buildEntry() === true;
-    if (!normalizeCombatExpansionSettings(readerSettings.combatExpansion).enabled && !buildEntry) hiddenSet.add('combat-status');
+    // 「人物状态」只在卡牌战斗开启（enabled 且非纯日常模式）时显示。未开启卡片战斗时不显示。
+    if (!combatBattleOn(readerSettings.combatExpansion)) hiddenSet.add('combat-status');
     // 窄屏阅读模式：列表盖住大半画面，「隐藏对话框」总要放出来，才能看清背景和 CG；「自动播放」也总放出来（一批出完、念完再出下一批）。
     if (current.logReaderActive) { hiddenSet.delete('hide'); hiddenSet.delete('auto-play'); }
     // 「连续播放」开关只在窄屏阅读模式出现。
@@ -1067,8 +1066,8 @@ const statusHudKeys = new WeakMap();
 function statusHudKey(root, snapshot, hud, radius) {
     const hudSettings = snapshot && snapshot.readerSettings && snapshot.readerSettings.statusHud;
     const optionsVisible = Boolean(root.classList && root.classList.contains('igs-options-visible'));
-    // 资料菜单的「人物状态」项随扩展开关增减，开关必须进重建签名。
-    const combat = normalizeCombatExpansionSettings(snapshot && snapshot.readerSettings && snapshot.readerSettings.combatExpansion).enabled;
+    // 资料菜单的「人物状态」项随卡牌战斗开关增减（纯日常模式不显示），必须进重建签名。
+    const combat = combatBattleOn(snapshot && snapshot.readerSettings && snapshot.readerSettings.combatExpansion);
     try {
         return JSON.stringify([hud || null, hudSettings ? [hudSettings.collapsed, hudSettings.size, hudSettings.hiddenEntries] : null, optionsVisible, radius, combat]);
     } catch {
@@ -1155,10 +1154,11 @@ export function applyStatusHudToDom(root, snapshot) {
     const hasLocation = Boolean(hud && hud.location);
     const hasMetrics = Boolean(hud && Array.isArray(hud.metrics) && hud.metrics.length);
     const heroRows = hud && hud.hero && Array.isArray(hud.hero.metrics) ? hud.hero.metrics.slice(0, 4) : [];
+    const alwaysShow = Boolean(hud && hud.alwaysShow);
     const grayscaleBars = Boolean(hud && hud.barColor === 'grayscale');
-    const shouldShow = Boolean(hud && hud.enabled && (hud.character || hasLocation || heroRows.length));
+    const shouldShow = Boolean(hud && hud.enabled && (hud.character || hasLocation || heroRows.length || alwaysShow));
     if (globalThis.__IGS_HUD_DEBUG__) {
-        console.log('[HUD-PROBE]', JSON.stringify({ hud: hud ? { enabled: hud.enabled, character: hud.character, emotion: hud.emotion, location: hud.location, avatar: Boolean(hud.avatar), metrics: hud.metrics && hud.metrics.length } : null, hasEmotion, hasLocation, hasMetrics, shouldShow }));
+        console.log('[HUD-PROBE]', JSON.stringify({ hud: hud ? { enabled: hud.enabled, alwaysShow, character: hud.character, emotion: hud.emotion, location: hud.location, avatar: Boolean(hud.avatar), metrics: hud.metrics && hud.metrics.length, hero: heroRows.length } : null, hasEmotion, hasLocation, hasMetrics, shouldShow }));
     }
     if (!shouldShow) {
         host.setAttribute('hidden', '');
@@ -1167,10 +1167,11 @@ export function applyStatusHudToDom(root, snapshot) {
     }
     host.removeAttribute('hidden');
     // 背景只在有 HUD 条时出现：只有头像/情绪/地点栏时不加背景，即使背景开关开着。
-    if (hud.background === 'dialog' && hasMetrics) host.classList.add('igs-hud-bg-dialog');
+    if (hud.background === 'dialog' && (hasMetrics || heroRows.length)) host.classList.add('igs-hud-bg-dialog');
     if (root.classList && root.classList.contains('igs-options-visible')) host.classList.add('igs-hud-suppressed');
     // 仅头像/情绪/地点、无 HUD 条时挂修饰类，anchor 恢复加菜单前的列式几何，情绪与头像间距回到旧值；有 HUD 条时保持现状。
     host.classList.toggle('igs-hud-no-metrics', !hasMetrics && !heroRows.length);
+    host.classList.toggle('igs-hud-no-avatar', !hud.character);
     host.classList.toggle('igs-hud-character-emotion-only', Boolean(hud && hud.character && hasEmotion && !hasLocation && !hasMetrics));
     host.classList.toggle('igs-hud-character-emotion-with-metrics', Boolean(hud && hud.character && hasEmotion && hasMetrics));
     if (hudSettings && hudSettings.collapsed) host.classList.add('igs-hud-collapsed');
@@ -1207,6 +1208,11 @@ export function applyStatusHudToDom(root, snapshot) {
         const chip = doc.createElement('span');
         chip.className = 'igs-hud-emotion';
         chip.textContent = hud.emotion;
+        entryAnchor.appendChild(chip);
+    } else if (!hud.character && !hasLocation && (heroRows.length || alwaysShow)) {
+        const chip = doc.createElement('span');
+        chip.className = 'igs-hud-emotion';
+        chip.textContent = (hud.hero && hud.hero.name) || '状态';
         entryAnchor.appendChild(chip);
     }
     if (hasLocation) {
@@ -1247,8 +1253,8 @@ export function applyStatusHudToDom(root, snapshot) {
     if (!recordMenuOpen) menu.setAttribute('hidden', '');
     // 好感总览入口：当前 HUD 有好感度条，或本聊天有好感数据可看（hud.favorData：数值系统有已登记角色 / 状态栏已选读取表）。
     const hasFavorBar = Boolean(hud && hud.favorData) || (hasMetrics && hud.metrics.some(metric => /好感/.test(String(metric?.label || ''))));
-    // 「人物状态」项只在卡牌战斗扩展开启时出现。
-    const hasCombat = normalizeCombatExpansionSettings(snapshot && snapshot.readerSettings && snapshot.readerSettings.combatExpansion).enabled;
+    // 「人物状态」项只在卡牌战斗开启（enabled 且非纯日常模式）时出现。
+    const hasCombat = combatBattleOn(snapshot && snapshot.readerSettings && snapshot.readerSettings.combatExpansion);
     // 「随身系统」项只在接了引擎且总开关开着时出现，名字跟随设置里的系统名。
     const origin = resolveOriginBinding({});
     const hiddenEntries = Array.isArray(hudSettings?.hiddenEntries) ? hudSettings.hiddenEntries : [];
@@ -1342,13 +1348,14 @@ export function applyStatusHudScale(root, snapshot) {
     if (!host) return;
     const settings = snapshot && snapshot.readerSettings;
     const hudSettings = settings && settings.statusHud;
-    if (!hudSettings || !hudSettings.enabled) return;
+    const hudEnabled = Boolean((hudSettings && hudSettings.enabled) || (snapshot && snapshot.content && snapshot.content.statusHud && snapshot.content.statusHud.enabled));
+    if (!hudEnabled) return;
     const overlayWidth = readElementWidth(root, 0);
     const overlayHeight = readElementHeight(root, 0);
-    const scale = resolveStatusHudScale(hudSettings.size, overlayWidth, overlayHeight);
+    const scale = resolveStatusHudScale(hudSettings && hudSettings.size, overlayWidth, overlayHeight);
     snapshot._statusHudScale = scale;
     host.style.setProperty('--igs-hud-scale', String(scale));
-    const locationScale = resolveStatusHudLocationScale(hudSettings.size);
+    const locationScale = resolveStatusHudLocationScale(hudSettings && hudSettings.size);
     snapshot._statusHudLocationScale = locationScale;
     host.style.setProperty('--igs-hud-location-scale', String(locationScale));
 }
@@ -2184,7 +2191,8 @@ export function applyReaderSnapshotToDom(root, snapshot, current, ctx = {}) {
             const plateParts = rgba(plateRaw);
             const plateAlpha = plateParts.length > 3 ? plateParts[3] : (plateParts.length ? 1 : 0);
             const lightInk = (r * 299 + g * 587 + b * 114) / 1000 > 140;
-            const plate = plateAlpha >= 0.15 ? `rgb(${plateParts.slice(0, 3).join(',')})` : (lightInk ? 'rgb(18,18,20)' : 'rgb(246,244,240)');
+            const plateLight = plateParts.length >= 3 && (plateParts[0] * 299 + plateParts[1] * 587 + plateParts[2] * 114) / 1000 > 140;
+            const plate = plateAlpha >= 0.15 && plateLight !== lightInk ? `rgb(${plateParts.slice(0, 3).join(',')})` : (lightInk ? 'rgb(18,18,20)' : 'rgb(246,244,240)');
             if (ink) root.style.setProperty('--igs-bar-ink', ink);
             root.style.setProperty('--igs-bar-plate', plate);
             // 展开工具栏的羽化底板也跟对话框的毛玻璃走：有就照搬（封顶 10px 保持轻量），没有用 6px。

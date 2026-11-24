@@ -9,8 +9,9 @@ import { hashString } from './random.js';
 import { BATTLE_POINTS_RANGE, BATTLE_POINT_TIERS, battlePoints, weakBattlePoints } from './points.js';
 import { ENEMY_ART_KEYS } from './enemy-art.js';
 import { ABILITY_KEYS, REL_TIERS, normalizeManualScores, prefsFromScores } from './abilities.js';
+import { normalizeHeroScores, normalizeNpcScores } from '../scene/stats/ability-fields.js';
 import { TRAIT_BASE_SLOTS, TRAIT_KINDS, TRAIT_LINKS, TRAIT_RARITIES, TRAIT_SKILL_COSTS, TRAIT_SLOT_MAX } from './traits.js';
-import { DEFEAT_CAUSES, ORB_FILTER_KINDS, opHandler, reserveBuiltins } from './mechanics/registry.js';
+import { DEFEAT_CAUSES, ORB_FILTER_KINDS, opHandler, registeredStatuses, reserveBuiltins } from './mechanics/registry.js';
 import { INSCRIPTION_KEYS, inscribable } from './mechanics/inscription.js';
 import { rewardUpgradable } from './reward-cards.js';
 import { APPLY_STATUSES } from './mechanics/apply-status.js';
@@ -21,7 +22,7 @@ import { winPointsBonus } from './relics/off-combat.js';
 import { BIAS_CATEGORIES, TRAIT_FLIPS, biasCategoryOf, traitFlipIssue } from './trait-reward-bias.js';
 import { CLASS_PASSIVE_VERSION } from './class-passives.js';
 import { CARD_ARCHETYPES } from './attribute-policy.js';
-import { SCRIPT_CONDITION_MAX, isScriptCondition } from './script-conditions.js';
+import { SCRIPT_CONDITION_MAX, SCRIPT_MISSING_HP_CONDITIONS, SCRIPT_MISSING_HP_MAX, SCRIPT_STATUS_CONDITIONS, isScriptCondition } from './script-conditions.js';
 import { UPGRADE_FIELDS, UPGRADE_FLAGS } from './card-upgrade.js';
 import { SOURCE_CARD_MODELS, TEMPLATE_UPGRADE_MODEL_KEYS, sourceCardMatches, templateUpgradeMatches } from './card-source-models.js';
 import { DEATH_SPAWN_LIMIT, KIN_DEF_FIELDS, KIN_FIELDS, KIN_LIMIT, kitEffects, kitKinRefs, validKinKey } from './kin.js';
@@ -66,6 +67,7 @@ export const LEDGER_TYPES = Object.freeze([
     'profile', 'exp', 'learn', 'upgrade', 'class', 'reward', 'deck', 'revoke', 'equip', 'unequip', 'item', 'consume', 'offer',
     'loot', 'sell', 'rebuild', 'respec', 'ascend', 'trait', 'trait-pick', 'trait-slot', 'wound', 'heal', 'hurt', 'keepsake', 'lose', 'battle-growth', 'inscribe',
     'purge', 'card-upgrade', 'card-draw', 'card-flip', 'card-pick', 'battle-points', 'relic-inscribe', 'card-lost', 'card-implant',
+    'daily-deck', 'daily-win', 'daily-loot', 'daily-purge', 'daily-upgrade',
 ]);
 export const GEAR_SLOTS = Object.freeze(['weapon', 'armor', 'accessory', 'treasure']);
 // 按剧情给的初始装备锚定开战楼、不来自标签，锚点 tagHash 固定为此值。
@@ -88,7 +90,7 @@ export const CARD_DRAW_CHOICES = 3;
 export const REWARD_ORIGIN_MAX = 30;
 export const BUFF_TRIGGERS = Object.freeze(['card-played', 'discard', 'exhaust', 'kill', 'hp-loss', 'block-gain', 'turn-start', 'turn-end']);
 export const GEAR_BONUS_BY_RARITY = Object.freeze({ common: 1, uncommon: 2, rare: 3, epic: 4, mythic: 5 });
-export const ATTRIBUTE_TYPES = Object.freeze(['init', 'rel', 'story', 'alloc', 'reward']);
+export const ATTRIBUTE_TYPES = Object.freeze(['init', 'hero-base', 'npc-base', 'rel', 'story', 'alloc', 'reward']);
 
 // 以下为模块内部常量。
 // status 效果的合法目标 = 攻击目标 + 辅助目标。
@@ -604,9 +606,18 @@ function validateInterrupt(rule, path, state) {
 
 // 加权候选表：[{ skill, weight }]，1–6 项，权重 1–100 的整数。
 export const SCRIPT_PICK_MAX = 6;
-// 脚本条件：随从数 / 同伴数（kin-lt、kin-gte、allies-lt、allies-gte，取值 1–5）或沿用效果条件。
+// 脚本条件：随从数 / 同伴数（kin-lt、kin-gte、allies-lt、allies-gte，取值 1–5）、目标状态（target-status / target-no-status）、同阵营失血（ally-missing-hp-gte，1–999）或沿用效果条件。
 function validateScriptWhen(when, path, state) {
     if (!isScriptCondition(when)) return validateCondition(when, path, state);
+    if (SCRIPT_STATUS_CONDITIONS.includes(when.kind)) {
+        checkKnownFields(when, ['kind', 'status'], path, state);
+        const allowed = [...STATUSES, ...registeredStatuses()];
+        return { kind: when.kind, status: enumField(when.status, joinPath(path, 'status'), state, allowed) };
+    }
+    if (SCRIPT_MISSING_HP_CONDITIONS.includes(when.kind)) {
+        checkKnownFields(when, ['kind', 'value'], path, state);
+        return { kind: when.kind, value: intField(when.value, joinPath(path, 'value'), state, 1, SCRIPT_MISSING_HP_MAX) };
+    }
     checkKnownFields(when, ['kind', 'value'], path, state);
     return { kind: when.kind, value: intField(when.value, joinPath(path, 'value'), state, 1, SCRIPT_CONDITION_MAX) };
 }
@@ -1036,8 +1047,31 @@ function starterShapeV6Errors(starterDeck, fixedIds, personalIds) {
     return errors;
 }
 
+// 规则 v7 模板组合起始卡组（20 张均来自程序按职业模板池拼出并由 LLM 命名的 personalPool）：
+// 份数分布与 starterDeckShapeV6 一致（攻击 3/3/2、技能 3/3/2、其余 2/2），至少 3 种攻击与 3 种技能。
+function starterShapeTemplateErrors(starterDeck, personalPool) {
+    const shape = COMBAT_RULES.starterDeckShapeV6;
+    const byId = new Map((personalPool || []).map((card) => [card.id, card]));
+    const counts = new Map();
+    const kinds = { attack: 0, skill: 0 };
+    const errors = [];
+    for (const id of starterDeck) counts.set(id, (counts.get(id) || 0) + 1);
+    for (const id of counts.keys()) {
+        const card = byId.get(id);
+        if (!card) { errors.push({ path: 'starterDeck', reason: 'unknown-card', cardId: id }); continue; }
+        if (Object.hasOwn(kinds, card.type)) kinds[card.type] += 1;
+    }
+    const copies = (list) => [...list].sort((a, b) => b - a).join('/');
+    const expected = copies([...shape.attack, ...shape.skill, ...shape.third, ...shape.personal]);
+    const actual = copies(counts.values());
+    if (expected !== actual) errors.push({ path: 'starterDeck', reason: 'starter-shape', detail: { slot: 'templateCopies', expected, actual } });
+    if (kinds.attack < shape.attack.length) errors.push({ path: 'starterDeck', reason: 'starter-shape', detail: { slot: 'attackKinds', expected: shape.attack.length, actual: kinds.attack } });
+    if (kinds.skill < shape.skill.length) errors.push({ path: 'starterDeck', reason: 'starter-shape', detail: { slot: 'skillKinds', expected: shape.skill.length, actual: kinds.skill } });
+    return errors;
+}
+
 // 校验起始卡组：职业匹配、牌池 id 无冲突、卡组结构符合起始形状、重复张数不超过稀有度限制。
-// 含本职业固定卡 ID 的起始卡组按规则 v6 形状校验；v3–v5 档案不含固定卡 ID，照旧按 starterDeckShape。
+// 含本职业固定卡 ID 的起始卡组按规则 v6 形状校验；全来自个人池（模板组合命名 20 张）按 v7 形状校验；旧档案照旧按 starterDeckShape。
 export function validateStarterDeck(deckCharacter, classProfile) {
     const errors = [];
     if (!classProfile || classProfile.kind !== 'class') return { ok: false, errors: [{ path: 'classRef', reason: 'class-missing' }] };
@@ -1060,7 +1094,9 @@ export function validateStarterDeck(deckCharacter, classProfile) {
         else if (signatureIds.has(id)) errors.push({ path: `starterDeck[${index}]`, reason: 'signature-in-starter', cardId: id });
         else if (!(v6 && fixedIds.has(id))) errors.push({ path: `starterDeck[${index}]`, reason: 'unknown-card', cardId: id });
     });
+    const templateComposed = !v6 && shape.basicAttack === 0 && shape.basicDefend === 0 && shape.classCards === 0 && shape.personalCards === COMBAT_RULES.starterDeckSize;
     if (v6) errors.push(...starterShapeV6Errors(deckCharacter.starterDeck, fixedIds, personalIds));
+    else if (templateComposed) errors.push(...starterShapeTemplateErrors(deckCharacter.starterDeck, deckCharacter.personalPool));
     else {
         for (const [slot, expected] of Object.entries(COMBAT_RULES.starterDeckShape)) {
             if (shape[slot] !== expected) errors.push({ path: 'starterDeck', reason: 'starter-shape', detail: { slot, expected, actual: shape[slot] } });
@@ -1534,6 +1570,58 @@ function validateLedgerPayload(type, payload, path, state) {
                 reportId: textField(payload.reportId, at('reportId'), state, 40),
             };
         }
+        // 日常挑战领域固定卡组：该领域首次挑战完成时写入，后续同领域挑战沿用固定牌库。
+        case 'daily-deck': {
+            checkKnownFields(payload, ['domain', 'reportId', 'deck', 'cards'], path, state);
+            const cards = arrayField(payload.cards, at('cards'), state, 0, COMBAT_RULES.deckSanityMax, (card, cardPath, st) => validateCardEntry(card, cardPath, st));
+            if (Array.isArray(cards)) checkDuplicateIds(cards, at('cards'), state);
+            return {
+                domain: textField(payload.domain, at('domain'), state, 20),
+                reportId: textField(payload.reportId, at('reportId'), state, 40),
+                deck: arrayField(payload.deck, at('deck'), state, COMBAT_RULES.deckMin, COMBAT_RULES.deckSanityMax, (id, idPath, st) => idField(id, idPath, st)),
+                cards,
+            };
+        }
+        // 日常挑战按领域独立胜场计数：锚定非亲密挑战的胜利战报楼。
+        case 'daily-win': {
+            checkKnownFields(payload, ['domain', 'reportId', 'outcome', 'tier'], path, state);
+            return {
+                domain: textField(payload.domain, at('domain'), state, 20),
+                reportId: textField(payload.reportId, at('reportId'), state, 40),
+                outcome: enumField(payload.outcome, at('outcome'), state, ['圆满', '勉强']),
+                tier: enumField(payload.tier, at('tier'), state, ['轻松', '普通', '艰难']),
+            };
+        }
+        // 日常挑战胜利三选一翻牌选中的卡牌战利品：加入对应领域的固定牌库。
+        case 'daily-loot': {
+            checkKnownFields(payload, ['domain', 'combatId', 'reportId', 'card'], path, state);
+            return {
+                domain: textField(payload.domain, at('domain'), state, 20),
+                combatId: textField(payload.combatId, at('combatId'), state, 120),
+                reportId: textField(payload.reportId, at('reportId'), state, 40),
+                card: validateCardEntry(payload.card, at('card'), state),
+            };
+        }
+        // 日常挑战领域删卡：该领域胜场每满 PURGE_EVERY 场免费删去一张副本。
+        case 'daily-purge': {
+            checkKnownFields(payload, ['domain', 'copyId', 'battle', 'reportId'], path, state);
+            return {
+                domain: textField(payload.domain, at('domain'), state, 20),
+                copyId: idField(payload.copyId, at('copyId'), state, LEDGER_ID_PATTERN),
+                battle: intField(payload.battle, at('battle'), state, 1, 1e6),
+                reportId: textField(payload.reportId, at('reportId'), state, 40),
+            };
+        }
+        // 日常挑战领域免费升级：该领域胜场每满 UPGRADE_EVERY 场免费升级一张副本。
+        case 'daily-upgrade': {
+            checkKnownFields(payload, ['domain', 'copyId', 'battle', 'reportId'], path, state);
+            return {
+                domain: textField(payload.domain, at('domain'), state, 20),
+                copyId: idField(payload.copyId, at('copyId'), state, LEDGER_ID_PATTERN),
+                battle: intField(payload.battle, at('battle'), state, 1, 1e6),
+                reportId: textField(payload.reportId, at('reportId'), state, 40),
+            };
+        }
         // 规则 v6 G5g 战斗胜利积分：锚定胜利战报楼，amount 由程序按档位与战斗 ID 定额（10–30）。
         // G5f-4c：bonus 为写入时持有的加金币遗物特性快照（relics），points / hpMax 必须等于按引用与定额重算的值。
         case 'battle-points': {
@@ -1663,6 +1751,20 @@ function validateAttributePayload(type, payload, path, state) {
     if (!objectField(payload, path, state)) return;
     const at = (key) => joinPath(path, key);
     switch (type) {
+        case 'hero-base': {
+            checkKnownFields(payload, ['scores', 'uncapped'], path, state);
+            const uncapped = payload.uncapped === true;
+            if (payload.uncapped !== undefined && typeof payload.uncapped !== 'boolean') addIssue(state, at('uncapped'), 'expected-boolean');
+            const scores = normalizeHeroScores(payload.scores, { uncapped });
+            if (!scores) addIssue(state, at('scores'), 'invalid-scores');
+            return uncapped ? { scores, uncapped: true } : { scores };
+        }
+        case 'npc-base': {
+            checkKnownFields(payload, ['scores'], path, state);
+            const scores = normalizeNpcScores(payload.scores);
+            if (!scores) addIssue(state, at('scores'), 'invalid-scores');
+            return { scores };
+        }
         case 'init': {
             checkKnownFields(payload, ['className', 'role', 'major', 'minor', 'weak', 'scores'], path, state);
             const result = {
@@ -1739,7 +1841,7 @@ function validateAttributeRecord(record, path, state) {
         id: idField(record.id, at('id'), state, LEDGER_ID_PATTERN),
         type,
         character: idField(record.character, at('character'), state),
-        anchor: validateAnchor(record.anchor, at('anchor'), state, type !== undefined && type !== 'init'),
+        anchor: validateAnchor(record.anchor, at('anchor'), state, type !== undefined && type !== 'init' && type !== 'hero-base' && type !== 'npc-base'),
         payload: type === undefined ? undefined : validateAttributePayload(type, record.payload, at('payload'), state),
         createdAt: intField(record.createdAt, at('createdAt'), state, 0, Number.MAX_SAFE_INTEGER),
         change: textField(record.change, at('change'), state, 40, ''),

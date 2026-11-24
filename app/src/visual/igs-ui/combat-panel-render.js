@@ -79,8 +79,14 @@ const REASON_TEXT = Object.freeze({
     'combat-record-corrupt': '聊天记录里的战斗留档已损坏',
     'combat-record-save-failed': '战斗留档未能写入聊天记录',
     'combat-record-unverified': '战斗留档写入后未能读回确认',
-    'combat-record-stale': '开战楼已改动，留档未写入',
+    'combat-record-stale': '开战楼已变更，留档未确认',
     'combat-reward-not-retryable': '当前不能重试奖励',
+    'combat-offer-save-pending': '奖励保存未确认',
+    'combat-offer-save-conflict': '奖励留档冲突，未覆盖已有记录',
+    'combat-offer-intent-invalid': '奖励恢复记录无效',
+    'combat-offer-intent-unavailable': '奖励恢复存储不可用',
+    'combat-offer-intent-read-failed': '无法读取奖励恢复记录',
+    'combat-offer-intent-write-failed': '无法保存奖励恢复记录',
     'combat-record-unsupported': '当前宿主不支持写入聊天记录',
     'combat-card-unplayable': '能量不足或当前不能出这张牌',
     'combat-hero-skill-unusable': '人物技能本回合已用过或能量不足',
@@ -355,12 +361,14 @@ const LOBBY_FOE_ROWS_AT = 4;
 // 开战生命（持续伤势已计入）紧跟 Lv；没有生命数据时不画。
 const plateMeta = (a) => `<small>Lv${esc(a.level)}</small>${a.maxHp ? `<small data-hp="">生命 ${esc(a.hp)}/${esc(a.maxHp)}</small>` : ''}${a.className ? `<small>${esc(a.className)}</small>` : ''}`;
 const plateRow = (a) => `<span class="igs-combat-plate-row"><b>${esc(a.name)}</b>${plateMeta(a)}</span>`;
-// 胜利奖励：生成成功不显示；失败（生成失败、写库失败、重开未生成）只显示「奖励生成失败」与「重试」，不阻断开战；重试进行中显示「奖励生成中」。
 function lobbyRewardHtml(r, pending) {
     if (!r || r.status === 'ready') return '';
     const waiting = r.status === 'pending';
+    const label = r.stage === 'save' ? (waiting ? '正在确认奖励保存' : combatReasonText(r.reason))
+        : r.stage === 'read' ? (waiting ? '正在读取奖励' : '奖励读取失败')
+            : waiting ? '奖励生成中' : '奖励生成失败';
     const retry = waiting ? '' : btn('retry-reward', '重试', { disabled: Boolean(pending) });
-    return `<div class="igs-combat-row igs-combat-lobby-reward" data-state="${waiting ? 'pending' : 'failed'}"><span class="igs-combat-label">${waiting ? '奖励生成中' : '奖励生成失败'}</span>${retry}</div>`;
+    return `<div class="igs-combat-row igs-combat-lobby-reward" data-state="${waiting ? 'pending' : 'failed'}"><span class="igs-combat-label">${esc(label)}</span>${retry}</div>`;
 }
 const INTIMATE_MECHANICS_ROW = Object.freeze(['合拍', '主导']);
 const INTIMATE_POSITIONS_ROW = Object.freeze([['receive', '受方'], ['lead', '攻方']]);
@@ -373,6 +381,7 @@ const CHALLENGE_LOBBY_TIER = Object.freeze({ 轻松: 'normal', 普通: 'elite', 
 function challengeLobbyHtml(v) {
     const l = v.lobby;
     const pics = v.portraits || {};
+    const arts = v.enemyArt || {};
     const hero = l.allies[0];
     const foe = l.enemies[0];
     const tint = pics[hero.name] ? tintTriplet((v.tints || {})[hero.name]) : '';
@@ -381,9 +390,12 @@ function challengeLobbyHtml(v) {
         ? `<div class="igs-combat-row igs-challenge-allies"><span class="igs-combat-label">协助者</span>${l.candidates.map((c) => `<button type="button" class="igs-combat-chip" data-combat-act="ally" data-combat-id="${esc(c.name)}" aria-pressed="${c.picked ? 'true' : 'false'}"${v.pending ? ' aria-disabled="true"' : ''}>${esc(c.name)}</button>`).join('')}</div>` : '';
     const heroHtml = `<figure class="igs-combat-lobby-figure" data-side="ally" data-picked=""${tint ? ` style="--igs-combat-ally-tint:${tint}"` : ''}>${portraitHtml(hero.name, 'ally', pics[hero.name] || '')}`
         + `<span class="igs-combat-plate"><span class="igs-combat-plate-row"><b>${esc(hero.name)}</b>${hero.maxHp ? `<small data-hp="">${CHALLENGE_LABELS.hp} ${esc(hero.maxHp)}</small>` : ''}</span></span></figure>`;
-    const foeHtml = `<figure class="igs-combat-lobby-figure" data-side="enemy" data-tier="${esc(CHALLENGE_LOBBY_TIER[l.tier] || 'normal')}">${portraitHtml(foe.name, 'enemy', '', null)}`
+    const foeHtml = `<figure class="igs-combat-lobby-figure" data-side="enemy" data-tier="${esc(CHALLENGE_LOBBY_TIER[l.tier] || 'normal')}">${portraitHtml(foe.name, 'enemy', pics[foe.name] || '', arts[foe.name] || null)}`
         + `<figcaption class="igs-combat-plate"><b>${esc(foe.name)}</b><small>${CHALLENGE_LABELS.enemy}</small></figcaption></figure>`;
-    const banner = `<div class="igs-combat-lobby-top"><div class="igs-combat-lobby-banner"><b class="igs-combat-lobby-name">${esc(l.encounter || CHALLENGE_LABELS.battle)}</b><span class="igs-combat-lobby-tier">${esc([l.tierLabel, l.domain].filter(Boolean).join(' · '))}</span></div></div>`;
+    const domainBadge = !l.intimate && l.domain && Number.isInteger(l.skillValue) && typeof l.domainMultiplier === 'number'
+        ? `${l.domain} ${l.skillValue} (${l.domainMultiplier >= 1 ? '+' : ''}${Math.round((l.domainMultiplier - 1) * 100)}%)`
+        : l.domain;
+    const banner = `<div class="igs-combat-lobby-top"><div class="igs-combat-lobby-banner"><b class="igs-combat-lobby-name">${esc(l.encounter || CHALLENGE_LABELS.battle)}</b><span class="igs-combat-lobby-tier">${esc([l.tierLabel, domainBadge].filter(Boolean).join(' · '))}</span></div></div>`;
     return `<section class="igs-combat-lobby" data-tier="${esc(CHALLENGE_LOBBY_TIER[l.tier] || 'normal')}"${v.intro ? ' data-intro=""' : ''}>${banner}`
         + '<div class="igs-combat-lobby-stage"><span class="igs-combat-lobby-fx" aria-hidden="true"><i class="is-ally"></i><i class="is-enemy"></i></span>'
         + `<div class="igs-combat-lobby-side is-ally" style="--n:${l.allies.length}">${heroHtml}${helperHtml}</div>`
@@ -586,7 +598,7 @@ function purgeButton(f, pending) {
         return btn('purge-open', p.reason === 'combat-points-insufficient' ? '删牌·积分不足' : full, { disabled: true, full });
     }
     const name = (p.cards || []).find((c) => c.copyId === p.pick)?.name;
-    const label = p.pick === 'skip' ? '删牌：不删' : name ? `删牌：${name}` : `删一张牌（消耗${p.cost}积分）`;
+    const label = p.pick === 'skip' ? '删牌：不删' : name ? `删牌：${name}` : p.cost > 0 ? `删一张牌（消耗${p.cost}积分）` : '删一张牌（免费）';
     const short = p.pick === 'skip' || name ? label : p.cost > 0 ? `删牌·${p.cost}积分` : '删牌·免费';
     return btn('purge-open', short, { primary: f.needPurge === true, disabled: pending, full: label });
 }
@@ -605,7 +617,7 @@ function purgeDetailHtml(c, cost, pending, upgradePick) {
         + (keywords ? `<span class="igs-combat-trait-tip-meta">${esc(keywords)}</span>` : '')
         + `<span class="igs-combat-trait-tip-text">${esc(text || '无效果')}</span>`
         + (marks ? `<span class="igs-combat-trait-tip-origin">${esc(marks)}</span>` : '')
-        + `<div class="igs-combat-actions">${btn('pick-purge', upgradePick === c.copyId ? '已选为升级' : `删除这张（消耗${cost}积分）`, { id: c.copyId, primary: true, disabled: pending || upgradePick === c.copyId })}</div></div>`;
+        + `<div class="igs-combat-actions">${btn('pick-purge', upgradePick === c.copyId ? '已选为升级' : cost > 0 ? `删除这张（消耗${cost}积分）` : '删除这张（免费）', { id: c.copyId, primary: true, disabled: pending || upgradePick === c.copyId })}</div></div>`;
 }
 function purgeSheetHtml(v) {
     const f = v.flip;
@@ -623,7 +635,7 @@ function purgeSheetHtml(v) {
     }).join('');
     const skip = btn('pick-purge', p.pick === 'skip' ? '已选不删' : '不删', { id: 'skip', primary: p.pick === 'skip', disabled: pending });
     return `<div class="igs-combat-purge-sheet" role="dialog" aria-label="删牌"><i class="igs-combat-purge-veil" data-combat-act="purge-close"></i>`
-        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">删一张牌（消耗${esc(p.cost)}积分）</div><div class="igs-combat-purge">${cards}</div>`
+        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">${p.cost > 0 ? `删一张牌（消耗${esc(p.cost)}积分）` : '删一张牌（免费）'}</div><div class="igs-combat-purge">${cards}</div>`
         + (focus ? purgeDetailHtml(focus, p.cost, pending, upgradePick) : '')
         + `<div class="igs-combat-actions">${skip}${btn('purge-close', '关闭', { disabled: pending })}</div></div></div>`;
 }
@@ -819,23 +831,66 @@ const intimateResultHtml = (v) => {
     return `<section class="igs-combat-result igs-duel-result" data-outcome="${esc(v.end.outcome)}"><p class="igs-duel-result-line">${esc(line)}</p><div class="igs-combat-actions">${send}</div></section>`;
 };
 
-// M7 二选一诅咒浮层：挂起的选择带 curses 时出现，必须选一项再确认（不能关闭或跳过）；各皮肤与竖屏共用，叠在最上层。
+const PILE_ORIGIN_LABEL = Object.freeze({ draw: '抽牌堆', discard: '弃牌堆', exhaust: '消耗堆' });
+
+function pileChoiceCopy(choice) {
+    const n = choice.count || 1;
+    if (choice.kind === 'draw-play') return { aria: '选择抽牌堆中的牌', cap: '选择一张牌打出', ok: '打出' };
+    if (choice.kind === 'search') return { aria: '选择抽牌堆中的牌', cap: `从抽牌堆选择 ${n} 张牌加入手牌`, ok: '加入手牌' };
+    if (choice.kind === 'retrieve') {
+        const fromLabel = PILE_ORIGIN_LABEL[choice.from] || '弃牌堆';
+        if (choice.to === 'top') return { aria: `选择${fromLabel}中的牌`, cap: `从${fromLabel}选择 ${n} 张牌放到抽牌堆顶`, ok: '放回牌堆顶' };
+        return { aria: `选择${fromLabel}中的牌`, cap: `从${fromLabel}选择 ${n} 张牌加入手牌`, ok: '加入手牌' };
+    }
+    return { aria: '二选一诅咒', cap: '承受一道诅咒（只限本场）', ok: '承受' };
+}
+
+// 牌堆选牌（draw-play / retrieve / search）与 M7 二选一诅咒浮层：各皮肤与竖屏共用，叠在最上层。
 function curseSheetHtml(v) {
     const choice = v.status === 'battle' ? v.battle?.choice : null;
     const candidates = choice?.candidates || choice?.curses;
     if (!candidates?.length || v.battle.outcome) return '';
-    const draw = choice.kind === 'draw-play';
+    const copy = pileChoiceCopy(choice);
     const picks = Array.isArray(v.chosen) ? v.chosen : [];
     const busy = Boolean(v.pending);
-    const items = candidates.map((c) => btn('choose-pick', `${c.name}｜${c.text}`, { id: c.id, pressed: picks.includes(c.id), disabled: busy })).join('');
-    return `<div class="igs-combat-purge-sheet" role="dialog" aria-label="${draw ? '选择抽牌堆中的牌' : '二选一诅咒'}"><i class="igs-combat-purge-veil"></i>`
-        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">${draw ? '选择一张牌打出' : '承受一道诅咒（只限本场）'}</div><div class="igs-combat-purge">${items}</div>`
-        + `<div class="igs-combat-actions">${btn('choose-confirm', draw ? '打出' : '承受', { primary: true, disabled: busy || picks.length !== choice.count })}</div></div></div>`;
+    const items = candidates.map((c) => {
+        const costPrefix = c.cost !== undefined && c.cost !== '' ? `[${c.cost}费] ` : '';
+        const title = `${costPrefix}${c.name}${c.upgraded ? '+' : ''}${c.text ? `｜${c.text}` : ''}`;
+        return btn('choose-pick', title, { id: c.id, pressed: picks.includes(c.id), disabled: busy });
+    }).join('');
+    return `<div class="igs-combat-purge-sheet" role="dialog" aria-label="${esc(copy.aria)}"><i class="igs-combat-purge-veil"></i>`
+        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">${esc(copy.cap)}（已选 ${esc(picks.length)}/${esc(choice.count)}）</div><div class="igs-combat-purge">${items}</div>`
+        + `<div class="igs-combat-actions">${btn('choose-confirm', copy.ok, { primary: true, disabled: busy || picks.length !== choice.count })}</div></div></div>`;
 }
 
-// 面板 HTML：主体按状态与皮肤出，删牌与诅咒浮层统一叠在最上层（结算画布外，各皮肤与竖屏都不被裁切）。
+// 抽牌堆 / 弃牌堆查看浮层：点击左下「抽牌」或右下「弃牌」打开，只读浏览当前牌堆内所有牌。
+const CARD_TYPE_TAG = Object.freeze({ attack: '攻', skill: '技', power: '能', status: '状', curse: '咒' });
+function pileSheetHtml(v) {
+    const kind = v.pileOpen === 'draw' || v.pileOpen === 'discard' ? v.pileOpen : '';
+    if (!kind || v.status !== 'battle' || !v.battle || v.battle.outcome) return '';
+    const list = v.battle.pileCards?.[kind] || [];
+    const label = kind === 'draw' ? '抽牌堆（已按名称排序，不剧透抽牌顺序）' : '弃牌堆（最近弃入在前）';
+    const items = list.length
+        ? list.map((c) => {
+            const typeTag = CARD_TYPE_TAG[c.type] || '牌';
+            const costText = c.cost !== undefined && c.cost !== '' ? `${c.cost}费` : '—';
+            return `<div class="igs-pile-sheet-item" data-card-type="${esc(c.type || 'skill')}">`
+                + `<span class="igs-pile-sheet-cost">${esc(costText)}</span>`
+                + `<span class="igs-pile-sheet-tag">${esc(typeTag)}</span>`
+                + `<b class="igs-pile-sheet-name">${esc(c.name)}${c.upgraded ? '+' : ''}</b>`
+                + `<span class="igs-pile-sheet-text">${esc(c.text || '无额外效果')}</span></div>`;
+        }).join('')
+        : '<div class="igs-pile-sheet-empty">当前没有卡牌</div>';
+    return `<div class="igs-combat-purge-sheet igs-pile-sheet" role="dialog" aria-label="${esc(kind === 'draw' ? '查看抽牌堆' : '查看弃牌堆')}">`
+        + `<i class="igs-combat-purge-veil" data-combat-act="pile-close"></i>`
+        + `<div class="igs-combat-purge-box"><div class="igs-combat-loot-cap">${esc(label)} · 共 ${esc(list.length)} 张</div>`
+        + `<div class="igs-pile-sheet-list">${items}</div>`
+        + `<div class="igs-combat-actions">${btn('pile-close', '关闭', { primary: true })}</div></div></div>`;
+}
+
+// 面板 HTML：主体按状态与皮肤出，删牌、升级、选牌/诅咒与牌堆查看浮层统一叠在最上层（结算画布外，各皮肤与竖屏都不被裁切）。
 export function renderCombatPanelHtml(v) {
-    return `${renderCombatPanelBody(v)}${purgeSheetHtml(v)}${upgradeSheetHtml(v)}${curseSheetHtml(v)}`;
+    return `${renderCombatPanelBody(v)}${purgeSheetHtml(v)}${upgradeSheetHtml(v)}${curseSheetHtml(v)}${pileSheetHtml(v)}`;
 }
 
 function renderCombatPanelBody(v) {

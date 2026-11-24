@@ -2,9 +2,9 @@
 // 纯函数，随机性只来自 hash32，同名同输入结果恒定。
 import { hash32 } from './random.js';
 import { COMBAT_RULES } from './rules.js';
+import { ABILITY_KEYS, HERO_SCORE_UNCAPPED_MAX, normalizeHeroScores, normalizeNpcScores } from '../scene/stats/ability-fields.js';
+export { ABILITY_KEYS, ABILITY_LABELS } from '../scene/stats/ability-fields.js';
 
-export const ABILITY_KEYS = Object.freeze(['str', 'dex', 'con', 'int', 'wis', 'cha']);
-export const ABILITY_LABELS = Object.freeze({ str: '力量', dex: '敏捷', con: '体质', int: '智力', wis: '感知', cha: '魅力' });
 // 各能力的可接受写法（小写比较）。
 const ABILITY_ALIASES = Object.freeze({
     str: ['str', '力量', '力'],
@@ -36,9 +36,9 @@ export const REL_TIERS = Object.freeze({
     outclassed: Object.freeze({ label: '远逊', offset: Object.freeze([-6, -4]), mod: -2, ally: 'support', combat: Object.freeze({ hp: 0.5, damage: 0.5, speed: 0.85 }) }),
     weaker: Object.freeze({ label: '稍弱', offset: Object.freeze([-3, -2]), mod: -1, ally: 'support', combat: Object.freeze({ hp: 0.75, damage: 0.75, speed: 0.93 }) }),
     even: Object.freeze({ label: '相当', offset: Object.freeze([-1, 1]), mod: 0, ally: 'peer', combat: Object.freeze({ hp: 1, damage: 1, speed: 1 }) }),
-    stronger: Object.freeze({ label: '稍强', offset: Object.freeze([2, 3]), mod: 1, ally: 'ace', combat: Object.freeze({ hp: 1, damage: 1, speed: 1 }) }),
-    formidable: Object.freeze({ label: '强敌', offset: Object.freeze([4, 6]), mod: 2, ally: 'ace', combat: Object.freeze({ hp: 1, damage: 1, speed: 1 }) }),
-    overwhelming: Object.freeze({ label: '碾压', offset: Object.freeze([7, 12]), mod: 3, ally: 'legend', combat: Object.freeze({ hp: 1, damage: 1, speed: 1 }) }),
+    stronger: Object.freeze({ label: '稍强', offset: Object.freeze([2, 3]), mod: 1, ally: 'ace', combat: Object.freeze({ hp: 1.15, damage: 1.1, speed: 1.03 }) }),
+    formidable: Object.freeze({ label: '强敌', offset: Object.freeze([4, 6]), mod: 2, ally: 'ace', combat: Object.freeze({ hp: 1.35, damage: 1.25, speed: 1.06 }) }),
+    overwhelming: Object.freeze({ label: '碾压', offset: Object.freeze([7, 12]), mod: 3, ally: 'legend', combat: Object.freeze({ hp: 1.65, damage: 1.45, speed: 1.1 }) }),
 });
 export const DEFAULT_REL_TIER = 'even';
 const REL_KEY_BY_LABEL = Object.freeze(Object.fromEntries(Object.entries(REL_TIERS).map(([key, tier]) => [tier.label, key])));
@@ -151,11 +151,13 @@ export function autoAllocate(scores, prefs, asiCount, cap) {
     return result;
 }
 
-// 推导完整能力：scores、修正、熟练加值、上限。base 为手动六维时优先于偏好。
-export function deriveAbilities({ prefs, name, level = 1, protagonist = false, tier = DEFAULT_REL_TIER, adjustments = [], base = null } = {}) {
-    const cap = abilityCap(protagonist);
+// 推导完整能力：scores、修正、熟练加值、上限。heroBase（纯六维主角建档/手改）与 base（旧手动六维）均优先于偏好。
+export function deriveAbilities({ prefs, name, level = 1, protagonist = false, tier = DEFAULT_REL_TIER, adjustments = [], base = null, heroBase = null, heroUncapped = false, npcBase = null } = {}) {
+    const uncapped = Boolean(protagonist && heroUncapped);
+    const cap = uncapped ? HERO_SCORE_UNCAPPED_MAX : abilityCap(protagonist);
     const manual = base ? normalizeManualScores(base) : null;
-    let scores = manual ? { ...manual } : baseScores(prefs, name);
+    let scores = (protagonist && normalizeHeroScores(heroBase, { uncapped })) || (!protagonist && normalizeNpcScores(npcBase)) || manual || baseScores(prefs, name);
+    const initialScores = { ...scores };
     if (!protagonist) {
         const tierMod = (REL_TIERS[tier] || REL_TIERS[DEFAULT_REL_TIER]).mod;
         scores = Object.fromEntries(ABILITY_KEYS.map((key) => [key, clamp(scores[key] + tierMod, ABILITY_MIN, cap)]));
@@ -169,7 +171,7 @@ export function deriveAbilities({ prefs, name, level = 1, protagonist = false, t
         if (key && amount) scores[key] = clamp(scores[key] + amount, ABILITY_MIN, cap);
     }
     const mods = Object.fromEntries(ABILITY_KEYS.map((key) => [key, abilityMod(scores[key])]));
-    return { scores, base: unadjusted, mods, proficiency: proficiencyBonus(level), cap };
+    return { scores, base: unadjusted, initialScores, mods, proficiency: proficiencyBonus(level), cap };
 }
 
 // 尚未花掉的升级加点数。

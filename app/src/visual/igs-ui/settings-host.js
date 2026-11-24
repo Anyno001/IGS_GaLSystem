@@ -1,4 +1,5 @@
 import { ensureAliases, forumPoFromText } from './forum-reader-model.js';
+import { cocAllocCheck, cocOccSkills, cocOccupation, parseCocSheet, rollCocAttributes } from '../../scene/stats/coc-investigator.js';
 import { clearNaiQuota, syncNaiQuota, querySettingsNaiQuota, renderNaiQuota } from './settings-nai-quota.js';
 import { recoverOperation, createOperationCheckpoint, checkpointService, wakeRecoveringOperations } from '../../storage/automatic-recovery.js';
 // 设置器的打开 / 关闭、挂载、事件委托、草稿写入与保存。reader-host 只负责把阅读器侧的依赖交进来。
@@ -61,7 +62,7 @@ import { BASE_ATTRIBUTES } from '../../scene/stats/stat-state.js';
 import { describeCurrencyFailure } from '../../scene/stats/stat-currency.js';
 import { getStatusDef } from '../../scene/stats/stat-status-defs.js';
 import { refreshStatsWallets } from './stats-hero-card.js';
-import { refreshStatsBuildStatus } from './stats-settings-fields.js';
+import { refreshCocAlloc, refreshStatsBuildStatus } from './stats-settings-fields.js';
 import { ABILITY_KEYS, ABILITY_LABELS, MANUAL_BUILD, MANUAL_TOTAL } from '../../combat/abilities.js';
 import { BATTLE_MODE_PATH, COMBAT_PRESET_PATH, checkCombatExpansionReady, planBattleMode, planCombatPreset } from './combat-settings.js';
 import { ensureEnemyAtlas } from './combat-enemy-atlas.js';
@@ -99,7 +100,7 @@ export function createSettingsHost(deps) {
     const settingsBusyActions = new Set();
     // 手指按着或 ⋯ 菜单开着时不整页重绘：重绘会收掉菜单、换掉按下的按钮，点击落空。
     let settingsPointerDown = false;
-    const { buildSettingsSnapshot, renderSettingsBody, renderPageForIndex, renderImageJobLogList, buildRegexPreview, settingsLowQuality } = createSettingsRenderer({
+    const { buildSettingsSnapshot, renderSettingsBody, renderPageForIndex, renderImageJobLogList, renderLlmCallLogList, buildRegexPreview, settingsLowQuality } = createSettingsRenderer({
         normalizeUnifiedSettings, options, rerenderSettings, settingsShellHtml, state, forumRegistry,
     });
 
@@ -573,7 +574,7 @@ export function createSettingsHost(deps) {
         }
 
         // 论坛登记（标题、板块、代号）随聊天存在 chatMetadata，不进设置草稿：虚拟 path 直接写登记。
-        const forumField = /^forum\.(title|board|alias|names|add|po)(?:\.(t\d+))?(?:\.(.+))?$/.exec(path);
+        const forumField = /^forum\.(title|board|alias|names|add|po|drop)(?:\.(t\d+))?(?:\.(.+))?$/.exec(path);
         if (forumField && forumRegistry) {
             const registry = forumRegistry;
             const data = registry.read();
@@ -590,6 +591,16 @@ export function createSettingsHost(deps) {
                 const key = decodeURIComponent(forumField[3] || '');
                 next.alias = { ...thread.alias };
                 if (text) { next.alias[key] = text; manual.alias[key] = true; } else { delete next.alias[key]; delete manual.alias[key]; }
+            } else if (forumField[1] === 'drop') {
+                const key = decodeURIComponent(forumField[3] || '');
+                if (thread.po && thread.po.kind === 'char' && thread.po.key === key) return { ok: true };
+                const without = (obj) => { const o = { ...obj }; delete o[key]; return o; };
+                next.alias = without(thread.alias);
+                next.names = without(thread.names);
+                manual.alias = without(manual.alias);
+                manual.asked = without(manual.asked);
+                registry.commit({ ...data, threads: data.threads.map((t) => (t.id === thread.id ? next : t)) });
+                return rerenderSettings();
             } else if (forumField[1] === 'po') {
                 const po = forumPoFromText(text);
                 if (!po) return { ok: true };
@@ -848,6 +859,99 @@ export function createSettingsHost(deps) {
         return { ok: true, values };
     }
 
+    // CoC 调查员档界面动作。草稿记在 asyncState.cocDraft（choose / roll / alloc 三步），保存走 options.statsCoc。
+    async function runCocAction(kind) {
+        const panel = state.activeSettings;
+        const coc = typeof options.statsCoc === 'function' ? options.statsCoc : null;
+        if (!panel || !coc) return { ok: false, reason: 'stats-runtime-missing' };
+        const as = panel.asyncState;
+        const redraw = () => { if (state.activeSettings === panel) rerenderSettings(); };
+        const reasonText = (reason) => ({ ruleset: '数值规则不是CoC第七版。', invalid: '车卡数据不完整，请检查八项属性。', 'request-stale': '聊天已切换或数值存档尚未载入，请回到该聊天后重试。', 'stats-attribute-conflict': '属性正被其他操作修改。', 'no-sheet': '尚未建立调查员档。', 'stats-runtime-missing': '数值系统尚未就绪。', 'no-model': '需要可用的辅助模型（自动插图设置里的写词模型）。', 'stats-inactive': '本聊天的数值系统尚未启用。', busy: '另一项调查员档任务正在进行，结束后再试。' })[reason] || `原因：${reason || '未知'}`;
+        const save = async (job) => {
+            as.cocSaving = true; as.cocError = ''; as.cocNotice = '';
+            redraw();
+            let res;
+            try { res = await job(); } catch (error) { res = { ok: false, reason: String((error && error.message) || error) }; }
+            as.cocSaving = false;
+            if (res && res.ok) {
+                delete as.cocDraft;
+            } else as.cocError = reasonText(res && res.reason);
+            redraw();
+            return res || { ok: false };
+        };
+        if (kind.startsWith('mode:')) {
+            const res = coc('setMode', kind.slice(5));
+            as.cocError = res && res.ok ? '' : reasonText(res && res.reason);
+            redraw();
+            return res || { ok: false };
+        }
+        if (kind === 'redo') { as.cocDraft = { stage: 'choose' }; as.cocError = ''; as.cocNotice = ''; redraw(); return { ok: true }; }
+        if (kind === 'cancel') { delete as.cocDraft; as.cocError = ''; as.cocNotice = ''; redraw(); return { ok: true }; }
+        if (kind === 'roll') {
+            const rolled = rollCocAttributes();
+            as.cocDraft = { ...(as.cocDraft || {}), stage: 'roll', attrs: rolled.attrs, luck: rolled.luck };
+            as.cocError = ''; redraw();
+            return { ok: true };
+        }
+        if (kind === 'alloc') {
+            const d = as.cocDraft;
+            if (!d || !d.attrs) return { ok: false };
+            as.cocDraft = { occupation: '', occId: '', occPicks: [], occFormula: 'edu4', occPoints: 0, alloc: {}, ...d, stage: 'alloc' };
+            redraw();
+            return { ok: true };
+        }
+        if (kind === 'clear') {
+            if (!await settingsDialogs.confirm('清除调查员档？属性、技能分配都会删除，并回到日常模式。', { okLabel: '清除' })) return { ok: true, cancelled: true };
+            return save(() => coc('clear'));
+        }
+        if (kind === 'apply') {
+            const d = as.cocDraft;
+            if (!d || d.stage !== 'alloc') return { ok: false };
+            if (!cocAllocCheck(d).ok) return { ok: false, reason: 'stats-coc-alloc-invalid' };
+            return save(() => coc('apply', { v: 1, attrs: d.attrs, luck: d.luck, occupation: d.occupation, occId: d.occId, occPicks: d.occPicks, occFormula: d.occFormula, occPoints: d.occPoints, alloc: d.alloc, san: d.attrs.意志, source: 'roll', at: Date.now() }));
+        }
+        // 粘贴车卡：解析、第六版换算、预览确认；返回档或 null（取消）。主角与 NPC 共用。
+        const pasteSheet = async (who) => {
+            const text = await settingsDialogs.edit(who ? `粘贴${who}的车卡文本（骰娘 .st 格式或属性列表）：` : '粘贴车卡文本（骰娘 .st 格式或属性列表）：', '', { okLabel: '解析' });
+            if (text == null || !String(text).trim()) return null;
+            const p = parseCocSheet(text);
+            const list = (obj) => Object.entries(obj).map(([k, v]) => `${k}${v}`).join('，');
+            let attrs = p.attrs; let luck = p.luck;
+            const preview = () => `属性：${list(attrs) || '无'}\n幸运：${luck ?? '未给出（按 50）'}\n理智：${p.san ?? '未给出（按意志）'}\n技能（${Object.keys(p.skills).length} 项）：${list(p.skills) || '无'}\n认不出的片段：${p.unknown.length ? p.unknown.join('、') : '无'}`;
+            if (p.missing.length) { await settingsDialogs.alert(`${preview()}\n缺少属性：${p.missing.join('、')}，补全后才能应用。`); return null; }
+            if (p.legacy6) {
+                if (!await settingsDialogs.confirm('可能是第六版车卡（属性 3–18），是否按×5换算为 1–99？选「取消」则不应用。', { okLabel: '按×5换算' })) return null;
+                attrs = Object.fromEntries(Object.entries(attrs).map(([k, v]) => [k, Math.min(99, v * 5)]));
+                if (luck != null && luck <= 18) luck *= 5;
+            }
+            if (!await settingsDialogs.confirm(preview(), { okLabel: '应用' })) return null;
+            return { v: 1, attrs, luck: luck ?? 50, occupation: '', occFormula: 'edu4', occPoints: 0, totals: p.skills, san: p.san ?? attrs.意志, source: 'paste', at: Date.now() };
+        };
+        if (kind === 'paste') {
+            const sheet = await pasteSheet('');
+            return sheet ? save(() => coc('apply', sheet)) : { ok: true, cancelled: true };
+        }
+        if (kind.startsWith('npc-')) {
+            const [op, enc = ''] = kind.slice(4).split(':');
+            const name = enc ? decodeURIComponent(enc) : '';
+            if (op === 'paste') {
+                const sheet = await pasteSheet(`「${name}」`);
+                return sheet ? save(() => coc('npcApply', { name, sheet })) : { ok: true, cancelled: true };
+            }
+            if (op === 'clear') {
+                if (!await settingsDialogs.confirm(`清除「${name}」的调查员档？清除后检定改按日常数值临时换算。`, { okLabel: '清除' })) return { ok: true, cancelled: true };
+                return save(() => coc('npcClear', name));
+            }
+            if (op === 'gen' || op === 'gen-all') {
+                const res = await save(() => coc('npcGenerate', op === 'gen' ? [name] : null));
+                if (res && res.ok && !(res.created || []).length) { as.cocNotice = (res.skipped || []).length ? '模型没有给出可用的调查员档。' : '没有需要生成的角色。'; redraw(); }
+                return res;
+            }
+            return { ok: false, reason: 'stats-coc-unknown' };
+        }
+        return { ok: false, reason: 'stats-coc-unknown' };
+    }
+
     async function runStatsOp(spec) {
         const op = typeof options.statsOp === 'function' ? options.statsOp : null;
         if (!op) return { ok: false, reason: 'stats-runtime-missing' };
@@ -1007,15 +1111,32 @@ export function createSettingsHost(deps) {
                 const attrs = read && read.attrs;
                 if (!attrs) result = { ok: false, reason: 'combat-attribute-table-missing' };
                 else {
-                    const values = await settingsDialogs.numbers(`修改属性（单项${MANUAL_BUILD.min}–${MANUAL_BUILD.max}，合计不超过${MANUAL_TOTAL}）`, ABILITY_KEYS.map((key) => ({ key, label: ABILITY_LABELS[key], value: attrs.base[key], min: MANUAL_BUILD.min, max: MANUAL_BUILD.max })), { okLabel: '保存', total: { max: MANUAL_TOTAL, note: (left, total) => (left < 0 ? `超出 ${-left} 点 · 合计 ${total}/${MANUAL_TOTAL}` : `剩余 ${left} 点 · 合计 ${total}/${MANUAL_TOTAL}`) } });
-                    if (!values) result = { ok: true, cancelled: true };
+                    const draft = panel.asyncState.heroAttributeDraft;
+                    const initial = draft?.chatId === attrs.chatId && draft.ownerGeneration === attrs.ownerGeneration ? draft.scores : attrs.base;
+                    const values = await settingsDialogs.numbers(`修改属性（常规单项${MANUAL_BUILD.min}–${MANUAL_BUILD.max}，合计≤${MANUAL_TOTAL}；超限将询问是否开挂）`, ABILITY_KEYS.map((key) => ({ key, label: ABILITY_LABELS[key], value: initial[key], min: 1, max: 9999 })), { okLabel: '保存', total: { max: MANUAL_TOTAL, note: (left, total) => (left < 0 ? `! 超出 ${-left} 点 · 合计 ${total}/${MANUAL_TOTAL}（提交时可选择开挂）` : `剩余 ${left} 点 · 合计 ${total}/${MANUAL_TOTAL}`) } });
+                    if (state.activeSettings !== panel) return { ok: false, reason: 'request-stale' };
+                    if (!values) { delete panel.asyncState.heroAttributeDraft; result = { ok: true, cancelled: true }; }
                     else {
                         const scores = Object.fromEntries(ABILITY_KEYS.map((key) => [key, Math.round(Number(values[key]))]));
+                        const submission = { chatId: attrs.chatId, ownerGeneration: attrs.ownerGeneration, scores };
+                        panel.asyncState.heroAttributeDraft = submission;
                         const total = Object.values(scores).reduce((sum, v) => sum + v, 0);
-                        result = total > MANUAL_TOTAL ? { ok: false, reason: 'stats-build-over-total' }
-                            : ABILITY_KEYS.some((key) => !(scores[key] >= MANUAL_BUILD.min && scores[key] <= MANUAL_BUILD.max)) ? { ok: false, reason: 'stats-build-score-range' }
-                                : ABILITY_KEYS.every((key) => scores[key] === attrs.base[key]) ? { ok: true, cancelled: true }
-                                    : await op('attrs', 'set', '', { scores, className: attrs.className, role: attrs.role });
+                        const overCap = total > MANUAL_TOTAL || ABILITY_KEYS.some((key) => !(scores[key] >= MANUAL_BUILD.min && scores[key] <= MANUAL_BUILD.max));
+                        let uncapped = Boolean(attrs.uncapped);
+                        if (overCap && !uncapped) {
+                            const allowCheat = await settingsDialogs.confirm('【！】当前属性已超出常规上限（单项 3–18，总分 ≤ 72）。是否需要开挂并解除属性上限？');
+                            if (state.activeSettings !== panel) return { ok: false, reason: 'request-stale' };
+                            if (allowCheat) uncapped = true;
+                        }
+                        result = (overCap && !uncapped) ? { ok: false, reason: total > MANUAL_TOTAL ? 'stats-build-over-total' : 'stats-build-score-range' }
+                            : ABILITY_KEYS.every((key) => scores[key] === attrs.base[key]) && uncapped === Boolean(attrs.uncapped) ? { ok: true, cancelled: true }
+                                : await op('attrs', 'set', '', { ...submission, uncapped, className: attrs.className, role: attrs.hasCombatInit ? attrs.role : undefined,
+                                    expectedRevision: attrs.revision, signal: panel.recoveryController.signal });
+                        if (panel.asyncState.heroAttributeDraft === submission && result?.ok) delete panel.asyncState.heroAttributeDraft;
+                        if (state.activeSettings === panel && result?.reason === 'stats-attribute-conflict')
+                            await settingsDialogs.alert('属性已变化，未覆盖新值。再次打开可复核并提交保留的输入。');
+                        else if (state.activeSettings === panel && result?.ok === false && !['stats-build-over-total', 'stats-build-score-range', 'request-stale'].includes(result.reason))
+                            await settingsDialogs.alert(`未保存主角属性修改（${result.reason}）。输入草稿已保留。`);
                     }
                 }
             }
@@ -1064,9 +1185,19 @@ export function createSettingsHost(deps) {
                     persistSettingsDraft();
                 }
             } else if (kind === 'sheet-edit') {
-                const text = String((await settingsDialogs.prompt(`修改「${name}」的一项数值，格式：项目 档位（如「话术 精通」「敏捷 出众」）。技能档：未学、入门、熟练、精通、大师；属性档：很弱、偏弱、普通、出众、顶尖。`, '')) || '').trim();
+                const stamp = await op('sheet', 'draft', name);
+                if (!stamp?.ok || state.activeSettings !== panel) return stamp?.ok ? { ok: false, reason: 'request-stale' } : stamp;
+                const drafts = panel.asyncState.sheetDrafts ||= new Map();
+                const key = JSON.stringify([stamp.chatId, stamp.ownerGeneration, name]);
+                const text = String((await settingsDialogs.prompt(`修改「${name}」的一项数值，格式：项目 档位（如「话术 精通」「敏捷 出众」）。技能档：未学、入门、熟练、精通、大师；属性档：很弱、偏弱、普通、出众、顶尖。`, drafts.get(key) || '')) || '').trim();
+                if (state.activeSettings !== panel) return { ok: false, reason: 'request-stale' };
                 const [skill, tier] = text.split(/\s+/);
-                result = skill && tier ? await op('sheet', 'edit', name, { skill, tier }) : { ok: true, cancelled: true };
+                drafts.set(key, text);
+                result = !text ? { ok: true, cancelled: true } : !tier ? { ok: false, reason: 'stats-sheet-edit-invalid' }
+                    : await op('sheet', 'edit', name, { ...stamp, skill, tier, signal: panel.recoveryController.signal });
+                if (result?.ok && drafts.get(key) === text) drafts.delete(key);
+                if (state.activeSettings === panel && result?.ok === false && !['stats-sheet-edit-invalid', 'request-stale'].includes(result.reason))
+                    await settingsDialogs.alert(`未保存「${name}」的修改（${result.reason}）。输入已保留。`);
             } else if (kind === 'trait-fill') {
                 const busy = typeof settingsDialogs.busy === 'function' ? settingsDialogs.busy('正在按人设评定角色特质，角色较多时需要几十秒。') : null;
                 try { result = await op('relation', 'fill-traits', '', {}); } finally { if (busy) busy.close(); }
@@ -1133,6 +1264,14 @@ export function createSettingsHost(deps) {
                 const values = guess && !guess.ok ? null : await settingsDialogs.numbers(`修改主角对「${name}」的态度`, dims.map((key, i) => ({ key, label: key, value: Number.isFinite(fill[key]) ? fill[key] : Number.isFinite(before[i]) ? before[i] : 0, min: key === '欲望' || key === '芥蒂' ? 0 : -100, max: 100 })), { okLabel: '保存' });
                 const payload = values ? Object.fromEntries(dims.filter((key, i) => values[key] !== before[i]).map((key) => [key, values[key]])) : {};
                 result = guess && !guess.ok ? guess : Object.keys(payload).length ? await op('relation', 'set-hero', name, payload) : { ok: true, cancelled: true };
+            } else if (kind === 'npc-policy') {
+                result = await op('npc', 'policy', name, { policy: name });
+                if (state.activeSettings === panel && result?.ok === false && result.reason !== 'request-stale')
+                    await settingsDialogs.alert(`未保存 NPC 建档策略（${result.reason}）。`);
+            } else if (kind === 'npc-choice') {
+                result = await op('npc', 'choice', name, { choice: valuePart });
+                if (state.activeSettings === panel && result?.ok === false && result.reason !== 'request-stale')
+                    await settingsDialogs.alert(`未保存「${name}」的建档选择（${result.reason}）。`);
             } else if (kind === 'sheet-regen') {
                 result = await settingsDialogs.confirm(`重新生成「${name}」的数值？手改过的内容会被覆盖。`) ? await op('sheet', 'regen', name) : { ok: true, cancelled: true };
             } else if (kind === 'person-rename') {
@@ -1155,7 +1294,7 @@ export function createSettingsHost(deps) {
             if (state.activeSettings === panel && result.reason !== 'request-stale' && typeof settingsDialogs.alert === 'function')
                 await settingsDialogs.alert(describeCurrencyFailure(result));
         } else if (result && result.ok === false && result.reason && !result.cancelled && typeof settingsDialogs.alert === 'function') {
-            const text = { 'stats-no-model': '没有可用的辅助模型，请先在自动插图设置里接好写词模型。', 'stats-generating': '正在生成回复，结束后再试。', 'stats-sheet-edit-invalid': '格式不对，请写成「项目 档位」。', 'stats-relation-invalid': '关系数值须为-100到100的整数。', 'stats-relation-missing': '该角色还没有结算记录，下一楼回复后再改。', 'stats-note-no-text': '还没有可参考的剧情正文。', 'stats-estimate-failed': '估算失败，辅助模型未返回结果，可稍后重试。', 'stats-note-failed': '拟写失败，辅助模型未返回结果，可稍后重试。', 'stats-table-none': '数据库表格里没有可导入的新角色。', 'stats-import-no-floor': '本聊天启用数值后还没有结算过回复，下一楼回复后再导入。', 'stats-inactive': '本聊天未启用数值系统。', 'stats-no-ledger': '本聊天还没有数值存档。', 'stats-start-none': '没有需要补填的角色：已登记角色的关系数值都已定过。', 'stats-start-failed': `补填失败${result.detail ? `：${result.detail}` : '，辅助模型的回复无法解析'}。可稍后重试。`, 'stats-chat-changed': '计算期间切换了聊天，未写入。','stats-hero-skill-invalid': '技能值须为1到99的整数。', 'stats-hero-edit-invalid': '格式不对，请写成「技能 档位」或「技能 数值」。', 'stats-hero-edit-attribute': '六维属性不能在这里修改。', 'stats-hero-tier-over-cap': '熟练度不能高于当前成长档位。', 'stats-hero-edit-unknown': '没有这项技能，请在擅长技能八格里选择。', 'stats-build-skill-invalid': '技能名须为1到8个字，不含数字和符号。', 'stats-hero-skills-coc-only': '主角技能分配仅适用于CoC规则。', 'stats-hero-skills-busy': '另一个聊天的分配尚未完成。', 'stats-hero-skills-invalid': '分配失败，回复无法解析。', 'stats-hero-skills-empty': '分配失败，回复中没有有效档位。', 'stats-build-pick-duplicate': '同一项技能只能选一次。', 'stats-build-strong-missing': '擅长技能须选满3项。', 'stats-build-over-total': `六维合计不能超过${MANUAL_TOTAL}。`, 'stats-build-score-range': `每项须在${MANUAL_BUILD.min}到${MANUAL_BUILD.max}之间。`, 'combat-attribute-table-missing': '战斗属性表尚未建立，暂时无法修改属性。', 'combat-init-write-failed': '属性写入失败，请稍后重试。', 'stats-fame-name': '条名须为1到8个字，不含数字和符号。', 'stats-fame-dup': '已有同名的声望。', 'stats-fame-max': '声望最多开十条。', 'stats-fame-draft': '声望设定不完整，请检查条名、谁在看、类与两端叫法。', 'stats-fame-missing': '该声望已不存在。', 'stats-fame-fill-bad': '辅助模型返回的内容无法使用，未建立声望，可稍后重试。', 'stats-fame-fill-failed': '补全失败，辅助模型未返回结果，可稍后重试。', 'stats-fame-sentence': '请先写一句话。', 'stats-fame-kind': '请选择声望的性质。', 'stats-trait-full': '特质已满格，请先摘下一项。', 'stats-trait-refused': '该特质当前无法挂上。', 'stats-trait-initial-failed': '评定失败，辅助模型未返回结果，可稍后重试。', 'stats-trait-busy': '正在复核特质，稍后再试。', 'stats-rename-invalid': '名字须为1到20个字，不含竖线、方括号和冒号。', 'stats-rename-hero': '不能改成主角的名字。' }[result.reason];
+            const text = { 'stats-no-model': '没有可用的辅助模型，请先在自动插图设置里接好写词模型。', 'stats-generating': '正在生成回复，结束后再试。', 'stats-sheet-busy': '正在生成其他角色的数值，结束后再试。', 'stats-generation-save-pending': '上次数值结果尚未确认保存，请先在提示条里恢复。', 'stats-sheet-edit-invalid': '格式不对，请写成「项目 档位」。', 'stats-relation-invalid': '关系数值须为-100到100的整数。', 'stats-relation-missing': '该角色还没有结算记录，下一楼回复后再改。', 'stats-note-no-text': '还没有可参考的剧情正文。', 'stats-estimate-failed': '估算失败，辅助模型未返回结果，可稍后重试。', 'stats-note-failed': '拟写失败，辅助模型未返回结果，可稍后重试。', 'stats-table-none': '数据库表格里没有可导入的新角色。', 'stats-import-no-floor': '本聊天启用数值后还没有结算过回复，下一楼回复后再导入。', 'stats-inactive': '本聊天未启用数值系统。', 'stats-no-ledger': '本聊天还没有数值存档。', 'stats-start-none': '没有需要补填的角色：已登记角色的关系数值都已定过。', 'stats-start-failed': `补填失败${result.detail ? `：${result.detail}` : '，辅助模型的回复无法解析'}。可稍后重试。`, 'stats-chat-changed': '计算期间切换了聊天，未写入。','stats-hero-skill-invalid': '技能值须为1到99的整数。', 'stats-hero-edit-invalid': '格式不对，请写成「技能 档位」或「技能 数值」。', 'stats-hero-edit-attribute': '六维属性不能在这里修改。', 'stats-hero-tier-over-cap': '熟练度不能高于当前成长档位。', 'stats-hero-edit-unknown': '没有这项技能，请在擅长技能八格里选择。', 'stats-build-skill-invalid': '技能名须为1到8个字，不含数字和符号。', 'stats-hero-skills-coc-only': '主角技能分配仅适用于CoC规则。', 'stats-hero-skills-busy': '另一个聊天的分配尚未完成。', 'stats-hero-skills-invalid': '分配失败，回复无法解析。', 'stats-hero-skills-empty': '分配失败，回复中没有有效档位。', 'stats-build-pick-duplicate': '同一项技能只能选一次。', 'stats-build-strong-missing': '擅长技能须选满3项。', 'stats-build-over-total': `六维合计不能超过${MANUAL_TOTAL}。`, 'stats-build-score-range': `每项须在${MANUAL_BUILD.min}到${MANUAL_BUILD.max}之间。`, 'combat-attribute-table-missing': '战斗属性表尚未建立，暂时无法修改属性。', 'combat-init-write-failed': '属性写入失败，请稍后重试。', 'stats-fame-name': '条名须为1到8个字，不含数字和符号。', 'stats-fame-dup': '已有同名的声望。', 'stats-fame-max': '声望最多开十条。', 'stats-fame-draft': '声望设定不完整，请检查条名、谁在看、类与两端叫法。', 'stats-fame-missing': '该声望已不存在。', 'stats-fame-fill-bad': '辅助模型返回的内容无法使用，未建立声望，可稍后重试。', 'stats-fame-fill-failed': '补全失败，辅助模型未返回结果，可稍后重试。', 'stats-fame-sentence': '请先写一句话。', 'stats-fame-kind': '请选择声望的性质。', 'stats-trait-full': '特质已满格，请先摘下一项。', 'stats-trait-refused': '该特质当前无法挂上。', 'stats-trait-initial-failed': '评定失败，辅助模型未返回结果，可稍后重试。', 'stats-trait-busy': '正在复核特质，稍后再试。', 'stats-rename-invalid': '名字须为1到20个字，不含竖线、方括号和冒号。', 'stats-rename-hero': '不能改成主角的名字。' }[result.reason];
             if (text) await settingsDialogs.alert(text);
         }
         if (state.activeSettings) rerenderSettings();
@@ -1210,6 +1349,10 @@ export function createSettingsHost(deps) {
 
     function handleSettingsAction(action) {
         if (action === 'query-nai-quota') return querySettingsNaiQuota({ state, options, rerenderSettings });
+        if (String(action).startsWith('forum-drop:')) {
+            const [, tid, ...rest] = String(action).split(':');
+            return Promise.resolve(updateSettingsValue(`forum.drop.${tid}.${rest.join(':')}`, ''));
+        }
         if (action === 'anchor-cg-viewport') return Promise.resolve(anchorCgViewport());
         if (String(action).startsWith('origin-op:')) return runOriginOp(String(action).slice('origin-op:'.length));
         if (action === 'origin-chat-pause') return runOriginOp('pause');
@@ -1254,6 +1397,8 @@ export function createSettingsHost(deps) {
         }
         // 数值 v2 存档区操作（角色卡、剧情技能、补全、旧版备份）：交给运行时，结束后重绘。
         if (String(action).startsWith('stats-op:')) return runStatsOp(String(action).slice('stats-op:'.length));
+        // CoC 调查员档：粘贴 / 掷属性 / 分配点数 / 应用 / 清除。
+        if (String(action).startsWith('stats-coc:')) return runCocAction(String(action).slice('stats-coc:'.length));
         // 适配版表格模板下载（§8C）。
         // 推送映射「确认映射」：给当前模板指纹写一个空覆盖，之后不再提示「新的表格模板」（§8B 第 5 条）。
         if (String(action).startsWith('stats-mapping-confirm:')) {
@@ -1663,6 +1808,26 @@ export function createSettingsHost(deps) {
         root.addEventListener('input', (event) => {
             const target = event.target;
             if (!target || !target.getAttribute) return;
+            const cocDraft = state.activeSettings?.asyncState.cocDraft;
+            if (cocDraft && cocDraft.stage === 'alloc') {
+                const cocField = target.getAttribute('data-coc-field');
+                const cocOcc = target.getAttribute('data-coc-occ');
+                const cocHobby = target.getAttribute('data-coc-hobby');
+                const digits = (max) => {
+                    const clean = String(target.value || '').replace(/\D+/g, '');
+                    if (clean !== target.value) target.value = clean;
+                    return Math.min(max, Number(clean) || 0);
+                };
+                if (cocField === 'occupation') { cocDraft.occupation = String(target.value); return; }
+                if (cocField === 'occPoints') { cocDraft.occPoints = digits(999); refreshCocAlloc(root, cocDraft); return; }
+                if (cocOcc != null || cocHobby != null) {
+                    const skill = cocOcc != null ? cocOcc : cocHobby;
+                    cocDraft.alloc = cocDraft.alloc || {};
+                    cocDraft.alloc[skill] = { occ: 0, hobby: 0, ...cocDraft.alloc[skill], [cocOcc != null ? 'occ' : 'hobby']: digits(99) };
+                    refreshCocAlloc(root, cocDraft, skill);
+                    return;
+                }
+            }
             // 「我对TA」输入：只记在界面草稿里，点「保存」才写进聊天存档。
             const statsNote = target.getAttribute('data-stats-note');
             if (statsNote !== null) {
@@ -1852,6 +2017,33 @@ export function createSettingsHost(deps) {
                 const rows = [...root.querySelectorAll('[data-stats-expense-row]')].map((row) => Object.fromEntries(['name', 'amount', 'every'].map((f) => [f, row.querySelector(`[data-stats-expense="${f}"]`)?.value ?? ''])));
                 controller.invoke(`stats-op:expenses-save:${encodeURIComponent(JSON.stringify(rows))}`);
                 return;
+            }
+            // 调查员档：只有换职业点公式要重绘（自填点数框出现/消失）；点数与职业名在 input 事件里就地更新。
+            const cocDraft = state.activeSettings?.asyncState.cocDraft;
+            if (cocDraft && cocDraft.stage === 'alloc' && target?.getAttribute) {
+                if (target.getAttribute('data-coc-field') === 'occFormula') { cocDraft.occFormula = String(target.value); rerenderSettings(); return; }
+                // 换职业：公式跟职业走，自选与已加的职业点清零，避免旧职业的点数留在非本职技能上。
+                if (target.getAttribute('data-coc-field') === 'occId') {
+                    const occ = cocOccupation(target.value);
+                    cocDraft.occId = occ ? occ.id : '';
+                    cocDraft.occupation = occ ? occ.name : '';
+                    cocDraft.occFormula = occ ? occ.f : 'edu4';
+                    cocDraft.occPicks = [];
+                    for (const a of Object.values(cocDraft.alloc || {})) if (a) a.occ = 0;
+                    rerenderSettings();
+                    return;
+                }
+                const pickIndex = target.getAttribute('data-coc-pick');
+                if (pickIndex != null) {
+                    const picks = [...(cocDraft.occPicks || [])];
+                    picks[Number(pickIndex)] = String(target.value);
+                    cocDraft.occPicks = picks;
+                    const own = cocOccSkills(cocOccupation(cocDraft.occId), picks);
+                    if (own) for (const [k, a] of Object.entries(cocDraft.alloc || {})) if (a && !own.has(k)) a.occ = 0;
+                    rerenderSettings();
+                    return;
+                }
+                if (target.getAttribute('data-coc-occ') != null || target.getAttribute('data-coc-hobby') != null || target.getAttribute('data-coc-field') != null) return;
             }
             const heroSkill = target?.getAttribute?.('data-stats-hero-skill');
             if (heroSkill != null) {
@@ -2275,7 +2467,7 @@ export function createSettingsHost(deps) {
 
     return {
         settingsInteracting, openSettings, syncSettingsStagePause, rerenderSettings, closeSettings,
-        persistSettingsDraft, reportSettingsFailure, renderImageJobLogList,
+        persistSettingsDraft, reportSettingsFailure, renderImageJobLogList, renderLlmCallLogList,
         withCharacterDnaDraftSync: target => withCharacterDnaDraftSync(target, () => state.activeSettings),
     };
 }

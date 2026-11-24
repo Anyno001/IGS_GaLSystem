@@ -13,6 +13,10 @@ import { INVENTORY_LOST_MARK } from './record-model.js';
 
 export { INVENTORY_LOST_MARK };
 
+const leaseActive = shouldStart => {
+    try { return shouldStart() === true; } catch { return false; }
+};
+
 // 数据库插件必须提供的函数，缺任何一个都不能启用背包写入。
 export const INVENTORY_REQUIRED_API = Object.freeze([
     'exportTableAsJson', 'insertRow', 'updateRow', 'deleteRow',
@@ -175,9 +179,9 @@ const sheetEntries = (template) => Object.entries(template || {}).filter(([, she
 // 背包表是否已经处于 IGS 独占状态。
 const isManaged = (sheet) => sheet.updateConfig?.updateFrequency === 0 && sheet.sourceData?.insertNode === MANAGED_SOURCE_DATA.insertNode;
 
-// 在用户模板上规划需要的改动：补背包表的描述/类别列、接管背包表、缺表时新建背包表与装备定义表。
+// 在用户模板上规划需要的改动：补背包表的描述/类别列、按需接管背包表、缺表时新建背包表，战斗开启时按需补建装备定义表。
 // 返回 { ok, template, changes }；无法安全改动时返回带 reason 的失败结果。
-export function planInventoryTemplate(template, tables) {
+export function planInventoryTemplate(template, tables, { includeGear = true, manageInventory = true } = {}) {
     const next = JSON.parse(JSON.stringify(template || {}));
     const entries = sheetEntries(next);
     let orderNo = entries.reduce((max, [, sheet]) => Math.max(max, Number(sheet.orderNo) || 0), -1);
@@ -207,7 +211,7 @@ export function planInventoryTemplate(template, tables) {
             ];
             changes.push({ kind: 'inventory-columns', added: missingColumns.map((column) => column.header) });
         }
-        if (!isManaged(sheet)) {
+        if (manageInventory && !isManaged(sheet)) {
             sheet.updateConfig = { ...MANAGED_UPDATE_CONFIG };
             sheet.sourceData = { ...(sheet.sourceData || {}), ...MANAGED_SOURCE_DATA };
             changes.push({ kind: 'inventory-managed' });
@@ -225,14 +229,16 @@ export function planInventoryTemplate(template, tables) {
         next[uid] = sheet;
         changes.push({ kind: 'inventory-created' });
     }
-    const hasGearTable = (Array.isArray(tables) ? tables : []).some((table) => table.name === GEAR_TABLE.name)
-        || entries.some(([, sheet]) => sheet.name === GEAR_TABLE.name);
-    if (!hasGearTable) {
-        let uid = GEAR_TABLE.uid;
-        for (let suffix = 2; Object.hasOwn(next, uid); suffix += 1) uid = `${GEAR_TABLE.uid}${suffix}`;
-        orderNo += 1;
-        next[uid] = buildIgsSheet({ name: GEAR_TABLE.name, columns: GEAR_TABLE.columns, note: 'IGS 战斗扩展的装备与道具效果、穿戴状态' }, orderNo, uid);
-        changes.push({ kind: 'gear-created' });
+    if (includeGear) {
+        const hasGearTable = (Array.isArray(tables) ? tables : []).some((table) => table.name === GEAR_TABLE.name)
+            || entries.some(([, sheet]) => sheet.name === GEAR_TABLE.name);
+        if (!hasGearTable) {
+            let uid = GEAR_TABLE.uid;
+            for (let suffix = 2; Object.hasOwn(next, uid); suffix += 1) uid = `${GEAR_TABLE.uid}${suffix}`;
+            orderNo += 1;
+            next[uid] = buildIgsSheet({ name: GEAR_TABLE.name, columns: GEAR_TABLE.columns, note: 'IGS 战斗扩展的装备与道具效果、穿戴状态' }, orderNo, uid);
+            changes.push({ kind: 'gear-created' });
+        }
     }
     if (changes.length) next.mate = { ...(next.mate && typeof next.mate === 'object' ? next.mate : {}), updateConfigUiSentinel: -1 };
     return { ok: true, template: next, changes };
@@ -337,9 +343,9 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
     };
 
     // 缺表缺列时在用户当前模板上补建，建完核对。
-    function ensure({ shouldStart = () => true } = {}) {
+    function ensure({ shouldStart = () => true, includeGear = true, manageInventory = true } = {}) {
         return runSerial(async () => {
-            const alive = () => { try { return shouldStart() === true; } catch { return false; } };
+            const alive = () => leaseActive(shouldStart);
             if (!alive()) return { ok: false, reason: 'request-stale' };
             const support = probe();
             if (!support.ok) return support;
@@ -350,7 +356,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
             const tables = parseTablesMemo(current.data);
             const templateRead = client.getTableTemplate();
             if (!templateRead.ok) return { ok: false, reason: 'inventory-template-unavailable', detail: templateRead.reason };
-            const plan = planInventoryTemplate(templateRead.data, tables);
+            const plan = planInventoryTemplate(templateRead.data, tables, { includeGear, manageInventory });
             if (!plan.ok) return plan;
             if (!plan.changes.length) return { ok: true, changes: [] };
             // 用户模板与已有表集合不一致时不导入，避免覆盖用户的表
@@ -373,11 +379,12 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
             } finally {
                 writing = false;
             }
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             if (!imported.ok) return { ok: false, reason: 'inventory-template-import-failed', detail: imported.message || imported.reason };
             if (imported.result?.runtimeReady === false) return { ok: false, reason: 'inventory-runtime-not-ready', changes: plan.changes };
-            // 导入后重新读取核对：装备表要有效，背包表要补齐新增的列
+            // 导入后重新读取核对：需要装备表时核对有效，背包表要补齐新增的列
             const verified = readInventoryTables(client);
-            if (!verified.ok || !verified.gear || verified.gear.invalid) return { ok: false, reason: 'inventory-ensure-unverified', detail: verified.reason || '' };
+            if (!verified.ok || (includeGear && (!verified.gear || verified.gear.invalid))) return { ok: false, reason: 'inventory-ensure-unverified', detail: verified.reason || '' };
             const stillMissing = Object.keys(INVENTORY_ADDED_COLUMNS).filter((field) => verified.inventory.index[field] < 0);
             return stillMissing.length ? { ok: false, reason: 'inventory-ensure-unverified', missing: stillMissing } : { ok: true, changes: plan.changes };
         });
@@ -395,7 +402,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
 
     // 对一条物品变化：写表后立即重读核对。snapshot 是写前的快照。
     // 剧情全部失去时保留数量列的正数约束，以类别标记不再持有；再获得时恢复类别与新数量。
-    async function applyQuantityChange(snapshot, { name, delta, description = '', category = '', lost = false, expectedBefore }) {
+    async function applyQuantityChange(snapshot, { name, delta, description = '', category = '', lost = false, expectedBefore }, alive) {
         const key = normalizeItemName(name);
         const amount = Number(delta);
         if (!key || !Number.isInteger(amount) || amount === 0) return { ok: false, reason: 'inventory-change-invalid', name };
@@ -429,10 +436,12 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
                 : await client.updateRow(inventory.name, existing.rowIndex, { [columns[inventory.index.quantity]]: String(after) }, BATCH_WRITE_OPTIONS);
         } else {
             const row = { [columns[inventory.index.name]]: String(name).trim(), [columns[inventory.index.quantity]]: String(after) };
-            if (description && inventory.index.description >= 0) row[columns[inventory.index.description]] = String(description);
-            if (category && inventory.index.category >= 0) row[columns[inventory.index.category]] = String(category);
+            // 始终显式写入描述与类别文本列（缺失时写空串而非省略），避免 SQLite NOT NULL 列收到 NULL 触发 SQL_CONSTRAINT。
+            if (inventory.index.description >= 0) row[columns[inventory.index.description]] = String(description ?? '');
+            if (inventory.index.category >= 0) row[columns[inventory.index.category]] = String(category ?? '');
             result = await client.insertRow(inventory.name, row, BATCH_WRITE_OPTIONS);
         }
+        if (!alive()) return { ok: false, reason: 'request-stale', name };
         if (!result.ok) return { ok: false, reason: 'inventory-write-failed', name, detail: result.reason };
         // 写操作已使缓存作废，这里读到的是最新数据
         const verified = readInventoryTables(client);
@@ -446,7 +455,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
     // 批量改物品数量：按顺序逐条执行，遇到失败停下，已完成的列入 applied。
     function changeQuantities(changes, { shouldStart = () => true } = {}) {
         return runSerial(async () => {
-            const alive = () => { try { return shouldStart() === true; } catch { return false; } };
+            const alive = () => leaseActive(shouldStart);
             if (!alive()) return { ok: false, reason: 'request-stale', applied: [] };
             const support = probe();
             if (!support.ok) return support;
@@ -459,7 +468,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
             try {
                 for (const change of Array.isArray(changes) ? changes : [changes]) {
                     if (!alive()) { failure = { ok: false, reason: 'request-stale' }; break; }
-                    const result = await applyQuantityChange(snapshot, change);
+                    const result = await applyQuantityChange(snapshot, change, alive);
                     if (!result.ok) { failure = result; break; }
                     applied.push({ name: result.name, before: result.before, after: result.after });
                     snapshot = result.snapshot;
@@ -467,17 +476,22 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
             } finally {
                 writing = false;
             }
+            if (!alive()) return { ok: false, reason: 'request-stale', applied };
             const refreshFailure = await refreshAfterWrite(applied.length > 0);
+            if (!alive()) return { ok: false, reason: 'request-stale', applied };
             if (failure) return { ...failure, applied };
             return refreshFailure ? { ok: false, reason: refreshFailure, applied } : { ok: true, applied };
         });
     }
 
     // 新增/更新/删除一行装备定义（record 为 null 表示删除）。写后重读核对定义与穿戴状态。
-    function setGearRow(name, record) {
+    function setGearRow(name, record, { shouldStart = () => true } = {}) {
         return runSerial(async () => {
+            const alive = () => leaseActive(shouldStart);
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             const support = probe();
             if (!support.ok) return support;
+            client.invalidate?.();
             const snapshot = readInventoryTables(client);
             if (!snapshot.ok) return snapshot;
             if (!snapshot.gear || snapshot.gear.invalid) return { ok: false, reason: 'gear-table-missing' };
@@ -489,6 +503,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
             let result;
             writing = true;
             try {
+                if (!alive()) return { ok: false, reason: 'request-stale' };
                 if (record) {
                     result = existing
                         ? await client.updateRow(GEAR_TABLE.name, existing.rowIndex, cells, BATCH_WRITE_OPTIONS)
@@ -499,6 +514,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
             } finally {
                 writing = false;
             }
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             if (!result.ok) return { ok: false, reason: 'gear-write-failed', detail: result.reason };
             const verified = readInventoryTables(client);
             const found = verified.ok && verified.gear ? verified.gear.rows.find((row) => row.key === key) : null;
@@ -506,6 +522,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
                 ? !!found && found.equipped === !!record.equipped && JSON.stringify(found.definition) === cells.定义JSON
                 : !found);
             const refreshFailure = await refreshAfterWrite(true);
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             if (!confirmed) return { ok: false, reason: 'gear-write-unverified' };
             return refreshFailure ? { ok: false, reason: refreshFailure } : { ok: true, changed: true, snapshot: verified };
         });
@@ -548,7 +565,7 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
 
     function prepareRename({ from, to, balance }, { shouldStart = () => true } = {}) {
         return runSerial(() => {
-            if (!shouldStart()) return { ok: false, reason: 'request-stale' };
+            if (!leaseActive(shouldStart)) return { ok: false, reason: 'request-stale' };
             const support = probe();
             if (!support.ok) return support;
             client.invalidate?.();
@@ -558,14 +575,15 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
 
     function rename(guard, { shouldStart = () => true } = {}) {
         return runSerial(async () => {
-            if (!shouldStart()) return { ok: false, reason: 'request-stale' };
+            const alive = () => leaseActive(shouldStart);
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             const support = probe();
             if (!support.ok) return support;
             client.invalidate?.();
             const snapshot = readInventoryTables(client);
             const checked = inspectRename(snapshot, guard);
             if (!checked.ok || checked.complete) return checked;
-            if (!shouldStart()) return { ok: false, reason: 'request-stale' };
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             let written;
             writing = true;
             try {
@@ -573,12 +591,12 @@ export function createInventoryTables({ api, client = createCachedTableClient({ 
                     { [snapshot.inventory.columns[snapshot.inventory.index.name]]: guard.to }, BATCH_WRITE_OPTIONS);
             } catch { written = { ok: false }; }
             finally { writing = false; client.invalidate?.(); }
-            if (!shouldStart()) return { ok: false, reason: 'request-stale' };
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             const verified = inspectRename(readInventoryTables(client), guard);
             if (!verified.ok) return verified;
             if (!verified.complete) return { ok: false, reason: written?.ok ? 'inventory-write-unverified' : 'inventory-write-failed' };
             const refreshFailure = await refreshAfterWrite(true);
-            if (!shouldStart()) return { ok: false, reason: 'request-stale' };
+            if (!alive()) return { ok: false, reason: 'request-stale' };
             return refreshFailure ? { ok: false, reason: refreshFailure } : { ok: true, complete: true };
         });
     }

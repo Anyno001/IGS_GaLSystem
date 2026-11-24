@@ -8,15 +8,15 @@ import { COMBAT_RULES, CURSE_CARD, SKILL_COUNT_MAX, combatSpeedFor, crowdScaleFo
 import { ENEMY_SUFFIXES, applyAction, createBattle, legalActions, replayBattle, seedFor } from './engine.js';
 import {
     deckProfileEntities, enemyRosterEntities, enemyIdFor, generationWrites, rewardEntity, skillFillEntity, skillProfileEntity,
-    templateEnemy, withCharacterLore, withStoryContext, withCombatInitialization, encounterThemeEntity, profileGearEntity,
+    templateEnemy, withCharacterLore, withStoryContext, encounterThemeEntity, profileGearEntity,
 } from './generation.js';
 import { generateWithRetry } from './generation-retry.js';
 import { attachCardUpgrade, attachLoot, attachPurge, buildCombatReport, COMBAT_SKIP_TEXT, hasLoot, injuryLevel, reportHpLostOf, reportIdFor, reportIdOf } from './report.js';
-import { BATTLE_GROWTH_TAG_HASH, BATTLE_POINTS_TAG_HASH, CARD_IMPLANT_TAG_HASH, CARD_LOST_TAG_HASH, CHALLENGE_REWARD_TAG_HASH, CONSUME_TAG_HASH, PROTAGONIST_ALIASES, WOUND_TAG_HASH, attributeViewFor, abilitiesForName, grantGeneratedGear, purgeChance, upgradableRows, upgradeChance } from './ledger.js';
+import { BATTLE_GROWTH_TAG_HASH, BATTLE_POINTS_TAG_HASH, CARD_IMPLANT_TAG_HASH, CARD_LOST_TAG_HASH, CHALLENGE_REWARD_TAG_HASH, CONSUME_TAG_HASH, DAILY_DECK_TAG_HASH, DAILY_LOOT_TAG_HASH, DAILY_PURGE_TAG_HASH, DAILY_UPGRADE_TAG_HASH, DAILY_WIN_TAG_HASH, PROTAGONIST_ALIASES, WOUND_TAG_HASH, attributeViewFor, abilitiesForName, dailyPurgeChance, dailyUpgradableRows, dailyUpgradeChance, grantGeneratedGear, purgeChance, upgradableRows, upgradeChance } from './ledger.js';
 import { battlePoints, battleTierOf, weakBattlePoints } from './points.js';
 import { heldOffCombat, winPointsBonus } from './relics/off-combat.js';
 import { allyTierOf, applyAbilities, characterCombatStats, skillTierFor, vitalsOf } from './vitals.js';
-import { ABILITY_KEYS, ABILITY_LABELS, DEFAULT_REL_TIER, REL_TIERS, wantsAutoInit } from './abilities.js';
+import { ABILITY_KEYS, ABILITY_LABELS, DEFAULT_REL_TIER, REL_TIERS } from './abilities.js';
 import { scaleSkills } from './card-scaling.js';
 import { ledgerEntryId, profileIdFor } from './schema.js';
 import { cardUsesPool, fixedPoolsFor } from './fixed-cards/index.js';
@@ -30,13 +30,14 @@ import { hash32 } from './random.js';
 import { extractCombatStart, extractGrowthDirectives } from '../scene/combat-directives.js';
 import { parseChallengeStart } from '../scene/challenge-directives.js';
 import { chooseAllyPlay } from './policy.js';
-import { buildChallengeSetup, challengeCombatIdFor, challengeOutcomeOf, challengeResultOf } from './challenge-setup.js';
+import { buildChallengeSetup, challengeCombatIdFor, challengeOutcomeOf, challengeResultOf, resolveChallengeDomain } from './challenge-setup.js';
+import { buildChallengeDeck, describeDailyCardSummary, normalizeChallengeDomain } from './challenge-cards.js';
 import { chooseChallengeFoe } from './challenge-foe-pick.js';
 import { eligibleChallengeAllies } from './challenge-allies.js';
 import { challengeHarvest } from './challenge-foes.js';
 import { afterBattleMend } from './mechanics/sanctum.js';
 import { baseMaxHp } from './mechanics/foe-seize.js';
-import { planChallengeReward } from './challenge-reward.js';
+import { applyDailyLootNaming, describePreparedLootCards, planChallengeLootOffer, planPreparedDailyLoot } from './challenge-reward.js';
 import { buildChallengeReport, parseChallengeReport } from './challenge-report.js';
 import { buildIntimateSetup, foldIntimateTrace, initIntimateTrace, replayIntimateTrace } from './intimate-setup.js';
 import { INTIMATE_LEGACY_OUTCOME, intimateEnding, resolveIntimatePosition } from '../scene/intimate-duel.js';
@@ -51,6 +52,7 @@ import { encounterByName, encounterEntryByName } from './enemies/encounters.js';
 import { GARDENER_FORMATION, validEncounterFormation } from './encounter-formation.js';
 import { KIN_FIELDS, kinUnitDefinition } from './kin.js';
 import { findReportFloor, resumableCombat } from './session-state.js';
+import { createCombatRewardIntents } from '../storage/combat-reward-intents.js';
 export { findReportFloor } from './session-state.js';
 
 export const SESSION_VERSION = 1;
@@ -282,7 +284,7 @@ export function enemyUnits(start, templates, partyLevel, difficulty, enemyAttrib
         const vitals = applyAbilities(scaled.hp, template.base?.speed ?? combatSpeedFor({ tier: template.tier, id: template.id }), attributes);
         const combat = (REL_TIERS[attributes?.tier] || REL_TIERS[DEFAULT_REL_TIER]).combat;
         const factor = crowd * encounterScaleFor(template.tier, battleWins, archetype)
-            * (template.generated !== false ? (COMBAT_RULES.generatedScale[template.tier] ?? 1) : 1);
+            * (!fromTemplate && template.generated !== false ? (COMBAT_RULES.generatedScale[template.tier] ?? 1) : 1);
         const maxHp = Math.max(1, Math.min(9999, Math.round(vitals.hp * factor * combat.hp)));
         const damageScale = Math.min(5, Math.round(scaled.damageScale * factor * combat.damage * 100) / 100);
         return (id, shownName, extra = {}) => {
@@ -436,7 +438,16 @@ function buildLobby(ledgerState, start, userName, fallbackTemplates, weakFoes, b
         const view = attributeViewFor(ledgerState, name);
         if (view) enemyAttributes.set(name, view);
     }
-    return { ok: true, heroId: hero.id, allies, absent, downed, enemies, templated, controllable, enemyAttributes, battleWins, ...(weakFoes === true ? { weakFoes: true } : {}) };
+    const attributesFrozen = {
+        revision: ledgerState.attributes?.revision ?? null,
+        allies: Object.fromEntries(allies.map((ally) => [ally.id, {
+            initialized: ally.attributes?.initialized === true,
+            source: ally.attributes?.source || (ally.attributes?.initialized ? 'formal' : 'default'),
+            base: ally.attributes?.base ? { ...ally.attributes.base } : null,
+            scores: ally.attributes?.scores ? { ...ally.attributes.scores } : null,
+        }])),
+    };
+    return { ok: true, heroId: hero.id, allies, absent, downed, enemies, templated, controllable, enemyAttributes, attributesFrozen, battleWins, ...(weakFoes === true ? { weakFoes: true } : {}) };
 }
 
 // 规则 v6 G3d 弱敌战：开战标签里的敌人全部相对主角「远逊」时为真（防刷场次）；没有关系档的敌人按默认档「相当」计（D-23）。
@@ -471,7 +482,8 @@ const SOFT_FAILURE_KINDS = new Set(['profile-init', 'battle-reward', 'skill-fill
 const rewardFailureReason = (result) => result?.reason || ((result?.rejected || []).some((item) => item.kind === 'battle-reward') ? 'combat-reward-generation-failed' : '');
 
 // 奖励状态：账本里有该战斗的奖励 -> ready，否则 failed
-function rewardStatus(ledgerState, combatId, plan, failureReason) {
+function rewardStatus(ledgerState, combatId, plan, failureReason, saveFailure) {
+    if (saveFailure) return { status: 'failed', exp: plan?.exp ?? 0, slots: plan?.slots.length ?? 0, stage: 'save', reason: saveFailure };
     const offer = ledgerState?.ok ? ledgerState.offers?.get(combatId) : null;
     if (offer) return { status: 'ready', exp: offer.exp, slots: offer.slots.length };
     return { status: 'failed', exp: plan?.exp ?? 0, slots: plan?.slots.length ?? 0, reason: failureReason || 'combat-reward-missing' };
@@ -598,6 +610,7 @@ export function buildSetup(lobby, start, { controlledId, difficulty = 'normal', 
     };
     // 规则 v6 G3d：弱敌战标记只在为真时写进新建 setup，战报、奖励与账本重放只认已存值。
     if (lobby.weakFoes === true) setup.weakFoes = true;
+    if (lobby.attributesFrozen) setup.attributesFrozen = lobby.attributesFrozen;
     const reserve = encounterFormation ? null : reserveQueue(enemies, tiers, combatId);
     if (reserve) setup.reserve = reserve;
     // 敌人模板 M7 盗金：只在本场有会盗金的敌人且剧情货币可读时快照余额；其余 setup 形状不变。
@@ -781,6 +794,7 @@ function battleGrowthPart(session) {
 
 export function createCombatSession(options = {}) {
     const { ledger, tables, request, send, storage } = options;
+    const rewardIntents = createCombatRewardIntents(storage);
     const getChat = () => resolveOption(options.chat) || [];
     const getChatId = () => String(resolveOption(options.getChatId) ?? '');
     const getUserName = () => String(resolveOption(options.userName) || '').trim();
@@ -817,6 +831,28 @@ export function createCombatSession(options = {}) {
     });
 
     let current = { status: 'idle' };
+    let disposed = false;
+    let taskEpoch = 0;
+    const captureTaskLease = ({ signal, shouldStart } = {}, requireApi = true) => {
+        const epoch = taskEpoch, chatId = getChatId(), floors = getChat();
+        const prefix = floors.map(message => [message, message?.mes, message?.swipe_id]);
+        const owner = typeof options.captureGenerationLease === 'function' ? options.captureGenerationLease({ signal, shouldStart, requireApi }) : null;
+        let active = !disposed;
+        return () => {
+            try {
+                active = active && !disposed && taskEpoch === epoch && !signal?.aborted && getChatId() === chatId
+                    && getChat() === floors && prefix.every(([message, text, swipe], index) =>
+                        floors[index] === message && message?.mes === text && message?.swipe_id === swipe)
+                    && (!owner || owner() === true) && (!shouldStart || shouldStart() === true);
+            } catch { active = false; }
+            return active;
+        };
+    };
+    const invalidateTasks = () => {
+        taskEpoch += 1;
+        prepareTask = null;
+        rewardRetryTask = null;
+    };
     let sending = false; // 战报/跳过消息发送中，防重入
     let settlementTask = null;
     const resultsSaved = new Set(); // 已写进聊天记录的战斗结果
@@ -825,7 +861,7 @@ export function createCombatSession(options = {}) {
     let prepareTask = null;
     let rewardRetryTask = null;
     let flipContext = null; // 翻牌的当前数据 { combatId, offer, pick, points, payer, character }
-    let flipLoading = null; // 正在读取的翻牌 { combatId, promise }，同一战斗并发调用共用
+    let flipLoading = null;
     let flipWriteChain = Promise.resolve();
     let flipSaving = false;
     const listeners = new Set();
@@ -833,9 +869,17 @@ export function createCombatSession(options = {}) {
     const snapshot = () => {
         const chat = getChat();
         const reportDelivered = Boolean(current.anchor && findReportFloor(chat, current.anchor.messageId, current.reportId) >= 0);
-        return { ...current, reportDelivered, resumable: resumableCombat(current, chat), ...(isChallenge(current) && (current.challengeResult || current.report) ? { challengeSummary: challengeSummary(current) } : {}), ...(recordError ? { recordError } : {}), legal: current.status === 'battle' && current.battle ? legalActions(current.battle) : [] };
+        const interrupted = current.status === 'preparing' && (prepareTask?.preparing !== current || !prepareTask.alive());
+        const pendingReward = rewardRetryTask?.previous === current.reward && rewardRetryTask?.alive()
+            ? { reward: { ...current.reward, status: 'pending' } } : {};
+        const pendingFlip = !current.flip && flipLoading?.alive() ? { flip: { status: 'loading' } } : {};
+        return { ...current, ...(interrupted && { status: 'blocked', reason: 'request-stale' }), ...pendingReward, ...pendingFlip, reportDelivered, resumable: resumableCombat(current, chat), ...(isChallenge(current) && (current.challengeResult || current.report) ? { challengeSummary: challengeSummary(current) } : {}), ...(recordError ? { recordError } : {}), legal: current.status === 'battle' && current.battle ? legalActions(current.battle) : [] };
     };
-    const setState = (next) => { current = next; return snapshot(); };
+    const setState = (next) => {
+        if (next.status === 'preparing' && prepareTask) prepareTask.preparing = next;
+        current = next;
+        return snapshot();
+    };
     const ok = (extra = {}) => ({ ok: true, ...extra, session: snapshot() });
     const fail = (reason, extra = {}) => ({ ok: false, reason, ...extra, session: snapshot() });
     const sessionKey = () => sessionKeyFor(getChatId());
@@ -901,8 +945,8 @@ export function createCombatSession(options = {}) {
         const domain = saved?.domain ?? challenge.domain;
         const ending = saved ? saved.ending : challenge.intimate && end.ending;
         const harvest = ending ? { prize: null, card: false } : challengeHarvest(foe, outcome, tier);
-        const reward = harvest.card ? planChallengeReward({ combatId: session.combatId, ...battleRandomFields(session), outcome, tier, foe, domain }) : null;
-        const value = { outcome, prize: harvest.prize, card: reward?.ok ? reward.card : null, ...(ending ? { ending } : {}) };
+        // 日常挑战胜利的卡牌战利品已统一走三选一翻牌（planChallengeLootOffer），此处仅保留奖金与结局摘要。
+        const value = { outcome, prize: harvest.prize, card: null, ...(ending ? { ending } : {}) };
         summaryCache.set(session.combatId, { end: source, value });
         return value;
     }
@@ -929,19 +973,18 @@ export function createCombatSession(options = {}) {
         return corrupt ? { ok: false, reason: 'combat-record-corrupt' } : { ok: true, value: read.value || null };
     }
 
-    async function writeChatRecord(session, patch) {
+    async function writeChatRecord(session, patch, { shouldStart } = {}) {
         const chatRecord = options.chatRecord;
+        const active = () => !disposed && (!shouldStart || shouldStart()) && isCurrent(session);
+        if (!active()) return { ok: false, reason: 'combat-record-stale' };
         if (!chatRecord || typeof chatRecord.write !== 'function') return { ok: true, skipped: true };
-        if (!isCurrent(session)) {
-            recordError = 'combat-record-stale';
-            return { ok: false, reason: 'combat-record-stale' };
-        }
         let written;
         try {
-            written = await chatRecord.write(session.anchor, session.combatId, patch);
+            written = await chatRecord.write(session.anchor, session.combatId, patch, { shouldStart: active });
         } catch {
             written = null;
         }
+        if (!active()) return { ok: false, reason: 'combat-record-stale' };
         const result = written?.ok === true ? written : { ok: false, reason: written?.reason || 'combat-record-save-failed' };
         recordError = result.ok ? '' : result.reason;
         return result;
@@ -974,16 +1017,39 @@ export function createCombatSession(options = {}) {
     }
 
     // ---- 翻牌奖励 ----
+    const isIntimateChallenge = (session) => Boolean(session?.record?.setup?.challenge?.intimate || session?.challenge?.intimate || session?.start?.intimate);
     const currentReport = () => current.final || current.report || null;
     const currentResult = () => currentReport()?.result ?? (current.battle?.outcome === 'victory' ? 'win' : null);
     const noLootNow = () => currentReport()?.noLoot === true || current.battle?.noLoot === true;
-    const canFlip = () => !isChallenge(current) && (current.status === 'ended' || current.status === 'send-failed') && currentResult() === 'win' && !noLootNow();
-    const viewOfFlip = (context) => flipView(context.offer, context.pick, { points: context.points, payer: context.payer, locked: hasLoot(currentReport()?.text), free: context.freeReroll === true }, context.purge, context.upgrade);
+    const canFlip = () => !isIntimateChallenge(current) && (current.status === 'ended' || current.status === 'send-failed') && currentResult() === 'win' && !noLootNow();
+    const flipLocked = (context) => (context?.kind === 'challenge' ? Boolean(currentReport()?.daily?.resolved) : hasLoot(currentReport()?.text));
+    const viewOfFlip = (context) => flipView(context.offer, context.pick, { points: context.points, payer: context.payer, locked: flipLocked(context), free: context.freeReroll === true }, context.purge, context.upgrade);
 
     // 规则 v6 删卡：本场普通胜利正好满 5 场时，结算页给主角一次删牌机会（可跳过）。没到场次时不给字段。
     // cards 按卡组副本逐张列出（同名牌不合并）：已升级的副本给升级后的费用与效果并带 upgraded，成长与刻印原样带出。
     // keywords 为牌面关键字（固有、保留等，只取定义里有的）。
     const PURGE_KEYWORD_KEYS = ['unplayable', 'innate', 'retain', 'ethereal', 'sly', 'replay', 'radiance', 'temp', 'onDiscard'];
+    function purgeCardRows(deckEntries, catalog) {
+        return (deckEntries || []).filter((row) => row.copyId).map((row) => {
+            const definition = catalog?.get?.(row.cardId) || {};
+            const card = row.upgraded ? upgradedCardFace(definition) : definition;
+            const keywords = Object.fromEntries(PURGE_KEYWORD_KEYS.filter((k) => card[k] !== undefined && card[k] !== false).map((k) => [k, card[k]]));
+            return { copyId: row.copyId, cardId: row.cardId, name: card.name || row.cardId, type: card.type || '', cost: card.cost ?? '', rarity: card.rarity || '',
+                effects: card.effects || [], ...(row.upgraded ? { upgraded: true } : {}), ...(row.bonus ? { bonus: row.bonus } : {}),
+                ...(row.inscription ? { inscription: row.inscription } : {}), ...(Object.keys(keywords).length ? { keywords } : {}) };
+        });
+    }
+    function upgradeCardRows(rows, catalog) {
+        return (rows || []).map((row) => {
+            const card = catalog?.get?.(row.cardId) || {};
+            const after = upgradedCardFace(card);
+            const keywords = Object.fromEntries(PURGE_KEYWORD_KEYS.filter((k) => card[k] !== undefined && card[k] !== false).map((k) => [k, card[k]]));
+            const upKeywords = Object.fromEntries(PURGE_KEYWORD_KEYS.filter((k) => after[k] !== undefined && after[k] !== false).map((k) => [k, after[k]]));
+            return { copyId: row.copyId, cardId: row.cardId, name: card.name || row.cardId, type: card.type || '', rarity: card.rarity || '',
+                cost: card.cost ?? '', effects: card.effects || [], upCost: after.cost ?? '', upEffects: after.effects || [], upKeywords,
+                ...(row.bonus ? { bonus: row.bonus } : {}), ...(row.inscription ? { inscription: row.inscription } : {}), ...(Object.keys(keywords).length ? { keywords } : {}) };
+        });
+    }
     function purgeOfHero(hero, combatId, points) {
         if (hero?.kind !== 'deck-character') return null;
         const chance = purgeChance(hero, reportIdFor(combatId));
@@ -991,15 +1057,7 @@ export function createCombatSession(options = {}) {
         const short = chance.available && points < chance.cost;
         const base = { battle: chance.battle, cost: chance.cost, available: chance.available && !short, ...(short ? { reason: 'combat-points-insufficient' } : chance.reason ? { reason: chance.reason } : {}) };
         if (!base.available) return base;
-        const cards = (hero.deckEntries || []).filter((row) => row.copyId).map((row) => {
-            const definition = hero.catalog?.get?.(row.cardId) || {};
-            const card = row.upgraded ? upgradedCardFace(definition) : definition;
-            const keywords = Object.fromEntries(PURGE_KEYWORD_KEYS.filter((k) => card[k] !== undefined && card[k] !== false).map((k) => [k, card[k]]));
-            return { copyId: row.copyId, cardId: row.cardId, name: card.name || row.cardId, type: card.type || '', cost: card.cost ?? '', rarity: card.rarity || '',
-                effects: card.effects || [], ...(row.upgraded ? { upgraded: true } : {}), ...(row.bonus ? { bonus: row.bonus } : {}),
-                ...(row.inscription ? { inscription: row.inscription } : {}), ...(Object.keys(keywords).length ? { keywords } : {}) };
-        });
-        return { ...base, cards };
+        return { ...base, cards: purgeCardRows(hero.deckEntries, hero.catalog) };
     }
 
     // 规则 v6 G3c 升级机会：与删卡同一场次口径，本场普通胜利正好满 5 场时免费升级一张卡组副本（可跳过）。没到场次时不给字段。
@@ -1010,44 +1068,94 @@ export function createCombatSession(options = {}) {
         if (chance.reason === 'combat-card-upgrade-not-due' || chance.reason === 'combat-card-upgrade-kind-mismatch') return null;
         const base = { battle: chance.battle, available: chance.available, ...(chance.reason ? { reason: chance.reason } : {}) };
         if (!base.available) return base;
-        const cards = upgradableRows(hero).map((row) => {
-            const card = hero.catalog?.get?.(row.cardId) || {};
-            const after = upgradedCardFace(card);
-            const keywords = Object.fromEntries(PURGE_KEYWORD_KEYS.filter((k) => card[k] !== undefined && card[k] !== false).map((k) => [k, card[k]]));
-            const upKeywords = Object.fromEntries(PURGE_KEYWORD_KEYS.filter((k) => after[k] !== undefined && after[k] !== false).map((k) => [k, after[k]]));
-            return { copyId: row.copyId, cardId: row.cardId, name: card.name || row.cardId, type: card.type || '', rarity: card.rarity || '',
-                cost: card.cost ?? '', effects: card.effects || [], upCost: after.cost ?? '', upEffects: after.effects || [], upKeywords,
-                ...(row.bonus ? { bonus: row.bonus } : {}), ...(row.inscription ? { inscription: row.inscription } : {}), ...(Object.keys(keywords).length ? { keywords } : {}) };
-        });
-        return { ...base, cards };
+        return { ...base, cards: upgradeCardRows(upgradableRows(hero), hero.catalog) };
+    }
+
+    // 日常挑战按领域独立胜场触发的免费删卡与免费升级机会（仅作用于该领域已固定牌库）。
+    function dailyPurgeOf(domainView, combatId) {
+        if (domainView?.kind !== 'daily-deck') return null;
+        const chance = dailyPurgeChance(domainView, reportIdFor(combatId));
+        if (chance.reason === 'combat-purge-not-due' || chance.reason === 'combat-purge-kind-mismatch') return null;
+        const base = { battle: chance.battle, cost: 0, available: chance.available, ...(chance.reason ? { reason: chance.reason } : {}) };
+        if (!base.available) return base;
+        return { ...base, cards: purgeCardRows(domainView.deckEntries, domainView.catalog) };
+    }
+    function dailyUpgradeOf(domainView, combatId) {
+        if (domainView?.kind !== 'daily-deck') return null;
+        const chance = dailyUpgradeChance(domainView, reportIdFor(combatId));
+        if (chance.reason === 'combat-card-upgrade-not-due' || chance.reason === 'combat-card-upgrade-kind-mismatch') return null;
+        const base = { battle: chance.battle, available: chance.available, ...(chance.reason ? { reason: chance.reason } : {}) };
+        if (!base.available) return base;
+        return { ...base, cards: upgradeCardRows(dailyUpgradableRows(domainView), domainView.catalog) };
     }
 
     // 读取奖励候选并合并三处来源（内存记录、本地会话、聊天记录）里的已翻结果；同一战斗并发调用共用同一次读取
-    function loadFlip() {
+    function loadFlip({ shouldStart } = {}) {
+        if (disposed || (shouldStart && !shouldStart())) return Promise.resolve(fail('request-stale'));
         if (!canFlip()) return Promise.resolve(fail('combat-flip-unavailable'));
-        if (flipLoading && flipLoading.combatId === current.combatId) return flipLoading.promise;
-        const task = { combatId: current.combatId, promise: null };
+        if (flipLoading?.shouldStart === shouldStart && flipLoading?.alive()) return flipLoading.promise;
+        const identity = identityOf(current), epoch = taskEpoch;
+        const task = { shouldStart, alive: () => flipLoading === task && !disposed && epoch === taskEpoch
+            && current.combatId === identity.combatId && canFlip() && isCurrent(identity)
+            && (!shouldStart || shouldStart()) };
         flipLoading = task;
-        task.promise = loadFlipOnce().finally(() => { if (flipLoading === task) flipLoading = null; });
+        task.promise = loadFlipOnce(identity, task.alive).finally(() => { if (flipLoading === task) flipLoading = null; });
         return task.promise;
     }
 
-    async function loadFlipOnce() {
-        const identity = identityOf(current);
-        if (!current.flip) setState({ ...current, flip: { status: 'loading' } });
-        let ledgerState;
-        try {
-            ledgerState = await ledger.effectiveState();
-        } catch {
-            ledgerState = null;
-        }
-        if (current.combatId !== identity.combatId || !canFlip()) return fail('request-stale');
+    async function loadFlipOnce(identity, alive) {
+        if (!alive()) return fail('request-stale');
         const finishWith = (flip, context = null) => {
             flipContext = context;
             setState({ ...current, flip });
             notify();
             return flip.status === 'error' ? fail(flip.reason) : ok();
         };
+        if (isChallenge(current)) {
+            if (isIntimateChallenge(current)) return finishWith({ status: 'none' });
+            const challenge = current.record?.setup?.challenge || current.challenge;
+            const parsed = !challenge ? parseChallengeReport(currentReport()?.text) : null;
+            const summary = challengeSummary(current);
+            const outcome = summary?.outcome || parsed?.outcome || '圆满';
+            const tier = challenge?.tier || parsed?.tier || '普通';
+            const domain = challenge?.domain || parsed?.domain || '';
+            const domainKey = normalizeChallengeDomain(domain);
+            const offer = planChallengeLootOffer({
+                combatId: identity.combatId, ...battleRandomFields(identity), outcome, tier, domain: domainKey,
+                preparedOffer: current.record?.dailyLootOffer || current.challengeLootOffer || null,
+            });
+            if (!offer) return finishWith({ status: 'none' });
+            const chatRecord = readChatRecord(identity);
+            if (!chatRecord.ok) return finishWith({ status: 'error', reason: chatRecord.reason });
+            const saved = readSession();
+            const savedFlip = saved.ok && saved.value?.combatId === identity.combatId ? saved.value.flip : undefined;
+            const picks = [current.record?.flip, savedFlip, chatRecord.value?.flip].filter((pick) => pick != null).map((pick) => normalizePick(pick, offer));
+            if (picks.some((pick) => !pick)) return finishWith({ status: 'error', reason: 'combat-flip-corrupt' });
+            let domainView = null;
+            if (typeof ledger?.effectiveState === 'function') {
+                try {
+                    const ledgerState = await ledger.effectiveState();
+                    if (!alive()) return fail('request-stale');
+                    if (ledgerState?.ok) domainView = ledgerState.dailyDecks?.get(domainKey) ?? null;
+                } catch { domainView = null; }
+            }
+            const context = {
+                kind: 'challenge', domain: domainKey, outcome, tier,
+                combatId: identity.combatId, offer, pick: picks.reduce(laterPick, null) || emptyPick(),
+                points: 0, payer: false, character: getUserName(), heroName: getUserName(),
+                purge: domainView ? dailyPurgeOf(domainView, identity.combatId) : null,
+                upgrade: domainView ? dailyUpgradeOf(domainView, identity.combatId) : null,
+                freeReroll: false,
+            };
+            return finishWith(viewOfFlip(context), context);
+        }
+        let ledgerState;
+        try {
+            ledgerState = await ledger.effectiveState();
+        } catch {
+            ledgerState = null;
+        }
+        if (!alive()) return fail('request-stale');
         if (ledgerState?.ok !== true) return finishWith({ status: 'error', reason: ledgerState?.reason || 'combat-ledger-read-failed' });
         const original = ledgerState.offers?.get(identity.combatId);
         if (!original) return finishWith({ status: 'none' });
@@ -1083,7 +1191,7 @@ export function createCombatSession(options = {}) {
     function flipBlockReason() {
         if (!canFlip()) return 'combat-flip-unavailable';
         if (!flipContext || flipContext.combatId !== current.combatId || current.flip?.status !== 'ready') return 'combat-flip-not-ready';
-        return hasLoot(currentReport()?.text) ? 'combat-flip-locked' : null;
+        return flipLocked(flipContext) ? 'combat-flip-locked' : null;
     }
 
     // 保存翻牌选择：战斗还在会话记录里就同时写会话记录（节流）+ 聊天记录；否则只写聊天记录
@@ -1165,20 +1273,75 @@ export function createCombatSession(options = {}) {
         return { ok: true, item: { ...report, text } };
     }
 
+    // 日常挑战发送战报前确认三选一翻牌、免费删卡与免费升级（仅非亲密挑战）；首场完成时一并携带初始 20 张牌组快照以固定领域牌库。
+    async function resolveDailyLoot(report) {
+        if (isIntimateChallenge(current)) return { ok: true, item: report };
+        const initialDeck = report?.daily?.initialDeck || current.record?.initialDailyDeck || current.challengeInitialDeck || null;
+        const challenge = current.record?.setup?.challenge || current.challenge;
+        const parsed = !challenge ? parseChallengeReport(report?.text) : null;
+        const domain = normalizeChallengeDomain(initialDeck?.domain || challenge?.domain || parsed?.domain || '');
+        if (report?.result !== 'win') {
+            if (!initialDeck || report?.daily?.initialDeck) return { ok: true, item: report };
+            return { ok: true, item: { ...report, daily: { domain, initialDeck } } };
+        }
+        if (report?.daily?.resolved === true) return { ok: true, item: report };
+        const loaded = await loadFlip();
+        const flipState = current.flip;
+        if (flipState?.status === 'none') return { ok: true, item: initialDeck ? { ...report, daily: { resolved: true, domain, initialDeck } } : report };
+        if (!loaded.ok || flipState?.status !== 'ready' || !flipContext || flipContext.kind !== 'challenge') {
+            return { ok: false, reason: flipState?.reason || loaded.reason || 'combat-flip-not-ready' };
+        }
+        const loot = lootOf(flipContext.offer, flipContext.pick);
+        if (!loot) return { ok: false, reason: 'combat-flip-required' };
+        if (hasCardChoices(loot.slot) && loot.pick === undefined) return { ok: false, reason: 'combat-flip-card-required' };
+        const purge = flipContext.purge;
+        const purgePick = flipContext.pick.purge;
+        if (purge?.available && purgePick === undefined) return { ok: false, reason: 'combat-purge-required' };
+        const purgeCard = purge?.available && purgePick !== 'skip' ? (purge.cards || []).find((c) => c.copyId === purgePick) : null;
+        if (purge?.available && purgePick !== 'skip' && !purgeCard) return { ok: false, reason: 'combat-purge-copy-missing' };
+        const upgrade = flipContext.upgrade;
+        const upgradePick = flipContext.pick.upgrade;
+        if (upgrade?.available && upgradePick === undefined) return { ok: false, reason: 'combat-card-upgrade-required' };
+        const upgradeCard = upgrade?.available && upgradePick !== 'skip' ? (upgrade.cards || []).find((c) => c.copyId === upgradePick) : null;
+        if (upgrade?.available && upgradePick !== 'skip' && !upgradeCard) return { ok: false, reason: 'combat-card-upgrade-copy-missing' };
+        if (upgradeCard && purgeCard && upgradeCard.copyId === purgeCard.copyId) return { ok: false, reason: 'combat-card-upgrade-purge-conflict' };
+        await flipWriteChain;
+        const pickedCard = loot.pick !== 'skip' && loot.slot?.card ? JSON.parse(JSON.stringify(loot.slot.card)) : null;
+        const daily = {
+            resolved: true,
+            domain: flipContext.domain || domain,
+            outcome: flipContext.outcome || '圆满',
+            tier: flipContext.tier || '普通',
+            ...(initialDeck ? { initialDeck } : {}),
+            ...(pickedCard ? { card: pickedCard } : {}),
+            ...(purgeCard ? { purge: { copyId: purgeCard.copyId, battle: purge.battle } } : {}),
+            ...(upgradeCard ? { upgrade: { copyId: upgradeCard.copyId, battle: upgrade.battle } } : {}),
+        };
+        return { ok: true, item: { ...report, daily } };
+    }
+
     // ---- 备战 ----
     // 备战：同一战斗并发调用共用一次；结束后通知监听者
     async function prepare(messageId, prepareOptions = {}) {
+        if (disposed) return fail('request-stale');
         const located = locate(messageId);
         if (!located.ok) return fail(located.reason);
-        if (prepareTask && prepareTask.combatId === located.combatId) return prepareTask.promise;
-        const task = { combatId: located.combatId, promise: null };
+        if (prepareTask && prepareTask.combatId === located.combatId && prepareTask.alive()) return prepareTask.promise;
+        const owner = captureTaskLease(prepareOptions, !located.challenge);
+        const task = { combatId: located.combatId, promise: null, alive: null };
+        task.alive = () => prepareTask === task && owner();
         prepareTask = task;
-        task.promise = runPrepare(located, messageId, prepareOptions);
+        task.promise = Promise.resolve().then(() => task.alive()
+            ? runPrepare(located, messageId, { ...prepareOptions, shouldStart: task.alive }) : fail('request-stale'));
         try {
-            return await task.promise;
+            const result = await task.promise;
+            return task.alive() ? result : fail('request-stale');
         } finally {
-            if (prepareTask === task) prepareTask = null;
-            notify();
+            if (prepareTask === task) {
+                const active = task.alive();
+                prepareTask = null;
+                if (active) notify();
+            }
         }
     }
 
@@ -1192,11 +1355,13 @@ export function createCombatSession(options = {}) {
         }
     }
 
-    async function runPrepare(located, messageId, { signal } = {}) {
+    async function runPrepare(located, messageId, { signal, shouldStart, recoverReward = false } = {}) {
         const chat = getChat();
         const userName = getUserName();
         if (!userName) return fail('combat-user-name-missing');
         const session = { combatId: located.combatId, anchor: located.anchor, start: located.start, reportId: reportIdFor(located.combatId), chatId: getChatId(), ...(located.challenge ? { kind: 'challenge' } : {}) };
+        const stillWanted = () => shouldStart() && isCurrent(session);
+        if (!stillWanted()) return fail('request-stale');
         if (findReportFloor(chat, messageId, session.reportId) >= 0) return ok({ session: setState({ ...session, status: 'done' }) });
         const chatRecord = readChatRecord(session);
         if (!chatRecord.ok) return blocked(session, chatRecord.reason);
@@ -1209,17 +1374,17 @@ export function createCombatSession(options = {}) {
         if (chatRecord.value?.result) {
             resultsSaved.add(session.combatId);
             setState({ ...session, ...(savedRecord ? { record: savedRecord } : {}), status: 'send-failed', report: reportItemOf(chatRecord.value.result) });
-            await loadFlip();
+            await loadFlip({ shouldStart: stillWanted });
             return ok();
         }
         const outbox = readOutbox();
         if (!outbox.ok) return fail(outbox.reason);
         if (outbox.value[session.combatId]) {
             setState({ ...session, ...(savedRecord ? { record: savedRecord } : {}), status: 'send-failed', report: outbox.value[session.combatId] });
-            await loadFlip();
+            await loadFlip({ shouldStart: stillWanted });
             return ok();
         }
-        if (located.challenge) return prepareChallenge(session, signal);
+        if (located.challenge) return prepareChallenge(session, signal, stillWanted);
         const unavailableEncounter = located.start.enemies.map(({ name }) => encounterEntryByName(name))
             .find((entry) => entry && !encounterByName(entry.name));
         if (unavailableEncounter) return blocked(session, 'combat-encounter-unavailable', {
@@ -1229,11 +1394,20 @@ export function createCombatSession(options = {}) {
         const protagonistWait = typeof options.awaitProtagonist === 'function' ? options.awaitProtagonist() : null;
         if (protagonistWait) {
             try { await protagonistWait; } catch { /* 主角档案生成失败由后面的检查兜底 */ }
-            if (signal?.aborted || !isCurrent(session)) { setState({ status: 'idle' }); return fail('request-stale'); }
+            if (!stillWanted()) return fail('request-stale');
+        }
+        const writeOptions = { signal, shouldStart: stillWanted };
+        const heldReward = readPendingReward(session);
+        let rewardSaveFailure = heldReward.reason || '';
+        if (heldReward.offer) {
+            const recovered = await commitRewardOffer(session, heldReward.offer, writeOptions, recoverReward);
+            if (!stillWanted()) return fail('request-stale');
+            rewardSaveFailure = recovered.reason || '';
         }
         // 账本状态：只在本函数确实写过表之后才重新读取，其余步骤传递同一份
         let ledgerState = await ledger.effectiveState({ throughMessageId: session.anchor.messageId, includePanelBoundary: true });
-        if (!ledgerState.ok) return blocked(session, ledgerState.reason, ledgerState.detail ? { detail: ledgerState.detail } : {});
+        if (!stillWanted()) return fail('request-stale');
+        if (!ledgerState.ok) return blocked(session, rewardSaveFailure || ledgerState.reason, ledgerState.detail ? { detail: ledgerState.detail } : {});
         // 与删卡共用普通胜场；准备期间的生成与重读不能把开战楼之后的胜利算进本场。
         session.battleWins = findCharacter(ledgerState, userName)?.purge?.battle ?? 0;
         const alreadyPrepared = !!chatRecord.value?.prepared;
@@ -1243,16 +1417,9 @@ export function createCombatSession(options = {}) {
         session.randomKey = resolveBattleRandomKey({ chatId: session.chatId, combatId: session.combatId, record: savedRecord, offer: ledgerState.offers?.get(session.combatId), prepared });
         let entities = neededProfiles(ledgerState, located.start, userName, { heroOnly: alreadyPrepared, seed: session.randomKey ?? session.combatId ?? '' });
         const initNames = alreadyPrepared ? [userName] : [userName, ...located.start.allies, ...located.start.enemies.map((enemy) => enemy.name)];
-        if (ledgerState.attributes?.table === 'ok') {
-            const names = [...new Set(initNames.map((name) => (PROTAGONIST_ALIASES.includes(name) ? userName : findCharacter(ledgerState, name)?.name || name)))];
-            const buildMode = resolveOption(options.buildMode) || null;
-            const enemyNames = new Set(located.start.enemies.map((enemy) => enemy.name));
-            const wantsInit = (name) => buildMode?.ready !== false && wantsAutoInit({ mode: buildMode?.mode ?? null, choice: buildMode?.choices?.[name] ?? null, protagonist: name === userName, enemy: enemyNames.has(name) });
-            entities = withCombatInitialization(entities, names.filter((name) => !abilitiesForName(ledgerState, name, userName)?.initialized && wantsInit(name)));
-        }
         const filledIds = new Set();
         if (!alreadyPrepared) entities = [...entities, ...skillFillEntities(ledgerState, located.start, userName, filledIds)];
-        const rewardPlan = ledgerState.offers?.has(session.combatId) ? null : planReward(ledgerState, session, userName, difficultyOf(), statTraitsFor(session, userName));
+        const rewardPlan = heldReward.offer || rewardSaveFailure || ledgerState.offers?.has(session.combatId) ? null : planReward(ledgerState, session, userName, difficultyOf(), statTraitsFor(session, userName));
         const wantsReward = !!rewardPlan?.entity && !alreadyPrepared;
         if (wantsReward) entities = [...entities, rewardPlan.entity];
         // 敌人图集题材：第一次准备时与同批实体一起请求一条；已准备过或留档已有题材的场次不再请求。
@@ -1267,8 +1434,7 @@ export function createCombatSession(options = {}) {
         let rewardFailure = '';
         const initDiagnostics = [];
         const fillDiagnostics = [];
-        const stillWanted = () => !signal?.aborted && isCurrent(session);
-        if (!stillWanted()) { setState({ status: 'idle' }); return fail('request-stale'); }
+        if (!stillWanted()) return fail('request-stale');
         const fallbackTemplates = new Map();
         let generated = null;
         if (entities.length) {
@@ -1277,15 +1443,12 @@ export function createCombatSession(options = {}) {
                 { names: initNames, signal },
             );
             generated = await generateWithRetry(await withCharacterLore(entities, options.readLore), {
-                request, llm: resolveOption(options.llm), signal, classes: ledgerState.classes, now: now(), context, retryDelays: options.retryDelays,
+                request, llm: resolveOption(options.llm), signal, shouldStart: stillWanted, classes: ledgerState.classes, now: now(), context, retryDelays: options.retryDelays, maxRounds: options.generationMaxRounds,
             });
-            if (generated.reason === 'request-stale' || !stillWanted()) { setState({ status: 'idle' }); return fail('request-stale'); }
+            if (generated.reason === 'request-stale' || !stillWanted()) return fail('request-stale');
             if (generated.reason) {
                 if (entities.some((entity) => !SOFT_FAILURE_KINDS.has(entity.kind))) return blocked(session, generated.reason, generated.missing ? { missing: generated.missing } : {});
-                if (entities.some((entity) => entity.kind === 'profile-init')) initDiagnostics.push({ code: generated.reason });
             }
-            initDiagnostics.push(...(generated.diagnostics || []).filter((item) => item.code === 'combat-init-invalid'));
-            for (const rejected of generated.rejected || []) if (rejected.kind === 'profile-init') initDiagnostics.push({ code: 'combat-init-generation-failed', key: rejected.key });
             collectFillDiagnostics(generated, entities, fillDiagnostics);
             if (wantsTheme) theme = (generated.accepted || []).find((item) => item.kind === 'encounter-theme')?.theme || '';
             if (generated.reason && gearNames.length) gearDiagnostics.push({ code: generated.reason });
@@ -1294,7 +1457,8 @@ export function createCombatSession(options = {}) {
             const writes = generationWrites(generated, { createdAt: now() });
             if (writes.profiles.length) {
                 wrote = true;
-                const written = await tables.append('profile', writes.profiles);
+                const written = await tables.append('profile', writes.profiles, { signal, shouldStart: stillWanted });
+                if (!stillWanted()) return fail('request-stale');
                 const onlySkillFill = (generated.accepted || []).every((item) => (!item.profile && !item.profiles?.length) || item.kind === 'skill-fill');
                 if (written?.ok !== true && !onlySkillFill) return blocked(session, 'combat-profile-write-failed', { write: written });
                 if (written?.ok !== true) fillDiagnostics.push({ code: 'combat-skill-fill-write-failed', owners: writes.profiles.map((profile) => profile.id) });
@@ -1305,62 +1469,67 @@ export function createCombatSession(options = {}) {
             }
             if (generated.blocked) return blocked(session, 'combat-protagonist-generation-failed', { rejected: generated.rejected });
             if (wantsReward) {
-                wrote = true;
-                rewardFailure = rewardFailureReason(generated) || (await writeOffers(generated)).reason || '';
-            }
-            for (const accepted of generated.accepted || []) {
-                if (!stillWanted()) { setState({ status: 'idle' }); return fail('request-stale'); }
-                if (!accepted.init) continue;
-                const policy = resolveOption(options.buildMode) || null;
-                if (policy?.ready === false) { initDiagnostics.push({ code: policy.reason || 'stats-build-policy-waiting', name: accepted.init.name }); continue; }
-                if (!wantsAutoInit({ mode: policy?.mode ?? null, choice: policy?.choices?.[accepted.init.name] ?? null,
-                    protagonist: accepted.init.name === userName, enemy: located.start.enemies.some((enemy) => enemy.name === accepted.init.name) })) continue;
-                wrote = true;
-                let initResult;
-                try {
-                    initResult = await ledger.writeInit(accepted.init.name, accepted.init.value, { signal, shouldStart: stillWanted });
-                } catch {
-                    initResult = { ok: false, reason: 'combat-init-write-failed' };
+                rewardFailure = rewardFailureReason(generated);
+                if (!rewardFailure) {
+                    wrote = true;
+                    const saved = await saveRewardOffer(session, generated, writeOptions);
+                    rewardSaveFailure = saved.reason || '';
                 }
-                if (initResult?.ok !== true) initDiagnostics.push({ code: initResult?.reason || 'combat-init-write-failed', name: accepted.init.name });
+                if (!stillWanted()) return fail('request-stale');
             }
             if (wrote) {
                 ledgerState = await ledger.effectiveState();
+                if (!stillWanted()) return fail('request-stale');
                 if (!ledgerState.ok) return blocked(session, ledgerState.reason);
             }
             // 初始装备：档案落库并读回后按开战楼锚点写 equip；写失败只记诊断，不阻断开战。
-            if (await grantGeneratedGear(ledger, generated, (name) => findCharacter(ledgerState, name)?.id, { anchor: session.anchor, diagnostics: gearDiagnostics })) {
+            if (await grantGeneratedGear(ledger, generated, (name) => findCharacter(ledgerState, name)?.id, { anchor: session.anchor, diagnostics: gearDiagnostics, signal, shouldStart: stillWanted })) {
+                if (!stillWanted()) return fail('request-stale');
                 ledgerState = await ledger.effectiveState();
+                if (!stillWanted()) return fail('request-stale');
                 if (!ledgerState.ok) return blocked(session, ledgerState.reason);
             }
-            const fillAgain = alreadyPrepared ? [] : skillFillEntities(ledgerState, located.start, userName, filledIds);
+            const fillAgain = alreadyPrepared || options.generationMaxRounds === 0 ? [] : skillFillEntities(ledgerState, located.start, userName, filledIds);
             if (fillAgain.length) {
                 const fillResult = await generateWithRetry(await withCharacterLore(fillAgain, options.readLore), {
-                    request, llm: resolveOption(options.llm), signal, classes: ledgerState.classes, now: now(), context, retryDelays: options.retryDelays,
+                    request, llm: resolveOption(options.llm), signal, shouldStart: stillWanted, classes: ledgerState.classes, now: now(), context, retryDelays: options.retryDelays, maxRounds: options.generationMaxRounds,
                 });
-                if (fillResult.reason === 'request-stale' || !stillWanted()) { setState({ status: 'idle' }); return fail('request-stale'); }
+                if (fillResult.reason === 'request-stale' || !stillWanted()) return fail('request-stale');
                 collectFillDiagnostics(fillResult, fillAgain, fillDiagnostics);
                 const fillWrites = generationWrites(fillResult, { createdAt: now() });
                 if (fillWrites.profiles.length) {
-                    if ((await tables.append('profile', fillWrites.profiles))?.ok !== true) {
+                    const written = await tables.append('profile', fillWrites.profiles, { signal, shouldStart: stillWanted });
+                    if (!stillWanted()) return fail('request-stale');
+                    if (written?.ok !== true) {
                         fillDiagnostics.push({ code: 'combat-skill-fill-write-failed', owners: fillWrites.profiles.map((profile) => profile.id) });
                     } else {
                         ledgerState = await ledger.effectiveState();
+                        if (!stillWanted()) return fail('request-stale');
                         if (!ledgerState.ok) return blocked(session, ledgerState.reason);
                     }
                 }
             }
         }
-        if (!stillWanted()) { setState({ status: 'idle' }); return fail('request-stale'); }
+        if (!stillWanted()) return fail('request-stale');
+        const newTheme = theme && theme !== savedTheme ? { theme } : {};
+        if (!chatRecord.value?.prepared || newTheme.theme) {
+            await writeChatRecord(session, { ...(chatRecord.value?.prepared ? {} : { prepared: { at: now(), weakFoes: session.weakFoes }, ...battleRandomFields(session) }), ...newTheme }, { shouldStart: stillWanted });
+        }
+        if (!stillWanted()) return fail('request-stale');
+        // 内容已落库后检查主角权威六维；未就绪时阻止开战并保留已保存战斗内容，不伪造主角六维。
+        const requireProtagonistAttributes = typeof options.requireProtagonistAttributes === 'function'
+            ? options.requireProtagonistAttributes() === true
+            : options.requireProtagonistAttributes === true;
+        if (requireProtagonistAttributes && abilitiesForName(ledgerState, userName, userName)?.initialized !== true) {
+            return blocked(session, 'combat-attributes-waiting');
+        }
         const lobby = buildLobby(ledgerState, located.start, userName, fallbackTemplates, session.weakFoes, session.battleWins);
         if (!lobby.ok) return blocked(session, lobby.reason, lobby.detail ? { detail: lobby.detail } : {});
         lobby.vitals = lobbyVitals(lobby, difficultyOf());
         const skipped = (generated?.rejected || []).filter((item) => item.fallback?.kind === 'skip').map((item) => item.owner);
-        const newTheme = theme && theme !== savedTheme ? { theme } : {};
-        if (!chatRecord.value?.prepared || newTheme.theme) await writeChatRecord(session, { ...(chatRecord.value?.prepared ? {} : { prepared: { at: now(), weakFoes: session.weakFoes }, ...battleRandomFields(session) }), ...newTheme });
         return ok({
             session: setState({
-                ...session, ...(theme ? { theme } : {}), status: 'lobby', lobby, skipped, reward: rewardStatus(ledgerState, session.combatId, rewardPlan?.plan, rewardFailure),
+                ...session, ...(theme ? { theme } : {}), status: 'lobby', lobby, skipped, reward: rewardStatus(ledgerState, session.combatId, rewardPlan?.plan, rewardFailure, rewardSaveFailure),
                 ...(initDiagnostics.length && { initDiagnostics }), ...(fillDiagnostics.length && { fillDiagnostics }), ...(gearDiagnostics.length && { gearDiagnostics }),
             }),
         });
@@ -1401,23 +1570,74 @@ export function createCombatSession(options = {}) {
         return ok();
     }
 
-    async function prepareChallenge(session, signal) {
+    async function prepareChallenge(session, signal, stillWanted) {
         if (session.start?.intimate === true) return prepareIntimate(session);
         setState({ ...session, status: 'preparing' });
         const challengeState = resolveOption(challengeOptions.state) || null;
         const start = { ...session.start, allowEscape: resolveOption(challengeOptions.allowEscape) !== false };
-        let picked = { foe: '', name: '' };
+        const resolvedDomain = resolveChallengeDomain(start.domain, challengeState?.skills);
+        const domainKey = normalizeChallengeDomain(resolvedDomain);
+        const tier = start.tier || '普通';
+        const prepSeed = session.randomKey ?? session.combatId;
+        // 1. 先查该领域是否已有固定牌库；未固定时由程序先拼合初始牌模板，再交给 LLM 按模板与世界观起名。
+        let fixedDeck = null;
+        if (typeof ledger?.effectiveState === 'function') {
+            try {
+                const ledgerState = await ledger.effectiveState({ throughMessageId: session.anchor.messageId, includePanelBoundary: true });
+                if (!stillWanted()) return fail('request-stale');
+                if (ledgerState?.ok) fixedDeck = ledgerState.dailyDecks?.get(domainKey) ?? null;
+            } catch { fixedDeck = null; }
+        }
+        const rawSkill = challengeState?.skills?.[resolvedDomain]?.value ?? challengeState?.skills?.[domainKey]?.value;
+        const skillValue = Number.isFinite(Number(rawSkill)) ? Number(rawSkill) : 50;
+        const hasFixed = Boolean(fixedDeck && Array.isArray(fixedDeck.deckEntries) && fixedDeck.deckEntries.length);
+        const draftDeck = hasFixed
+            ? null
+            : buildChallengeDeck({ domain: resolvedDomain, skillValue, otherSkills: challengeState?.skills, seed: prepSeed });
+        const deckCardPrompts = draftDeck
+            ? (draftDeck.domainCardIds || []).map((id) => ({
+                id,
+                fallbackName: draftDeck.catalog[id]?.name || '',
+                summary: describeDailyCardSummary(draftDeck.catalog[id]),
+            }))
+            : [];
+        // 2. 程序先从本领域专属池抽取并缝合 3 张战利品候选卡模板，同一次请求交由 LLM 起名与写来历。
+        const preparedLoot = planPreparedDailyLoot({ combatId: session.combatId, ...battleRandomFields(session), tier, domain: domainKey });
+        const lootCardPrompts = describePreparedLootCards(preparedLoot);
+        // 3. 带上当前剧情与世界观上下文，一次请求完成：enemyPool 挑敌起名 + 初始牌/战利品牌按模板起名。
+        const userName = getUserName();
+        const storyNames = [userName, ...(start.counterpart ? [start.counterpart] : [])].filter(Boolean);
+        let storyContext = { encounter: start.event, domain: domainKey, tier, protagonist: userName };
         try {
-            picked = await chooseChallengeFoe({ event: start.event, domain: start.domain, request, llm: resolveOption(options.llm), signal, retryDelays: [] });
-        } catch { /* 副模型出错时沿用本地难关 */ }
-        if (signal?.aborted || !isCurrent(session)) { setState({ status: 'idle' }); return fail('request-stale'); }
+            storyContext = await withStoryContext(storyContext, options.readStoryContext, { names: storyNames, signal });
+        } catch { /* 读不到剧情上下文时照旧请求 */ }
+        if (!stillWanted()) return fail('request-stale');
+        let picked = { foe: '', name: '', enemyProfile: null, deckCards: [], lootCards: [] };
+        try {
+            picked = await chooseChallengeFoe({
+                event: start.event, domain: domainKey, tier, seed: prepSeed,
+                deckCards: deckCardPrompts, lootCards: lootCardPrompts, context: storyContext,
+                request, llm: resolveOption(options.llm), signal, shouldStart: stillWanted, retryDelays: [], maxRounds: options.generationMaxRounds,
+            });
+        } catch { /* 副模型出错时沿用本地敌人池与默认卡名 */ }
+        if (!stillWanted()) return fail('request-stale');
         const challengeStart = { ...start, ...(picked.source === 'llm' ? { foe: picked.foe, foeName: picked.name } : {}) };
-        const built = buildChallengeSetup({ start: challengeStart, state: challengeState, user: { name: getUserName() }, allies: [] });
+        const cardNameMap = Array.isArray(picked.deckCards) && picked.deckCards.length
+            ? Object.fromEntries(picked.deckCards.map((item) => [item.id, item]))
+            : null;
+        const challengeLootOffer = applyDailyLootNaming(preparedLoot, picked.lootCards);
+        const enemyProfile = picked.enemyProfile || null;
+        const built = buildChallengeSetup({
+            start: challengeStart, state: challengeState, user: { name: userName }, allies: [], fixedDeck,
+            enemyProfile, deckSeed: prepSeed, enemySeed: prepSeed, cardNames: cardNameMap,
+        });
         if (!built.ok) return blocked(session, built.reason);
         const candidates = eligibleChallengeAllies({ present: challengeState?.present, favors: challengeState?.favors, exclude: challengeStart.counterpart ? [challengeStart.counterpart] : [] });
         return ok({
             session: setState({
                 ...session, status: 'lobby', challenge: built.setup.challenge, challengeSetup: built.setup, challengeStart, challengeState, challengeCandidates: candidates,
+                challengeFixedDeck: fixedDeck, challengeInitialDeck: built.initialDeck || null,
+                challengeEnemyProfile: enemyProfile, challengeDeckSeed: prepSeed, challengeCardNames: cardNameMap, challengeLootOffer,
                 lobby: { challenge: true, heroId: built.setup.controlledId, controllable: [built.setup.controlledId] }, skipped: [],
             }),
         });
@@ -1426,66 +1646,115 @@ export function createCombatSession(options = {}) {
     // 大厅里挑协助者：只拒收不修正，名单按在场与好感校验后重建建局；最多两名。
     function pickChallengeAllies(names) {
         if (!isChallenge(current) || current.status !== 'lobby' || !current.challengeStart) return fail('combat-session-not-ready');
-        const built = buildChallengeSetup({ start: current.challengeStart, state: current.challengeState, user: { name: getUserName() }, allies: Array.isArray(names) ? names : [] });
+        const built = buildChallengeSetup({
+            start: current.challengeStart, state: current.challengeState, user: { name: getUserName() }, allies: Array.isArray(names) ? names : [],
+            fixedDeck: current.challengeFixedDeck || null,
+            enemyProfile: current.challengeEnemyProfile || null,
+            deckSeed: current.challengeDeckSeed || '',
+            enemySeed: current.challengeDeckSeed || '',
+            cardNames: current.challengeCardNames || null,
+        });
         if (!built.ok) return fail(built.reason);
-        setState({ ...current, challenge: built.setup.challenge, challengeSetup: built.setup });
+        setState({ ...current, challenge: built.setup.challenge, challengeSetup: built.setup, challengeInitialDeck: built.initialDeck || null });
         notify();
         return ok({ rejected: built.allies.rejected });
     }
 
-    // 奖励候选写进账本（只写 offer 类条目）
-    async function writeOffers(generated) {
-        const offers = generationWrites(generated, { createdAt: now() }).entries.filter((entry) => entry.type === 'offer');
-        if (!offers.length) return { ok: true };
-        let written;
-        try {
-            written = await ledger.append(offers);
-        } catch {
-            written = null;
+    function readPendingReward(session) {
+        const held = rewardIntents.read(session.chatId);
+        if (!held.ok) return held;
+        const offer = held.offers.find(item => item.payload.combatId === session.combatId);
+        return offer && !sameAnchor(offer.anchor, session.anchor)
+            ? { ok: false, reason: 'combat-offer-save-conflict' } : { ok: true, offer };
+    }
+
+    async function commitRewardOffer(session, offer, writeOptions, writeMissing = true) {
+        const { shouldStart } = writeOptions;
+        const stale = { ok: false, reason: 'request-stale' };
+        if (!shouldStart()) return stale;
+        let checked = await ledger.readOfferCommit(offer, writeOptions);
+        if (!shouldStart()) return stale;
+        if (!checked.ok) return checked;
+        if (!checked.present && writeMissing) {
+            try { await ledger.append([offer], { ...writeOptions, retainOnFailure: false, recoverSegments: true }); }
+            catch { /* 只以回读确认提交。 */ }
+            if (!shouldStart()) return stale;
+            checked = await ledger.readOfferCommit(offer, writeOptions);
         }
-        return written?.ok === true ? written : { ok: false, reason: 'combat-offer-write-failed' };
+        if (!shouldStart()) return stale;
+        if (!checked.ok) return checked;
+        return checked.present ? rewardIntents.clear(session.chatId, offer) : { ok: false, reason: 'combat-offer-save-pending' };
+    }
+
+    async function saveRewardOffer(session, generated, writeOptions) {
+        const offer = generationWrites(generated).entries.find(entry => entry.type === 'offer' && entry.payload.combatId === session.combatId);
+        if (!offer || !sameAnchor(offer.anchor, session.anchor)) return { ok: false, reason: 'combat-offer-intent-invalid' };
+        if (!writeOptions.shouldStart()) return { ok: false, reason: 'request-stale' };
+        const staged = rewardIntents.stage(session.chatId, offer);
+        return staged.ok ? commitRewardOffer(session, offer, writeOptions) : staged;
     }
 
     // 奖励生成失败时的重试（只在大厅阶段）
-    async function retryReward({ signal } = {}) {
+    async function retryReward(options = {}) {
+        if (disposed) return fail('request-stale');
+        if (rewardRetryTask?.alive()) return rewardRetryTask.promise;
         if (current.status !== 'lobby' || current.reward?.status !== 'failed') return fail('combat-reward-not-retryable');
-        if (rewardRetryTask) return rewardRetryTask;
-        const task = runRewardRetry(identityOf(current), signal);
+        const session = identityOf(current), owner = captureTaskLease(options);
+        const task = { previous: current.reward, alive: () => rewardRetryTask === task && owner()
+            && current.status === 'lobby' && current.combatId === session.combatId && isCurrent(session) };
         rewardRetryTask = task;
+        task.promise = Promise.resolve().then(() => task.alive()
+            ? runRewardRetry(session, options.signal, task.alive) : fail('request-stale'));
+        if (task.alive()) notify();
         try {
-            return await task;
+            const result = await task.promise;
+            return task.alive() ? result : fail('request-stale');
         } finally {
-            if (rewardRetryTask === task) rewardRetryTask = null;
-            notify();
+            if (rewardRetryTask === task) {
+                const active = task.alive();
+                rewardRetryTask = null;
+                if (active) notify();
+            }
         }
     }
 
-    async function runRewardRetry(session, signal) {
+    async function runRewardRetry(session, signal, shouldStart) {
         const previous = current.reward;
         const applyReward = (reward) => {
-            if (current.status !== 'lobby' || current.combatId !== session.combatId) return fail('request-stale');
+            if (!shouldStart() || current.reward !== previous) return fail('request-stale');
             setState({ ...current, reward });
-            return signal?.aborted || !isCurrent(session) ? fail('request-stale') : ok();
+            return ok();
         };
-        setState({ ...current, reward: { ...previous, status: 'pending' } });
-        notify();
-        let ledgerState = await ledger.effectiveState({ throughMessageId: session.anchor.messageId, includePanelBoundary: true });
-        if (!ledgerState.ok) return applyReward({ ...previous, reason: ledgerState.reason });
+        const writeOptions = { signal, shouldStart };
+        const readRewardState = () => ledger.effectiveState({ throughMessageId: session.anchor.messageId, includePanelBoundary: true });
+        const held = readPendingReward(session);
+        if (!held.ok) return applyReward({ ...previous, stage: 'save', reason: held.reason });
+        if (held.offer) {
+            const saved = await commitRewardOffer(session, held.offer, writeOptions);
+            if (!saved.ok) return applyReward({ ...previous, stage: 'save', reason: saved.reason });
+        }
+        let ledgerState = await readRewardState();
+        if (!shouldStart()) return fail('request-stale');
+        if (!ledgerState.ok) return applyReward({ ...previous, stage: 'read', reason: ledgerState.reason });
+        if (held.offer || ledgerState.offers?.has(session.combatId)) return applyReward(rewardStatus(ledgerState, session.combatId));
         const userName = getUserName();
-        const rewardPlan = ledgerState.offers?.has(session.combatId) ? null : planReward(ledgerState, session, userName, difficultyOf(), statTraitsFor(session, userName));
+        const rewardPlan = planReward(ledgerState, session, userName, difficultyOf(), statTraitsFor(session, userName));
         let failure = '';
         if (rewardPlan?.entity) {
             const names = [userName, ...session.start.allies, ...session.start.enemies.map((enemy) => enemy.name)];
             const context = await withStoryContext({ encounter: session.start.encounter, tier: session.start.tier, protagonist: userName }, options.readStoryContext, { names, signal });
             const generated = await generateWithRetry([rewardPlan.entity], {
-                request, llm: resolveOption(options.llm), signal, classes: ledgerState.classes, now: now(), context, retryDelays: options.retryDelays,
+                request, llm: resolveOption(options.llm), signal, shouldStart, classes: ledgerState.classes, now: now(), context, retryDelays: options.retryDelays, maxRounds: options.generationMaxRounds,
             });
-            if (generated.reason === 'request-stale' || signal?.aborted) return applyReward(previous);
-            failure = rewardFailureReason(generated) || (await writeOffers(generated)).reason || '';
-            // 只有写过奖励候选才需要重读
-            ledgerState = await ledger.effectiveState();
+            if (generated.reason === 'request-stale' || !shouldStart()) return fail('request-stale');
+            failure = rewardFailureReason(generated);
+            if (!failure) {
+                const saved = await saveRewardOffer(session, generated, writeOptions);
+                if (!saved.ok) return applyReward(rewardStatus(null, session.combatId, rewardPlan.plan, '', saved.reason));
+                ledgerState = await readRewardState();
+            }
         }
-        return applyReward(ledgerState.ok ? rewardStatus(ledgerState, session.combatId, rewardPlan?.plan, failure) : { ...previous, reason: ledgerState.reason });
+        return applyReward(ledgerState.ok ? rewardStatus(ledgerState, session.combatId, rewardPlan?.plan, failure) : { ...previous, stage: 'read', reason: ledgerState.reason });
     }
 
     // ---- 开战与出牌 ----
@@ -1494,7 +1763,11 @@ export function createCombatSession(options = {}) {
         const seed = seedFor(current.randomKey ?? current.combatId);
         const battle = createBattle(setup, seed);
         if (!battle.ok) return fail('combat-setup-invalid', { error: battle.error });
-        const record = { v: SESSION_VERSION, combatId: current.combatId, ...battleRandomFields(current), anchor: current.anchor, seed, setup, actions: [], encounter: current.start.event, tiers: [], expTargets: [] };
+        const record = {
+            v: SESSION_VERSION, combatId: current.combatId, ...battleRandomFields(current), anchor: current.anchor, seed, setup, actions: [], encounter: current.start.event, tiers: [], expTargets: [],
+            ...(current.challengeInitialDeck ? { initialDailyDeck: current.challengeInitialDeck } : {}),
+            ...(current.challengeLootOffer ? { dailyLootOffer: current.challengeLootOffer } : {}),
+        };
         if (!writeSession(record)) return fail('combat-session-save-failed');
         const intimateTrace = setup.challenge?.intimate ? foldIntimateTrace(initIntimateTrace(), battle.state, battle.events) : null;
         setState({ ...current, status: 'battle', record, battle: battle.state, events: battle.events, challengeResult: null, ...(intimateTrace ? { intimateTrace } : {}) });
@@ -1541,7 +1814,7 @@ export function createCombatSession(options = {}) {
                 const final = { ...reportItemOf(report), ...usedPart(current), ...woundPart(current) };
                 setState({ ...current, final });
                 finalWrite = saveResult(identityOf(current), final, current.battle);
-                if (final.result === 'win' && final.noLoot !== true && !isChallenge(current)) loadFlip().catch(() => {});
+                if (final.result === 'win' && final.noLoot !== true && !isIntimateChallenge(current)) loadFlip().catch(() => {});
             }
         }
         return ok({ events: end.events });
@@ -1685,29 +1958,108 @@ export function createCombatSession(options = {}) {
             const entry = { id: ledgerEntryId('battle-points', hero, anchor), type: 'battle-points', character: hero, anchor, payload: { amount, tier, combatId, reportId: report.reportId, ...(weak ? { weak: true } : {}), ...(bonus ? { bonus } : {}) }, createdAt: now() };
             try {
                 pointsResult = await appendSettled([entry]);
+                if (pointsResult?.ok !== false && options.sharedPoints?.isV2?.()) {
+                    const total = amount + (bonus?.points || 0);
+                    if (total > 0) {
+                        const credited = await options.sharedPoints.credit({
+                            sourceId: `combat-battle:${combatId}:${report.reportId}`,
+                            domain: 'combat', amount: total, messageId: session.anchor?.messageId,
+                            meta: { combatId, reportId: report.reportId, tier, ...(weak ? { weak: true } : {}), ...(bonus ? { bonus } : {}) },
+                        });
+                        if (!credited?.ok) pointsResult = credited || { ok: false, reason: 'combat-battle-points-write-failed' };
+                    }
+                }
             } catch {
                 pointsResult = { ok: false, reason: 'combat-battle-points-write-failed' };
             }
         }
         let challengeResult = null;
-        if (isChallenge(session) && Number.isInteger(reportMessageId) && ledger?.append) {
-            const card = challengeSummary(session)?.card;
-            if (card) {
-                const hero = profileIdFor('deck-character', getUserName());
-                const anchor = { messageId: reportMessageId, swipeId: swipeIdOf(getChat()[reportMessageId]), tagHash: CHALLENGE_REWARD_TAG_HASH, occurrence: 0 };
-                try { challengeResult = await appendSettled([{ id: ledgerEntryId('learn', hero, anchor), type: 'learn', character: hero, anchor, payload: { card, merge: true, ...(session.record?.setup?.rulesVersion >= 6 ? { added: true } : {}) }, createdAt: now() }]); } catch { challengeResult = { ok: false, reason: 'combat-challenge-reward-write-failed' }; }
+        if (isChallenge(session) && !intimate && Number.isInteger(reportMessageId) && ledger?.append) {
+            const daily = report.daily || {};
+            const initialDeck = daily.initialDeck || session.record?.initialDailyDeck || session.challengeInitialDeck || null;
+            const challenge = session.record?.setup?.challenge || session.challenge;
+            const parsed = !challenge ? parseChallengeReport(report.text) : null;
+            const domain = normalizeChallengeDomain(daily.domain || initialDeck?.domain || challenge?.domain || parsed?.domain || '');
+            const heroKey = profileIdFor('deck-character', getUserName());
+            const swipeId = reportSwipeId();
+            const dailyEntries = [];
+            if (initialDeck) {
+                const anchor = { messageId: reportMessageId, swipeId, tagHash: DAILY_DECK_TAG_HASH, occurrence: 0 };
+                dailyEntries.push({
+                    id: ledgerEntryId('daily-deck', heroKey, anchor), type: 'daily-deck', character: heroKey, anchor,
+                    payload: { domain, reportId: report.reportId, deck: initialDeck.deck, cards: initialDeck.cards }, createdAt: now(),
+                });
+            }
+            if (report.result === 'win') {
+                const outcome = daily.outcome || challengeSummary(session)?.outcome || parsed?.outcome || '圆满';
+                const tier = daily.tier || challenge?.tier || parsed?.tier || '普通';
+                const winAnchor = { messageId: reportMessageId, swipeId, tagHash: DAILY_WIN_TAG_HASH, occurrence: 0 };
+                dailyEntries.push({
+                    id: ledgerEntryId('daily-win', heroKey, winAnchor), type: 'daily-win', character: heroKey, anchor: winAnchor,
+                    payload: { domain, reportId: report.reportId, outcome, tier }, createdAt: now(),
+                });
+                if (daily.card) {
+                    const lootAnchor = { messageId: reportMessageId, swipeId, tagHash: DAILY_LOOT_TAG_HASH, occurrence: 0 };
+                    dailyEntries.push({
+                        id: ledgerEntryId('daily-loot', heroKey, lootAnchor), type: 'daily-loot', character: heroKey, anchor: lootAnchor,
+                        payload: { domain, combatId: session.combatId, reportId: report.reportId, card: daily.card }, createdAt: now(),
+                    });
+                }
+                if (daily.purge?.copyId && daily.purge?.battle) {
+                    const purgeAnchor = { messageId: reportMessageId, swipeId, tagHash: DAILY_PURGE_TAG_HASH, occurrence: 0 };
+                    dailyEntries.push({
+                        id: ledgerEntryId('daily-purge', heroKey, purgeAnchor), type: 'daily-purge', character: heroKey, anchor: purgeAnchor,
+                        payload: { domain, copyId: daily.purge.copyId, battle: daily.purge.battle, reportId: report.reportId }, createdAt: now(),
+                    });
+                }
+                if (daily.upgrade?.copyId && daily.upgrade?.battle) {
+                    const upAnchor = { messageId: reportMessageId, swipeId, tagHash: DAILY_UPGRADE_TAG_HASH, occurrence: 0 };
+                    dailyEntries.push({
+                        id: ledgerEntryId('daily-upgrade', heroKey, upAnchor), type: 'daily-upgrade', character: heroKey, anchor: upAnchor,
+                        payload: { domain, copyId: daily.upgrade.copyId, battle: daily.upgrade.battle, reportId: report.reportId }, createdAt: now(),
+                    });
+                }
+            }
+            if (dailyEntries.length) {
+                try { challengeResult = await appendSettled(dailyEntries); } catch { challengeResult = { ok: false, reason: 'combat-challenge-reward-write-failed' }; }
             }
         }
         let scan = null;
+        let reportSpendResult = null;
         if (Number.isInteger(reportMessageId) && ledger?.scan && !isChallenge(session)) {
             try {
                 scan = await ledger.scan({ messageIds: [reportMessageId] });
             } catch {
                 scan = { ok: false, reason: 'combat-ledger-scan-failed' };
             }
+            if (scan?.ok !== false && options.sharedPoints?.isV2?.() && typeof ledger?.read === 'function') {
+                try {
+                    const afterScan = await ledger.read();
+                    const paidEntries = afterScan?.ok
+                        ? (afterScan.entries || []).filter(entry =>
+                            (entry.type === 'loot' || entry.type === 'purge')
+                            && entry.payload?.reportId === report.reportId
+                            && Number.isSafeInteger(entry.payload?.cost) && entry.payload.cost > 0)
+                        : [];
+                    for (const entry of paidEntries) {
+                        const spent = await options.sharedPoints.spend({
+                            sourceId: `combat-report:${entry.id}`, domain: 'combat', cost: entry.payload.cost,
+                            action: entry.type, messageId: session.anchor?.messageId,
+                            meta: { entryId: entry.id, reportId: report.reportId },
+                            apply: () => ({ ok: true }),
+                        });
+                        if (!spent?.ok) {
+                            reportSpendResult = spent || { ok: false, reason: 'combat-report-points-spend-failed' };
+                            break;
+                        }
+                    }
+                } catch {
+                    reportSpendResult = { ok: false, reason: 'combat-report-points-spend-failed' };
+                }
+            }
         }
         if (!unchanged()) return fail('request-stale');
-        const failed = [consumeResult, woundResult, growthResult, lostResult, implantResult, pointsResult, challengeResult, scan]
+        const failed = [consumeResult, woundResult, growthResult, lostResult, implantResult, pointsResult, challengeResult, scan, reportSpendResult]
             .find(result => result && (result.ok === false || result.stock?.some(step => step.ok === false)));
         if (failed) return settlementFailed(failed.reason || 'combat-settlement-failed');
         if (!setOutbox(session.combatId, null)) return settlementFailed('combat-outbox-save-failed');
@@ -1795,7 +2147,7 @@ export function createCombatSession(options = {}) {
         if (finalWrite) await finalWrite;
         if (!resultsSaved.has(combatId) && current.combatId === combatId) await saveResult(identityOf(current), report, current.battle);
         if (current.status !== 'ended' || current.combatId !== combatId) return fail('combat-session-not-ended');
-        const looted = isChallenge(current) ? { ok: true, item: report } : await resolveLoot(report);
+        const looted = isChallenge(current) ? await resolveDailyLoot(report) : await resolveLoot(report);
         if (!looted.ok) return fail(looted.reason);
         if (current.status !== 'ended' || current.combatId !== combatId) return fail('combat-session-not-ended');
         report = looted.item;
@@ -1812,7 +2164,7 @@ export function createCombatSession(options = {}) {
         if (!resultsSaved.has(current.combatId)) await saveResult(identityOf(current), current.report, current.battle);
         if (current.status !== 'send-failed' || !current.report) return fail('combat-nothing-to-send');
         const combatId = current.combatId;
-        const looted = isChallenge(current) ? { ok: true, item: current.report } : await resolveLoot(current.report);
+        const looted = isChallenge(current) ? await resolveDailyLoot(current.report) : await resolveLoot(current.report);
         if (!looted.ok) return fail(looted.reason);
         if (current.status !== 'send-failed' || current.combatId !== combatId) return fail('combat-nothing-to-send');
         if (looted.item !== current.report) {
@@ -2000,6 +2352,7 @@ export function createCombatSession(options = {}) {
 
     // 复位到空闲（不动存储里的记录），顺手把待写的落盘
     function reset() {
+        invalidateTasks();
         flipContext = null;
         persist.flush();
         setState({ status: 'idle' });
@@ -2011,6 +2364,6 @@ export function createCombatSession(options = {}) {
         // 以下为写盘节流新增：立即落盘、写盘统计、释放监听器
         flushPersist,
         getPersistStats: () => ({ ...persist.stats, pending: persist.hasPending() }),
-        dispose: () => persist.dispose(),
+        dispose: () => { disposed = true; invalidateTasks(); listeners.clear(); persist.dispose(); },
     };
 }

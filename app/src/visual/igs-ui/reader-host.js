@@ -8,7 +8,7 @@ import { disposeLive2dStage } from './live2d-stage.js';
 import { openLive2dPanel } from './live2d-panel.js';
 import { createMediaLeaseScope } from '../../media/media-lease-scope.js';
 import { bindImageCacheDocument } from '../../media/tavern-image-cache.js';
-import { buildIgsTextPayload, getMessagePrimaryText, getVisibleMessageTextFromElement, normalizeSourceFilter, normalizeVirtualRegex } from '../../scene/message-source.js';
+import { buildIgsTextPayload, getMessagePrimaryText, getVisibleMessageTextFromElement, normalizeSourceFilter, normalizeVirtualRegex, visibleDirectiveSource } from '../../scene/message-source.js';
 import { applyVoiceBark, canonicalName, normalizeCharacterVoices, noteFormGender, setActiveFormGenders } from './voice-bark.js';
 import { knownCharacterNames } from '../../scene/creature-registry.js';
 import { confirmedCreatureOf, storedCreatureOf } from '../../scene/creature-profile.js';
@@ -16,7 +16,8 @@ import { creatureVoiceKind, creatureVoiceText } from './creature-voice.js';
 import { createSettingsHost } from './settings-host.js';
 import { createCombatPanelController } from './combat-panel.js';
 import { createCombatDeckPanelController } from './combat-deck-panel.js';
-import { normalizeCombatExpansionSettings } from './combat-settings.js';
+import { createHeroManualModal } from './hero-manual-modal.js';
+import { combatBattleOn, normalizeCombatExpansionSettings } from './combat-settings.js';
 import { growthTagsByPage, planGrowthFx } from './combat-growth-fx-model.js';
 import { cancelGrowthFx } from './combat-growth-fx.js';
 import { cancelCheckBadges, checksByPage } from './combat-check-badge.js';
@@ -37,7 +38,7 @@ import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { secondaryLlmText } from '../../host/secondary-llm-result.js';
 
 import { isMarkerDirectiveLine, stripMarkerDirectives } from '../../scene/directive-tags.js';
-import { composeStatsHud, dropUserFavor } from '../../scene/stats/stat-metrics.js';
+import { composeStatsHud, dropUserFavor, isUserName } from '../../scene/stats/stat-metrics.js';
 import { PROTAGONIST } from '../../scene/stats/stat-engine.js';
 import { readStoryNow, resolveDuePromises } from '../../scene/promise-reminder.js';
 import { normalizeItemImageSettings } from '../../generated-images/illustration/item-image-settings.js';
@@ -115,7 +116,7 @@ import { createReaderTableData } from '../../data/shujuku/reader-table-data.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
 import { collectFloorAssetUrls } from './floor-asset-prefetch.js';
 import { createChatStreamObserver, isUserFloorNode } from '../../host/chat-stream-observer.js';
-import { findAcuDice, formatCheckMessage, resolveDiceCommand } from '../../choices/dice-check.js';
+import { d20Bonus, findAcuDice, formatCheckMessage, resolveDiceCommand } from '../../choices/dice-check.js';
 import { abilitiesForName } from '../../combat/ledger.js';
 import { buildResultFxPlan, normalizeResultFxSettings, resultDetailOf } from './fx-result-model.js';
 import { cancelResultFx, playResultFx } from './fx-result.js';
@@ -174,9 +175,13 @@ import { personaOfTraits } from '../../stickers/sticker-persona.js';
 import { shotGroupsOf } from './forum-reader-chat-shot.js';
 import { storyClock } from './phone-sense.js';
 import { PHONE_CASE_DEFAULT, myPhoneOf } from './my-phone.js';
-import { FORUM_USER_KEY, applyFloorTags, ensureAliases, floorMarks, forumBoardOf, forumChainTail, forumTailCount, forumTailOf, forumWithTail, threadAt, forumFallbackTitle, forumKeyResolver, forumImagesOf, forumFixedOf, forumNamePairs, replaceNames, forumPairOf, forumPlan, forumNo, forumPoId, forumPrevRepliesOf, forumRepliesOf, forumAnkeOf, forumNameMap, forumRowsOf, forumSettingsOf, forumTagsOf, forumThreadById, replaceForumThread, resolvePoster, titleAt } from './forum-reader-model.js';
+import { FORUM_USER_KEY, applyFloorTags, ensureAliases, floorMarks, forumBoardOf, forumChainTail, forumTailCount, forumTailOf, forumWithTail, threadAt, forumFallbackTitle, forumKeyResolver, forumImagesOf, forumFixedOf, forumNamePairs, replaceNames, forumPairOf, forumPlan, forumNo, forumPoId, forumPrevRepliesOf, forumRepliesOf, forumRepliesNamed, forumAnkeOf, forumAnkeLockKey, forumMinutesAfter, forumPasserId, forumNameMap, forumRowsOf, forumSettingsOf, forumTagsOf, forumThreadById, replaceForumThread, resolvePoster, titleAt } from './forum-reader-model.js';
 import { createForumRegistry } from './forum-reader-registry.js';
+import { createAnkeStore } from './forum-anke-store.js';
+import { ankeVisibleVotes, ankeVoteOf } from './forum-anke-play.js';
 import { normalizeForumReaderSettings } from './forum-reader-settings.js';
+import { forumBlocksImages } from '../../generated-images/image-block.js';
+import { applyForumFxBlock } from './forum-fx-block.js';
 import { normalizeMangaFxSettings, pickMangaSymbol } from './fx-settings.js';
 import { nextBilingualDisplay, normalizeBilingualSettings, resolveBilingualDisplay } from './bilingual-text.js';
 
@@ -191,7 +196,7 @@ const logWait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // 盖住舞台的面板（地图、资料、战斗、卡组构筑）同一时刻只开一个。
 const anyPanelOpen = (dom) => Boolean(dom && (dom.mapController?.isOpen() || dom.recordController?.isOpen()
-    || dom.combatController?.isOpen() || dom.combatDeckController?.isOpen() || dom.originPageController?.isOpen()));
+    || dom.combatController?.isOpen() || dom.combatDeckController?.isOpen() || dom.originPageController?.isOpen() || dom.heroManualModal?.isOpen()));
 
 // 翻页时设置没变就复用上次整理好的阅读器设置：每次整份深拷贝再跑几十项整理，是翻页最大的一块 JS 开销。
 // 存储配置是共享只读的，改设置会换新引用，按引用判断即可。返回浅拷贝：调用方只改顶层字段，下层对象只读。
@@ -341,13 +346,26 @@ export function createIgsReaderHost(options = {}) {
         onAction: async (id, act) => {
             if (typeof options.statsNoticeAction !== 'function') return;
             let result = null;
-            try { result = await options.statsNoticeAction(id, act); } catch (error) { result = null; }
+            try { result = await options.statsNoticeAction(id, act); }
+            catch (error) {
+                try { console.warn('[IGS 数值提示条] 操作异常', id, act, error); } catch { /* */ }
+                result = null;
+            }
+            if (result && result.ok === false && result.reason && result.reason !== 'stats-notice-gone' && result.reason !== 'request-stale') {
+                try { console.warn('[IGS 数值提示条] 操作未完成', id, act, result.reason); } catch { /* */ }
+            }
             if (result && result.openSettings) openSettings({ tab: result.openSettings, mode: state.activeReader ? state.activeReader.mode : undefined });
-            // 手动建档逐角色询问「填写」（P8c）：打开人物状态面板并定位到这位角色的建档页；已有面板打开时不叠开。
+            // 主角开局「自行填写」独立弹窗（不依赖人物状态页，未开启卡片战斗也可填）。
+            if (result && result.openPanel === 'hero-manual-setup') {
+                const current = state.activeReader;
+                const overlay = current?.dom?.overlay;
+                if (overlay && current.dom.heroManualModal && !anyPanelOpen(current.dom)) current.dom.heroManualModal.open(overlay);
+            }
+            // 手动建档逐角色询问「填写」（P8c）：仅在卡片战斗开启时打开人物状态面板。
             if (result && result.openPanel === 'build') {
                 const current = state.activeReader;
                 const overlay = current?.dom?.overlay;
-                if (overlay && current.dom.combatDeckController && !anyPanelOpen(current.dom)) current.dom.combatDeckController.open(overlay, { build: result.name });
+                if (overlay && current.dom.combatDeckController && combatBattleOn(current.snapshot?.readerSettings?.combatExpansion) && !anyPanelOpen(current.dom)) current.dom.combatDeckController.open(overlay, { build: result.name });
             }
         },
     });
@@ -649,6 +667,16 @@ export function createIgsReaderHost(options = {}) {
             else rerenderSettings();
         })
         : () => {};
+    const offLlmCallLog = options.llmCallLog && typeof options.llmCallLog.onChange === 'function'
+        ? options.llmCallLog.onChange(() => {
+            const current = state.activeSettings;
+            if (!current || currentSettingsPage(current) !== 'logs') return;
+            const list = current.dom && current.dom.root && current.dom.root.querySelector
+                ? current.dom.root.querySelector('[data-llm-log-list]') : null;
+            if (list) list.innerHTML = renderLlmCallLogList();
+            else rerenderSettings();
+        })
+        : () => {};
     // DLC 中途登记 / 注销：重绘当前阅读器与设置页（皮肤样式、下拉、演出开关），同一轮里多次登记只重绘一次。
     let dlcRerenderQueued = false;
     const onDlcChange = () => {
@@ -698,6 +726,10 @@ export function createIgsReaderHost(options = {}) {
         ? options.onImageActivity((event) => generationStrip.activity(event))
         : () => {};
 
+    const ankeStore = createAnkeStore({
+        getContext: () => getSillyTavernContext(options.global || globalThis),
+        getChatId: currentChatIdText,
+    });
     const forumRegistry = createForumRegistry({
         getContext: () => getSillyTavernContext(options.global || globalThis),
         getChatId: currentChatIdText,
@@ -705,7 +737,7 @@ export function createIgsReaderHost(options = {}) {
 
     const {
         settingsInteracting, openSettings, syncSettingsStagePause, rerenderSettings, closeSettings,
-        persistSettingsDraft, reportSettingsFailure, renderImageJobLogList, withCharacterDnaDraftSync,
+        persistSettingsDraft, reportSettingsFailure, renderImageJobLogList, renderLlmCallLogList, withCharacterDnaDraftSync,
     } = createSettingsHost({
         flushDeferredImageRefresh, normalizeUnifiedSettings, onboarding, openCgGallery, options, pageModal,
         playReaderUiSfx, rerenderActiveReader, resolveBridgeConfigSnapshot, scheduleMoodAutoClassify, sourceCache,
@@ -753,7 +785,7 @@ export function createIgsReaderHost(options = {}) {
         playStatsCheck(detail) {
             return playOptionResultFx({ ok: true, detail }, { force: true });
         },
-        // 数值结算反馈（好感飘字、成长、关系阶段）：状态栏关着时直接丢弃，开着时用现有飘字样式；阅读器没开不补播。
+        // 数值结算反馈（好感飘字、成长、关系阶段）：状态栏关着且未开启数值系统时直接丢弃，开着时用现有飘字样式；阅读器没开不补播。
         playStatsFeedback(fx) {
             const current = state.activeReader;
             const snapshot = current && current.snapshot;
@@ -761,7 +793,7 @@ export function createIgsReaderHost(options = {}) {
             const readerSettings = snapshot && snapshot.readerSettings;
             if (!overlay || !readerSettings) return false;
             const hud = snapshot.content && snapshot.content.statusHud;
-            return playStatsFeedbackWithHud(overlay, fx, { readerSettings, speaker: hud && hud.character, reducedMotion: prefersReducedMotion() }).played > 0;
+            return playStatsFeedbackWithHud(overlay, fx, { readerSettings, forceHud: Boolean(hud && hud.enabled), speaker: hud && hud.character, reducedMotion: prefersReducedMotion() }).played > 0;
         },
         // 对外通知卡（IGS.api.notify.show）：阅读器没开直接返回，不排队、不补播。
         playExternalNotify(message) {
@@ -1112,7 +1144,8 @@ export function createIgsReaderHost(options = {}) {
         const current = state.activeReader;
         const settings = current && current.snapshot && current.snapshot.readerSettings;
         const statusHud = normalizeStatusHudSettings(settings && settings.statusHud);
-        const shouldSubscribe = Boolean(current) && ((statusHud.enabled && statusHudUsesTables(statusHud))
+        const statsHudOn = Boolean(typeof options.isStatsEnabled === 'function' && options.isStatsEnabled());
+        const shouldSubscribe = Boolean(current) && (((statusHud.enabled || statsHudOn) && statusHudUsesTables(statusHud))
             || Boolean(settings?._sceneAssets?.enabled && Object.keys(settings._sceneAssets.characterOutfits || {}).length)
             || Boolean(current.payload?.promiseHistory?.length));
         if (!shouldSubscribe) {
@@ -1207,6 +1240,43 @@ export function createIgsReaderHost(options = {}) {
         }
         for (const candidate of fuzzyPortraitNames(name, knownCharacterNames(sceneAssets))) {
             const url = lookup(canonicalName(sceneAssets, candidate));
+            if (url) return url;
+        }
+        return '';
+    }
+
+    // 资料页（人际关系 / 好感总览）角色默认立绘：按当前素材库解析角色默认立绘（主角优先查「设为User立绘」）。
+    function resolveRecordPersonPortrait(name) {
+        const current = state.activeReader;
+        const readerSettings = current && current.snapshot && current.snapshot.readerSettings;
+        const sceneAssets = (readerSettings && readerSettings._sceneAssets)
+            || resolveRenderConfig(current ? current.mode : 'default').bridge?.sceneAssets;
+        if (!sceneAssets) return '';
+        const raw = String(name || '').trim();
+        if (!raw) return '';
+        const stCtx = getSillyTavernContext(options.global || globalThis);
+        const userName = String(stCtx?.name1 || '').trim();
+        const userChar = String(sceneAssets.userCharacter || '').trim();
+        const isHeroTarget = isUserName(raw, userName) || (Boolean(userChar) && raw === userChar);
+        const seedNames = isHeroTarget
+            ? [...new Set([userChar, raw, userName, '主角'].filter(Boolean))]
+            : [raw];
+        const generatedAssets = options.generatedAssets || null;
+        const chatId = current?.illustrationIdentity?.chatId || '';
+        const lookup = (character) => {
+            let hit = { url: '' };
+            try {
+                hit = resolveReaderSpriteAsset(character, '', {
+                    chatId, sceneAssets, generatedAssets: sceneAssets.generated, imageAvailability: readerSpriteAvailability,
+                    tempSprite: generatedAssets ? generatedAssets.tempSprite : null,
+                    tempSpriteForOutfit: generatedAssets ? generatedAssets.tempSpriteForOutfit : null,
+                });
+            } catch (error) { hit = { url: '' }; }
+            return concreteReaderAssetUrl(hit.url, 'high');
+        };
+        for (const seed of seedNames) {
+            const canonical = canonicalName(sceneAssets, seed);
+            const url = lookup(canonical) || (canonical !== seed ? lookup(seed) : '');
             if (url) return url;
         }
         return '';
@@ -1411,6 +1481,7 @@ export function createIgsReaderHost(options = {}) {
         offCombatGrowth();
         offWaitGamePack();
         offImageJobLog();
+        offLlmCallLog();
         teardownStatusHudSubscription();
         closeReader();
         waitStage.dispose();
@@ -2563,7 +2634,7 @@ export function createIgsReaderHost(options = {}) {
             const host = overlay?.querySelector?.('#igs-status-hud');
             const arrow = host?.querySelector?.('.igs-hud-entry-arrow');
             const menu = host?.querySelector?.('#igs-hud-record-menu');
-            if (!hud?.enabled || (!hud.character && !hud.location && !hud.hero) || settings?.statusHud?.collapsed || !current.toolbarCollapsed
+            if (!hud?.enabled || (!hud.character && !hud.location && !hud.hero && !hud.alwaysShow) || settings?.statusHud?.collapsed || !current.toolbarCollapsed
                 || overlay?.classList?.contains('igs-options-visible') || !host || !menu || host.classList?.contains('igs-hud-collapsed'))
                 return { ok: false, reason: 'record-entry-not-visible' };
             if (normalizedAction === 'toggle-record-menu') {
@@ -2574,9 +2645,9 @@ export function createIgsReaderHost(options = {}) {
                 arrow?.setAttribute('aria-expanded', String(expanded));
                 return { ok: true, expanded };
             }
-            if (normalizedAction === 'map' && !hud.character && !hud.location) return { ok: false, reason: 'record-entry-not-visible' };
+            if (normalizedAction === 'map' && !hud.character && !hud.location && !hud.alwaysShow) return { ok: false, reason: 'record-entry-not-visible' };
             if (normalizedAction === 'favor' && !hud.favorData && !(hud.metrics || []).some(metric => /好感/.test(String(metric?.label || '')))) return { ok: false, reason: 'favor-bar-missing' };
-            if (normalizedAction === 'combat' && !normalizeCombatExpansionSettings(settings?.combatExpansion).enabled) return { ok: false, reason: 'combat-disabled' };
+            if (normalizedAction === 'combat' && !combatBattleOn(settings?.combatExpansion)) return { ok: false, reason: 'combat-disabled' };
             if (anyPanelOpen(current.dom)) return { ok: false, reason: 'panel-open' };
             if (!menu.hasAttribute('hidden')) {
                 menu.setAttribute('hidden', '');
@@ -2661,10 +2732,10 @@ export function createIgsReaderHost(options = {}) {
         if (normalizedAction === 'consistency-cg') {
             return redrawCurrentConsistency();
         }
-        // 工具栏「人物状态」：战斗扩展开启时打开人物状态面板（与资料菜单「人物状态」项同一面板）；已有面板打开时不叠开。
+        // 工具栏「人物状态」：仅在卡牌战斗开启（非纯日常模式）时打开人物状态面板；未开启卡片战斗时不显示、不打开。
         if (normalizedAction === 'combat-status') {
             const current = state.activeReader;
-            if (!normalizeCombatExpansionSettings(current.snapshot?.readerSettings?.combatExpansion).enabled && !current.buildEntry?.()) return { ok: false, reason: 'combat-disabled' };
+            if (!combatBattleOn(current.snapshot?.readerSettings?.combatExpansion)) return { ok: false, reason: 'combat-disabled' };
             if (anyPanelOpen(current.dom)) return { ok: false, reason: 'panel-open' };
             const overlay = current.dom?.overlay;
             if (!overlay || !current.dom?.combatDeckController) return { ok: false, reason: 'combat-entry-missing' };
@@ -3688,9 +3759,17 @@ ${row.key}`;
         const posterKey = poster.kind === 'char' ? poster.key : poster.kind === 'user' ? FORUM_USER_KEY : '';
         const nameMap = forumNameMap(thread);
         const forumRowsIn = nameMap.size ? log.rows.map((row) => (nameMap.has(row.key) ? { ...row, key: nameMap.get(row.key) } : row)) : log.rows;
+        const rawReplies = forumRepliesOf(floor.source);
+        const ankeRaw = settings.anke === 'off' ? null : forumAnkeOf(floor.source);
+        // 数值规则是 CoC 时，AI 误写成「判定|问题|对象|技能|数值」也按 CoC 检定算；锁仍按原标签记，已掷过的楼不丢结果。
+        let cocOn = false;
+        try { cocOn = ankeRaw && ankeRaw.kind === 'check' && ankeRaw.abilityText && typeof options.statsIsCoc === 'function' && !!options.statsIsCoc(); } catch (_) { cocOn = false; }
+        const ankeFound = cocOn ? { kind: 'coc', question: ankeRaw.question, options: [], actor: ankeRaw.actor, skill: ankeRaw.abilityText, value: ankeRaw.line, level: '普通', code: '' } : ankeRaw;
         if (idle && thread) {
             const order = [...new Set(forumRowsIn.map((row) => (row.key && row.key === floor.userKey ? FORUM_USER_KEY : row.key)).filter(Boolean))];
-            const bodyText = forumRowsIn.map((row) => String(row.text || '')).join(' ');
+            // 只在安科或 AI 回帖里点到名的人也要有代号，否则替换时没有对照、真名原样露出。
+            const ankeText = ankeFound ? [ankeFound.question, ankeFound.actor, ...(ankeFound.options || [])].join(' ') : '';
+            const bodyText = [...forumRowsIn.map((row) => String(row.text || '')), ankeText, ...rawReplies.map((r) => `${r.text || ''} ${r.cite || ''}`)].join(' ');
             for (const key of Object.keys(assets.characters || {})) {
                 if (key && !nameMap.has(key) && !order.includes(key) && [key, ...(assets.characterAliases && Array.isArray(assets.characterAliases[key]) ? assets.characterAliases[key] : []), ...((thread.names || {})[key] || [])].some((n) => n && bodyText.includes(n))) order.push(key);
             }
@@ -3731,10 +3810,11 @@ ${row.key}`;
         const firstPage = (floor.pages[0] && floor.pages[0].sceneStateForBg) || floor.inheritedSceneState || {};
         const sendDate = Array.isArray(ctx.chat) && ctx.chat[messageId] ? ctx.chat[messageId].send_date : '';
         const poId = (thread && thread.poId) || forumPoId(chatId, threadId);
-        const aiReplies = forumRepliesOf(floor.source);
+        const aiReplies = forumRepliesNamed(rawReplies, namePairs);
         const images = forumImagesOf(rows, (row) => forumImagePick(current, floor, rs, row.index, messageId), `${chatId}:${messageId}`);
-        const prevReplies = aiReplies.some((r) => r.prev) ? forumPrevRepliesOf(ctx.chat, messageId) : [];
-        const plan = forumPlan(rows, { chatId, messageId, settings: rs.forumReader, poId, threadId, aiReplies, sceneTime: firstPage.time || '', sendDate, images, posterKind: poster.kind, threadStart: marks.start, prevReplies });
+        const prevReplies = aiReplies.some((r) => r.prev) ? forumRepliesNamed(forumPrevRepliesOf(ctx.chat, messageId), namePairs) : [];
+        const reserve = ankeFound && ankeFound.kind !== 'pick' ? 1 + (ankeFound.kind === 'anchor' || ankeFound.kind === 'collect' ? ankeFound.options.length : 0) : 0;
+        const plan = forumPlan(rows, { chatId, messageId, settings: rs.forumReader, poId, threadId, aiReplies, sceneTime: firstPage.time || '', sendDate, images, posterKind: poster.kind, threadStart: marks.start, prevReplies, reserve });
         const tailSig = (id) => `${(ctx.chat && ctx.chat[id] && String(ctx.chat[id].mes || '').length) || 0}:${settings.replies}:${settings.perPost}:${settings.posterText}`;
         if (idle) {
             const mine = { sig: tailSig(messageId), replies: forumTailOf(plan, 3) };
@@ -3794,14 +3874,58 @@ ${row.key}`;
                 groups: groups.length ? groups : [[]],
             };
         };
-        // 安价楼：楼号接在本楼最后一条之后；安科关闭时不显示。
+        // 安科楼：旧四选一接在本楼最后一条之后；新四种形式排在最后一个主楼与它的 AI 回帖之间（楼号已在 forumPlan 里占好）。
+        const ankeHeroNames = [floor.userName, ctx.name1].filter(Boolean);
+        const ankeBonus = (actor, key) => {
+            if (!key || typeof options.statsAbilities !== 'function') return null;
+            const text = String(actor || '').trim();
+            let name = '';
+            if (text === '楼主') name = poster.kind === 'char' ? poster.key : poster.kind === 'user' ? ctx.name1 || '主角' : '';
+            else if (/^\{\{\s*user\s*\}\}$/i.test(text) || text === '我' || text === '主角' || ankeHeroNames.includes(text)) name = ctx.name1 || '主角';
+            else name = known(text) || text;
+            if (!name) return null;
+            let abilities = null;
+            try { abilities = options.statsAbilities(name); } catch (_) { abilities = null; }
+            const bonus = d20Bonus(abilities, key);
+            return bonus === null ? null : Math.round(bonus) * 5;
+        };
+        // 检定对象是主角/楼主(玩家)/{{user}} 且 coc7 有调查员档时，技能值取档里的生效值，否则沿用标签里的值。
+        const ankeCocValue = (actor, skill, fallback) => {
+            if (typeof options.statsCocSkill !== 'function') return fallback;
+            const text = String(actor || '').trim();
+            const isHero = text === '楼主' ? poster.kind === 'user' : (/^\{\{\s*user\s*\}\}$/i.test(text) || text === '我' || text === '主角' || ankeHeroNames.includes(text));
+            if (!isHero) return fallback;
+            let v = null;
+            try { v = options.statsCocSkill(skill); } catch (_) { v = null; }
+            return Number.isFinite(v) && v > 0 ? v : fallback;
+        };
         const anke = (() => {
-            const found = settings.anke === 'off' ? null : forumAnkeOf(floor.source);
-            if (!found || !plan.length) return null;
-            const items = plan.flatMap((p) => [p, ...(p.replies || [])]);
-            const lastItem = items[items.length - 1];
-            const maxK = Math.max(...items.map((p) => p.k));
-            return { ...found, key: `${chatId}:${messageId}`, id: poId, no: forumNo(chatId, messageId, maxK + 1), time: lastItem.time || '' };
+            if (!ankeFound || !plan.length) return null;
+            const key = forumAnkeLockKey(chatId, messageId, ankeRaw);
+            const lock = ankeStore.get(key);
+            const readonly = Array.isArray(ctx.chat) && ctx.chat.slice(messageId + 1).some((m) => m && m.is_user);
+            const flat = plan.flatMap((p) => [p, ...(p.replies || [])]);
+            const lastItem = flat[flat.length - 1];
+            if (ankeFound.kind === 'pick') return { ...ankeFound, key, id: poId, no: forumNo(chatId, messageId, Math.max(...flat.map((p) => p.k)) + 1), time: lastItem.time || '', lock, readonly };
+            const lastPost = plan[plan.length - 1];
+            const slots = lastPost.reserved || [];
+            if (!slots.length) return null;
+            const aiReplies2 = flat.filter((p) => p.text && p.po !== true && p.id !== poId);
+            const passers = [...new Set([...aiReplies2.map((p) => p.id), ...slots.slice(1).map((r) => r.id)])];
+            const nextK = lastPost.nextK || slots[slots.length - 1].k + 1;
+            const count = ankeFound.options.length;
+            return {
+                ...ankeFound, key, id: poId, no: slots[0].no, time: slots[0].time, lock, readonly,
+                floors: slots.slice(1).map((r, i) => ({ no: r.no, id: r.id, time: r.time, text: ankeFound.options[i] })),
+                actorLabel: ankeFound.actor === '楼主' && poster.kind === 'char' ? poster.key : ankeFound.actor,
+                bonus: ankeFound.kind === 'check' ? ankeBonus(ankeFound.actor, ankeFound.ability) : null,
+                ...(ankeFound.kind === 'coc' ? { value: ankeCocValue(ankeFound.actor, ankeFound.skill, ankeFound.value) } : {}),
+                visible: ankeFound.kind === 'vote' ? ankeVisibleVotes(count, aiReplies2.map((p) => p.text)) : [],
+                voters: ankeFound.kind === 'vote' ? aiReplies2.map((p) => ({ id: p.id, n: ankeVoteOf(p.text, count) })).filter((v) => v.n) : [],
+                passers: passers.length ? passers : [0, 1, 2, 3, 4, 5].map((i) => forumPasserId(chatId, i, threadId)),
+                aiTexts: aiReplies2.map((p) => p.text),
+                reactSlots: Array.from({ length: 5 }, (_, j) => ({ no: forumNo(chatId, messageId, nextK + j), time: forumMinutesAfter(lastItem.time || '', j + 1) })),
+            };
         })();
         const onAnke = async (text, replace) => {
             if (state.activeReader !== current) return { ok: false, reason: 'reader-not-open' };
@@ -3818,9 +3942,12 @@ ${row.key}`;
             return { ok: true };
         };
         return syncForumReader(overlay, {
-            anke, onAnke,
+            anke, onAnke, ankeBonus, ankeNamed: (text, other) => replaceNames(text, other ? namePairs.map(([from, to]) => [from, to === '我' ? '楼主' : to]) : namePairs),
+            ankeNameSig: JSON.stringify(namePairs),
+            onAnkeLock: (key, value) => ankeStore.put(key, value),
+            ankeLockOf: (key) => ankeStore.get(key),
             floorKey: log.key,
-            sig: JSON.stringify([anke, rs.dialogSkin, settings.stickers && settings.stickers.disabled, settings.stickers && settings.stickers.set, settings.stickers && settings.stickers.overrides, rs.myPhone, rs.chatShow, threadAlias, thread && thread.names, thread && thread.titles, marks.start, marks.retitle, data.board, poster, settings.mood, settings.quote, aiReplies, prevReplies, chainTail, settings.othersThoughts, settings.perPost, settings.replies, poId, settings.foldNsfw, [...images].map(([i, img]) => `${i}:${img.url}`)]),
+            sig: JSON.stringify([anke && { ...anke, lock: null }, rs.dialogSkin, settings.stickers && settings.stickers.disabled, settings.stickers && settings.stickers.set, settings.stickers && settings.stickers.overrides, rs.myPhone, rs.chatShow, threadAlias, thread && thread.names, thread && thread.titles, marks.start, marks.retitle, data.board, poster, settings.mood, settings.quote, aiReplies, prevReplies, chainTail, settings.othersThoughts, settings.perPost, settings.replies, poId, settings.foldNsfw, [...images].map(([i, img]) => `${i}:${img.url}`)]),
             rows, plan, chainTail, pendingAlias, onAlias, images, shotOf,
             board: forumBoardOf(data, worldview),
             threadNo: (() => { const froms = thread ? (data.timeline || []).filter((e) => e.thread === thread.id).map((e) => Number(e.from)).filter(Number.isFinite) : []; return froms.length ? forumNo(chatId, Math.min(...froms), 0) : (plan[0] ? plan[0].no : ''); })(),
@@ -4853,24 +4980,28 @@ ${row.key}`;
     function buildReaderSnapshot(payload, mode, readerSettings, index = 0) {
         const scene = payload.scene || (payload.render && payload.render.scene) || {};
         const buildStatusHudForSnapshot = (settings, speaker, emotion, sceneInfo, isNarration, outfitFor, spriteAvatar) => {
-            const statusHud = normalizeStatusHudSettings(settings && settings.statusHud);
+            const rawStatusHud = normalizeStatusHudSettings(settings && settings.statusHud);
+            // 数值系统接管时，已登记角色的 HUD 条以 IGS 为准（易错点 H3）；只要开启数值系统，现有状态栏就在左上角常驻显示。
+            const tavernLookup = typeof options.statsLookup === 'function' ? options.statsLookup() : null;
+            const statsSystemOn = Boolean((typeof options.isStatsEnabled === 'function' && options.isStatsEnabled()) || tavernLookup);
+            const statusHud = statsSystemOn ? { ...rawStatusHud, enabled: true } : rawStatusHud;
             if (!statusHud.enabled) return buildStatusHudModel({ settings: statusHud, character: '', emotion: '', location: '' });
             const sceneAssets = (settings && settings._sceneAssets) || {};
             const usesTables = statusHudUsesTables(statusHud);
             const readResult = usesTables ? readStatusHudTables() : null;
             const info = sceneInfo && typeof sceneInfo === 'object' ? sceneInfo : {};
             const hud = buildStatusHudModel({ settings: statusHud, sceneAssets, character: speaker, emotion, location: info.location, time: info.time, weather: info.weather, isNarration, readResult, outfitFor, spriteAvatar, parsedTables: usesTables ? tableData.parsed() : [], rowFor: tableData.rowFor });
-            // 数值系统接管时，已登记角色的 HUD 条以 IGS 为准（易错点 H3）。
-            const tavernLookup = typeof options.statsLookup === 'function' ? options.statsLookup() : null;
-            // 主角说话时显示主角条（生命、体力、压力、金钱），其余角色读好感等人际数值；旁白页不加主角区。
+            // 开启数值系统时状态栏常驻显示主角区（生命、体力、压力、金钱）；说话人是主角时只显示一块不重复，其余角色叠加好感等人际数值。
             const protagonistLookup = tavernLookup && typeof options.statsProtagonistLookup === 'function' ? options.statsProtagonistLookup() : null;
             const statsLookup = protagonistLookup ? (name) => protagonistLookup(name) || tavernLookup(name) : tavernLookup;
+            const heroBlock = tavernLookup && typeof options.statsProtagonistBlock === 'function' ? options.statsProtagonistBlock() : null;
             const userName = String((getSillyTavernContext(options.global || globalThis) || {}).name1 || '');
             // 「设为User立绘」的角色名常与酒馆用户名不同，也按主角处理。
             const userCharacter = String(sceneAssets.userCharacter || '').trim();
             const asHero = Boolean(userCharacter) && (speaker === userCharacter || hud.character === userCharacter);
             const heroSpeaker = asHero ? PROTAGONIST : speaker;
-            const composed = withConcreteAvatar(dropUserFavor(composeStatsHud(hud, { lookup: statsLookup, speaker: heroSpeaker }), heroSpeaker, userName));
+            const composed = withConcreteAvatar(dropUserFavor(composeStatsHud(hud, { lookup: statsLookup, heroLookup: protagonistLookup, heroBlock, speaker: heroSpeaker }), heroSpeaker, userName));
+            if (composed && statsSystemOn) composed.alwaysShow = true;
             // 好感总览数据信号：数值系统有已登记角色，或状态栏已选到读取表；旁白页、只有主角条的页面据此也显示入口。
             let favorData = false;
             try {
@@ -5754,6 +5885,10 @@ ${row.key}`;
             statsProtagonistLookup: () => (typeof options.statsProtagonistLookup === 'function' ? options.statsProtagonistLookup() : null),
             statsFavorOverview: () => (typeof options.statsFavorOverview === 'function' ? options.statsFavorOverview() : null),
             statsGenerate: (name) => (typeof options.statsOp === 'function' ? options.statsOp('generate', '', name) : null),
+            statsAssignHero: () => (typeof options.statsOp === 'function' ? options.statsOp('hero', 'assign', '', { overwrite: false }) : null),
+            resolvePersonPortrait: (name) => resolveRecordPersonPortrait(name),
+            subscribePortraits: (handler) => (typeof options.onGeneratedAssetUpdated === 'function'
+                ? options.onGeneratedAssetUpdated((detail) => { if (detail && (detail.reason === 'image-loaded' || detail.reason === 'image-lost' || detail.reason === 'combat-prewarm')) handler(detail); }) : null),
             // 背包「使用」（P7c）：有装配定义的回复道具走场外使用；返回 draft 时照旧填草稿。
             useInventoryItem: typeof options.useCombatInventoryItem === 'function' ? (name) => options.useCombatInventoryItem(name) : null,
             // 背包分组、已装备标记与装备映射（P7e）：战斗开启时读主角背包投影；装上 / 卸下走现有换装服务。
@@ -5886,7 +6021,7 @@ ${row.key}`;
             inscribeRelic: typeof options.inscribeCombatRelic === 'function' ? (opts) => options.inscribeCombatRelic(opts) : null,
             setGear: typeof options.setCombatGear === 'function' ? (id, gearId, equip, slotIndex) => options.setCombatGear(id, gearId, equip, slotIndex) : null,
             // 手动建档（P8c）：本聊天建档方式为「手动」时，加点页给尚无建档记录的角色逐项加点，确认后写属性表 init。
-            writeManualInit: typeof options.writeCombatManualInit === 'function' ? (name, raw) => options.writeCombatManualInit(name, raw) : null,
+            writeManualInit: typeof options.writeCombatManualInit === 'function' ? (name, raw, guard) => options.writeCombatManualInit(name, raw, guard) : null,
             buildMode: () => (typeof options.statsBuildMode === 'function' ? options.statsBuildMode() : null),
             // 待建档名单与只开数值系统时的入口（P8c）。
             buildEntry: () => (typeof options.statsBuildEntry === 'function' ? options.statsBuildEntry() === true : false),
@@ -5916,6 +6051,11 @@ ${row.key}`;
             getTheme: () => readSettingsTheme(),
             setTheme: (settingsTheme) => saveBridgePatch({ settingsTheme }),
         });
+        const heroManualModal = createHeroManualModal(doc, {
+            onSubmit: (payload) => (typeof options.statsOp === 'function'
+                ? Promise.resolve(options.statsOp('hero', 'manual-init', '', payload)).finally(() => statsChip.sync())
+                : Promise.resolve({ ok: false, reason: 'stats-runtime-missing' })),
+        });
         const domState = {
             root,
             doc,
@@ -5925,6 +6065,7 @@ ${row.key}`;
             combatController,
             combatDeckController,
             originPageController,
+            heroManualModal,
             embeddedMount,
             dispose() {
                 if (typeof doc.removeEventListener === 'function') {
@@ -5938,6 +6079,7 @@ ${row.key}`;
                 combatController.dispose();
                 combatDeckController.dispose();
                 originPageController.dispose();
+                heroManualModal.close();
                 dbController.close();
                 teardownEmbeddedMount(domState.embeddedMount);
                 domState.embeddedMount = null;
@@ -6630,11 +6772,27 @@ ${row.key}`;
         const overlay = current && current.dom && current.dom.overlay;
         const service = options.generatedAssets;
         if (!service) return;
+        // 论坛体屏蔽生图：不入库剧情衣装，也不弹待确认素材（留着的项取消屏蔽后照常问）。
+        if (forumBlocksImages(snapshot && snapshot.readerSettings)) {
+            const hidden = current && current.dom && current.dom.overlay && current.dom.overlay.querySelector && current.dom.overlay.querySelector('#igs-asset-review');
+            if (hidden) hidden.setAttribute('hidden', '');
+            return;
+        }
         const context = storyOutfitContext();
         if (current.streamPhase !== 'streaming' && storyOutfits && context && snapshot.readerSettings?._sceneAssets?.enabled) {
-            const assets = effectiveSceneAssets(context.root, context.scopeKey);
-            const observed = storyOutfits.observe(extractSceneDirectives(context.text, { outfitResolver: createOutfitResolver(assets) }).directives, context);
-            if (observed.ok) void storyOutfits.autoGenerate(context);
+            const prepared = typeof storyOutfits.prepareFloorDirectives === 'function'
+                ? storyOutfits.prepareFloorDirectives(context)
+                : {
+                    context,
+                    directives: extractSceneDirectives(
+                        visibleDirectiveSource(context.text, snapshot.readerSettings?._sourceFilter),
+                        { outfitResolver: createOutfitResolver(effectiveSceneAssets(context.root, context.scopeKey)) },
+                    ).directives,
+                };
+            if (prepared.context) {
+                const observed = storyOutfits.observe(prepared.directives, prepared.context);
+                if (observed.ok) void storyOutfits.autoGenerate(prepared.context);
+            }
         }
         if (!overlay || !overlay.querySelector) return;
         let container = overlay.querySelector('#igs-asset-review');
@@ -7028,7 +7186,7 @@ ${row.key}`;
         const worldview = resolveWorldview(sceneAssets);
         setCharacterNameFallback(!sceneAssets || sceneAssets.nameFallback !== false);
         readerSettings.dialogSkin = effectiveDialogSkin(readerSettings.dialogSkin, sceneAssets);
-        Object.assign(readerSettings, applyFxWorldview(readerSettings, worldview, { carryPhone: Boolean(sceneAssets && sceneAssets.carryPhone === true) }));
+        Object.assign(readerSettings, applyForumFxBlock(applyFxWorldview(readerSettings, worldview, { carryPhone: Boolean(sceneAssets && sceneAssets.carryPhone === true) })));
         // 演出与聊天层据此换皮：_ancientEra 保留给既有古风分支，_worldview 供西幻 / 科幻 / 末日换皮。
         readerSettings._ancientEra = worldview === 'ancient';
         // 随身手机：线上聊天换回手机样式（chat-layer 读这个标记）。

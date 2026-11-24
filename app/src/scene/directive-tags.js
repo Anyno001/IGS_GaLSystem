@@ -94,6 +94,13 @@ export function hasIgsDirectiveTags(text) {
     return IGS_DIRECTIVE_START_RE.test(String(text || ''));
 }
 
+// 任意可见 IGS 格式标签（含场景、角色、心理、插图、演出、战斗、挑战、CG、聊天、数值、检定、恐怖、论坛、表情包）。
+const ANY_IGS_FORMAT_TAG_RE = /(?:[\[［【]\s*igs\s*-?\s*(?:(?:scene|char|thought|img|fx|combat|challenge|cg|chat(?:-time)?|msg|stat|check|dread|forum|reply|anke|sticker)\s*[:：]|chat-end\s*[\]］】])|<\s*igs-combat\s*>)/i;
+
+export function hasAnyIgsFormatTag(text) {
+    return ANY_IGS_FORMAT_TAG_RE.test(String(text || ''));
+}
+
 // AI 偶尔把指令写走样：全角括号 / 冒号 / 竖线（【igs-char：名｜表情｜台词】）、括号和字段两边带空格、大写 IGS-CHAR、
 // 漏掉连字符（igschar、igsfx）。统一成 [igs-名:a|b|c]，后面的分段、正文格式化和指令提取都只认这一种。
 // 横杠可有可无：紧跟已登记指令名+冒号，正文误伤概率极低。半角 "[" 开头的只认 "]" 收口，
@@ -103,11 +110,35 @@ const LOOSE_DIRECTIVE_RE = new RegExp(
     'gi',
 );
 
+// 半角 "[" 开头却用「】」收口（[igs-char:名|表情|台词】）：没有 "]" 时，取第一个不成对的「】/］」当结尾，台词里成对的【门】照旧保留。
+function unpairedWideCloseAt(body) {
+    let depth = 0;
+    for (let i = 0; i < body.length; i++) {
+        const ch = body[i];
+        if (ch === '【' || ch === '［') depth++;
+        else if (ch === '】' || ch === '］') {
+            if (!depth) return i;
+            depth--;
+        }
+    }
+    return -1;
+}
+
 export function canonicalizeIgsDirectives(text) {
     return normalizeClosedIgsDialogueLines(text).replace(LOOSE_DIRECTIVE_RE, (all, name, body, close, wideName, wideBody, wideClose) => {
-        const inner = String(name ? body : wideBody);
+        let inner = String(name ? body : wideBody);
+        let closed = name ? close : wideClose;
+        let tail = '';
+        if (name && !closed) {
+            const at = unpairedWideCloseAt(inner);
+            if (at >= 0) {
+                tail = canonicalizeIgsDirectives(inner.slice(at + 1));
+                inner = inner.slice(0, at);
+                closed = ']';
+            }
+        }
         const fields = (inner.includes('|') ? inner : inner.replace(/｜/g, '|')).split('|').map((field) => field.trim());
-        return `[igs-${String(name || wideName).toLowerCase()}:${fields.join('|')}${(name ? close : wideClose) ? ']' : ''}`;
+        return `[igs-${String(name || wideName).toLowerCase()}:${fields.join('|')}${closed ? ']' : ''}${tail}`;
     });
 }
 

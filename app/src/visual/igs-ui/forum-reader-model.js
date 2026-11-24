@@ -1,4 +1,5 @@
 import { storyClock } from './phone-sense.js';
+import { abilityKeyOf } from '../../combat/abilities.js';
 import { feedStableCount } from '../../scene/feed-platforms.js';
 import { FORUM_BOARDS, FORUM_BOARD_DEFAULT, FORUM_IMAGE_REF_LINES, FORUM_KAOMOJI, FORUM_KAOMOJI_ONLY_RATE, FORUM_KAOMOJI_TAIL_RATE, FORUM_LINES } from './forum-reader-lines.js';
 import { normalizeForumReaderSettings } from './forum-reader-settings.js';
@@ -109,6 +110,38 @@ function cleanPo(value) {
 
 const wholeFrom = (value) => Math.max(0, Math.round(Number(value) || 0));
 
+// 同一线程里，names[主名] 列出的别名若又作为独立条目出现（代号、手动标记、已询问、别的主名、楼主），并入主名。
+export function mergeThreadNames(thread) {
+    const { alias, names, manual } = thread;
+    const asked = manual.asked;
+    for (const main of Object.keys(names)) {
+        if (!names[main]) continue;
+        for (const a of [...names[main]]) {
+            if (a === main) continue;
+            if (names[a]) {
+                names[main] = [...new Set([...names[main], ...names[a]])].filter((n) => n !== main).slice(0, 8);
+                delete names[a];
+            }
+            if (Object.hasOwn(alias, a)) {
+                if (!alias[main]) { alias[main] = alias[a]; if (manual.alias[a]) manual.alias[main] = manual.alias[a]; }
+                delete alias[a];
+            }
+            if (asked[a] && !asked[main]) asked[main] = asked[a];
+            delete manual.alias[a];
+            delete asked[a];
+            if (thread.po && thread.po.kind === 'char' && thread.po.key === a) thread.po = { kind: 'char', key: main };
+        }
+    }
+    return thread;
+}
+
+// 名字归到所在线程里的主名（names 反查）；不是别名就原样返回。
+export function threadMainName(thread, name) {
+    if (!thread || !thread.names || Object.hasOwn(thread.names, name)) return name;
+    for (const [main, list] of Object.entries(thread.names)) if (list.includes(name)) return main;
+    return name;
+}
+
 export function cleanThread(value) {
     const src = plain(value);
     const alias = {};
@@ -128,7 +161,7 @@ export function cleanThread(value) {
         .map((t) => ({ from: wholeFrom(plain(t).from), title: String(plain(t).title || '').trim().slice(0, 80), ...(plain(t).fb === true ? { fb: true } : {}) }))
         .filter((t) => t.title)
         .sort((x, y) => x.from - y.from);
-    return {
+    return mergeThreadNames({
         id: String(src.id || ''),
         po: cleanPo(src.po),
         poId: String(src.poId || '').slice(0, 8),
@@ -137,7 +170,7 @@ export function cleanThread(value) {
         names,
         seq: Math.max(0, Math.round(Number(src.seq) || 0)),
         manual: { title: manual.title === true, alias: { ...plain(manual.alias) }, asked: { ...plain(manual.asked) } },
-    };
+    });
 }
 
 function cleanTailItem(value) {
@@ -145,7 +178,7 @@ function cleanTailItem(value) {
     if (!r.no || !r.id) return null;
     return {
         k: wholeFrom(r.k), no: String(r.no).slice(0, 16), id: String(r.id).slice(0, 12), po: r.po === true, time: String(r.time || '').slice(0, 8),
-        text: String(r.text || '').slice(0, 600), quote: String(r.quote || '').slice(0, 80), ref: wholeFrom(r.ref),
+        text: String(r.text || ''), quote: String(r.quote || '').slice(0, 80), ref: wholeFrom(r.ref),
     };
 }
 
@@ -245,15 +278,56 @@ export function forumRepliesOf(source) {
     return out;
 }
 
-// 安价标签 [igs-anke:问题|选项1|选项2|…]：取本楼最后一条，至少 2 个选项，最多 8 个；返回 { question, options } 或 null。
+const ANKE_KINDS = { 多数决: 'vote', 投票: 'vote', 安价: 'anchor', 征集: 'collect', 判定: 'check', 检定: 'coc' };
+const COC_LEVELS = ['普通', '困难', '极难'];
+const ANKE_CHECK_LINE = 50;
+
+// 安科标签 [igs-anke:形式|问题|…]：取本楼最后一条。形式 多数决（投票）/ 安价 / 征集 / 判定；第一格不是形式名按旧格式 [igs-anke:问题|选项…]（kind='pick'）。
+// 选项 2–8 个；判定 [igs-anke:判定|问题|对象|属性|成功线]：1–99 的数字是成功线，第一个非数字是对象，第二个非数字解析成属性键。
+// 检定（CoC，剧情注入器跑团模式写）[igs-anke:检定|问题|对象|技能|技能值|难度|编号]：1D100 ≤ 技能值（困难 1/2、极难 1/5）为过；编号原样带回结果行。
 export function forumAnkeOf(source) {
     let found = null;
     for (const m of String(source || '').matchAll(new RegExp(`[\\[【［]\\s*igs\\s*-?\\s*anke\\s*[:：](${REPLY_BODY_SOURCE})[\\]】］]`, 'gi'))) {
         const fields = m[1].split(/[|｜]/).map((f) => f.trim()).filter(Boolean);
-        if (fields.length < 3) continue;
-        found = { question: fields[0].slice(0, 80), options: fields.slice(1, 9).map((o) => o.slice(0, 120)) };
+        const kind = ANKE_KINDS[fields[0]];
+        if (!kind) {
+            if (fields.length < 3) continue;
+            found = { kind: 'pick', question: fields[0], options: fields.slice(1, 9) };
+            continue;
+        }
+        const rest = fields.slice(1);
+        if (!rest.length) continue;
+        if (kind === 'coc') {
+            const [actor, skill, value, level, code] = rest.slice(1);
+            const v = Number(value);
+            if (!skill || !(v >= 1 && v <= 99)) continue;
+            found = { kind, question: rest[0], options: [], actor: (actor || '楼主').slice(0, 20), skill: skill.slice(0, 12), value: Math.round(v), level: COC_LEVELS.includes(level) ? level : '普通', code: /^#?[A-Za-z][\w-]{0,40}$/.test(code || '') ? code.replace(/^#/, '') : '' };
+            continue;
+        }
+        if (kind === 'check') {
+            const extra = rest.slice(1);
+            const num = extra.find((f) => /^\d{1,2}$/.test(f) && Number(f) >= 1);
+            const words = extra.filter((f) => !/^\d+$/.test(f));
+            found = { kind, question: rest[0], options: [], actor: (words[0] || '楼主').slice(0, 20), ability: abilityKeyOf(words[1]) || null, abilityText: (words[1] || '').slice(0, 12), line: num ? Number(num) : ANKE_CHECK_LINE };
+            continue;
+        }
+        if (rest.length < 3) continue;
+        found = { kind, question: rest[0], options: rest.slice(1, 9) };
     }
     return found;
+}
+
+// 一个安科的锁键：同一楼里内容不同（swipe 重写）就是新安科。
+export function forumAnkeLockKey(chatId, messageId, anke) {
+    const base = [anke.kind, anke.question, anke.options, anke.actor, anke.ability, anke.line];
+    return `${chatId}:${messageId}:${forumHash(JSON.stringify(anke.kind === 'coc' ? [...base, anke.skill, anke.value, anke.level, anke.code] : base))}`;
+}
+
+export function forumMinutesAfter(time, minutes) {
+    const m = String(time || '').match(/^(\d{2}):(\d{2})$/);
+    if (!m) return '';
+    const total = (Number(m[1]) * 60 + Number(m[2]) + minutes) % (24 * 60);
+    return `${pad(Math.floor(total / 60))}:${pad(total % 60)}`;
 }
 
 // 上一轮 AI 回帖：从当前楼往前找最近一个有 [igs-reply] 的 AI 楼。chat 为酒馆聊天数组。
@@ -403,7 +477,7 @@ export function applyFloorTags(data, messageId, tags, opts = {}) {
         for (const [name, code] of tag.alias) {
             const key = keyOfName(name);
             if (!key && /^\{\{\s*user\s*\}\}$/i.test(name)) { dropped.push(name); continue; }
-            const aliasKey = key || name;
+            const aliasKey = threadMainName(thread, key || name);
             if (thread.manual.alias[aliasKey]) continue;
             thread.alias[aliasKey] = code.slice(0, 24);
         }
@@ -500,6 +574,13 @@ export function forumNamePairs(ctx) {
     return pairs;
 }
 
+// AI 回帖里的真名换成代号：楼主自己的回帖里楼主名换「我」，路人回帖里换「楼主」；
+// 引用的正文片段按正文的换法（楼主名换「我」），才能和改写后的正文对上。
+export function forumRepliesNamed(replies, pairs) {
+    const asPasser = pairs.map(([from, to]) => [from, to === '我' ? '楼主' : to]);
+    return replies.map((r) => ({ ...r, text: replaceNames(r.text, r.who === '楼主' ? pairs : asPasser), cite: replaceNames(r.cite, pairs) }));
+}
+
 export function forumRowsOf(rows, ctx) {
     const { poster, alias = {}, userKey = '', userNames = [], namesOf: baseNamesOf = () => [], extraNames = {}, settings } = ctx;
     const namesOf = (key) => [...baseNamesOf(key), ...(extraNames[key] || [])];
@@ -578,7 +659,7 @@ export function forumFileName(seed) {
 // 楼层计划：把行分成若干 PO 主楼（超过 perPost 行或换场景另起一楼），每楼之后排 0–2 条点缀回帖。
 // 返回 posts[]：{ start, end, k, no, id, time, replies:[{ k, no, id, time, text, quote, ref }] }。纯函数，同输入同输出。
 export function forumPlan(rows, ctx) {
-    const { chatId = '', messageId = 0, settings, poId = '', threadId = '', sceneTime = '', sendDate = '', aiReplies = [], images = null, posterKind = '', threadStart = false, prevReplies = [] } = ctx;
+    const { chatId = '', messageId = 0, settings, poId = '', threadId = '', sceneTime = '', sendDate = '', aiReplies = [], images = null, posterKind = '', threadStart = false, prevReplies = [], reserve = 0 } = ctx;
     const st = normalizeForumReaderSettings(settings);
     const seedBase = `${chatId}:${messageId}`;
     const shown = rows.map((row, i) => ({ row, i })).filter(({ row }) => !row.hidden);
@@ -645,6 +726,13 @@ export function forumPlan(rows, ctx) {
         const text = rows.slice(post.start, post.end + 1).filter((r) => !r.hidden).map((r) => r.text).filter(Boolean);
         const tail = text.length ? text[text.length - 1] : '';
         const out = { start: post.start, end: post.end, k: own, no: forumNo(chatId, messageId, own), id: poId, time: clock(own), replies: [] };
+        // 安科楼与候选楼排在本楼最后一个主楼之后、AI 回帖之前：先把楼号占住，回帖的楼号顺延。
+        if (reserve > 0 && n === last) {
+            out.reserved = Array.from({ length: reserve }, (_, r) => ({
+                k: k + r, no: forumNo(chatId, messageId, k + r), id: r === 0 ? poId : forumPasserId(chatId, forumHash(`${seedBase}:p${k + r}`), threadId), time: forumMinutesAfter(out.time, r + 1),
+            }));
+            k += reserve;
+        }
         if (written.length) {
             for (const slot of slotsAt[n]) {
                 const no = forumNo(chatId, messageId, k);
@@ -663,7 +751,7 @@ export function forumPlan(rows, ctx) {
             return out;
         }
         const count = perGap[1] === 0 ? 0 : feedStableCount(`${seedBase}:r${n}`, perGap[0], perGap[1]);
-        for (let r = 0; r < count && k < BUILTIN_SLOTS; r++) {
+        for (let r = 0; r < count && k - reserve < BUILTIN_SLOTS; r++) {
             if (post.image) {
                 const own = posterKind === 'witness' ? FORUM_LINES.imageWitness : posterKind === 'char' ? FORUM_LINES.imageSelf : [];
                 const pool = [...FORUM_LINES.image, ...own].filter((line) => !used.has(line));
@@ -690,6 +778,7 @@ export function forumPlan(rows, ctx) {
         const target = item.to > 0 && item.to !== j + 1 ? made[item.to - 1] : null;
         if (target && made[j]) made[j].ref = target.no;
     });
+    if (result.length) result[result.length - 1].nextK = k;
     return result;
 }
 

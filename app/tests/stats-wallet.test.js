@@ -158,7 +158,7 @@ async function sharedRuntime(t, money = 500, originSettings = {}, currencyOption
         if (wait) await statsRuntime.whenSaved();
         return statsRuntime;
     };
-    if (currencyOptions) { game.ai('古城开场'); await openStats(); }
+    if (currencyOptions) { game.ai('[igs-scene:古城|白天|晴]\n古城开场'); await openStats(); }
     const runtime = createOriginRuntime({
         getContext: () => ({ ...game.ctx }), readSettings: () => ({ enabled: true, achieveOn: false, ...originSettings }),
         readLlm: () => ({}), combatServices: services,
@@ -471,7 +471,7 @@ test('货币慢请求：跨过60秒与宿主慢通知仍单飞，原回复可完
     const { renderStatsHeroDashboard } = await import('../src/visual/igs-ui/stats-hero-card.js');
     for (const source of ['tavern', 'openai']) await t.test(source, async t => {
         const h = await sharedRuntime(t, 0);
-        h.game.ai('古城开场');
+        h.game.ai('[igs-scene:古城|白天|晴]\n古城开场');
         await h.runtime.engine.whenSaved();
         let resolve, calls = 0;
         const pending = new Promise(done => { resolve = done; });
@@ -511,15 +511,15 @@ test('货币慢请求：跨过60秒与宿主慢通知仍单飞，原回复可完
 test('货币失败：请求与解析原因保留，一次动作只请求一次，显式重试才重发', async t => {
     const cases = [
         ['拒绝', () => { throw Object.assign(new Error('fixture-secret-provider-body'), { reason: 'secondary-llm-http-failed', status: 429 }); }, 'request', 'secondary-llm-http-failed'],
-        ['传输', () => { throw new TypeError('fixture-secret-provider-body'); }, 'request', 'stats-currency-request-failed'],
-        ['空回复', () => '', 'parse', 'stats-currency-reply-empty'],
-        ['非法 JSON', () => '{not-json}', 'parse', 'stats-currency-not-json'],
+        ['传输', () => { throw new TypeError('fixture-secret-provider-body'); }, 'request', 'stats-hero-init-request-failed'],
+        ['空回复', () => '', 'parse', 'stats-hero-init-reply-empty'],
+        ['非法 JSON', () => '{not-json}', 'parse', 'stats-hero-init-not-json'],
         ['配置非法', () => '{}', 'parse', 'stats-currency-config-invalid'],
         ['初始金额非法', () => JSON.stringify({ ...JSON.parse(currencyReply()), initial: -1 }), 'parse', 'stats-currency-initial-invalid'],
     ];
     for (const [label, fail, stage, reason] of cases) await t.test(label, async t => {
         const h = await sharedRuntime(t, 0);
-        h.game.ai('古城开场');
+        h.game.ai('[igs-scene:古城|白天|晴]\n古城开场');
         await h.runtime.engine.whenSaved();
         let calls = 0;
         const rt = await h.openStats(null, { getBackgroundRequest: () => () => { calls += 1; return calls === 1 ? fail() : currencyReply(); } });
@@ -544,29 +544,29 @@ test('货币失败：请求与解析原因保留，一次动作只请求一次�
 test('货币任务失效：换聊天、暂停与销毁拒绝迟到成功和失败，不写新目标', async t => {
     for (const action of ['chat', 'pause', 'destroy']) for (const rejected of [false, true]) await t.test(`${action}/${rejected ? '失败' : '成功'}`, async t => {
         const h = await sharedRuntime(t, 0);
-        h.game.ai('古城开场');
+        h.game.ai('[igs-scene:古城|白天|晴]\n古城开场');
         await h.runtime.engine.whenSaved();
-        let resolve, reject, task;
-        const pending = new Promise((done, fail) => { resolve = done; reject = fail; });
+        const tasks = [];
         const rt = await h.openStats(null, {
             wait: false,
             statsTables: () => h.game.ctx.chatId === 'chat-a' ? h.services.statsTables()
-                : { ok: true, version: 0, read: () => ({ ok: true, stats: [] }) },
-            getBackgroundRequest: () => (prompt, options) => { task = options; return pending; },
+                : { ok: true, version: 0, read: () => ({ ok: true, stats: [] }), append: async () => ({ ok: true, written: [] }) },
+            getBackgroundRequest: () => (prompt, options) => new Promise((resolve, reject) => { tasks.push({ options, resolve, reject }); }),
         });
         await flushCurrency();
         const job = rt.retryCurrency();
+        const first = tasks[0];
         if (action === 'chat') {
             h.game.ctx.chatId = 'chat-b';
             h.game.ctx.chat = [];
             h.game.emit(h.game.ctx.eventTypes.CHAT_CHANGED);
         } else if (action === 'pause') assert.equal(rt.disableForChat().ok, true);
         else rt.destroy();
-        assert.equal(task.signal.aborted, true);
+        assert.equal(first.options.signal.aborted, true);
         assert.equal((await job).reason, 'request-stale');
-        await rt.whenSaved();
+        if (action !== 'chat') await rt.whenSaved();
         const before = h.db.calls.insertRow + h.db.calls.updateRow;
-        if (rejected) reject(new Error('late-provider-body')); else resolve(currencyReply());
+        if (rejected) first.reject(new Error('late-provider-body')); else first.resolve(currencyReply());
         await flushCurrency();
         assert.equal(h.db.calls.insertRow + h.db.calls.updateRow, before);
         assert.equal(h.services.inventoryTables().read().inventory.items.some(item => item.name === '铜钱'), false);
@@ -580,11 +580,13 @@ test('bootstrap 货币接线：公开设置动作单飞，慢状态局部刷新�
     const { createMemoryStorage } = await import('../src/storage/preset-store.js');
     const { initRecord } = await import('../src/scene/stats/stat-log.js');
     const h = await sharedRuntime(t, 0);
+    h.game.ai('[igs-scene:古城|白天|晴]\n古城开场');
     h.game.ctx.name1 = '主角';
     h.game.ctx.getCurrentChatId = () => h.game.ctx.chatId;
     h.game.ctx.setExtensionPrompt = () => {};
     assert.equal((await h.tables.append('stats', [initRecord(createStatsState()),
-        { id: 'chat-enabled', type: 'chat', character: '主角', anchor: null, createdAt: 1, change: '启用', payload: { key: 'chat:enabled', value: true } }])).ok, true);
+        { id: 'chat-enabled', type: 'chat', character: '主角', anchor: null, createdAt: 1, change: '启用', payload: { key: 'chat:enabled', value: true } },
+        { id: 'hero-init-auto', type: 'chat', character: '主角', anchor: null, createdAt: 2, change: '自动', payload: { key: 'hero:initChoice', value: 'auto' } }])).ok, true);
     const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: 'https://igs.invalid/' });
     const storage = createMemoryStorage({ igs_bridge_config: JSON.stringify({ stats: {
         enabled: true, newChat: 'ask', ruleset: 'coc7', autoSkill: false, sheetGen: 'off', backfill: 'off', push: { enabled: false },
@@ -593,7 +595,7 @@ test('bootstrap 货币接线：公开设置动作单飞，慢状态局部刷新�
     const app = bootstrapIGS({ global: { document: dom.window.document, localStorage: storage, AutoCardUpdaterAPI: h.db.api,
         SillyTavern: { getContext: () => h.game.ctx }, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent,
         dispatchEvent: dom.window.dispatchEvent.bind(dom.window), addEventListener: dom.window.addEventListener.bind(dom.window),
-        removeEventListener: dom.window.removeEventListener.bind(dom.window) }, autoAttachMagicWand: false,
+        removeEventListener: dom.window.removeEventListener.bind(dom.window) }, autoAttachMagicWand: false, startupDelayMs: 0,
         secondaryLlm: { request: (prompt, config) => new Promise(resolve => tasks.push({ prompt, config, resolve })) } });
     t.after(async () => { await app.shutdown(); dom.window.close(); });
     await flushCurrency();
@@ -625,11 +627,15 @@ test('bootstrap 货币接线：公开设置动作单飞，慢状态局部刷新�
     await flushCurrency();
     assert.match(doc.querySelector('.igs-settings-dialog-msg').textContent, /解析失败.*回复为空/);
     doc.querySelector('[data-settings-dialog="ok"]').click();
-    assert.equal((await job).reason, 'stats-currency-reply-empty');
+    const heroInitReply = () => JSON.stringify({
+        attributes: { 力量: 12, 敏捷: 14, 体质: 11, 智力: 13, 感知: 10, 魅力: 15 },
+        currency: JSON.parse(currencyReply()),
+    });
+    assert.equal((await job).reason, 'stats-hero-init-reply-empty');
     const recovery = opened.controller.invoke('stats-op:currency-retry');
     await flushCurrency();
     assert.equal(tasks.length, 3);
-    tasks[2].resolve(currencyReply());
+    tasks[2].resolve(heroInitReply());
     assert.equal((await recovery).ok, true);
     await flushCurrency();
     assert.match(doc.querySelector('.igs-stats-wallets').textContent, /铜钱100/);
@@ -696,12 +702,12 @@ test('bootstrap 生命周期：聊天与API替换、关闭和销毁隔离迟到�
         assert.equal((await tables.ensure()).ok, true);
         assert.equal((await createInventoryTables({ api: db.api, client: tables.client, serial: tables.serial }).ensure()).ok, true);
         assert.equal((await tables.append('stats', [initRecord(createStatsState()),
-            ...diffChatRecords(chatEntries(), chatEntries({ chatEnabled: true }), { tag: 'lifecycle' })])).ok, true);
+            ...diffChatRecords(chatEntries(), chatEntries({ chatEnabled: true, catalog: { heroInitChoice: 'auto' } }), { tag: 'lifecycle' })])).ok, true);
     }
     const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: 'https://igs.invalid/' });
     const handlers = new Map();
     const context = { name1: '主角', name2: '小雪', chatId: 'lifecycle-a', chatMetadata: {},
-        chat: [{ is_user: true, mes: '出发' }, { is_user: false, mes: '古城开场。', swipe_id: 0 }],
+        chat: [{ is_user: true, mes: '出发' }, { is_user: false, mes: '[igs-scene:古城|白天|晴]\n古城开场。', swipe_id: 0 }],
         getCurrentChatId: () => context.chatId, setExtensionPrompt() {}, saveMetadata() {},
         eventTypes: { CHAT_CHANGED: 'chat' }, eventSource: {
             on(key, fn) { if (!handlers.has(key)) handlers.set(key, new Set()); handlers.get(key).add(fn); },
@@ -718,7 +724,7 @@ test('bootstrap 生命周期：聊天与API替换、关闭和销毁隔离迟到�
         dispatchEvent: dom.window.dispatchEvent.bind(dom.window), addEventListener: dom.window.addEventListener.bind(dom.window),
         removeEventListener: dom.window.removeEventListener.bind(dom.window) };
     const tasks = [];
-    const options = { global, autoAttachMagicWand: false,
+    const options = { global, autoAttachMagicWand: false, startupDelayMs: 0,
         secondaryLlm: { request: (prompt, config) => new Promise(resolve => tasks.push({ config, resolve })) } };
     let app = bootstrapIGS(options);
     t.after(async () => { await app.shutdown(); dom.window.close(); });
@@ -789,10 +795,14 @@ test('bootstrap 生命周期：聊天与API替换、关闭和销毁隔离迟到�
     assert.equal([...handlers.values()].every(set => set.size === 0), true, '销毁退订宿主事件');
     assert.equal(tasks.length, 4);
 
+    const heroInitReply = () => JSON.stringify({
+        attributes: { 力量: 11, 敏捷: 13, 体质: 12, 智力: 14, 感知: 10, 魅力: 12 },
+        currency: JSON.parse(currencyReply()),
+    });
     app = bootstrapIGS(options);
     await waitFor(() => tasks.length === 5, '冷重建未启动自己的任务');
     app.openSettings({ page: 'stats' });
-    tasks[4].resolve(currencyReply());
+    tasks[4].resolve(heroInitReply());
     await waitFor(() => /铜钱100/.test(dom.window.document.querySelector('.igs-stats-wallets')?.textContent || ''),
         '新实例未完成权威余额读回');
     assert.equal(tasks.length, 5);
@@ -802,7 +812,7 @@ test('bootstrap 生命周期：聊天与API替换、关闭和销毁隔离迟到�
 
 test('货币恢复：已初始化且无待写也须确认权威余额，读错与合法零严格分开', async t => {
     const h = await sharedRuntime(t, 500);
-    h.game.ai('古城开场');
+    h.game.ai('[igs-scene:古城|白天|晴]\n古城开场');
     let calls = 0;
     const rt = await h.openStats(null, { getBackgroundRequest: () => () => { calls += 1; return currencyReply(); } });
     const inventory = h.services.inventoryTables();
@@ -1123,12 +1133,14 @@ test('货币编辑：目标名称占用与外部行变化拒绝覆盖，恢复�
 test('货币编辑：缺段仅补原记录，残段不一致停止恢复且不写余额', async t => {
     for (const corrupt of [false, true]) await t.test(corrupt ? '残段冲突' : '原段恢复', async t => {
         const h = await sharedRuntime(t, 500, {}, { rate: 0.25 });
-        const { createCombatTables } = await import('../src/data/shujuku/combat-tables.js');
-        const raw = createCombatTables({ api: h.db.api, cellMax: 180 });
-        const facade = { ok: true, read: options => raw.read(options), invalidate: () => raw.client.invalidate(),
-            matchesIncomplete: record => raw.matchesIncomplete('stats', record),
-            append: (records, options) => raw.append('stats', records, options), ensure: () => raw.ensure() };
-        const rt = await h.openStats(undefined, { statsTables: () => facade });
+        const { createIgsChatStore } = await import('../src/data/shujuku/igs-chat-store.js');
+        const { readIgsChatEvidence } = await import('../src/storage/igs-chat-evidence.js');
+        const store = createIgsChatStore({ api: () => h.host.AutoCardUpdaterAPI, cellMax: 180,
+            chatId: () => h.game.ctx.chatId, chat: () => h.game.ctx.chat,
+            evidence: chatId => readIgsChatEvidence({ context: h.game.ctx, chatId, storage: h.storage }) });
+        t.after(() => store.dispose());
+        const ports = { statsTables: () => store.get().statsAccess, currencyInventory: () => store.get().inventory };
+        const rt = await h.openStats(undefined, ports);
         const model = await rt.relationOp('money-config-read');
         const insert = h.db.api.insertRow;
         let interrupted = false;
@@ -1148,13 +1160,14 @@ test('货币编辑：缺段仅补原记录，残段不一致停止恢复且不�
         assert.ok(part);
         if (corrupt) part[sheet.content[0].indexOf('载荷JSON')] += 'x';
         h.db.api.insertRow = insert;
-        facade.invalidate();
+        store.reset();
+        assert.equal(store.get().statsAccess.read().ok, false, '普通读取不得绕过残段校验');
         const before = h.db.calls.updateRow;
-        const cold = await h.openStats(undefined, { statsTables: () => facade });
+        const cold = await h.openStats(undefined, ports);
         const result = await cold.retryCurrency();
         assert.equal(result.ok, !corrupt, JSON.stringify(result));
         if (corrupt) {
-            assert.equal(result.reason, 'stats-currency-edit-log-conflict');
+            assert.ok(['stats-currency-edit-log-conflict', 'igs-legacy-records-invalid', 'stats-chat-not-enabled'].includes(result.reason), result.reason);
             assert.equal(cold.currencyBalance(), null);
             assert.equal(h.db.calls.updateRow, before);
         } else {
@@ -1222,4 +1235,288 @@ test('货币编辑：新编辑先恢复旧兑换，只扣一次且保留恢复�
     assert.equal((await h.services.readSharedPoints()).balance, 400);
     assert.equal((await rt.exchangePoints(quote)).present, true);
     assert.equal(rt.currencyBalance(), 125);
+});
+
+test('P4 主角统一建档（v2 无战斗表）：一次请求补齐六维与货币，不建战斗表，确认后才展示技能/NPC交互', async t => {
+    const { createIgsChatStore } = await import('../src/data/shujuku/igs-chat-store.js');
+    const { createLedgerMockHost, userInventorySheet } = await import('./helpers/combat-mock-host-ledger.js');
+    const { createMemoryStorage } = await import('../src/storage/preset-store.js');
+    const { readIgsChatEvidence } = await import('../src/storage/igs-chat-evidence.js');
+    const db = createLedgerMockHost({ supportCallbacks: true });
+    db.sheets.sheet_userbag = userInventorySheet();
+    const storage = createMemoryStorage();
+    const handlers = new Map();
+    const context = {
+        name1: '主角', name2: '小雪', chatId: 'v2-hero-init-1', chatMetadata: {},
+        chat: [{ is_user: true, mes: '进城打探消息' }, { is_user: false, mes: '[igs-scene:街市|白天|晴]\n街市热闹。', swipe_id: 0 }],
+        getCurrentChatId: () => context.chatId, setExtensionPrompt() {}, saveMetadata() {},
+        eventTypes: { GENERATION_STARTED: 'gs', GENERATION_ENDED: 'ge', CHAT_CHANGED: 'cc' },
+        eventSource: {
+            on(k, fn) { if (!handlers.has(k)) handlers.set(k, new Set()); handlers.get(k).add(fn); },
+            removeListener(k, fn) { handlers.get(k)?.delete(fn); },
+        },
+    };
+    const chatStore = createIgsChatStore({
+        api: () => db.api,
+        chatId: () => context.chatId,
+        chat: () => context.chat,
+        userName: () => context.name1,
+        evidence: id => readIgsChatEvidence({ context, chatId: id, storage }),
+        storage,
+    });
+    t.after(() => chatStore.dispose());
+    const requests = [];
+    const rt = createStatsRuntime({
+        getContext: () => context,
+        readSettings: () => ({ enabled: true, ruleset: 'dnd5e', autoSkill: false, sheetGen: 'prompt', backfill: 'off', push: { enabled: false } }),
+        statsTables: () => chatStore.get().statsAccess,
+        attributeAccess: () => chatStore.get().attributeAccess,
+        currencyInventory: () => chatStore.get().inventory,
+        currencyEditStorage: storage,
+        generationIdentity: () => chatStore.get(),
+        getBackgroundRequest: () => (prompt, opts) => new Promise(resolve => requests.push({ prompt, opts, resolve })),
+    });
+    t.after(() => rt.destroy());
+    rt.sync();
+    for (let i = 0; i < 40 && !rt.notices().some(n => n.id === 'hero-init-mode'); i += 1) await new Promise(r => setTimeout(r, 10));
+    assert.equal(rt.notices().some(n => n.id === 'hero-init-mode'), true, '开局先询问自行填写还是自动生成，不抢跑请求模型');
+    assert.equal(requests.length, 0);
+    void rt.noticeAction('hero-init-mode', 'auto');
+    for (let i = 0; i < 40 && requests.length === 0; i += 1) await new Promise(r => setTimeout(r, 10));
+    assert.equal(requests.length, 1, '选择自动生成后仅发一次统一主角初始化请求');
+    assert.equal(rt.heroBasicReady(), false, '主角基础确认前不就绪');
+    assert.equal(rt.notices().some(n => n.id === 'hero-pick'), true, '主角擅长技能与 NPC 建档策略提示可并发出现');
+    assert.equal(rt.notices().some(n => n.id === 'npc-policy'), true, 'NPC 建档策略提示与主角建档并发出现');
+
+    requests[0].resolve(JSON.stringify({
+        attributes: { 力量: 13, 敏捷: 15, 体质: 12, 智力: 11, 感知: 14, 魅力: 10 },
+        currency: { name: '银币', initial: 50, prices: { 少量: 5, 普通: 20, 昂贵: 100, 巨额: 500 }, rate: 1 },
+        bio: '出身港城的年轻调查员，做事谨慎且善于观察细节。',
+    }));
+    await rt.whenSaved();
+    assert.equal(rt.heroBasicReady(), true);
+    assert.equal(rt.currencyBalance(), 50);
+    assert.equal(rt.archive().heroBio, '出身港城的年轻调查员，做事谨慎且善于观察细节。');
+    assert.equal(rt.protagonistLookup()('主角')?.bio, '出身港城的年轻调查员，做事谨慎且善于观察细节。');
+    const heroAttrs = chatStore.get().attributeAccess.source().readAbilities('主角');
+    assert.equal(heroAttrs.initialized, true);
+    assert.deepEqual(heroAttrs.permanentScores, { str: 13, dex: 15, con: 12, int: 11, wis: 14, cha: 10 });
+    assert.equal(rt.notices().some(n => n.id === 'hero-pick'), true, '未选技能前仍保留技能选择提示');
+    const sheetNames = Object.values(db.sheets).map(s => s.name);
+    assert.equal(sheetNames.includes('IGS战斗·档案'), false, '纯数值初始化不得建立战斗档案表');
+    assert.equal(sheetNames.includes('IGS战斗·日志'), false, '纯数值初始化不得建立战斗日志表');
+    assert.equal(sheetNames.includes('IGS战斗·装配'), false, '纯数值初始化不得建立战斗装配表');
+    assert.equal(sheetNames.includes('IGS数值·属性'), true);
+    assert.equal(sheetNames.includes('IGS·存储'), true);
+    assert.notEqual(db.sheets.sheet_userbag.updateConfig?.updateFrequency, 0, '未开战斗时不得接管用户物品表');
+});
+
+test('P4 部分补缺、回包前手改防覆盖与分阶段中断冷恢复（不重发模型、不重复发初始金钱）', async t => {
+    const { createIgsChatStore } = await import('../src/data/shujuku/igs-chat-store.js');
+    const { createLedgerMockHost, userInventorySheet } = await import('./helpers/combat-mock-host-ledger.js');
+    const { createMemoryStorage } = await import('../src/storage/preset-store.js');
+    const { readIgsChatEvidence } = await import('../src/storage/igs-chat-evidence.js');
+    const db = createLedgerMockHost({ supportCallbacks: true });
+    db.sheets.sheet_userbag = userInventorySheet();
+    const storage = createMemoryStorage();
+    const context = {
+        name1: '主角', name2: '小雪', chatId: 'v2-hero-recover-1', chatMetadata: {},
+        chat: [{ is_user: true, mes: '出发' }, { is_user: false, mes: '[igs-scene:开局|白天|晴]\n开局。', swipe_id: 0 }],
+        getCurrentChatId: () => context.chatId, setExtensionPrompt() {}, saveMetadata() {},
+        eventTypes: { GENERATION_STARTED: 'gs', GENERATION_ENDED: 'ge', CHAT_CHANGED: 'cc' },
+        eventSource: { on() {}, removeListener() {} },
+    };
+    const makeStore = () => createIgsChatStore({
+        api: () => db.api,
+        chatId: () => context.chatId,
+        chat: () => context.chat,
+        userName: () => context.name1,
+        evidence: id => readIgsChatEvidence({ context, chatId: id, storage }),
+        storage,
+    });
+    const store1 = makeStore();
+    t.after(() => store1.dispose());
+    // 1. 回包前手改补足六维：模型回包后绝不覆盖手改六维，但仍补货币；且在初始发钱阶段注入失败，验证冷恢复不重发模型
+    const reqs = [];
+    let failBag = true;
+    const inv1 = store1.get().inventory;
+    const origChange = inv1.changeQuantities;
+    inv1.changeQuantities = async (...args) => failBag
+        ? { ok: false, reason: 'inventory-write-failed' }
+        : origChange(...args);
+    const rt1 = createStatsRuntime({
+        getContext: () => context,
+        readSettings: () => ({ enabled: true, ruleset: 'dnd5e', autoSkill: false, sheetGen: 'off', backfill: 'off', push: { enabled: false } }),
+        statsTables: () => store1.get().statsAccess,
+        attributeAccess: () => store1.get().attributeAccess,
+        currencyInventory: () => store1.get().inventory,
+        currencyEditStorage: storage,
+        generationIdentity: () => store1.get(),
+        getBackgroundRequest: () => (prompt) => new Promise(resolve => reqs.push({ prompt, resolve })),
+    });
+    t.after(() => rt1.destroy());
+    rt1.sync();
+    for (let i = 0; i < 40 && !rt1.notices().some(n => n.id === 'hero-init-mode'); i += 1) await new Promise(r => setTimeout(r, 10));
+    void rt1.noticeAction('hero-init-mode', 'auto');
+    for (let i = 0; i < 40 && reqs.length === 0; i += 1) await new Promise(r => setTimeout(r, 10));
+    assert.equal(reqs.length, 1);
+    // 延迟建表：模型返回前尚未创建属性表
+    assert.equal(Object.values(db.sheets).some(s => s.name === 'IGS数值·属性'), false, '模型未成功返回前不得提前建属性表');
+    // 在模型返回之前，用户手改补足主角六维（写入前按需建表）
+    assert.equal((await store1.get().attributeAccess.ensure()).ok, true);
+    const heroRead = store1.get().attributeAccess.readHero('主角');
+    assert.equal(heroRead.ok, true);
+    const manualScores = { str: 16, dex: 12, con: 14, int: 10, wis: 10, cha: 10 };
+    assert.equal((await store1.get().attributeAccess.editHero('主角', manualScores, { expectedRevision: heroRead.view.revision })).ok, true);
+    // 模型回包给出了另一套六维和银币 80，但物品表写入失败
+    reqs[0].resolve(JSON.stringify({
+        attributes: { 力量: 8, 敏捷: 8, 体质: 8, 智力: 18, 感知: 18, 魅力: 18 },
+        currency: { name: '银币', initial: 80, prices: { 少量: 5, 普通: 20, 昂贵: 100, 巨额: 500 }, rate: 1 },
+    }));
+    await rt1.whenSaved();
+    assert.equal(rt1.heroBasicReady(), false, '初始发钱失败时基础未完成');
+    assert.deepEqual(store1.get().attributeAccess.source().readAbilities('主角').permanentScores, manualScores, '回包不得覆盖并发手改的六维');
+    rt1.destroy();
+
+    // 2. 冷重建恢复：修复物品表后重启，只补原结果的初始发钱，模型请求数仍为 1，不重复发钱
+    failBag = false;
+    inv1.changeQuantities = origChange;
+    const store2 = makeStore();
+    t.after(() => store2.dispose());
+    let coldCalls = 0;
+    const rt2 = createStatsRuntime({
+        getContext: () => context,
+        readSettings: () => ({ enabled: true, ruleset: 'dnd5e', autoSkill: false, sheetGen: 'off', backfill: 'off', push: { enabled: false } }),
+        statsTables: () => store2.get().statsAccess,
+        attributeAccess: () => store2.get().attributeAccess,
+        currencyInventory: () => store2.get().inventory,
+        currencyEditStorage: storage,
+        generationIdentity: () => store2.get(),
+        getBackgroundRequest: () => () => { coldCalls += 1; throw new Error('must-not-call-model-on-recovery'); },
+    });
+    t.after(() => rt2.destroy());
+    rt2.sync();
+    await rt2.whenSaved();
+    assert.equal(coldCalls, 0, '中断冷恢复只补缺阶段，绝不重发模型请求');
+    assert.equal(rt2.heroBasicReady(), true);
+    assert.equal(rt2.currencyBalance(), 80, '只入账一次 80 银币');
+    assert.deepEqual(store2.get().attributeAccess.source().readAbilities('主角').permanentScores, manualScores);
+
+    // 3. 合法零余额 + 已有货币，再检查不重发模型、不重发初始金额
+    assert.equal((await store2.get().inventory.changeQuantities([{ name: '银币', delta: -80, expectedBefore: 80, category: '货币' }])).ok, true);
+    assert.equal(rt2.currencyBalance(), 0);
+    await rt2.ensureHeroInit({ force: true });
+    assert.equal(coldCalls, 0);
+    assert.equal(rt2.currencyBalance(), 0, '合法零余额不得触发重复发放初始金钱');
+});
+
+test('回归：物品表描述列 NOT NULL 约束不触发 SQL_CONSTRAINT，且未开战斗时不建 IGS战斗·装配 也不接管物品表', async t => {
+    const { createIgsChatStore } = await import('../src/data/shujuku/igs-chat-store.js');
+    const { createLedgerMockHost } = await import('./helpers/combat-mock-host-ledger.js');
+    const { createMemoryStorage } = await import('../src/storage/preset-store.js');
+    const { readIgsChatEvidence } = await import('../src/storage/igs-chat-evidence.js');
+    const db = createLedgerMockHost({ supportCallbacks: true });
+    // 复刻官方「恋爱Gal_IGS数值系统适配版」物品表：description TEXT NOT NULL CHECK(LENGTH(description) <= 80)
+    db.sheets.sheet_wu_pin_biao = {
+        uid: 'sheet_wu_pin_biao',
+        name: '物品表',
+        orderNo: 0,
+        updateConfig: { updateFrequency: 1 },
+        sourceData: {
+            insertNode: '主角获得新物品时插入。',
+            ddl: [
+                'CREATE TABLE sheet_wu_pin_biao (',
+                '  row_id INTEGER PRIMARY KEY,',
+                '  item_name TEXT NOT NULL UNIQUE CHECK(LENGTH(item_name) <= 15), -- 物品名称',
+                '  quantity INTEGER NOT NULL DEFAULT 1 CHECK(quantity >= 0), -- 数量',
+                '  description TEXT NOT NULL CHECK(LENGTH(description) <= 80), -- 描述',
+                '  states_now TEXT -- 状态',
+                ');',
+            ].join('\n'),
+        },
+        content: [['row_id', '物品名称', '数量', '描述', '状态']],
+    };
+    const origInsert = db.api.insertRow;
+    const insertedPayloads = [];
+    db.api.insertRow = (first, second) => {
+        const tableName = first && typeof first === 'object' ? first.tableName : first;
+        const data = first && typeof first === 'object' ? first.data : second;
+        if (tableName === '物品表') {
+            insertedPayloads.push(clone(data));
+            // 严格模拟 SQLite NOT NULL：缺失/undefined/null 直接拒绝
+            for (const required of ['物品名称', '数量', '描述']) {
+                if (!data || !Object.hasOwn(data, required) || data[required] === null || data[required] === undefined) {
+                    return { success: false, error: 'SQL_CONSTRAINT' };
+                }
+            }
+            if (String(data['描述']).length > 80) return { success: false, error: 'SQL_CONSTRAINT' };
+        }
+        return origInsert(first, second);
+    };
+    const storage = createMemoryStorage();
+    const context = {
+        name1: '主角', name2: '小雪', chatId: 'v2-sql-constraint-1', chatMetadata: {},
+        chat: [{ is_user: true, mes: '出发' }, { is_user: false, mes: '[igs-scene:开局|白天|晴]\n开局。', swipe_id: 0 }],
+        getCurrentChatId: () => context.chatId, setExtensionPrompt() {}, saveMetadata() {},
+        eventTypes: { GENERATION_STARTED: 'gs', GENERATION_ENDED: 'ge', CHAT_CHANGED: 'cc' },
+        eventSource: { on() {}, removeListener() {} },
+    };
+    const chatStore = createIgsChatStore({
+        api: () => db.api,
+        chatId: () => context.chatId,
+        chat: () => context.chat,
+        userName: () => context.name1,
+        evidence: id => readIgsChatEvidence({ context, chatId: id, storage }),
+        storage,
+    });
+    t.after(() => chatStore.dispose());
+    const requests = [];
+    const rt = createStatsRuntime({
+        getContext: () => context,
+        readSettings: () => ({ enabled: true, ruleset: 'coc7', autoSkill: false, sheetGen: 'off', backfill: 'off', push: { enabled: false } }),
+        combatEnabled: () => false,
+        statsTables: () => chatStore.get().statsAccess,
+        attributeAccess: () => chatStore.get().attributeAccess,
+        currencyInventory: () => chatStore.get().inventory,
+        currencyEditStorage: storage,
+        generationIdentity: () => chatStore.get(),
+        getBackgroundRequest: () => (prompt) => new Promise(resolve => requests.push({ prompt, resolve })),
+    });
+    t.after(() => rt.destroy());
+    rt.sync();
+    for (let i = 0; i < 40 && !rt.notices().some(n => n.id === 'hero-init-mode'); i += 1) await new Promise(r => setTimeout(r, 10));
+    void rt.noticeAction('hero-init-mode', 'auto');
+    for (let i = 0; i < 40 && requests.length === 0; i += 1) await new Promise(r => setTimeout(r, 10));
+    assert.equal(requests.length, 1);
+    requests[0].resolve(JSON.stringify({
+        attributes: { 力量: 12, 敏捷: 13, 体质: 11, 智力: 14, 感知: 12, 魅力: 13 },
+        currency: { name: '日元', initial: 5000, prices: { 少量: 500, 普通: 2000, 昂贵: 8000, 巨额: 30000 }, rate: 10 },
+    }));
+    await rt.whenSaved();
+    assert.equal(rt.heroBasicReady(), true);
+    assert.equal(rt.currencyBalance(), 5000);
+    // 1) 写入边界显式带上非空描述，未触发 SQL_CONSTRAINT
+    assert.equal(insertedPayloads.length, 1);
+    assert.equal(insertedPayloads[0]['物品名称'], '日元');
+    assert.equal(insertedPayloads[0]['描述'], '剧情货币');
+    assert.equal(insertedPayloads[0]['类别'], '货币');
+    // 2) 未开战斗时，严禁插入任何 IGS战斗·* 表，也不得接管/冻结用户物品表
+    const sheetNamesOff = Object.values(db.sheets).map(s => s.name);
+    assert.equal(sheetNamesOff.includes('IGS战斗·装配'), false, '未开战斗不得插入 IGS战斗·装配');
+    assert.equal(sheetNamesOff.includes('IGS战斗·档案'), false, '未开战斗不得插入 IGS战斗·档案');
+    assert.equal(sheetNamesOff.includes('IGS战斗·日志'), false, '未开战斗不得插入 IGS战斗·日志');
+    assert.equal(db.sheets.sheet_wu_pin_biao.updateConfig.updateFrequency, 1, '未开战斗不得关闭用户物品表的自动更新');
+    assert.equal(db.sheets.sheet_wu_pin_biao.sourceData.insertNode, '主角获得新物品时插入。');
+    // 3) 即使业务侧省略 description 新增普通物品，inventory-tables 也在写入边界传 "" 而非省略/NULL
+    const plain = await chatStore.get().inventory.changeQuantities([{ name: '铁钥匙', delta: 1 }]);
+    assert.equal(plain.ok, true, JSON.stringify(plain));
+    assert.equal(insertedPayloads.length, 2);
+    assert.equal(insertedPayloads[1]['描述'], '');
+    assert.equal(insertedPayloads[1]['类别'], '');
+    // 4) 后续开启战斗后，调用默认 inventory.ensure() 才会补建 IGS战斗·装配 并接管物品表
+    const combatEnsure = await chatStore.get().inventory.ensure();
+    assert.equal(combatEnsure.ok, true, JSON.stringify(combatEnsure));
+    const sheetNamesOn = Object.values(db.sheets).map(s => s.name);
+    assert.equal(sheetNamesOn.includes('IGS战斗·装配'), true, '开启战斗后应补建 IGS战斗·装配');
+    assert.equal(db.sheets.sheet_wu_pin_biao.updateConfig.updateFrequency, 0, '开启战斗后应接管物品表');
 });

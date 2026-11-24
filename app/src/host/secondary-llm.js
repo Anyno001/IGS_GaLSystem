@@ -4,6 +4,38 @@ import { secondaryLlmMessages } from './secondary-llm-messages.js';
 import { customRequestExtras, requestCustomLlm } from './secondary-llm-custom.js';
 import { secondaryLlmBackendError, secondaryLlmHttpError, secondaryLlmText } from './secondary-llm-result.js';
 
+export const DEFAULT_SECONDARY_LLM_RETRIES = 3;
+export const DEFAULT_SECONDARY_LLM_RETRY_DELAY_MS = 3000;
+const NON_RETRYABLE_STATUSES = new Set([400, 401, 402, 403, 404, 405, 422]);
+const NON_RETRYABLE_REASONS = new Set(['request-stale', 'invalid-llm-messages', 'ordered-messages-unsupported']);
+
+export function isRetryableSecondaryLlmError(error) {
+    if (!error) return false;
+    if (error.name === 'AbortError' || NON_RETRYABLE_REASONS.has(error.reason)) return false;
+    if (Number.isInteger(error.status)) return !NON_RETRYABLE_STATUSES.has(error.status);
+    if (error.reason === 'secondary-llm-http-failed') return true;
+    if (error.reason === 'secondary-llm-transport-failed' || error.reason === 'secondary-llm-backend-unreachable') return true;
+    const msg = String(error.message || '');
+    if (/请先填写副 LLM 地址|副 LLM 地址无效|当前环境无法发起网络请求|无法获取酒馆请求头|当前酒馆不支持 generateRaw/.test(msg)) return false;
+    return true;
+}
+
+function waitRetryDelay(ms, signal) {
+    if (signal?.aborted) return Promise.resolve(false);
+    if (!(ms > 0)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const onAbort = () => {
+            clearTimeout(timer);
+            resolve(false);
+        };
+        const timer = setTimeout(() => {
+            signal?.removeEventListener?.('abort', onAbort);
+            resolve(true);
+        }, ms);
+        signal?.addEventListener?.('abort', onAbort, { once: true });
+    });
+}
+
 function apiBaseUrl(endpoint) {
     const base = String(endpoint || '').trim().replace(/\/+$/, '');
     if (!base) throw new Error('请先填写副 LLM 地址');
@@ -55,6 +87,12 @@ function safeDetail(value, apiKey) {
 export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
     const fetchImpl = deps.fetch || (typeof globalObject.fetch === 'function' ? globalObject.fetch.bind(globalObject) : null);
     const createAbort = () => new (globalObject.AbortController || globalThis.AbortController)();
+    let nativeTavernTail = Promise.resolve();
+    const serialNativeTavern = (fn) => {
+        const run = nativeTavernTail.then(fn, fn);
+        nativeTavernTail = run.then(() => {}, () => {});
+        return run;
+    };
 
     async function postToTavern(route, body, llm, signal, label) {
         if (!fetchImpl) throw new Error('当前环境无法发起网络请求');
@@ -95,7 +133,7 @@ export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
         return data;
     }
 
-    async function viaTavern(messages) {
+    async function viaTavern(messages, shouldStop = () => false) {
         const helper = getTavernHelper(globalObject);
         if (helper && typeof helper.generateRaw === 'function') {
             // should_silence：后台请求不显示停止按钮、不广播生成事件，避免被当成正文流式。
@@ -112,7 +150,11 @@ export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
                 error.reason = 'ordered-messages-unsupported';
                 throw error;
             }
-            return String(await ctx.generateRaw({ systemPrompt: messages[0].content, prompt: messages[1].content }) || '');
+            // 原生 ctx.generateRaw 在酒馆侧通常为单飞锁，串行排队避免主角/NPC 并发互相顶掉；独立 API 与酒馆助手不受此限。
+            return serialNativeTavern(async () => {
+                if (shouldStop()) throw Object.assign(new Error('副 LLM 任务已取消；上游可能仍在执行'), { reason: 'request-stale' });
+                return String(await ctx.generateRaw({ systemPrompt: messages[0].content, prompt: messages[1].content }) || '');
+            });
         }
         throw new Error('当前酒馆不支持 generateRaw，请在设置中改用独立 API');
     }
@@ -140,32 +182,97 @@ export function createSecondaryLlm(globalObject = globalThis, deps = {}) {
         })(), 30000, () => controller.abort());
     }
 
-    return {
-        fetchModels,
-        async request(request, llm = {}) {
+    async function execute(request, llm = {}) {
             const timeoutMs = Number(llm.timeoutMs) || 90000;
+            const rawRetries = llm.retries ?? deps.retries ?? DEFAULT_SECONDARY_LLM_RETRIES;
+            const maxRetries = Number.isInteger(rawRetries) && rawRetries >= 0 ? rawRetries : DEFAULT_SECONDARY_LLM_RETRIES;
+            const rawDelay = llm.retryDelayMs ?? deps.retryDelayMs ?? DEFAULT_SECONDARY_LLM_RETRY_DELAY_MS;
+            const retryDelayMs = Number.isFinite(Number(rawDelay)) && Number(rawDelay) >= 0 ? Number(rawDelay) : DEFAULT_SECONDARY_LLM_RETRY_DELAY_MS;
             const messages = secondaryLlmMessages(request, llm);
-            const controller = new AbortController();
             const cancelled = () => Object.assign(new Error('副 LLM 任务已取消；上游可能仍在执行'), { reason: 'request-stale' });
-            let rejectStop, timer;
-            const stopped = new Promise((_, reject) => { rejectStop = reject; });
-            const abort = () => { controller.abort(); rejectStop(cancelled()); };
-            llm.signal?.addEventListener('abort', abort, { once: true });
+            const shouldStop = () => Boolean(llm.signal?.aborted || (typeof llm.shouldStart === 'function' && llm.shouldStart() === false));
+
+            const runOnce = async () => {
+                const controller = new AbortController();
+                let rejectStop, timer;
+                const stopped = new Promise((_, reject) => { rejectStop = reject; });
+                const abort = () => { controller.abort(); rejectStop(cancelled()); };
+                llm.signal?.addEventListener('abort', abort, { once: true });
+                try {
+                    if (shouldStop()) throw cancelled();
+                    timer = setTimeout(() => {
+                        try { llm.onSlow?.(); } catch { /* 原请求继续接收同一回复。 */ }
+                    }, timeoutMs);
+                    const job = llm.source === 'openai'
+                        ? viaOpenAi(messages, { ...llm, signal: controller.signal })
+                        : runBackgroundGeneration(() => {
+                            if (controller.signal.aborted || shouldStop()) throw cancelled();
+                            return viaTavern(messages, () => controller.signal.aborted || shouldStop());
+                        });
+                    const result = await Promise.race([job, stopped]);
+                    if (controller.signal.aborted || shouldStop()) throw cancelled();
+                    return result;
+                } finally { clearTimeout(timer); llm.signal?.removeEventListener('abort', abort); }
+            };
+
+            let attempt = 0;
+            while (true) {
+                if (shouldStop()) throw cancelled();
+                try {
+                    return await runOnce();
+                } catch (error) {
+                    if (shouldStop() || error?.reason === 'request-stale') throw cancelled();
+                    if (attempt >= maxRetries || !isRetryableSecondaryLlmError(error)) {
+                        if (attempt > 0 && error && typeof error === 'object') {
+                            if (error.diagnostic && typeof error.diagnostic === 'object') error.diagnostic.retries = attempt;
+                            if (typeof error.message === 'string' && error.message.includes('未自动补发')) {
+                                error.message = error.message.replace('未自动补发', `已自动重试 ${attempt} 次仍失败`);
+                            }
+                        }
+                        throw error;
+                    }
+                    attempt += 1;
+                    try {
+                        llm.onRetry?.({ attempt, maxRetries, delayMs: retryDelayMs, reason: error?.reason || '', status: error?.status });
+                    } catch { /* 回调异常不中断重试 */ }
+                    try {
+                        console.info(`[IGS 副模型] API 调用失败，${Math.round(retryDelayMs / 1000)} 秒后第 ${attempt}/${maxRetries} 次重试`, error?.reason || error?.status || '');
+                    } catch { /* */ }
+                    const waited = await waitRetryDelay(retryDelayMs, llm.signal);
+                    if (!waited || shouldStop()) throw cancelled();
+                }
+            }
+    }
+
+    function clip(value, max) {
+        const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+        return text.length > max ? `${text.slice(0, max)}…` : text;
+    }
+
+    async function request(req, llm = {}) {
+        const log = deps.log;
+        if (!log || typeof log.add !== 'function') return execute(req, llm);
+        const startedAt = Date.now();
+        const model = llm.source === 'openai' ? (String(llm.model || '').trim() || '未填模型') : '酒馆当前连接';
+        const purpose = clip(req && (req.system || req.user), 24);
+        const head = `${model} · ${purpose || '未命名请求'}`;
+        const sizes = `发送${String(req && req.system || '').length + String(req && req.user || '').length}字`;
+        const traced = { ...llm, onRetry: (info) => {
+            try { log.add('warn', `${head} · 第${info.attempt}/${info.maxRetries}次重试${info.status ? `（HTTP ${info.status}）` : ''}${info.reason ? ` ${info.reason}` : ''}`); } catch { /* 日志不影响请求 */ }
+            llm.onRetry?.(info);
+        } };
+        try {
+            const out = await execute(req, traced);
+            try { log.add('success', `${head} · ${Date.now() - startedAt}ms · ${sizes} · 返回${String(out == null ? '' : out).length}字\n返回：${clip(out, 120) || '（空）'}`); } catch { /* */ }
+            return out;
+        } catch (error) {
             try {
-                if (llm.signal?.aborted) throw cancelled();
-                timer = setTimeout(() => {
-                    try { llm.onSlow?.(); } catch { /* 原请求继续接收同一回复。 */ }
-                }, timeoutMs);
-                const job = llm.source === 'openai'
-                    ? viaOpenAi(messages, { ...llm, signal: controller.signal })
-                    : runBackgroundGeneration(() => {
-                        if (controller.signal.aborted) throw cancelled();
-                        return viaTavern(messages);
-                    });
-                const result = await Promise.race([job, stopped]);
-                if (controller.signal.aborted) throw cancelled();
-                return result;
-            } finally { clearTimeout(timer); llm.signal?.removeEventListener('abort', abort); }
-        },
-    };
+                const cancelledOne = error?.reason === 'request-stale';
+                log.add(cancelledOne ? 'info' : 'error', `${head} · ${Date.now() - startedAt}ms · ${sizes} · ${cancelledOne ? '已取消' : `失败：${safeDetail(error?.message || error, llm.apiKey) || '未知错误'}`}`);
+            } catch { /* */ }
+            throw error;
+        }
+    }
+
+    return { fetchModels, request };
 }

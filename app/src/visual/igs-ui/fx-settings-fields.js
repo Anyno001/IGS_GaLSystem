@@ -14,6 +14,7 @@ import { forumAnkePromptText, forumDefaultPromptText } from './forum-reader-line
 import { FORUM_PALETTES } from './forum-reader-palettes.js';
 import { FORUM_PER_POST_MAX, FORUM_PER_POST_MIN } from './forum-reader-settings.js';
 import { renderForumRegistryFields } from './forum-reader-fields.js';
+import { FORUM_FX_GROUPS } from './forum-fx-block.js';
 
 // 纵向阅读模式的头像样式：按钮图标画出底框外形；破框的头从底框里伸出来（底框淡色、头实色）。
 const AVATAR_ICON = (plate) => `<svg viewBox="0 0 24 24" focusable="false">${plate}</svg>`;
@@ -176,9 +177,13 @@ export function renderFxFeatureFields(reader, more = collapsible, fontOptions = 
         + field(`${p}.forumReader.posterText`, '楼主', textInput(`${p}.forumReader.posterText`, fr.posterText, '留空由 AI 挑'))
         + field(`${p}.forumReader.replies`, '路人回帖', segmentedInput(`${p}.forumReader.replies`, fr.replies, [['off', '关'], ['few', '少'], ['normal', '标准']], '路人回帖'))
         + field(`${p}.forumReader.anke`, '安科模式', segmentedInput(`${p}.forumReader.anke`, fr.anke, [['off', '关'], ['key', '关键节点'], ['every', '每层']], '安科模式'))
+        + field(`${p}.forumReader.voteWeight`, '多数决User权重', segmentedInput(`${p}.forumReader.voteWeight`, fr.voteWeight, [[0, '不加权'], [25, '低'], [50, '标准'], [75, '高'], [100, '必胜']], '多数决User权重'), '投票时User那一项额外拿到的胜率，其余按网友票数分')
         + field(`${p}.forumReader.othersThoughts`, '其他人的心里话', segmentedInput(`${p}.forumReader.othersThoughts`, fr.othersThoughts, [['hide', '不显示'], ['show', '照常显示']], '其他人的心里话'))
         + checkbox(`${p}.forumReader.chainTail`, fr.chainTail, '新楼开头接上楼末尾回帖')
         + checkbox(`${p}.forumReader.prompt`, fr.prompt, '让 AI 登记标题与代号')
+        + checkbox(`${p}.forumReader.noImages`, fr.noImages, '屏蔽生图与素材入库')
+        + checkbox(`${p}.forumReader.noFx`, fr.noFx, '屏蔽演出')
+        + collapsible('forum-fx-keep', '屏蔽演出时保留', FORUM_FX_GROUPS.map((g) => checkbox(`${p}.forumReader.keepFx.${g.id}`, fr.keepFx[g.id], g.label)).join(''))
         + perfSubhead('外观')
         + field(`${p}.forumReader.palette`, '配色', selectInput(`${p}.forumReader.palette`, fr.palette, FORUM_PALETTES.map((x) => [x.id, x.name])))
         + field(`${p}.forumReader.perPost`, '一楼最多行数', selectInput(`${p}.forumReader.perPost`, fr.perPost, Array.from({ length: FORUM_PER_POST_MAX - FORUM_PER_POST_MIN + 1 }, (_, i) => [FORUM_PER_POST_MIN + i, `${FORUM_PER_POST_MIN + i}行`])))
