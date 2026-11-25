@@ -44,9 +44,17 @@ export function createStatsGenerationSave({ intents, tables, chatId }) {
         const held = pending();
         if (!held.ok || held.intent) return held.ok ? fail('stats-generation-save-pending') : held;
         if (!Array.isArray(beforeRows)) return fail('stats-generation-base-unavailable');
+        let resolvedLayout = layout === 'v2' || layout === 'legacy' ? layout : null;
+        if (!resolvedLayout) {
+            try {
+                const db = tables();
+                const probe = db?.ok ? db.read({ kinds: ['stats'] }) : null;
+                if (probe?.ok && (probe.layout === 'v2' || probe.layout === 'legacy')) resolvedLayout = probe.layout;
+            } catch { /* 无可用布局时按缺省省略 */ }
+        }
         const bases = [...new Set(records.map(slot))].map(key => [key, beforeRows.filter(row => slot(row) === key).at(-1)?.id || null]);
         const intent = JSON.parse(JSON.stringify({ version: 1, id: `sg-${records[0].id}`,
-            chatId: chatId(), ...(layout === 'v2' || layout === 'legacy' ? { layout } : {}), key, records, bases, result }));
+            chatId: chatId(), ...(resolvedLayout ? { layout: resolvedLayout } : {}), key, records, bases, result }));
         if (!alive()) return fail('request-stale');
         const saved = intents.save(intent.chatId, intent);
         return saved.ok ? { ok: true, intent } : saved;
@@ -56,20 +64,22 @@ export function createStatsGenerationSave({ intents, tables, chatId }) {
         const held = pending();
         if (!held.ok || !held.intent) return held.ok ? { ok: true, skipped: true } : held;
         const intent = held.intent;
-        let state = read(intent, alive, { allowMissing: true });
-        if (!state.ok) return state;
-        // 延迟建表：成功生成待写入数据时若数值表尚不存在，先建表再插数据。
-        if (state.tableMissing) {
-            const made = typeof state.db.ensure === 'function' ? await state.db.ensure({ shouldStart: alive }) : { ok: false, reason: 'stats-log-create-failed' };
-            if (!alive()) return fail('request-stale');
-            if (!made?.ok) return fail(made?.reason || 'stats-log-create-failed');
-            state = read(intent, alive, { allowMissing: false });
+        let state = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            state = read(intent, alive, { allowMissing: true });
             if (!state.ok) return state;
-        }
-        if (intent.records.some(record => state.rows.some(row => row.id === record.id && !same(row, record))))
-            return fail('stats-generation-record-conflict');
-        const missing = intent.records.filter(record => !state.rows.some(row => same(row, record)));
-        if (missing.length) {
+            // 延迟建表：成功生成待写入数据时若数值表尚不存在（或被角色卡首楼覆盖清掉），先建表再插数据。
+            if (state.tableMissing) {
+                const made = typeof state.db.ensure === 'function' ? await state.db.ensure({ shouldStart: alive }) : { ok: false, reason: 'stats-log-create-failed' };
+                if (!alive()) return fail('request-stale');
+                if (!made?.ok) return fail(made?.reason || 'stats-log-create-failed');
+                state = read(intent, alive, { allowMissing: false });
+                if (!state.ok) return state;
+            }
+            if (intent.records.some(record => state.rows.some(row => row.id === record.id && !same(row, record))))
+                return fail('stats-generation-record-conflict');
+            const missing = intent.records.filter(record => !state.rows.some(row => same(row, record)));
+            if (!missing.length) break;
             if (!matchesBase(intent, state.rows)) return fail('stats-generation-log-conflict');
             const shouldStart = () => {
                 const current = read(intent, alive, { allowMissing: false });
@@ -79,8 +89,14 @@ export function createStatsGenerationSave({ intents, tables, chatId }) {
                 await state.db.append(missing, { shouldStart, retainOnFailure: false, refresh: false,
                     recoverSegments: true, recoveryRecords: intent.records.map(record => ({ kind: 'stats', record })) });
             } catch { /* 只以原记录的权威回读判定提交结果。 */ }
-            state = read(intent, alive, { allowMissing: false });
+            state = read(intent, alive, { allowMissing: true });
             if (!state.ok) return state;
+            // 若追加期间被角色卡覆盖表模板清掉数值表，允许重新建表并再写一次。
+            if (state.tableMissing) {
+                if (attempt === 0 && alive()) continue;
+                return fail('stats-generation-save-unverified');
+            }
+            break;
         }
         if (intent.records.some(record => state.rows.some(row => row.id === record.id && !same(row, record))))
             return fail('stats-generation-record-conflict');

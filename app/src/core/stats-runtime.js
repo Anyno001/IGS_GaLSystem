@@ -43,7 +43,7 @@ import { BUILTIN_SKILLS, CORE_SKILL_NAMES, editStorySkill, mergeStorySkill, regi
 import { worldSkillNames } from '../scene/stats/stat-world-skills.js';
 import { applyTidy, buildTidyPrompt, parseTidyReply } from '../scene/stats/stat-story-tidy.js';
 import { DEFAULT_SPECIAL_SKILLS, BASE_ATTRIBUTES } from '../scene/stats/stat-state.js';
-import { COC_ATTRS, cocModeOf, cocSkillTotals, normalizeCocMode, sanitizeCocSheet } from '../scene/stats/coc-investigator.js';
+import { ATTR_ALIAS, COC_ATTRS, cocModeOf, cocSkillTotals, normalizeCocMode, sanitizeCocSheet } from '../scene/stats/coc-investigator.js';
 import { NPC_COC_BATCH_MAX, buildNpcCocModuleRequest, buildNpcCocRequest, parseNpcCocReply } from '../scene/stats/stat-coc-npc.js';
 import {
     PROTAGONIST, SAN_ATTRIBUTE, attributeNamesOf, chanceOf, heroBonusKey, heroBonusOf, heroBonusSkillNames, heroSkillLevel, cocSheetOf, checkLine, checkFxDetail, contestCheck, contestFxDetail, contestLine, engineFor, isProtagonist,
@@ -242,6 +242,10 @@ export function createStatsRuntime({
     let creating = false;
     let loadedKey = '';
     let loadedChat = '';
+    let justSwitchedChat = false;
+    let lastObservedChatLength = 0;
+    let lastConfirmedHeroBase = null;
+    let pendingCardOverwriteRestore = false;
     let eventCombat = null;
     let modeDefault = 'auto';
     let modePending = false;
@@ -249,6 +253,7 @@ export function createStatsRuntime({
     const askedFill = new Set();
     const heroAsked = new Set();
     const heroPickAsked = new Set();
+    const heroManualPickOpen = new Set();
     const notices = new Map();
     const diagnostics = [];
     const forcedSettings = new WeakMap();
@@ -285,6 +290,7 @@ export function createStatsRuntime({
         },
         onSlow: job => {
             if (VISIBLE_BUSY_TASKS.has(job.key)) {
+                if (job.key === 'hero-skills' && notices.get('hero-skills')?.kind !== 'busy') return;
                 setNotice(job.key, { kind: 'busy', text: '仍在等待同一次模型请求，请勿重复提交', slow: true });
             } else {
                 diag('stats-generation-slow', { key: job.key });
@@ -319,6 +325,9 @@ export function createStatsRuntime({
     let generationCommitTail = Promise.resolve();
     let generationCommitActive = 0;
     let sheetsDeferredByGenerating = false;
+    let syncTablesDeferredByGenerating = false;
+    const autoSheetAttemptedFloor = new Map();
+    const pendingAutoSheetNames = new Set();
     function enqueueGenerationCommit(fn) {
         generationCommitActive += 1;
         const run = generationCommitTail.then(fn, fn);
@@ -742,8 +751,8 @@ export function createStatsRuntime({
         return true;
     }
 
-    // 主角统一初始化（P4）：先恢复未完成意图；若未决定自动/手填则等待玩家选择；否则读取权威六维与货币判定缺项，全缺一次请求、部分已有只补缺项，分阶段保存并读回确认。
-    function ensureHeroInit({ force = false, requireBio = false } = {}) {
+    // 主角统一初始化（P4）：先恢复未完成意图；若未决定自动/手填则等待玩家选择；否则读取权威六维、擅长技能、初始特质与货币判定缺项，全缺一次请求、部分已有只补缺项，分阶段保存并读回确认。
+    function ensureHeroInit({ force = false, requireBio = false, includeSkills = false } = {}) {
         const hasAttr = Boolean(attributeAccess);
         const hasInv = Boolean(inventoryOf());
         if (!active() || (!hasAttr && !hasInv)) return null;
@@ -760,7 +769,8 @@ export function createStatsRuntime({
         }
         const currencyReady = !hasInv || Boolean(currency?.seeded);
         const bioReady = !requireBio || Boolean(String(catalog.heroBio || '').trim());
-        if (!hasPendingIntent && attrReady && currencyReady && bioReady && !force && !exchangeOf() && !currencyEditPending()) return null;
+        const skillsReady = !includeSkills || !needsHeroPick();
+        if (!hasPendingIntent && attrReady && currencyReady && bioReady && skillsReady && !force && !exchangeOf() && !currencyEditPending()) return null;
         // 尚无已落地数据时，自动触发必须满足当前最新楼层含任意可见 IGS 标签。
         if (!force && !hasPendingIntent && (!attrReady || !currencyReady) && !latestFloorHasVisibleIgsTag()) return null;
         if (!force && !hasPendingIntent && currencyAsked.has(chatId)) return null;
@@ -769,7 +779,16 @@ export function createStatsRuntime({
         const alive = () => ownerAlive();
         const requestAlive = () => ownerAlive() && generationRoute() === route;
         currencyAsked.add(chatId);
-        const job = { chatId, epoch: currencyEpoch, alive, controller: new AbortController(), stage: 'read', slow: false, promise: null };
+        const job = {
+            chatId,
+            epoch: currencyEpoch,
+            alive,
+            controller: new AbortController(),
+            stage: 'read',
+            slow: false,
+            wantSkills: Boolean(ledger && (includeSkills || catalog.heroInitChoice === 'auto') && catalog.heroSkillsManual !== true && needsHeroPick() && !hasLearnedHeroSkill()),
+            promise: null,
+        };
         currencyJob = job;
         const progress = (stage, slow = false) => {
             if (!alive() || currencyJob !== job) return;
@@ -777,7 +796,7 @@ export function createStatsRuntime({
             job.slow = slow;
             currencyProgress = { stage, reason: '', slow };
             const text = stage === 'request'
-                ? (slow ? '主角初始化仍在处理中，正在等待同一次请求' : '正在初始化主角六维与剧情货币')
+                ? (slow ? '主角初始化仍在处理中，正在等待同一次请求' : '正在初始化主角数值与剧情货币')
                 : stage === 'attributes' ? '正在保存主角六维'
                 : stage === 'recover' ? '正在恢复主角初始化'
                 : '正在确认剧情货币';
@@ -821,6 +840,7 @@ export function createStatsRuntime({
                     if (!alive()) return { ok: false, stage: 'attributes', reason: 'request-stale' };
                     if (!written?.ok) return { ok: false, stage: 'attributes', reason: written?.reason || 'stats-attribute-write-unverified' };
                 }
+                captureHeroBaseSnapshot(access, heroName);
                 gateMemo = null;
                 const adv = saveStage({ stage: intent.needCurrency ? 'currency-config' : 'done' });
                 if (!adv.ok) return adv;
@@ -829,6 +849,8 @@ export function createStatsRuntime({
             // 阶段 3：货币定义写入/确认
             if (intent.needCurrency && intent.stage !== 'currency-seed' && intent.stage !== 'done') {
                 progress('currency-config');
+                if (generationCommitActive > 0) await generationCommitTail;
+                if (!alive()) return { ok: false, stage: 'currency-config', reason: 'request-stale' };
                 const statsRead = readAuthoritativeStatsCurrency(alive, { allowMissing: true });
                 if (!statsRead.ok) return { ...statsRead, stage: 'currency-config' };
                 const existing = statsRead.currency;
@@ -864,14 +886,81 @@ export function createStatsRuntime({
                 const adv = saveStage({ stage: 'done' });
                 if (!adv.ok) return adv;
             }
-            // 阶段 4.5：写入主角简介（不覆盖已有简介，独立键值不锁 NPC 或技能写入）；若尚有未落盘的初始账本也一并落地。
-            if (intent.bio && !String(catalog.heroBio || '').trim() && alive()) {
-                catalog = sanitizeCatalog({ ...catalog, heroBio: intent.bio });
-                persist([], { shouldStart: alive });
-                await tail;
-            } else if (!ledgerPersisted && alive()) {
-                persist([], { shouldStart: alive });
-                await tail;
+            // 阶段 4.5：写入主角简介、擅长技能与初始特质（同一批请求结果一次性落地，不覆盖已有手填）；若尚有未落盘的初始账本也一并落地。
+            if (generationCommitActive > 0) await generationCommitTail;
+            if (alive()) {
+                let nextCatalog = catalog;
+                let catalogChanged = false;
+                let traitsAdded = false;
+                const traitNotices = [];
+                if (intent.bio && !String(nextCatalog.heroBio || '').trim()) {
+                    nextCatalog = sanitizeCatalog({ ...nextCatalog, heroBio: intent.bio });
+                    catalogChanged = true;
+                }
+                if (intent.needSkills && intent.skills && Object.keys(intent.skills).length && nextCatalog.heroSkillsManual !== true && needsHeroPick() && !hasLearnedHeroSkill()) {
+                    const owned = ledger ? currentStatsState(ledger).protagonist.skills : {};
+                    const base = { ...nextCatalog.protagonistBase };
+                    const edit = { ...nextCatalog.protagonistEdit };
+                    const entries = [];
+                    for (const [skill, tier] of Object.entries(intent.skills)) {
+                        if (!SKILL_TIERS[tier] || (owned[skill] && Number(owned[skill].value) >= 25)) continue;
+                        delete edit[skill];
+                        const val = bandValue(SKILL_TIERS[tier], `${chatId}|${PROTAGONIST}|${skill}`);
+                        base[skill] = val;
+                        entries.push([skill, val]);
+                    }
+                    if (entries.length) {
+                        const heroSlots = backfillHeroSlots(entries);
+                        nextCatalog = sanitizeCatalog({
+                            ...nextCatalog,
+                            protagonistBase: base,
+                            protagonistEdit: edit,
+                            heroAssigned: true,
+                            heroPicked: true,
+                            heroSkillsManual: false,
+                            heroSlots,
+                        });
+                        heroAsked.add(chatId);
+                        heroPickAsked.add(chatId);
+                        setNotice('hero-pick', null);
+                        setNotice('hero-skills', null);
+                        catalogChanged = true;
+                    }
+                }
+                if (intent.hasTraits && ledger && !(nextCatalog.traitInit || []).includes(PROTAGONIST)) {
+                    const nowState = currentStatsState(ledger);
+                    const prevForCombo = nextCatalog;
+                    for (const traitId of (Array.isArray(intent.traits) ? intent.traits : []).slice(0, 3)) {
+                        const applied = applyTraitChange(nowState, nextCatalog, PROTAGONIST, traitId, true, 'auto', gateAttrsOf(PROTAGONIST));
+                        if (applied && applied.catalog && !applied.reason && Array.isArray(applied.notices) && applied.notices.length) {
+                            nextCatalog = applied.catalog;
+                            traitsAdded = true;
+                            traitNotices.push(...applied.notices);
+                        }
+                    }
+                    nextCatalog = sanitizeCatalog({
+                        ...nextCatalog,
+                        traitInit: [...new Set([...(nextCatalog.traitInit || []), PROTAGONIST])],
+                    });
+                    catalogChanged = true;
+                    if (traitsAdded) {
+                        const beforeCombo = catalog;
+                        catalog = nextCatalog;
+                        const comboTexts = refreshAllCombos(nowState, prevForCombo, nowState);
+                        nextCatalog = catalog;
+                        catalog = beforeCombo;
+                        announceTraits(traitNotices, comboTexts);
+                        lightGlobalCodex(nowState);
+                    }
+                }
+                if (catalogChanged) {
+                    catalog = nextCatalog;
+                    persist([], { shouldStart: alive });
+                    await tail;
+                } else if (!ledgerPersisted) {
+                    persist([], { shouldStart: alive });
+                    await tail;
+                }
             }
             // 阶段 5：清除意图并恢复其余待完成写口
             const cleared = heroInitIntents.save(chatId, null);
@@ -910,7 +999,16 @@ export function createStatsRuntime({
             const needAttributes = Boolean(hasAttr && !attrRead.view.initialized);
             const needCurrency = Boolean(hasInv && !currency);
             const needBio = !String(catalog.heroBio || '').trim();
-            if (!needAttributes && !needCurrency && !(requireBio && needBio)) {
+            const ownedHeroSkills = ledger ? currentStatsState(ledger).protagonist.skills : {};
+            const wantSkills = Boolean(ledger && (includeSkills || catalog.heroInitChoice === 'auto') && catalog.heroSkillsManual !== true && needsHeroPick() && !hasLearnedHeroSkill());
+            const availableSkills = wantSkills
+                ? heroSkillNames().filter((name) => !(ownedHeroSkills[name] && Number(ownedHeroSkills[name].value) >= 25))
+                : [];
+            const needSkills = availableSkills.length > 0;
+            job.wantSkills = needSkills;
+            const traitDefs = ledger && !(catalog.traitInit || []).includes(PROTAGONIST) ? candidateTraitDefs({ protagonist: true }) : [];
+            const needTraits = traitDefs.length > 0;
+            if (!needAttributes && !needCurrency && !(requireBio && needBio) && !(includeSkills && needSkills)) {
                 if (hasInv && currency && !currency.seeded) {
                     progress('currency-seed');
                     const seeded = await seedCurrency(alive);
@@ -953,6 +1051,10 @@ export function createStatsRuntime({
                 needAttributes,
                 needCurrency,
                 needBio,
+                needSkills,
+                availableSkills,
+                needTraits,
+                traitDefs,
                 existingCurrency: currency,
             }, { prompt: settings().prompts.heroInit });
             progress('request');
@@ -983,7 +1085,16 @@ export function createStatsRuntime({
             }
             if (!requestAlive()) return { ok: false, stage: 'request', reason: 'request-stale' };
             job.stage = 'parse';
-            const parsed = parseHeroInitReply(reply, { needAttributes, needCurrency, chatSeed: chatId });
+            const parsed = parseHeroInitReply(reply, {
+                needAttributes,
+                needCurrency,
+                needSkills,
+                availableSkills,
+                needTraits,
+                traitDefs,
+                chatSeed: chatId,
+                registry: dailyEngineOf().registry,
+            });
             if (!parsed.ok) return { ...parsed, stage: 'parse' };
 
             // 回包前再次只读核对权威状态：若期间手改已补足，绝不覆盖；仍缺项时再在 commitIntent 中建表写入。
@@ -994,15 +1105,19 @@ export function createStatsRuntime({
                 const access = attributeAccess();
                 const latestAttr = readHeroAttributeState(access, heroName, alive);
                 if (!latestAttr.ok) return latestAttr;
+                if (latestAttr.layout === 'v2' || latestAttr.layout === 'legacy') layout = latestAttr.layout;
                 if (latestAttr.view.initialized) finalNeedAttributes = false;
                 else heroKey = latestAttr.view.key;
             }
             if (finalNeedCurrency) {
                 const latestStats = readAuthoritativeStatsCurrency(alive, { allowMissing: true });
                 if (!latestStats.ok) return latestStats;
+                if (latestStats.layout === 'v2' || latestStats.layout === 'legacy') layout = latestStats.layout;
                 if (latestStats.currency) finalNeedCurrency = false;
             }
-            if (!finalNeedAttributes && !finalNeedCurrency && !(needBio && parsed.bio)) {
+            const finalNeedSkills = Boolean(needSkills && parsed.skills && Object.keys(parsed.skills).length && catalog.heroSkillsManual !== true && needsHeroPick() && !hasLearnedHeroSkill());
+            const finalNeedTraits = Boolean(needTraits && parsed.hasTraits && !(catalog.traitInit || []).includes(PROTAGONIST));
+            if (!finalNeedAttributes && !finalNeedCurrency && !finalNeedSkills && !finalNeedTraits && !(needBio && parsed.bio)) {
                 if (hasInv && currency && !currency.seeded) {
                     progress('currency-seed');
                     const seeded = await seedCurrency(alive);
@@ -1018,6 +1133,8 @@ export function createStatsRuntime({
                 createdAt,
                 attributes: finalNeedAttributes ? parsed.attributes : null,
                 currency: finalNeedCurrency ? parsed.currency : null,
+                skills: finalNeedSkills ? parsed.skills : null,
+                traits: finalNeedTraits ? (parsed.traits || []) : null,
             });
             const operationId = `hi-${hash32(opSeed).toString(36)}`;
             const intent = {
@@ -1028,9 +1145,14 @@ export function createStatsRuntime({
                 stage: 'result-saved',
                 needAttributes: finalNeedAttributes,
                 needCurrency: finalNeedCurrency,
+                needSkills: finalNeedSkills,
+                needTraits: finalNeedTraits,
+                hasTraits: finalNeedTraits,
                 attributes: finalNeedAttributes ? parsed.attributes : null,
                 attributeRecordId: finalNeedAttributes ? `hero-base|${heroKey}|${operationId}` : null,
                 currency: finalNeedCurrency ? { ...parsed.currency.config, initial: parsed.currency.initial } : null,
+                skills: finalNeedSkills ? parsed.skills : null,
+                traits: finalNeedTraits ? (parsed.traits || []) : null,
                 bio: parsed.bio || '',
                 seed: null,
                 createdAt,
@@ -1060,6 +1182,7 @@ export function createStatsRuntime({
             if (currencyJob === job) {
                 currencyJob = null;
                 if (notices.get('currency')?.kind === 'busy') setNotice('currency', null);
+                if (chatIdOf(ctx()) === chatId) refreshHeroPick();
             }
         });
         return job.promise;
@@ -1195,9 +1318,9 @@ export function createStatsRuntime({
         const text = messages(c).slice(0, upTo === Infinity ? undefined : upTo + 1).map((m) => String((m && m.mes) || '')).join('\n');
         return [...new Set(names)].filter((n) => text.includes(n)).map((n) => canonName(n)).filter((n, i, all) => n && all.indexOf(n) === i);
     };
-    const tableSeedOf = (state, upTo = Infinity) => {
-        const fresh = [...new Set([...tableNames(), ...rosterNames(upTo)])].filter((name) => !state.characters[name] && !Object.hasOwn(catalog.renames, name));
-        return fresh.length ? Object.fromEntries(fresh.map((name) => [name, {}])) : null;
+    const tableSeedOf = (state, upTo = Infinity, { fresh = false } = {}) => {
+        const freshNames = [...new Set([...tableNames({ fresh }), ...rosterNames(upTo)])].filter((name) => !state.characters[name] && !Object.hasOwn(catalog.renames, name));
+        return freshNames.length ? Object.fromEntries(freshNames.map((name) => [name, {}])) : null;
     };
     // 表格被数据库插件改过后分两种来源：
     // 1. AI 填表（「开始填表」回调到下一次表格更新之间）：用 IGS 数值盖回去；
@@ -1243,23 +1366,149 @@ export function createStatsRuntime({
         for (const item of read.items) diag('stats-table-manual-adopted', { name: item.name, key: item.key, from: item.from, to: item.shown });
         return { ok: true, adopted: read.items, skills };
     }
-    const onTableUpdated = () => {
+    function captureHeroBaseSnapshot(access = attributeAccess ? attributeAccess() : null, heroName = userName() || PROTAGONIST) {
+        if (!access) return;
+        try {
+            const read = access.readHero(heroName);
+            if (!read?.ok || !Array.isArray(read.rows)) return;
+            const heroKey = read.view?.key;
+            const bases = read.rows.filter((row) => row.type === 'hero-base' && (!heroKey || row.character === heroKey));
+            const latest = bases.length ? bases[bases.length - 1] : null;
+            if (latest?.payload?.scores) {
+                lastConfirmedHeroBase = {
+                    id: latest.id,
+                    scores: structuredClone(latest.payload.scores),
+                    createdAt: latest.createdAt,
+                    uncapped: latest.payload.uncapped === true,
+                };
+            }
+        } catch { /* 读取失败不阻塞主流程 */ }
+    }
+
+    function restoreAfterCardOverwrite({ includePersist = true } = {}) {
+        if (!active() || !ledger) return;
+        const alive = currencyLease();
+        if (includePersist) persist([], { shouldStart: alive });
+        if (lastConfirmedHeroBase && attributeAccess) {
+            const savedBase = { ...lastConfirmedHeroBase, scores: structuredClone(lastConfirmedHeroBase.scores) };
+            const heroName = userName() || PROTAGONIST;
+            Promise.resolve().then(async () => {
+                if (!alive()) return;
+                const access = attributeAccess ? attributeAccess() : null;
+                if (!access) return;
+                const src = access.source();
+                if (src?.ready && src.readAbilities(heroName, { heroPrefs: heroPrefs() })?.initialized === true) return;
+                const ready = await ensureHeroAttributeReadable(access, heroName, alive);
+                if (!alive() || !ready?.ok || ready.view?.initialized) return;
+                const written = await access.initHero(heroName, savedBase.scores, {
+                    recordId: savedBase.id,
+                    createdAt: savedBase.createdAt,
+                    uncapped: savedBase.uncapped === true,
+                    shouldStart: alive,
+                });
+                if (alive() && written?.ok) {
+                    gateMemo = null;
+                    onChange(currentStatsState(ledger), null);
+                }
+            }).catch(() => {});
+        }
+        if (currency?.seeded && inventoryOf()) {
+            const cur = readCurrency();
+            if (!cur.ok && cur.reason === 'inventory-table-missing') {
+                queueCurrency(async () => {
+                    if (!alive()) return { ok: false, reason: 'request-stale' };
+                    const ready = await ensureCurrencyInventory(alive);
+                    if (alive() && ready?.ok) currencyChanged();
+                    return ready;
+                }).catch(() => {});
+            }
+        }
+    }
+
+    let awaitingTableReload = false;
+    let sameChatTableCleared = false;
+    const onTableUpdated = (data) => {
         tableCache = null;
         managedCache = null;
-        if (settings().enabled && !ledger
-            && ['combat-table-not-ready', 'combat-table-runtime-not-ready', 'not-ready', 'missing-api'].includes(blocked || unavailable)) {
+        const liveData = (() => { try { const r = getPushClient()?.readTables?.(); return r?.ok ? r.data : undefined; } catch { return undefined; } })();
+        const liveEmpty = liveData != null && typeof liveData === 'object' && !Array.isArray(liveData) && Object.keys(liveData).length === 0;
+        const payloadEmpty = data != null && typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0;
+        // 仅当实时导出为空（或无法读实时导出且回调载荷为空对象）时，才按数据库清空态提前返回；
+        // 避免把仅传递占位空对象 {} 的更新回调（实际表有数据）误判为空快照而跳过手改采纳或刷新。
+        const emptyData = liveData !== undefined ? liveEmpty : payloadEmpty;
+        const chatId = chatIdOf(ctx());
+        if (emptyData) {
+            if (inflight === 0 && currencyBusy === 0 && generationCommitActive === 0) {
+                loadedKey = '';
+                // 刚切聊天或尚未在本聊天落盘时按切聊天清空重载处理；本聊天已运行并落盘后遇到角色卡覆写清空则保留内存账本待重建。
+                if (justSwitchedChat || !ledger || !ledgerPersisted || loadedChat !== chatId) {
+                    awaitingTableReload = true;
+                    justSwitchedChat = false;
+                } else {
+                    sameChatTableCleared = true;
+                }
+            }
+            return;
+        }
+        const waitingState = [
+            'combat-table-not-ready', 'combat-table-runtime-not-ready', 'not-ready', 'missing-api',
+            'igs-layout-conflict', 'igs-layout-unconfirmed',
+            'combat-table-template-diverged', 'combat-table-template-mismatch',
+            'inventory-template-diverged', 'inventory-template-mismatch',
+        ].includes(blocked || unavailable);
+        if (settings().enabled && !generating
+            && ((awaitingTableReload && inflight === 0 && currencyBusy === 0 && generationCommitActive === 0)
+                || (!ledger && waitingState))) {
+            const reloadedAfterClear = awaitingTableReload;
+            awaitingTableReload = false;
+            sameChatTableCleared = false;
             load();
             autoEnable();
+            if (reloadedAfterClear) onChange(ledger ? currentStatsState(ledger) : null, null, { chatChanged: true });
             refreshOnboarding();
             if (active()) refreshLife();
             ensureCurrency();
         }
-        // 填表窗口内、或窗口刚关后的余波（插件一轮填表可能连发几次更新）都按 AI 填表处理：只盖回，不采纳。
-        const covered = fillOpen || Date.now() < fillGraceUntil;
+        // 角色卡在第一楼用户输入触发时强制用内置模板与数据覆盖当前聊天表：检测同一聊天内 IGS 数值日志表被外部整体清掉，
+        // 避免残留旧 baseline/ledgerPersisted 导致缺 init 的残缺写入、冲突报错或丢失首楼已生成的数值与主角六维。
+        let cardOverwritten = false;
+        const chatLen = messages(ctx()).length;
+        const notShrunk = chatLen >= lastObservedChatLength;
+        if (chatLen > lastObservedChatLength) lastObservedChatLength = chatLen;
+        if (settings().enabled && ledger && loadedChat === chatId && !justSwitchedChat && notShrunk
+            && (ledgerPersisted || sameChatTableCleared)
+            && inflight === 0 && currencyBusy === 0 && generationCommitActive === 0) {
+            const t = tables();
+            if (t.ok) {
+                t.invalidate?.();
+                const rows = t.read({ kinds: ['stats'] });
+                if (rows?.ok && (!Array.isArray(rows.stats) || rows.layoutPending || rows.stats.length === 0)) {
+                    cardOverwritten = true;
+                    sameChatTableCleared = false;
+                    ledgerPersisted = false;
+                    initQueued = false;
+                    baseline = new Map();
+                    loadedKey = '';
+                    if (generating) {
+                        pendingCardOverwriteRestore = true;
+                    } else {
+                        restoreAfterCardOverwrite({ includePersist: true });
+                    }
+                } else if (sameChatTableCleared && rows?.ok && Array.isArray(rows.stats) && rows.stats.length > 0) {
+                    sameChatTableCleared = false;
+                    if (!generating) {
+                        load();
+                        refreshOnboarding();
+                    }
+                }
+            }
+        }
+        // 填表窗口内、或窗口刚关后的余波（插件一轮填表可能连发几次更新）、或角色卡模板覆写都按 AI/外部覆写处理：只盖回，不误采纳。
+        const covered = fillOpen || Date.now() < fillGraceUntil || cardOverwritten;
         if (fillOpen) fillGraceUntil = Date.now() + FILL_GRACE;
         closeFillWindow();
+        if (!writingTable && active() && npcPolicy && !generating) detectNewCharacters({ syncTables: true });
         if (!covered && (writingTable || Date.now() < selfWriteUntil)) return;
-        if (active() && npcPolicy && !generating) detectNewCharacters({ syncTables: true });
         scheduleTableSync(covered);
     };
     // 延迟处理表格更新。到点时若正在写表、刚写完或又进了填表窗口，采纳会读到写了一半的表：顺延，并改按 AI 填表处理。
@@ -1337,6 +1586,15 @@ export function createStatsRuntime({
         }
         ledger = null; ledgerPersisted = false; initQueued = false; chatEnabled = false; buildMode = null; buildChoices = {}; npcPolicy = null; npcChoices = {}; blocked = ''; unavailable = ''; learned = {}; catalog = emptyCatalog(); declined = false; currency = null;
         currencyEdit = null; currencyEditError = '';
+        sameChatTableCleared = false; pendingCardOverwriteRestore = false;
+        if (!sameChat) {
+            lastConfirmedHeroBase = null;
+            autoSheetAttemptedFloor.clear();
+            pendingAutoSheetNames.clear();
+            sheetsDeferredByGenerating = false;
+            syncTablesDeferredByGenerating = false;
+        }
+        lastObservedChatLength = messages(ctx()).length;
         baseline = new Map(); pendingOption = null; manualCheck = null; notices.clear();
         if (currencyNotice) notices.set('currency', currencyNotice);
         for (const [key, notice] of preservedBusy) notices.set(key, notice);
@@ -1369,7 +1627,7 @@ export function createStatsRuntime({
         if (Array.isArray(rows.stats)) {
             const merged = mergeStatLog(rows.stats, { chatId, chat: messages(c) });
             merged.diagnostics.forEach((d) => diag(d.code, d));
-            if (merged.ledger) { adopt(merged); return; }
+            if (merged.ledger) { adopt(merged); captureHeroBaseSnapshot(); return; }
         }
         // 表里没有本聊天的记录：旧版整体快照（igs_stats）只在这里导入一次。
         if (read.raw) {
@@ -1460,7 +1718,29 @@ export function createStatsRuntime({
         }
     }
 
-    // 持久化（v0.39 ms）：算聊天级差分、附上楼层记录，一次追加；若数值表尚不存在则先建表再插数据；追加串行排队。
+    function buildFullStatsRecords(extra = [], nextEntries, createdAt = Date.now()) {
+        const list = Array.isArray(extra) ? extra : [];
+        const hasInit = list.some((r) => r && r.type === 'init');
+        const extraFloors = new Set(list
+            .filter((r) => r && r.type === 'floor' && r.anchor)
+            .map((r) => `${r.anchor.messageId}:${r.anchor.swipeId}`));
+        const activeFloors = [];
+        for (const [messageId, swipeId] of [...ledger.active].sort(([a], [b]) => a - b)) {
+            if (extraFloors.has(`${messageId}:${swipeId}`)) continue;
+            const entry = ledger.entries.get(ledgerKey(ledger, messageId, swipeId));
+            if (!entry) continue;
+            activeFloors.push(currencyFloorRecord(entry));
+        }
+        writeSeq += 1;
+        return [
+            ...(hasInit ? [] : [initRecord(ledger.initial, { createdAt })]),
+            ...activeFloors,
+            ...list,
+            ...diffChatRecords(new Map(), nextEntries, { tag: `${createdAt.toString(36)}${writeSeq}`, createdAt }),
+        ];
+    }
+
+    // 持久化（v0.39 ms）：算聊天级差分、附上楼层记录，一次追加；若数值表尚不存在（或被角色卡首楼覆盖清空）则先建表再全量/增量插数据；追加串行排队。
     function persist(extra = [], options = {}) {
         if (!ledger || blocked || unavailable) return options.generation
             ? Promise.resolve({ ok: false, reason: blocked || unavailable || 'stats-no-ledger' }) : null;
@@ -1494,19 +1774,36 @@ export function createStatsRuntime({
         const ownerAlive = generationTasks.lease();
         const shouldStart = () => ownerAlive() && (!options.shouldStart || options.shouldStart() === true);
         const runWrite = async () => {
-            if (!shouldStart()) return { ok: false, reason: 'request-stale' };
-            const check = t.read({ kinds: ['stats'] });
-            if (!check || check.ok !== true) return { ok: false, reason: (check && check.reason) || 'stats-log-read-failed' };
-            if (!Array.isArray(check.stats) || check.layoutPending) {
-                if (typeof t.ensure !== 'function') return { ok: false, reason: 'stats-log-create-failed' };
-                const made = await t.ensure({ shouldStart });
+            for (let attempt = 0; attempt < 2; attempt += 1) {
                 if (!shouldStart()) return { ok: false, reason: 'request-stale' };
-                if (!made || made.ok !== true) {
-                    diag('stats-log-create-failed', { reason: made && made.reason });
-                    return { ok: false, reason: (made && made.reason) || 'stats-log-create-failed' };
+                t.invalidate?.();
+                const check = t.read({ kinds: ['stats'] });
+                if (!check || check.ok !== true) return { ok: false, reason: (check && check.reason) || 'stats-log-read-failed' };
+                const tableMissing = !Array.isArray(check.stats) || check.layoutPending;
+                const tableWiped = tableMissing || check.stats.length === 0;
+                if (tableMissing) {
+                    if (typeof t.ensure !== 'function') return { ok: false, reason: 'stats-log-create-failed' };
+                    const made = await t.ensure({ shouldStart });
+                    if (!shouldStart()) return { ok: false, reason: 'request-stale' };
+                    if (!made || made.ok !== true) {
+                        diag('stats-log-create-failed', { reason: made && made.reason });
+                        return { ok: false, reason: (made && made.reason) || 'stats-log-create-failed' };
+                    }
                 }
+                // 若数值表已被角色卡覆盖清空，而本次原计划只是增量记录（缺少 init），自动补全为完整快照再落盘，防止写出残缺日志。
+                const payload = tableWiped && !records.some((r) => r && r.type === 'init')
+                    ? buildFullStatsRecords(extra, next, Date.now())
+                    : records;
+                const appended = await t.append(payload, { ...options, shouldStart });
+                if (appended?.ok === true) return appended;
+                if (attempt === 0 && shouldStart() && ['combat-table-missing', 'igs-layout-unconfirmed', 'combat-ledger-insert-failed', 'combat-ledger-write-unverified'].includes(appended?.reason)) {
+                    t.invalidate?.();
+                    const recheck = t.read({ kinds: ['stats'] });
+                    if (recheck?.ok && (!Array.isArray(recheck.stats) || recheck.layoutPending || recheck.stats.length === 0)) continue;
+                }
+                return appended;
             }
-            return t.append(records, { ...options, shouldStart });
+            return { ok: false, reason: 'stats-log-write-failed' };
         };
         let started;
         try { started = runWrite(); } catch (error) { started = Promise.reject(error); }
@@ -1518,6 +1815,8 @@ export function createStatsRuntime({
             } else {
                 ledgerPersisted = true;
                 initQueued = true;
+                justSwitchedChat = false;
+                sameChatTableCleared = false;
             }
             return r;
         }, () => {
@@ -1562,21 +1861,27 @@ export function createStatsRuntime({
         return enqueueGenerationCommit(async () => {
             await tail;
             checkGeneration(task);
-            if (typeof task.conflictCheck === 'function') {
-                const latest = generationSave.read(null, task.alive);
-                if (!latest.ok) {
-                    task.check();
-                    if (notices.get(task.key)?.kind === 'busy') setNotice(task.key, null);
-                    generationSaveNotice(latest);
-                    return latest;
-                }
-                task.beforeRows = latest.rows;
+            const latest = generationSave.read(null, task.alive);
+            if (!latest.ok) {
+                task.check();
+                if (notices.get(task.key)?.kind === 'busy') setNotice(task.key, null);
+                generationSaveNotice(latest);
+                return latest;
+            }
+            const wiped = Boolean(latest.tableMissing || latest.rows.length === 0);
+            if (typeof task.conflictCheck === 'function' || wiped) {
+                task.beforeRows = wiped ? [] : latest.rows;
                 task.beforeLayout = latest.layout;
                 task.saveRevision = generationRevision();
             }
+            if (wiped) {
+                ledgerPersisted = false;
+                initQueued = false;
+                baseline = new Map();
+            }
             const previous = { catalog, ledger, learned };
             const effects = { notices: [], codex: false, push: false };
-            task.beforeEntries = ledgerPersisted
+            task.beforeEntries = (ledgerPersisted && !wiped)
                 ? chatEntries({ chatEnabled, catalog, learned, buildMode, buildChoices, npcPolicy, npcChoices, currency, currencyEdit })
                 : new Map();
             let saved;
@@ -1586,13 +1891,27 @@ export function createStatsRuntime({
                 learned = structuredClone(learned);
                 generationStage = effects;
                 const { extra = [], result = { ok: true } } = apply();
-                saved = persist(extra, { generation: task, result: { ...result, effects } });
+                let finalExtra = extra;
+                if (wiped && ledger.active.size) {
+                    const extraFloors = new Set((Array.isArray(extra) ? extra : [])
+                        .filter((r) => r && r.type === 'floor' && r.anchor)
+                        .map((r) => `${r.anchor.messageId}:${r.anchor.swipeId}`));
+                    const activeFloors = [];
+                    for (const [messageId, swipeId] of [...ledger.active].sort(([a], [b]) => a - b)) {
+                        if (extraFloors.has(`${messageId}:${swipeId}`)) continue;
+                        const entry = ledger.entries.get(ledgerKey(ledger, messageId, swipeId));
+                        if (entry) activeFloors.push(currencyFloorRecord(entry));
+                    }
+                    if (activeFloors.length) finalExtra = [...activeFloors, ...extra];
+                }
+                saved = persist(finalExtra, { generation: task, result: { ...result, effects } });
             } finally {
                 generationStage = null;
                 ({ catalog, ledger, learned } = previous);
             }
             const result = await Promise.resolve(saved);
             task.check();
+            if (result?.ok) { justSwitchedChat = false; sameChatTableCleared = false; }
             if (result?.ok && !result.recovered) publishGeneration(task, result);
             if (!result?.ok) {
                 if (notices.get(task.key)?.kind === 'busy') setNotice(task.key, null);
@@ -1625,7 +1944,7 @@ export function createStatsRuntime({
         inflightChat = chatIdOf(ctx());
         const run = async () => {
             try {
-                // 并发非生成写口（如 setNpcPolicy、heroInit 的 heroBio/currency、detectNewCharacters 的 notified/queue）
+                // 并发非生成写口（如 setNpcPolicy、heroInit 的主角初始化/货币、pickHeroSkills、detectNewCharacters 的 notified/queue）
                 // 可能在 recover 等待 DB I/O 期间刚更新内存并入队 persist()；adopt(merged) 不得将其回滚成旧快照。
                 const beforeSnap = {
                     npcPolicy,
@@ -1635,6 +1954,14 @@ export function createStatsRuntime({
                     currency: JSON.stringify(currency),
                     currencyEdit: JSON.stringify(currencyEdit),
                     heroBio: catalog.heroBio || '',
+                    heroInitChoice: catalog.heroInitChoice || '',
+                    protagonistBase: JSON.stringify(catalog.protagonistBase || {}),
+                    protagonistEdit: JSON.stringify(catalog.protagonistEdit || {}),
+                    heroSlots: JSON.stringify(catalog.heroSlots || null),
+                    heroAssigned: catalog.heroAssigned === true,
+                    heroPicked: catalog.heroPicked === true,
+                    heroSkillsManual: catalog.heroSkillsManual === true,
+                    traitInit: JSON.stringify(catalog.traitInit || []),
                     notified: JSON.stringify(catalog.notified || []),
                     queue: JSON.stringify(catalog.queue || {}),
                 };
@@ -1644,7 +1971,16 @@ export function createStatsRuntime({
                 if (result.ok && result.rows) {
                     const liveNow = {
                         npcPolicy, npcChoices, buildMode, buildChoices, currency, currencyEdit,
-                        heroBio: catalog.heroBio || '', notified: catalog.notified || [], queue: catalog.queue || {},
+                        heroBio: catalog.heroBio || '',
+                        heroInitChoice: catalog.heroInitChoice || '',
+                        protagonistBase: { ...(catalog.protagonistBase || {}) },
+                        protagonistEdit: { ...(catalog.protagonistEdit || {}) },
+                        heroSlots: catalog.heroSlots ? { ...catalog.heroSlots } : null,
+                        heroAssigned: catalog.heroAssigned === true,
+                        heroPicked: catalog.heroPicked === true,
+                        heroSkillsManual: catalog.heroSkillsManual === true,
+                        traitInit: [...(catalog.traitInit || [])],
+                        notified: catalog.notified || [], queue: catalog.queue || {},
                         baseline: new Map(baseline),
                     };
                     const merged = mergeStatLog(result.rows, { chatId: chatIdOf(ctx()), chat: messages(ctx()) });
@@ -1682,6 +2018,38 @@ export function createStatsRuntime({
                     if (liveNow.heroBio !== beforeSnap.heroBio && (nextCat.heroBio || '') !== liveNow.heroBio) {
                         nextCat = { ...nextCat, heroBio: liveNow.heroBio };
                         restoreKey('hero:bio');
+                    }
+                    if (liveNow.heroInitChoice !== beforeSnap.heroInitChoice && (nextCat.heroInitChoice || '') !== liveNow.heroInitChoice) {
+                        nextCat = { ...nextCat, heroInitChoice: liveNow.heroInitChoice };
+                        restoreKey('hero:initChoice');
+                    }
+                    if (JSON.stringify(liveNow.protagonistBase) !== beforeSnap.protagonistBase && JSON.stringify(nextCat.protagonistBase || {}) !== JSON.stringify(liveNow.protagonistBase)) {
+                        nextCat = { ...nextCat, protagonistBase: liveNow.protagonistBase };
+                        for (const key of new Set([...Object.keys(liveNow.protagonistBase), ...Object.keys(nextCat.protagonistBase || {})])) restoreKey(`base:${key}`);
+                    }
+                    if (JSON.stringify(liveNow.protagonistEdit) !== beforeSnap.protagonistEdit && JSON.stringify(nextCat.protagonistEdit || {}) !== JSON.stringify(liveNow.protagonistEdit)) {
+                        nextCat = { ...nextCat, protagonistEdit: liveNow.protagonistEdit };
+                        for (const key of new Set([...Object.keys(liveNow.protagonistEdit), ...Object.keys(nextCat.protagonistEdit || {})])) restoreKey(`edit:${key}`);
+                    }
+                    if (JSON.stringify(liveNow.heroSlots) !== beforeSnap.heroSlots && JSON.stringify(nextCat.heroSlots || null) !== JSON.stringify(liveNow.heroSlots)) {
+                        nextCat = { ...nextCat, heroSlots: liveNow.heroSlots };
+                        restoreKey('hero:slots');
+                    }
+                    if (liveNow.heroAssigned !== beforeSnap.heroAssigned && (nextCat.heroAssigned === true) !== liveNow.heroAssigned) {
+                        nextCat = { ...nextCat, heroAssigned: liveNow.heroAssigned };
+                        restoreKey('hero:assigned');
+                    }
+                    if (liveNow.heroPicked !== beforeSnap.heroPicked && (nextCat.heroPicked === true) !== liveNow.heroPicked) {
+                        nextCat = { ...nextCat, heroPicked: liveNow.heroPicked };
+                        restoreKey('hero:picked');
+                    }
+                    if (liveNow.heroSkillsManual !== beforeSnap.heroSkillsManual && (nextCat.heroSkillsManual === true) !== liveNow.heroSkillsManual) {
+                        nextCat = { ...nextCat, heroSkillsManual: liveNow.heroSkillsManual };
+                        restoreKey('hero:skillsManual');
+                    }
+                    if (JSON.stringify(liveNow.traitInit) !== beforeSnap.traitInit && JSON.stringify(nextCat.traitInit || []) !== JSON.stringify(liveNow.traitInit)) {
+                        nextCat = { ...nextCat, traitInit: [...new Set([...(nextCat.traitInit || []), ...liveNow.traitInit])] };
+                        restoreKey('traitinit:all');
                     }
                     if (JSON.stringify(liveNow.notified) !== beforeSnap.notified && JSON.stringify(nextCat.notified || []) !== JSON.stringify(liveNow.notified)) {
                         nextCat = { ...nextCat, notified: [...new Set([...(nextCat.notified || []), ...liveNow.notified])] };
@@ -2297,6 +2665,10 @@ export function createStatsRuntime({
         const kept = (skipped || []).filter((s) => s.why !== 'no-change');
         if (kept.length) diag('stats-trait-review-skipped', { items: kept.map((s) => `${s.charName}:${s.id}:${s.why}`) });
     };
+    function candidateTraitDefs({ protagonist = false } = {}) {
+        const nsfw = isNsfw();
+        return TRAIT_DEFS.filter((d) => d.candidate !== false && (!protagonist || d.protagonist) && (nsfw || !d.nsfw) && subInWorlds(d.sub, worldsNow()));
+    }
     // 初始特质：主角与已建档角色各评一次（每人最多 3 项，src=auto），按 SHEET_BATCH_MAX 人一批依次发给备用模型。
     // 失败保留待评名单，仅手动操作可重试。
     // manual：设置页「补全角色特质」，已评过但仍没有任何特质的角色也再评一次。
@@ -2305,7 +2677,17 @@ export function createStatsRuntime({
         const done = new Set(catalog.traitInit || []);
         const npcs = [...new Set([...Object.keys(currentStatsState(ledger).characters || {}), ...Object.keys(catalog.sheets || {})])].filter((n) => n !== PROTAGONIST && !isHero(n));
         const bare = (n) => !listTraits(catalog, n).some((t) => t.src !== 'achieve');
-        return [PROTAGONIST, ...npcs].filter((n) => !done.has(n) || (manual && bare(n)));
+        const activeSheets = new Set(generationTasks.get('sheets')?.targets || []);
+        const autoSheetPending = (n) => !manual && settings().sheetGen !== 'off' && (
+            activeSheets.has(n)
+            || (npcPolicy === 'auto' && !catalog.sheets[n] && npcChoices[n] !== 'defer')
+        );
+        const heroInitPending = !manual && Boolean(currencyJob?.alive?.());
+        return [PROTAGONIST, ...npcs].filter((n) => {
+            if (n === PROTAGONIST && heroInitPending) return false;
+            if (n !== PROTAGONIST && autoSheetPending(n)) return false;
+            return !done.has(n) || (manual && bare(n));
+        });
     };
     function runInitialTraits({ manual = false } = {}) {
         const pending = generationTasks.get('initial-traits');
@@ -2347,7 +2729,7 @@ export function createStatsRuntime({
                 const c = ctx();
                 const state = currentStatsState(ledger);
                 const nsfw = isNsfw();
-                const defs = TRAIT_DEFS.filter((d) => d.candidate !== false && (nsfw || !d.nsfw) && subInWorlds(d.sub, worldsNow()));
+                const defs = candidateTraitDefs();
                 const floors = messages(c).filter((m) => m && !m.is_system).slice(-6)
                     .map((m) => ({ role: m.is_user ? 'user' : 'ai', text: stripStatDirectives(String(m.mes ?? '')) }));
                 let client = null;
@@ -2559,7 +2941,7 @@ export function createStatsRuntime({
                 check, preroll: p.preroll || null, rollPairs, storyChecks, npcChecks, favorTier, favorMode, strengthRev, aptitudeOf: (name) => aptitudeLevel(catalog, name), traits: catalog.traits, romanceSeen: catalog.romanceSeen, moodGroups: moodGroups(), intimateCost, dateRegex: s.dateRegex, timeRegex: s.timeRegex, manual, catalog, settings: s, floor: messageId, noBattle: combatOn(), currency: available, extraDirectives: challengeDirectivesBefore(messages(c), messageId), present: present(before),
                 random, nsfw: isNsfw(), resolveCharacter: (name) => resolve(canonName(name), before), engine,
                 expenses: catalog.expenses, heroSide,
-                seedCharacters: autoTable ? tableSeedOf(before, messageId) : null, fameBars: catalog.fameBars,
+                seedCharacters: autoTable ? tableSeedOf(before, messageId, { fresh: true }) : null, fameBars: catalog.fameBars,
             });
             const meta = { ...r.meta };
             let changes = r.changes;
@@ -2586,7 +2968,10 @@ export function createStatsRuntime({
             return { ...r, changes, meta };
         };
         const r = redo ? resettleFloor(ledger, floor, settle) : settleFloor(ledger, floor, settle, seed === null ? undefined : seed);
-        if (r.reused) return r;
+        if (r.reused) {
+            if (npcPolicy === 'auto') detectNewCharacters({ triggerExisting: sheetsDeferredByGenerating, syncTables: true, floorId: messageId, floorText: body, floorEntry: r.entry });
+            return r;
+        }
         const meta = r.entry.meta || {};
         if (currencyFailure) currencyFailed(currency, currencyFailure);
         if (meta.note && meta.note.reason === 'stats-roll-skipped') diag('stats-roll-skipped', { messageId });
@@ -2637,7 +3022,7 @@ export function createStatsRuntime({
         if (!(meta.flags && meta.flags.detached)) refreshLife({ write: true, messageIds: [messageId], battleHurts: new Map(hurt ? [[messageId, hurt]] : []), naturalHeals: (meta.heal || []).map((h) => ({ messageId, name: h.name, amount: h.amount, reason: h.reason })) });
         if (meta.check && meta.check.source === 'roll' && !redo) playCheck(meta.check, messageId);
         if (meta.pendingRoll && s.storyCheck === 'manual') offerManualRoll(r.entry);
-        detectNewCharacters();
+        detectNewCharacters({ triggerExisting: sheetsDeferredByGenerating, syncTables: true, floorId: messageId, floorText: body, floorEntry: r.entry });
         scheduleBackfill();
         confirmWorldRoles(meta.diagnostics, messageId);
         if (!redo) traitPass(r.entry, messageId, body);
@@ -2694,6 +3079,10 @@ export function createStatsRuntime({
     }
 
     function onStarted(type, params, dryRun) {
+        if (dryRun !== true) {
+            justSwitchedChat = false;
+            lastObservedChatLength = Math.max(lastObservedChatLength, messages(ctx()).length);
+        }
         // 上次读取失败（不含导入中）时，新一轮生成前再试一次。
         if (!ledger && blocked && blocked !== 'stats-importing' && dryRun !== true) { load(); autoEnable(); }
         if (dryRun === true || SKIP_TYPES.has(type) || background() || !active()) return;
@@ -2714,36 +3103,73 @@ export function createStatsRuntime({
     }
 
     // 完整正文只在结束（或停止）时结算一次；注入只对本次生成有效（易错点 A3/A6）。
+    function latestAiFloor(c) {
+        const list = messages(c);
+        for (let i = list.length - 1; i >= 0; i -= 1) {
+            const msg = list[i];
+            if (msg && msg.is_user) break;
+            if (msg && !msg.is_system) return { id: i, msg, text: String(msg.mes ?? '') };
+        }
+        return null;
+    }
+
     function onFinished() {
         if (background()) return;
         const g = generating;
         generating = null;
+        justSwitchedChat = false;
+        const cNow = ctx();
+        lastObservedChatLength = Math.max(lastObservedChatLength, messages(cNow).length);
+        const restorePending = pendingCardOverwriteRestore;
+        pendingCardOverwriteRestore = false;
         clearPrompt();
+        const latestAi = latestAiFloor(cNow);
         if (!active() && settings().enabled && latestFloorHasVisibleIgsTag()) {
             autoEnable();
             if (!g) {
-                const c = ctx();
-                const lastId = messages(c).length - 1;
-                const lastMsg = lastId >= 0 ? messages(c)[lastId] : null;
-                if (active() && lastMsg && !lastMsg.is_user && !lastMsg.is_system && /[\[【]\s*igs\s*-?\s*stat\s*[:：]|\[igs-check:/i.test(String(lastMsg.mes || ''))) {
-                    settleAt(lastId, { redo: false, plan: {} });
+                const lastId = latestAi ? latestAi.id : messages(cNow).length - 1;
+                const lastMsg = latestAi ? latestAi.msg : (lastId >= 0 ? messages(cNow)[lastId] : null);
+                if (active() && lastMsg && !lastMsg.is_user && !lastMsg.is_system) {
+                    if (/[\[【]\s*igs\s*-?\s*stat\s*[:：]|\[igs-check:/i.test(String(lastMsg.mes || ''))) {
+                        settleAt(lastId, { redo: false, plan: {} });
+                    } else if (npcPolicy === 'auto') {
+                        detectNewCharacters({ triggerExisting: sheetsDeferredByGenerating, syncTables: true, floorId: lastId, floorText: String(lastMsg.mes ?? '') });
+                    }
                 }
                 return;
             }
         }
         if (!g || !active()) {
-            if (sheetsDeferredByGenerating && active() && npcPolicy === 'auto') detectNewCharacters();
+            if (restorePending && active()) restoreAfterCardOverwrite({ includePersist: true });
+            if (active() && npcPolicy === 'auto' && (sheetsDeferredByGenerating || syncTablesDeferredByGenerating || latestAi)) {
+                detectNewCharacters({
+                    triggerExisting: sheetsDeferredByGenerating,
+                    syncTables: true,
+                    floorId: latestAi ? latestAi.id : null,
+                    floorText: latestAi ? latestAi.text : null,
+                });
+            }
             return;
         }
-        const c = ctx();
-        const lastId = messages(c).length - 1;
+        const lastId = latestAi ? latestAi.id : messages(cNow).length - 1;
         if (lastId < 0) {
-            if (sheetsDeferredByGenerating && npcPolicy === 'auto') detectNewCharacters();
+            if (restorePending) restoreAfterCardOverwrite({ includePersist: true });
+            if ((sheetsDeferredByGenerating || syncTablesDeferredByGenerating) && npcPolicy === 'auto') {
+                detectNewCharacters({ triggerExisting: sheetsDeferredByGenerating, syncTables: true });
+            }
             return;
         }
         const plan = { check: g.check, preroll: g.preroll, note: g.note, ruleset: g.ruleset };
         const settled = settleAt(lastId, { redo: g.type === 'continue', plan });
-        if (sheetsDeferredByGenerating && npcPolicy === 'auto' && (!settled || settled.reused)) detectNewCharacters();
+        if (restorePending) restoreAfterCardOverwrite({ includePersist: Boolean(!settled || settled.reused) });
+        if (npcPolicy === 'auto' && (!settled || settled.reused)) {
+            detectNewCharacters({
+                triggerExisting: sheetsDeferredByGenerating,
+                syncTables: true,
+                floorId: latestAi ? latestAi.id : null,
+                floorText: latestAi ? latestAi.text : null,
+            });
+        }
     }
 
     function onSwiped(messageId) {
@@ -2761,8 +3187,9 @@ export function createStatsRuntime({
     }
 
     function onDeleted() {
-        if (!ledger || !chatEnabled) return;
         const c = ctx();
+        if (c && Array.isArray(c.chat)) lastObservedChatLength = c.chat.length;
+        if (!ledger || !chatEnabled) return;
         if (!c || !Array.isArray(c.chat)) return;
         deleteFloorsFrom(ledger, c.chat.length);
         onChange(currentStatsState(ledger), null);
@@ -2779,13 +3206,30 @@ export function createStatsRuntime({
         }
         const id = Number(messageId);
         const m = messages(ctx())[id];
-        if (m && ledger.entries.has(ledgerKey(ledger, id, Number(m.swipe_id) || 0))) settleAt(id, { redo: true });
+        if (!m || m.is_user || m.is_system) return;
+        if (ledger.entries.has(ledgerKey(ledger, id, Number(m.swipe_id) || 0))) {
+            settleAt(id, { redo: true });
+            return;
+        }
+        // 流式生成中若 GENERATION_ENDED 到达时正文尚未写入（或尚未落楼），随后 MESSAGE_UPDATED 补到最新 AI 楼时补跑结算与 NPC 自动生成。
+        const latestAi = latestAiFloor(ctx());
+        if (latestAi && latestAi.id === id && String(m.mes || '').trim()) {
+            settleAt(id, { redo: false, plan: {} });
+        }
     }
 
     function onChatChanged() {
+        awaitingTableReload = false;
+        sameChatTableCleared = false;
+        pendingCardOverwriteRestore = false;
+        justSwitchedChat = true;
+        lastConfirmedHeroBase = null;
         invalidateGenerations();
         invalidateCurrencyJob();
         sheetsDeferredByGenerating = false;
+        syncTablesDeferredByGenerating = false;
+        autoSheetAttemptedFloor.clear();
+        pendingAutoSheetNames.clear();
         currencyAsked.delete(chatIdOf(ctx()));
         managedCache = null;
         pushedHeroSkills = {};
@@ -2795,14 +3239,21 @@ export function createStatsRuntime({
         autoEnable();
         onChange(ledger ? currentStatsState(ledger) : null, null, { chatChanged: true });
         refreshOnboarding();
-        if (active()) refreshLife();
+        if (active()) {
+            refreshLife();
+            if (npcPolicy === 'auto') detectNewCharacters({ syncTables: true });
+        }
         ensureCurrency();
     }
 
     function detach() {
+        awaitingTableReload = false;
         invalidateGenerations();
         invalidateCurrencyJob();
         sheetsDeferredByGenerating = false;
+        syncTablesDeferredByGenerating = false;
+        autoSheetAttemptedFloor.clear();
+        pendingAutoSheetNames.clear();
         for (const off of offs) { try { off(); } catch (error) { /* */ } }
         offs = [];
         generating = null;
@@ -2849,8 +3300,24 @@ export function createStatsRuntime({
     // 设置变化后调用：总开关开就挂监听并读存档，关就全部解绑（易错点 H1）。战斗开启时总开关强制为开。
     function sync() {
         const on = settings().enabled;
-        if (on && !offs.length) { if (attach()) { load(); autoEnable(); refreshOnboarding(); if (active()) refreshLife(); ensureCurrency(); } }
-        else if (on && offs.length) { autoEnable(); refreshOnboarding(); if (active()) { refreshLife(); ensureCurrency(); } }
+        if (on && !offs.length) {
+            if (attach()) {
+                load(); autoEnable(); refreshOnboarding();
+                if (active()) {
+                    refreshLife();
+                    if (npcPolicy === 'auto' && !generating) detectNewCharacters({ syncTables: true });
+                }
+                ensureCurrency();
+            }
+        }
+        else if (on && offs.length) {
+            autoEnable(); refreshOnboarding();
+            if (active()) {
+                refreshLife();
+                if (npcPolicy === 'auto' && !generating) detectNewCharacters({ syncTables: true });
+                ensureCurrency();
+            }
+        }
         else if (!on && offs.length) { detach(); notices.clear(); emitNotices(); }
         return { attached: offs.length > 0 };
     }
@@ -2862,10 +3329,12 @@ export function createStatsRuntime({
         if (blocked) return { ok: false, reason: blocked };
         const chatId = chatIdOf(ctx());
         if (!chatId) return { ok: false, reason: 'stats-no-chat' };
+        let tableReady = ledgerPersisted;
         if (!ledger) {
             const t = tables();
             const rows = t.ok ? t.read({ kinds: ['stats'] }) : t;
             if (!rows || rows.ok !== true) return { ok: false, reason: (rows && rows.reason) || 'stats-log-read-failed' };
+            tableReady = Array.isArray(rows.stats) && !rows.layoutPending;
             // 直接启用（快速开始、自动启用）不送技能，「我的角色」里提示选擅长技能（3+5）。
             ledger = createStatsLedger(chatId, initial || createStatsState({ skills: [] }));
             ledgerPersisted = false;
@@ -2877,12 +3346,12 @@ export function createStatsRuntime({
         if (!buildMode && mode) buildMode = mode;
         modePending = false;
         if (declined) { store.setDeclined(false); declined = false; }
-        // 仅在已有已落盘账本（如暂停后重新启用）时立即写回启用标记；全新未落盘账本等待实际数据写入再建表与落盘。
-        if (ledgerPersisted) persist();
+        // 若数值日志表尚不存在或布局未确认（延迟建表），等待实际数据生成成功后随数据一并建表落盘；若表已就绪则立即落盘启用与初始账本。
+        if (ledgerPersisted || tableReady) persist();
         onChange(currentStatsState(ledger), null);
         refreshOnboarding();
         onBuildPolicyChange();
-        detectNewCharacters();
+        detectNewCharacters({ syncTables: npcPolicy === 'auto' });
         ensureCurrency();
         return { ok: true };
     }
@@ -2981,9 +3450,15 @@ export function createStatsRuntime({
     function refreshHeroPick() {
         const chatId = chatIdOf(ctx());
         const offer = Boolean(chatId) && active() && !needsHeroInitChoice() && !heroPickAsked.has(chatId) && needsHeroPick();
-        const canAssign = Boolean(requester());
-        const actions = canAssign ? [['open', '手动选择'], ['assign', '按人设生成'], ['later', '稍后']] : [['open', '去选择'], ['later', '稍后']];
-        setNotice('hero-pick', offer ? { kind: 'onboarding', order: 1, text: '主角擅长技能：请选3项擅长、5项比较擅长，或按人设生成', actions } : null);
+        const heroInitGeneratingSkills = Boolean(currencyJob && currencyJob.chatId === chatId && currencyJob.epoch === currencyEpoch && currencyJob.wantSkills && currencyJob.alive());
+        const canAssign = Boolean(requester()) && !heroInitGeneratingSkills;
+        const text = heroInitGeneratingSkills
+            ? '主角擅长技能正在自动生成，是否同意自动填写？'
+            : (canAssign ? '主角擅长技能尚未设定，是否同意自动填写？' : '主角擅长技能尚未设定，请手动填写');
+        const actions = heroInitGeneratingSkills
+            ? [['agree', '是'], ['open', '手动填写']]
+            : (canAssign ? [['assign', '是'], ['open', '手动填写']] : [['open', '手动填写'], ['later', '暂不填写']]);
+        setNotice('hero-pick', offer ? { kind: 'onboarding', order: 1, text, actions } : null);
     }
 
     // 主角开局手动提交六维与擅长项：超出上限时若未确认开挂（uncapped）返回 stats-build-over-cap；
@@ -3007,6 +3482,7 @@ export function createStatsRuntime({
             ? await access.editHero(heroName, cleanScores, { expectedRevision: read.view.revision, uncapped: uncapped === true, shouldStart: alive })
             : await access.initHero(heroName, cleanScores, { expectedRevision: read.view.revision, uncapped: uncapped === true, shouldStart: alive });
         if (!written?.ok) return written || { ok: false, reason: 'stats-attribute-write-unverified' };
+        captureHeroBaseSnapshot(access, heroName);
         gateMemo = null;
         if (skills && typeof skills === 'object' && Object.keys(skills).length) {
             const picked = pickHeroSkills(skills, skillAttrs, slots);
@@ -3031,7 +3507,7 @@ export function createStatsRuntime({
         }
     }
 
-    // 选擅长技能：skills 为 { 技能: 起始值 }（pickSummary 的结果），写进底数层；之后成长、手改照常叠加。attributes 为自定义技能所选六维。
+    // 选擅长技能：skills 为 { 技能: 起始值 }（pickSummary 的结果），直接覆盖旧 AI 分配并写入底数层；标记手动后 AI 回包不得覆盖。
     function pickHeroSkills(skills, attributes, slots) {
         if (!ledger) return { ok: false, reason: 'stats-no-ledger' };
         registerCustomSkills(attributes);
@@ -3042,7 +3518,11 @@ export function createStatsRuntime({
         const entries = Object.entries(skills || {}).filter(([, v]) => Number(v) > 0)
             .map(([name, v]) => [own(name) || engine.registry.resolve(name) || commitSkill(name), Number(v)]).filter(([name]) => Boolean(name));
         if (!entries.length) return { ok: false, reason: 'stats-hero-pick-empty' };
+        // 用户手选直接覆盖先前 AI 自动生成的擅长项与旧格位底数，保留不相关的剧情成长技能。
+        const replaceable = new Set([...heroSkillNames(), ...Object.values(catalog.heroSlots || {}).filter(Boolean)]);
         const base = { ...catalog.protagonistBase };
+        const edit = { ...catalog.protagonistEdit };
+        for (const key of replaceable) { delete base[key]; delete edit[key]; }
         for (const [name, value] of entries) base[name] = withoutHeroBonus(engine, name, value);
 
         // 每格占的技能随聊天保存：界面给了格位就用，没给（旧调用）按起始值回填。
@@ -3053,8 +3533,21 @@ export function createStatsRuntime({
             if (name && picked.has(name)) given[slot] = name;
         }
         const heroSlots = Object.keys(given).length ? given : backfillHeroSlots(entries);
-        catalog = sanitizeCatalog({ ...catalog, protagonistBase: base, heroPicked: true, heroSlots });
+        const chatId = chatIdOf(ctx());
+        heroManualPickOpen.delete(chatId);
+        heroPickAsked.add(chatId);
+        heroAsked.add(chatId);
+        catalog = sanitizeCatalog({
+            ...catalog,
+            protagonistBase: base,
+            protagonistEdit: edit,
+            heroPicked: true,
+            heroAssigned: false,
+            heroSkillsManual: true,
+            heroSlots,
+        });
         setNotice('hero-pick', null);
+        setNotice('hero-skills', null);
         persist();
         onChange(currentStatsState(ledger), null);
         refreshOnboarding();
@@ -3109,9 +3602,16 @@ export function createStatsRuntime({
         return { san: { value: Number(profileOf(engine, state, PROTAGONIST, SAN_ATTRIBUTE).value) || 0, max: Math.max(1, 99 - mythos) }, skills };
     }
     // 论坛安科用：coc7 有档才返回主角该技能的生效值。
+    const LUCK_NAMES = ['幸运', '运气', 'luck'];
     function cocSkillOf(skill) {
         const engine = engineOf();
-        if (!cocSheetOf(engine)) return null;
+        const sheet = cocSheetOf(engine);
+        if (!sheet) return null;
+        // 灵感=智力、知识=教育、幸运=幸运值，属性名直接检定属性：这些不是技能，不能走技能表（会落到底值 1）。
+        const key = String(skill || '').trim().toLowerCase();
+        const attrKey = ATTR_ALIAS[key];
+        const direct = attrKey ? Number(sheet.attrs && sheet.attrs[attrKey]) : (LUCK_NAMES.includes(key) ? Number(sheet.luck) : NaN);
+        if (Number.isFinite(direct) && direct > 0) return Math.min(99, Math.round(direct));
         const v = Number(profileOf(engine, investigatorView(currentStatsState(ledger)), PROTAGONIST, String(skill || '')).value);
         return Number.isFinite(v) && v > 0 ? Math.round(v) : null;
     }
@@ -3290,12 +3790,55 @@ export function createStatsRuntime({
     // 角色卡入库前过一遍 sanitizeCatalog 的同一套规整（旧格式属性迁成六维分数），内存与存档保持一致。
     const tidySheet = (sheet) => sanitizeCatalog({ sheets: { x: sheet } }).sheets.x || sheet;
 
+    // 判断某楼层实际出场的候选 NPC（仅看本楼正文、本楼变动目标、随身角色或外部在场判定，不回看上一楼以免未出场角色误重试）。
+    function appearedOnFloor(state, candidates, { floorId = null, floorText = null, floorEntry = null } = {}) {
+        const hit = new Set();
+        if (floorId == null || !candidates.length) return hit;
+        const c = ctx();
+        const msg = messages(c)[floorId];
+        const text = typeof floorText === 'string' ? floorText : String(msg?.mes ?? '');
+        let aliases = {};
+        try { aliases = characterAliases() || {}; } catch (error) { aliases = {}; }
+        const touched = new Set(
+            (Array.isArray(floorEntry?.changes) ? floorEntry.changes : [])
+                .map((row) => canonName(row && row.target))
+                .filter(Boolean),
+        );
+        const traitCat = traitCatalogOf(catalog.traits);
+        let customPresent = null;
+        if (typeof presentOf === 'function') {
+            try { customPresent = new Set((presentOf(state) || []).map((n) => canonName(n)).filter(Boolean)); }
+            catch (error) { customPresent = null; }
+        }
+        for (const name of candidates) {
+            if (touched.has(name) || customPresent?.has(name) || hasTrait(state, traitCat, name, 'companion')) {
+                hit.add(name);
+                continue;
+            }
+            if (!text) continue;
+            const alt = Array.isArray(aliases[name]) ? aliases[name] : [];
+            if ([name, ...alt].some((n) => n && text.includes(String(n)))) hit.add(name);
+        }
+        return hit;
+    }
+
     // ---- 新角色与角色卡（v2 §6.4 / P5）：按本聊天 NPC 策略运行；同步重要角色表 / 开场名单，停止跨聊天 NPC 缓存读取 ----
-    function detectNewCharacters({ triggerExisting = false, syncTables = false } = {}) {
+    function detectNewCharacters({ triggerExisting = false, syncTables = false, floorId = null, floorText = null, floorEntry = null } = {}) {
         if (!active()) return;
         const s = settings();
         if (s.sheetGen === 'off') return;
-        if (syncTables && npcPolicy && s.register !== 'manual' && !generating) syncTablePeopleIntoLedger();
+        if (generating && npcPolicy === 'auto') {
+            if (triggerExisting || syncTables || floorId != null) {
+                sheetsDeferredByGenerating = true;
+                if (syncTables) syncTablesDeferredByGenerating = true;
+            }
+            return;
+        }
+        const shouldSyncTables = (syncTables || syncTablesDeferredByGenerating) && Boolean(npcPolicy) && s.register !== 'manual' && !generating;
+        if (shouldSyncTables) {
+            syncTablesDeferredByGenerating = false;
+            syncTablePeopleIntoLedger();
+        }
         const state = currentStatsState(ledger);
         const rawNames = [
             ...Object.keys(state.characters || {}),
@@ -3303,7 +3846,11 @@ export function createStatsRuntime({
         ];
         const candidates = [...new Set(rawNames.map((n) => canonName(n)))]
             .filter((n) => n && !isHero(n) && !catalog.sheets[n] && npcChoices[n] !== 'defer');
-        if (!candidates.length) { refreshNpcAsk(); return; }
+        if (!candidates.length) {
+            if (npcPolicy === 'auto' && !generating) sheetsDeferredByGenerating = false;
+            refreshNpcAsk();
+            return;
+        }
         if (!npcPolicy) {
             refreshNpcPolicy();
             return;
@@ -3312,11 +3859,27 @@ export function createStatsRuntime({
             const fresh = triggerExisting
                 ? candidates
                 : candidates.filter((n) => !catalog.notified.includes(n));
-            const deferred = !fresh.length && sheetsDeferredByGenerating && !generating
+            const deferred = sheetsDeferredByGenerating && !generating
                 ? (catalog.queue.people || []).map((n) => canonName(n)).filter((n) => candidates.includes(n))
                 : [];
-            const targets = fresh.length ? fresh : deferred;
-            if (!targets.length) return;
+            let reappeared = [];
+            let floorKey = '';
+            if (floorId != null) {
+                const c = ctx();
+                const msg = messages(c)[floorId];
+                const swipeId = Number(msg?.swipe_id) || 0;
+                floorKey = `${chatIdOf(c)}:${floorId}:${swipeId}`;
+                const appeared = appearedOnFloor(state, candidates, { floorId, floorText, floorEntry });
+                reappeared = candidates.filter((n) => appeared.has(n) && autoSheetAttemptedFloor.get(n) !== floorKey);
+            }
+            const targets = [...new Set([...fresh, ...deferred, ...reappeared])];
+            if (!targets.length) {
+                if (!generating) sheetsDeferredByGenerating = false;
+                return;
+            }
+            if (floorKey) {
+                for (const name of targets) autoSheetAttemptedFloor.set(name, floorKey);
+            }
             const addedNotified = targets.filter((n) => !catalog.notified.includes(n));
             const nextQueue = [...new Set([...catalog.queue.people, ...targets])];
             if (addedNotified.length || nextQueue.length !== catalog.queue.people.length) {
@@ -3397,9 +3960,23 @@ export function createStatsRuntime({
     }
 
     function generateSheets(names = null, { supersede = false } = {}) {
+        const requestedNames = Array.isArray(names)
+            ? [...new Set(names.map((n) => canonName(n)).filter(Boolean))]
+            : null;
         const pending = generationTasks.get('sheets');
-        if (pending) return !supersede || (pending.supersede || []).includes(names?.[0])
-            ? pending.promise : Promise.resolve({ ok: false, reason: 'stats-sheet-busy' });
+        if (pending) {
+            // 自动建档进行中又有新 NPC 到来：记入待续批队列，等本批结束后自动继续，避免新角色被吞掉。
+            if (!supersede && npcPolicy === 'auto' && requestedNames?.length) {
+                const inFlight = new Set(pending.targets || []);
+                for (const name of requestedNames) {
+                    if (!inFlight.has(name) && !isHero(name) && !catalog.sheets[name] && npcChoices[name] !== 'defer') {
+                        pendingAutoSheetNames.add(name);
+                    }
+                }
+            }
+            return !supersede || (pending.supersede || []).includes(names?.[0])
+                ? pending.promise : Promise.resolve({ ok: false, reason: 'stats-sheet-busy' });
+        }
         const recovery = pendingGenerationSave('sheets', () => generateSheets(names, { supersede }));
         if (recovery) return recovery;
         if (!active()) return Promise.resolve({ ok: false, reason: 'stats-inactive' });
@@ -3410,18 +3987,35 @@ export function createStatsRuntime({
         }
         if (generating) {
             sheetsDeferredByGenerating = true;
+            if (requestedNames?.length && npcPolicy === 'auto') {
+                for (const name of requestedNames) {
+                    if (!isHero(name) && !catalog.sheets[name] && npcChoices[name] !== 'defer') pendingAutoSheetNames.add(name);
+                }
+            }
             return Promise.resolve({ ok: false, reason: 'stats-generating', queued: true });
         }
         sheetsDeferredByGenerating = false;
         // 不点名时：待生成队列，加上有人际档却没有角色卡的角色（角色卡被删或生成失败丢失）。
         const orphans = () => !ledger ? [] : Object.keys(currentStatsState(ledger).characters || {})
             .filter((n) => n !== PROTAGONIST && !isHero(n) && !catalog.sheets[n]);
-        const targets = (names && names.length ? names : [...new Set([...catalog.queue.people, ...orphans()])]).slice(0, SHEET_BATCH_MAX);
+        const pool = requestedNames && requestedNames.length
+            ? requestedNames
+            : [...new Set([...catalog.queue.people, ...pendingAutoSheetNames, ...orphans()])];
+        const targets = pool.slice(0, SHEET_BATCH_MAX);
         if (!targets.length) return Promise.resolve({ ok: true, skipped: true });
+        for (const name of targets) pendingAutoSheetNames.delete(name);
+        if (npcPolicy === 'auto' && pool.length > SHEET_BATCH_MAX) {
+            for (const extra of pool.slice(SHEET_BATCH_MAX)) {
+                if (!isHero(extra) && !catalog.sheets[extra] && npcChoices[extra] !== 'defer') pendingAutoSheetNames.add(extra);
+            }
+        }
         setNotice('sheets', { kind: 'busy', text: `正在生成数值：${targets.join('、')}` });
         const chatSeed = chatIdOf(ctx());
         const sheetTargetSnapshot = () => JSON.stringify(targets.map((name) => [name, catalog.sheets[name] || null, catalog.sheetDrops[name] || null]));
+        const batchOwner = generationIdentity();
+        let doneNames = [];
         const started = generationTasks.start('sheets', async job => {
+            job.targets = targets;
             let failureReason = '';
             job.onFinish(() => {
                 if (job.alive() && notices.get('sheets')?.kind === 'busy') {
@@ -3430,6 +4024,19 @@ export function createStatsRuntime({
                     try { console.warn('[IGS 数值] 角色卡生成未完成：', code); } catch { /* */ }
                     setNotice('sheets', { kind: 'sheets', text: `生成数值未完成（${code}），可重试`, actions: [['generate', '重试'], ['dismiss', '稍后']] });
                 }
+                if (disposed || !active() || generating || npcPolicy !== 'auto') return;
+                if (chatIdOf(ctx()) !== chatSeed || generationIdentity() !== batchOwner) return;
+                const failedInBatch = new Set(targets.filter((n) => !doneNames.includes(n)));
+                const nextTargets = [...pendingAutoSheetNames]
+                    .filter((n) => n && !isHero(n) && !catalog.sheets[n] && npcChoices[n] !== 'defer' && !failedInBatch.has(n));
+                if (!nextTargets.length) return;
+                for (const name of nextTargets) pendingAutoSheetNames.delete(name);
+                queueMicrotask(() => {
+                    if (disposed || !active() || generating || npcPolicy !== 'auto') return;
+                    if (chatIdOf(ctx()) !== chatSeed || generationIdentity() !== batchOwner) return;
+                    const stillNeeded = nextTargets.filter((n) => !catalog.sheets[n] && npcChoices[n] !== 'defer');
+                    if (stillNeeded.length) generateSheets(stillNeeded);
+                });
             });
             try {
             await tail;
@@ -3468,15 +4075,19 @@ export function createStatsRuntime({
                 context = { ...context, ...resolved };
             }
             const engine = engineOf();
-            const skills = engine.registry.entries().filter(([, e]) => e.kind === 'skill' && (e.origin !== 'world')).map(([n, e]) => [n, e.attribute]);
-            const prompt = buildSheetRequest(context.people, { ...context, worldview: worldviewOf(), skills, prompt: settings().prompts.sheetGen });
+            const currentWorldSkills = new Set(worldSkillNames(worldviewOf()));
+            const skills = engine.registry.entries()
+                .filter(([n, e]) => e.kind === 'skill' && (e.origin !== 'world' || currentWorldSkills.has(n)))
+                .map(([n, e]) => [n, e.attribute]);
+            const traitDefs = targets.some((n) => !(catalog.traitInit || []).includes(n)) ? candidateTraitDefs() : [];
+            const prompt = buildSheetRequest(context.people, { ...context, worldview: worldviewOf(), skills, traitDefs, prompt: settings().prompts.sheetGen });
             let parsed = null;
             try {
                 parsed = parseSheetReply(await ask(request, prompt, BACKGROUND_TIMEOUT_MS, job, {
                     onRetry: ({ attempt, maxRetries }) => {
                         if (job.alive()) setNotice('sheets', { kind: 'busy', text: `正在重试生成数值（第 ${attempt}/${maxRetries} 次）：${targets.join('、')}` });
                     },
-                }), { names: targets, registry: engine.registry });
+                }), { names: targets, registry: engine.registry, traitDefs });
             }
             catch (error) { job.check(); if (error?.stage) throw error; parsed = { ok: false, reason: error?.reason || 'stats-sheet-request-failed' }; }
             checkGeneration(job);
@@ -3488,7 +4099,9 @@ export function createStatsRuntime({
             }
             (parsed.diagnostics || []).forEach((d) => diag(d.code, d));
             const done = Object.keys(parsed.sheets);
-            return await stageGeneration(job, () => {
+            const committed = await stageGeneration(job, () => {
+                const prevForCombo = catalog;
+                const nowState = ledger ? currentStatsState(ledger) : null;
                 const sheets = { ...catalog.sheets };
                 const sheetDrops = { ...catalog.sheetDrops };
                 for (const [name, tiers] of Object.entries(parsed.sheets)) {
@@ -3497,12 +4110,41 @@ export function createStatsRuntime({
                     if (replaced.ids[name]) sheetDrops[name] = replaced.ids[name];
                 }
                 catalog = { ...catalog, sheets, sheetDrops, queue: { ...catalog.queue, people: catalog.queue.people.filter((n) => !done.includes(n)) } };
+                if (traitDefs.length && nowState) {
+                    const traitNotices = [];
+                    let traitsAdded = false;
+                    const judged = [];
+                    for (const [name, tiers] of Object.entries(parsed.sheets)) {
+                        if (!tiers.hasTraits || (catalog.traitInit || []).includes(name)) continue;
+                        judged.push(name);
+                        for (const traitId of (Array.isArray(tiers.traits) ? tiers.traits : []).slice(0, 3)) {
+                            const applied = applyTraitChange(nowState, catalog, name, traitId, true, 'auto', gateAttrsOf(name));
+                            if (applied && applied.catalog && !applied.reason && Array.isArray(applied.notices) && applied.notices.length) {
+                                catalog = applied.catalog;
+                                traitsAdded = true;
+                                traitNotices.push(...applied.notices);
+                            }
+                        }
+                    }
+                    if (judged.length) {
+                        catalog = { ...catalog, traitInit: [...new Set([...(catalog.traitInit || []), ...judged])] };
+                        if (traitsAdded) {
+                            const comboTexts = refreshAllCombos(nowState, prevForCombo, nowState);
+                            announceTraits(traitNotices, comboTexts);
+                            lightGlobalCodex(nowState);
+                        }
+                    }
+                }
                 generationStage.sheetWrites = { card: cardOf(ctx()), names: done };
                 setNotice('sheets', catalog.queue.people.length
                     ? { kind: 'sheets', text: `还有 ${catalog.queue.people.length} 位角色没有数值`, actions: [['generate', '生成数值'], ['dismiss', '稍后']] }
                     : { kind: 'info', text: `已生成数值：${done.join('、')}`, ttl: true });
                 return { result: { ok: true, names: done } };
             });
+            if (committed?.ok === true) {
+                doneNames = done;
+            }
+            return committed;
             } catch (error) {
                 failureReason = error?.reason || error?.message || 'stats-sheet-threw';
                 throw error;
@@ -3515,11 +4157,11 @@ export function createStatsRuntime({
 
     // ---- 批量补全（v2 §6.2 第二、三层） ----
     function scheduleBackfill() {
-        if (settings().backfill !== 'auto' || !catalog.queue.skills.length || generationTasks.get('backfill') || !requester()
+        if (settings().backfill !== 'auto' || !catalog.queue.skills.length || generationTasks.get('backfill') || generationTasks.get('sheets') || !requester()
             || generationFailures.has(generationFailureKey('backfill'))) return;
         const owner = generationIdentity();
         const id = chatIdOf(ctx());
-        setTimeout(() => { if (!generating && chatIdOf(ctx()) === id && generationIdentity() === owner) runBackfill({ manual: false }); }, 0);
+        setTimeout(() => { if (!generating && !generationTasks.get('sheets') && chatIdOf(ctx()) === id && generationIdentity() === owner) runBackfill({ manual: false }); }, 0);
     }
 
     function runBackfill({ manual = true } = {}) {
@@ -3606,7 +4248,7 @@ export function createStatsRuntime({
         const recovery = pendingGenerationSave('hero-skills', () => assignHeroSkills({ overwrite }));
         if (recovery) return recovery;
         if (!active()) return Promise.resolve({ ok: false, reason: 'stats-inactive' });
-        if (hasLearnedHeroSkill() && !overwrite) return Promise.resolve({ ok: false, reason: 'needs-confirm' });
+        if ((hasLearnedHeroSkill() || catalog.heroSkillsManual === true) && !overwrite) return Promise.resolve({ ok: false, reason: 'needs-confirm' });
         const request = requester();
         if (!request) {
             setNotice('hero-skills', { kind: 'onboarding', order: 2, retry: true, text: '生成主角擅长技能需要可用的辅助模型（自动插图设置里的写词模型）', actions: [['later', '知道了']] });
@@ -3620,18 +4262,30 @@ export function createStatsRuntime({
             catalog = sanitizeCatalog({ ...catalog, heroAssigned: true, heroPicked: true });
             heroAsked.add(chatId);
             heroPickAsked.add(chatId);
+            heroManualPickOpen.delete(chatId);
             persist();
             setNotice('hero-skills', null);
             setNotice('hero-pick', null);
             refreshOnboarding();
             return Promise.resolve({ ok: true, skipped: true });
         }
+        const startedWithAssigned = Boolean(catalog.heroAssigned || hasLearnedHeroSkill());
+        const heroSkillsSettledOutside = () => {
+            if (!overwrite && catalog.heroSkillsManual === true) return 'manual-protected';
+            if (!startedWithAssigned && catalog.heroAssigned === true && hasLearnedHeroSkill()) return 'already-assigned';
+            return '';
+        };
         setNotice('hero-skills', { kind: 'busy', text: '正在按人设生成主角擅长技能' });
-        const heroSkillSnapshot = () => JSON.stringify([catalog.protagonistBase, catalog.protagonistEdit, catalog.heroSlots, catalog.heroAssigned]);
+        const heroSkillSnapshot = () => JSON.stringify([catalog.protagonistEdit, catalog.heroSlots, catalog.heroAssigned, catalog.heroSkillsManual]);
         return generationTasks.start('hero-skills', async job => {
             let failureReason = '';
             job.onFinish(() => {
-                if (job.alive() && notices.get('hero-skills')?.kind === 'busy') {
+                if (!job.alive()) return;
+                if (heroSkillsSettledOutside()) {
+                    if (notices.get('hero-skills')?.kind === 'busy') setNotice('hero-skills', null);
+                    return;
+                }
+                if (notices.get('hero-skills')?.kind === 'busy') {
                     const code = failureReason || 'stats-hero-skills-unfinished';
                     diag(code);
                     try { console.warn('[IGS 数值] 主角擅长技能生成未完成：', code); } catch { /* */ }
@@ -3641,22 +4295,45 @@ export function createStatsRuntime({
             try {
             await tail;
             job.check();
+            {
+                const settled = heroSkillsSettledOutside();
+                if (settled) {
+                    if (notices.get('hero-skills')?.kind === 'busy') setNotice('hero-skills', null);
+                    return { ok: true, skipped: settled };
+                }
+            }
             job.conflictSnapshot = heroSkillSnapshot();
             job.conflictCheck = () => heroSkillSnapshot() === job.conflictSnapshot;
             let people;
             try { people = typeof describePeople === 'function' ? await describeWithHero([PROTAGONIST]) : [{ name: PROTAGONIST, summary: '' }]; }
             catch (error) { people = [{ name: PROTAGONIST, summary: '' }]; }
+            {
+                const settled = heroSkillsSettledOutside();
+                if (settled) {
+                    if (notices.get('hero-skills')?.kind === 'busy') setNotice('hero-skills', null);
+                    return { ok: true, skipped: settled };
+                }
+            }
             checkGeneration(job);
             const prompt = buildHeroSkillRequest(people, skills, { prompt: settings().prompts.heroSkills, history: currencyStoryText() });
             let parsed = null;
             try {
                 parsed = parseHeroSkillReply(await ask(request, prompt, BACKGROUND_TIMEOUT_MS, job, {
                     onRetry: ({ attempt, maxRetries }) => {
-                        if (job.alive()) setNotice('hero-skills', { kind: 'busy', text: `正在重试生成主角擅长技能（第 ${attempt}/${maxRetries} 次）` });
+                        if (job.alive() && !heroSkillsSettledOutside() && notices.get('hero-skills')?.kind === 'busy') {
+                            setNotice('hero-skills', { kind: 'busy', text: `正在重试生成主角擅长技能（第 ${attempt}/${maxRetries} 次）` });
+                        }
                     },
-                }), { skills });
+                }), { skills, registry: dailyEngineOf().registry });
             }
             catch (error) { job.check(); if (error?.stage) throw error; parsed = { ok: false, reason: error?.reason || 'stats-hero-skills-request-failed' }; }
+            {
+                const settled = heroSkillsSettledOutside();
+                if (settled) {
+                    if (notices.get('hero-skills')?.kind === 'busy') setNotice('hero-skills', null);
+                    return { ok: true, skipped: settled };
+                }
+            }
             checkGeneration(job);
             if (!parsed || !parsed.ok) {
                 const reason = parsed ? parsed.reason : 'stats-hero-skills-request-failed';
@@ -3666,6 +4343,11 @@ export function createStatsRuntime({
                 return { ok: false, reason };
             }
             const res = await stageGeneration(job, () => {
+                const settled = heroSkillsSettledOutside();
+                if (settled) {
+                    setNotice('hero-skills', null);
+                    return { result: { ok: true, skipped: settled } };
+                }
                 const base = { ...catalog.protagonistBase };
                 const edit = { ...catalog.protagonistEdit };
                 for (const name of skills) { delete base[name]; delete edit[name]; }
@@ -3678,10 +4360,11 @@ export function createStatsRuntime({
                     done.push(`${skill} ${tier}`);
                 }
                 const heroSlots = backfillHeroSlots(entries);
-                catalog = sanitizeCatalog({ ...catalog, protagonistBase: base, protagonistEdit: edit, heroAssigned: true, heroPicked: true, heroSlots });
+                catalog = sanitizeCatalog({ ...catalog, protagonistBase: base, protagonistEdit: edit, heroAssigned: true, heroPicked: true, heroSkillsManual: false, heroSlots });
                 generationStage.heroAssigned = true;
                 heroAsked.add(chatId);
                 heroPickAsked.add(chatId);
+                heroManualPickOpen.delete(chatId);
                 setNotice('hero-pick', null);
                 setNotice('hero-skills', { kind: 'info', text: `已生成主角擅长技能：${done.join('、')}`, ttl: true });
                 return { result: { ok: true, assigned: done } };
@@ -3689,6 +4372,11 @@ export function createStatsRuntime({
             if (res?.ok && job.alive()) refreshOnboarding();
             return res;
             } catch (error) {
+                const settled = heroSkillsSettledOutside();
+                if (settled && error?.reason === 'stats-generation-conflict') {
+                    if (job.alive() && notices.get('hero-skills')?.kind === 'busy') setNotice('hero-skills', null);
+                    return { ok: true, skipped: settled };
+                }
                 failureReason = error?.reason || error?.message || 'stats-hero-skills-threw';
                 throw error;
             }
@@ -3717,7 +4405,8 @@ export function createStatsRuntime({
             // 界面和表格里看到的是含随身系统加成的生效值，存回 IGS 的要先减掉加成。
             edit[skill] = { value: withoutHeroBonus(engine, skill, value), from: seed };
         }
-        catalog = sanitizeCatalog({ ...catalog, protagonistEdit: edit });
+        heroManualPickOpen.delete(chatIdOf(ctx()));
+        catalog = sanitizeCatalog({ ...catalog, protagonistEdit: edit, heroSkillsManual: true });
         persist();
         onChange(currentStatsState(ledger), null);
         return { ok: true };
@@ -3774,7 +4463,8 @@ export function createStatsRuntime({
             if (Number(owned[name].value) < start) edit[name] = { value: withoutHeroBonus(engine, name, start), from: Number(owned[name].value) || 0 };
         } else base[name] = withoutHeroBonus(engine, name, start);
         slots[slot] = name;
-        let next = { ...catalog, protagonistBase: base, protagonistEdit: edit, heroSlots: slots, queue: { ...catalog.queue, skills: catalog.queue.skills.filter((x) => x !== name && x !== old) } };
+        heroManualPickOpen.delete(chatIdOf(ctx()));
+        let next = { ...catalog, protagonistBase: base, protagonistEdit: edit, heroSlots: slots, heroPicked: true, heroSkillsManual: true, queue: { ...catalog.queue, skills: catalog.queue.skills.filter((x) => x !== name && x !== old) } };
         if (old) next = removeStorySkill(next, old);
         catalog = sanitizeCatalog(next);
         persist();
@@ -3815,7 +4505,8 @@ export function createStatsRuntime({
         // 改为未学即腾出所占的格。
         let heroSlots = slots;
         if (tier === '未学' && Object.values(slots).includes(skill)) heroSlots = Object.fromEntries(Object.entries(slots).filter(([, v]) => v !== skill));
-        catalog = sanitizeCatalog({ ...catalog, protagonistBase: base, protagonistEdit: edit, heroSlots, queue: { ...catalog.queue, skills: catalog.queue.skills.filter((s) => s !== skill) } });
+        heroManualPickOpen.delete(chatIdOf(ctx()));
+        catalog = sanitizeCatalog({ ...catalog, protagonistBase: base, protagonistEdit: edit, heroSlots, heroSkillsManual: true, queue: { ...catalog.queue, skills: catalog.queue.skills.filter((s) => s !== skill) } });
         persist();
         onChange(currentStatsState(ledger), null);
         return { ok: true };
@@ -3825,6 +4516,11 @@ export function createStatsRuntime({
         if (op === 'set') return setHeroSkill(name, payload.value);
         if (op === 'edit') return editHeroSkill(name, payload.tier);
         if (op === 'pick') return pickHeroSkills(payload.skills, payload.attributes, payload.slots);
+        if (op === 'pick-open') {
+            const cid = chatIdOf(ctx());
+            if (cid) heroManualPickOpen.add(cid);
+            return { ok: true };
+        }
         if (op === 'slot') return setHeroSlot(name, payload);
         if (op === 'attrs') return { ok: true, attrs: heroAttrs() };
         if (op === 'manual-init') return submitManualHero(payload);
@@ -3937,19 +4633,22 @@ export function createStatsRuntime({
                 setNotice('hero-init-mode', null);
                 // 延迟建表：仅在已有落盘账本时立即写选择；否则等待自动生成成功后随生成数据一并建表写入。
                 if (ledgerPersisted) persist();
+                const initPromise = ensureHeroInit({ force: true, includeSkills: true });
                 refreshOnboarding();
-                const initPromise = ensureHeroInit({ force: true });
                 return Promise.resolve(initPromise || { ok: true }).then((res) => {
-                    if (res?.ok !== false && needsHeroPick() && requester()) void assignHeroSkills({ overwrite: true });
+                    if (res?.ok !== false && catalog.heroSkillsManual !== true && !heroManualPickOpen.has(chatIdOf(ctx())) && needsHeroPick() && requester()) void assignHeroSkills({ overwrite: false });
                     return { ok: res?.ok !== false, choice: 'auto', result: res };
                 });
             }
             return { ok: false, reason: 'stats-notice-action-unknown' };
         }
         if (id === 'hero-pick') {
-            heroPickAsked.add(chatIdOf(ctx()));
+            const cid = chatIdOf(ctx());
+            heroPickAsked.add(cid);
             setNotice('hero-pick', null);
-            if (action === 'assign') return assignHeroSkills({ overwrite: true });
+            if (action === 'assign') { heroManualPickOpen.delete(cid); return assignHeroSkills({ overwrite: false }); }
+            if (action === 'agree') { heroManualPickOpen.delete(cid); refreshOnboarding(); return { ok: true, agreed: true }; }
+            if (action === 'open' && cid) heroManualPickOpen.add(cid);
             refreshOnboarding();
             return action === 'open' ? { ok: true, openSettings: 'stats' } : { ok: true };
         }
@@ -3960,7 +4659,7 @@ export function createStatsRuntime({
         }
         if (id === 'sheets' && action === 'generate') { setNotice('sheets', null); return generateSheets(); }
         if (id === 'roll' && action === 'roll') return manualRoll();
-        if ((id === 'currency' || id === 'hero-init') && action === 'retry') return ensureHeroInit({ force: true });
+        if ((id === 'currency' || id === 'hero-init') && action === 'retry') return ensureHeroInit({ force: true, includeSkills: catalog.heroInitChoice === 'auto' && catalog.heroSkillsManual !== true });
         setNotice(id, null);
         return { ok: true };
     }
@@ -4843,6 +5542,10 @@ export function createStatsRuntime({
         if (!ledger) return { ok: false, reason: 'stats-chat-not-enabled' };
         const owner = generationIdentity(), chatId = chatIdOf(ctx());
         const alive = () => !disposed && loadedChat === chatId && chatIdOf(ctx()) === chatId && generationIdentity() === owner;
+        if (generationCommitActive > 0) {
+            await generationCommitTail;
+            if (!alive()) return { ok: false, reason: 'request-stale' };
+        }
         const prevPolicy = npcPolicy;
         const prevBaseline = new Map(baseline);
         npcPolicy = normalized;
@@ -4857,7 +5560,11 @@ export function createStatsRuntime({
         refreshOnboarding();
         onBuildPolicyChange();
         onChange(currentStatsState(ledger), null);
-        detectNewCharacters({ triggerExisting: normalized === 'auto', syncTables: true });
+        if (normalized === 'auto') {
+            detectNewCharacters({ triggerExisting: true, syncTables: true });
+        } else {
+            detectNewCharacters({ triggerExisting: false, syncTables: true });
+        }
         return { ok: true, npcPolicy };
     }
 
@@ -4903,7 +5610,15 @@ export function createStatsRuntime({
         if (blocked) return { ok: false, reason: blocked };
         const picked = normalizeBuildMode(mode);
         if (!picked) return { ok: false, reason: 'stats-build-mode-invalid' };
-        if (ledger) { buildMode = picked; npcPolicy = normalizeNpcPolicy(picked); persist(); refreshOnboarding(); onBuildPolicyChange(); return { ok: true }; }
+        if (ledger) {
+            buildMode = picked;
+            npcPolicy = normalizeNpcPolicy(picked);
+            persist();
+            refreshOnboarding();
+            onBuildPolicyChange();
+            if (npcPolicy === 'auto') detectNewCharacters({ triggerExisting: true, syncTables: true });
+            return { ok: true };
+        }
         if (!chatIdOf(ctx())) return { ok: false, reason: 'stats-no-chat' };
         refreshOnboarding();
         modeDefault = picked;
@@ -4944,7 +5659,8 @@ export function createStatsRuntime({
                 if (ab && !ab.initialized) npcRelative[c.name] = { source: ab.source || 'relative', initialized: false, scores: { ...ab.scores }, tier: ab.tier };
             }
         }
-        return model ? { ...model, heroBio: catalog.heroBio || '', npcPolicy, npcChoices: { ...npcChoices }, npcRelative, expenses: catalog.expenses, needsPick: needsHeroPick(), heroAttrs: heroAttrs(), aptitude: Object.fromEntries(Object.entries(catalog.aptitude).map(([n, v]) => [n, v.v])), traits: traitSwitchModel(catalog.traits), traitList: Object.fromEntries(Object.keys(catalog.traits).map((n) => [n, { items: listTraits(catalog, n), ...slotUsage(catalog, n) }])), traitNsfw: isNsfw(), combatCardOn: combatOn(), statusMap: catalog.statuses || {}, relMap: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).map(([n, c]) => [n, Array.isArray(c.relStates) ? c.relStates : []])), traitAttrs: Object.fromEntries([PROTAGONIST, ...Object.keys(currentStatsState(ledger).characters || {}), ...Object.keys(catalog.sheets || {})].map((n) => [n, gateAttrsOf(n)])), traitCodex: traitCodexStore ? traitCodexStore.get() : null, heroNotes: { ...catalog.heroNotes }, renames: { ...catalog.renames }, heroFeelings: settings().heroFeelings === true, confessed: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).filter(([, c]) => c.confessed === true).map(([n]) => [n, true])), heroDims: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).map(([n, c]) => [n, { ...heroDimsOf(c, { nsfw: isNsfw() }) }])), traitNotes: { ...catalog.traitNotes }, landmineKnown: { ...(catalog.landmineKnown || {}) }, softKnown: { ...(catalog.softKnown || {}) }, fame: fameRows(currentStatsState(ledger), catalog.fameBars), cycleMap: catalog.cycles || {}, statusDay: Number(currentStatsState(ledger).clock && currentStatsState(ledger).clock.day) || 0, worlds: [...(catalog.worlds || [])], worldsManual: [...(catalog.worldsManual || [])] } : null;
+        const chatIdNow = chatIdOf(ctx());
+        return model ? { ...model, heroBio: catalog.heroBio || '', npcPolicy, npcChoices: { ...npcChoices }, npcRelative, expenses: catalog.expenses, needsPick: needsHeroPick() || (Boolean(chatIdNow) && heroManualPickOpen.has(chatIdNow)), heroSkillsManual: catalog.heroSkillsManual === true, heroAttrs: heroAttrs(), aptitude: Object.fromEntries(Object.entries(catalog.aptitude).map(([n, v]) => [n, v.v])), traits: traitSwitchModel(catalog.traits), traitList: Object.fromEntries(Object.keys(catalog.traits).map((n) => [n, { items: listTraits(catalog, n), ...slotUsage(catalog, n) }])), traitNsfw: isNsfw(), combatCardOn: combatOn(), statusMap: catalog.statuses || {}, relMap: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).map(([n, c]) => [n, Array.isArray(c.relStates) ? c.relStates : []])), traitAttrs: Object.fromEntries([PROTAGONIST, ...Object.keys(currentStatsState(ledger).characters || {}), ...Object.keys(catalog.sheets || {})].map((n) => [n, gateAttrsOf(n)])), traitCodex: traitCodexStore ? traitCodexStore.get() : null, heroNotes: { ...catalog.heroNotes }, renames: { ...catalog.renames }, heroFeelings: settings().heroFeelings === true, confessed: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).filter(([, c]) => c.confessed === true).map(([n]) => [n, true])), heroDims: Object.fromEntries(Object.entries(currentStatsState(ledger).characters || {}).map(([n, c]) => [n, { ...heroDimsOf(c, { nsfw: isNsfw() }) }])), traitNotes: { ...catalog.traitNotes }, landmineKnown: { ...(catalog.landmineKnown || {}) }, softKnown: { ...(catalog.softKnown || {}) }, fame: fameRows(currentStatsState(ledger), catalog.fameBars), cycleMap: catalog.cycles || {}, statusDay: Number(currentStatsState(ledger).clock && currentStatsState(ledger).clock.day) || 0, worlds: [...(catalog.worlds || [])], worldsManual: [...(catalog.worldsManual || [])] } : null;
     }
     // 对外接口的入口统一包一层 inEvent：同一次调用内战斗开关只取一次。
     const ev = inEvent;

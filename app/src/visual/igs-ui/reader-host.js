@@ -354,7 +354,7 @@ export function createIgsReaderHost(options = {}) {
             if (result && result.ok === false && result.reason && result.reason !== 'stats-notice-gone' && result.reason !== 'request-stale') {
                 try { console.warn('[IGS 数值提示条] 操作未完成', id, act, result.reason); } catch { /* */ }
             }
-            if (result && result.openSettings) openSettings({ tab: result.openSettings, mode: state.activeReader ? state.activeReader.mode : undefined });
+            if (result && result.openSettings) openSettings({ page: result.openSettings, tab: result.openSettings, mode: state.activeReader ? state.activeReader.mode : undefined });
             // 主角开局「自行填写」独立弹窗（不依赖人物状态页，未开启卡片战斗也可填）。
             if (result && result.openPanel === 'hero-manual-setup') {
                 const current = state.activeReader;
@@ -785,7 +785,7 @@ export function createIgsReaderHost(options = {}) {
         playStatsCheck(detail) {
             return playOptionResultFx({ ok: true, detail }, { force: true });
         },
-        // 数值结算反馈（好感飘字、成长、关系阶段）：状态栏关着且未开启数值系统时直接丢弃，开着时用现有飘字样式；阅读器没开不补播。
+        // 数值结算反馈（好感飘字、成长、关系阶段）：状态栏关着时直接丢弃，开着时用现有飘字样式；阅读器没开不补播。
         playStatsFeedback(fx) {
             const current = state.activeReader;
             const snapshot = current && current.snapshot;
@@ -793,7 +793,7 @@ export function createIgsReaderHost(options = {}) {
             const readerSettings = snapshot && snapshot.readerSettings;
             if (!overlay || !readerSettings) return false;
             const hud = snapshot.content && snapshot.content.statusHud;
-            return playStatsFeedbackWithHud(overlay, fx, { readerSettings, forceHud: Boolean(hud && hud.enabled), speaker: hud && hud.character, reducedMotion: prefersReducedMotion() }).played > 0;
+            return playStatsFeedbackWithHud(overlay, fx, { readerSettings, speaker: hud && hud.character, reducedMotion: prefersReducedMotion() }).played > 0;
         },
         // 对外通知卡（IGS.api.notify.show）：阅读器没开直接返回，不排队、不补播。
         playExternalNotify(message) {
@@ -1009,7 +1009,7 @@ export function createIgsReaderHost(options = {}) {
         const merged = applyReaderPayloadToState(current, mode, { payload, index: 0 });
         if (!merged.content.segments.length) return { ok: false, reason: 'no-readable-text' };
         current.contentMessageId = payload.messageId != null ? payload.messageId : current.contentMessageId;
-        current.illustrationIdentity = readIllustrationIdentity(messageId);
+        current.illustrationIdentity = readIllustrationIdentity(current.contentMessageId);
         if (replaceOptions.turnOffset != null) current.turnOffset = Math.max(0, Number(replaceOptions.turnOffset) || 0);
         current.payload = payload;
         if (current.turnOffset === 0 || payload.messageId === current.mountMessageId) {
@@ -1144,8 +1144,7 @@ export function createIgsReaderHost(options = {}) {
         const current = state.activeReader;
         const settings = current && current.snapshot && current.snapshot.readerSettings;
         const statusHud = normalizeStatusHudSettings(settings && settings.statusHud);
-        const statsHudOn = Boolean(typeof options.isStatsEnabled === 'function' && options.isStatsEnabled());
-        const shouldSubscribe = Boolean(current) && (((statusHud.enabled || statsHudOn) && statusHudUsesTables(statusHud))
+        const shouldSubscribe = Boolean(current) && ((statusHud.enabled && statusHudUsesTables(statusHud))
             || Boolean(settings?._sceneAssets?.enabled && Object.keys(settings._sceneAssets.characterOutfits || {}).length)
             || Boolean(current.payload?.promiseHistory?.length));
         if (!shouldSubscribe) {
@@ -1963,6 +1962,7 @@ export function createIgsReaderHost(options = {}) {
         waitStage.close();
         if (current.dom && current.dom.root && current.dom.root.style) current.dom.root.style.display = '';
         if (current.deferredReviewKey) syncAssetReviewAfterRender(current, current.snapshot);
+        if (current.snapshot) syncCombatEntryAfterRender(current, current.snapshot);
     }
 
     function remountEmbeddedReader(current, message) {
@@ -3835,6 +3835,19 @@ ${row.key}`;
                 return hit && hit.sig === tailSig(id) ? hit.replies : null;
             },
         }) : [];
+        // 上一 AI 楼的安科掷过后补的内置短楼：只在本楼开头续上显示，不进上一轮回帖，不喂给 AI。
+        if (settings.chainTail && settings.anke !== 'off' && !marks.start && Array.isArray(ctx.chat)) {
+            for (let i = Math.min(ctx.chat.length, messageId) - 1; i >= 0; i--) {
+                const m = ctx.chat[i];
+                if (!m || m.is_user || m.is_system) continue;
+                const prevAnke = thread && (threadAt(data, i) || {}).id === thread.id ? forumAnkeOf(m.mes) : null;
+                const prevLock = prevAnke ? ankeStore.get(forumAnkeLockKey(chatId, i, prevAnke)) : null;
+                if (prevLock && Array.isArray(prevLock.react)) {
+                    for (const r of prevLock.react) chainTail.push({ k: 0, no: r.no, id: r.id, po: false, time: r.time || '', text: r.text, quote: '', ref: 0, builtin: true });
+                }
+                break;
+            }
+        }
         // 聊天页在帖子里画成手机截图：名字换论坛代号，配色与手机壳跟聊天演出一致，顶栏时间取剧情时间。
         const shotOf = (row) => {
             const block = logChatOf(floor, row.index);
@@ -4980,12 +4993,11 @@ ${row.key}`;
     function buildReaderSnapshot(payload, mode, readerSettings, index = 0) {
         const scene = payload.scene || (payload.render && payload.render.scene) || {};
         const buildStatusHudForSnapshot = (settings, speaker, emotion, sceneInfo, isNarration, outfitFor, spriteAvatar) => {
-            const rawStatusHud = normalizeStatusHudSettings(settings && settings.statusHud);
-            // 数值系统接管时，已登记角色的 HUD 条以 IGS 为准（易错点 H3）；只要开启数值系统，现有状态栏就在左上角常驻显示。
+            const statusHud = normalizeStatusHudSettings(settings && settings.statusHud);
+            // 状态栏显示权始终归状态栏自身开关；开启数值系统时只负责联动打开状态栏开关，不接管或覆盖用户的手动关闭。
+            if (!statusHud.enabled) return buildStatusHudModel({ settings: statusHud, character: '', emotion: '', location: '' });
             const tavernLookup = typeof options.statsLookup === 'function' ? options.statsLookup() : null;
             const statsSystemOn = Boolean((typeof options.isStatsEnabled === 'function' && options.isStatsEnabled()) || tavernLookup);
-            const statusHud = statsSystemOn ? { ...rawStatusHud, enabled: true } : rawStatusHud;
-            if (!statusHud.enabled) return buildStatusHudModel({ settings: statusHud, character: '', emotion: '', location: '' });
             const sceneAssets = (settings && settings._sceneAssets) || {};
             const usesTables = statusHudUsesTables(statusHud);
             const readResult = usesTables ? readStatusHudTables() : null;
@@ -5889,6 +5901,7 @@ ${row.key}`;
             resolvePersonPortrait: (name) => resolveRecordPersonPortrait(name),
             subscribePortraits: (handler) => (typeof options.onGeneratedAssetUpdated === 'function'
                 ? options.onGeneratedAssetUpdated((detail) => { if (detail && (detail.reason === 'image-loaded' || detail.reason === 'image-lost' || detail.reason === 'combat-prewarm')) handler(detail); }) : null),
+            subscribeStats: (handler) => (typeof options.onStatsUpdated === 'function' ? options.onStatsUpdated(handler) : null),
             // 背包「使用」（P7c）：有装配定义的回复道具走场外使用；返回 draft 时照旧填草稿。
             useInventoryItem: typeof options.useCombatInventoryItem === 'function' ? (name) => options.useCombatInventoryItem(name) : null,
             // 背包分组、已装备标记与装备映射（P7e）：战斗开启时读主角背包投影；装上 / 卸下走现有换装服务。
@@ -5907,6 +5920,23 @@ ${row.key}`;
         // 卡牌战斗面板：会话、账本与建表由 bootstrap 注入；扩展关闭或宿主不可用时 getSession 返回 null，面板不打开。
         const combatController = createCombatPanelController(doc, {
             getSession: () => (typeof options.getCombatSession === 'function' ? options.getCombatSession() : null),
+            // 流式生成落定期间若楼号暂未对齐或越界，重新定位当前活跃 AI 楼号，避免战斗准备报找不到 ID。
+            resolveMessageId: (currentId) => {
+                const reader = state.activeReader;
+                const activeId = reader && (reader.contentMessageId != null ? reader.contentMessageId : reader.payload?.messageId);
+                const candidate = Number(activeId ?? currentId);
+                if (Number.isInteger(candidate) && candidate >= 0 && typeof options.getIllustrationSource === 'function') {
+                    const floor = options.getIllustrationSource(candidate);
+                    if (floor && floor.isAi) return floor.messageId;
+                }
+                const ctx = getSillyTavernContext(options.global || globalThis);
+                const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
+                for (let i = chat.length - 1; i >= 0; i -= 1) {
+                    if (chat[i]?.is_user) break;
+                    if (chat[i] && !chat[i].is_system) return i;
+                }
+                return Number.isInteger(candidate) && candidate >= 0 ? candidate : null;
+            },
             // 对阵界面没做选择、或战斗打到一半就关闭（含关闭阅读器）：在入口位置留「返回战斗 / 返回挑战」标签；已发送、已放弃、已托管、已跳过则清除。
             onClose: ({ dismissed }) => {
                 setIntimateDuel(null);

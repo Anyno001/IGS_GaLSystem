@@ -114,7 +114,7 @@ import { applyCombatRuleModifiers, combatExpansionEnabled, combatCooldownFloorsO
 import { mergeCheckInputs, resolveCheckRollsSegment } from '../scene/check-rolls.js';
 import { isMatteUnlocked } from '../media/matte-unlock.js';
 
-const IGS_VERSION = '0.41.30';
+const IGS_VERSION = '0.41.43';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 
@@ -561,6 +561,7 @@ export function bootstrapIGS(options = {}) {
         statsFavorOverview: () => (app.statsRuntime && typeof app.statsRuntime.favorOverview === 'function' ? app.statsRuntime.favorOverview() : null),
         statsProtagonistLookup: () => (app.statsRuntime && typeof app.statsRuntime.protagonistLookup === 'function' ? app.statsRuntime.protagonistLookup() : null),
         statsProtagonistBlock: () => (app.statsRuntime && typeof app.statsRuntime.protagonistBlock === 'function' ? app.statsRuntime.protagonistBlock() : null),
+        onStatsUpdated: (handler) => events.on('igs:stats-updated', handler),
         isStatsEnabled: () => {
             const snap = getUnifiedSettingsSnapshot() || {};
             return Boolean((snap.bridge && snap.bridge.stats && snap.bridge.stats.enabled === true) || combatExpansionEnabled(snap.readerSettings));
@@ -998,9 +999,9 @@ export function bootstrapIGS(options = {}) {
     if (imageJobLog && typeof imageJobLog.prune === 'function') imageJobLog.prune();
     llmCallLog.prune?.();
     applyImageCacheLimit((getUnifiedSettingsSnapshot() || {}).bridge);
-    illustrationService.start();
     assetGenerationService.start();
     storyOutfits?.start();
+    illustrationService.start();
     itemCg.itemImages.start();
     itemCg.itemLedger.start();
     scheduleSceneAssetsInjection(SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS, 1);
@@ -1211,10 +1212,9 @@ export function bootstrapIGS(options = {}) {
             // 成长与战斗结果走阅读器生成细线（不弹窗、不挡画面，§10）；阅读器未打开时 info 级不退回 toastr。
             const notice = app.igsUi && app.igsUi.showImageNotice;
             if (typeof notice === 'function') {
-                // 成长行带技能数值：状态栏开启或数值系统开启（常驻状态栏）时显示。
+                // 成长行带技能数值：状态栏关闭时不显示，尊重用户对状态栏开关的独立控制。
                 const snap = getUnifiedSettingsSnapshot() || {};
-                const statsHudOn = Boolean((snap.bridge && snap.bridge.stats && snap.bridge.stats.enabled === true) || combatExpansionEnabled(snap.readerSettings));
-                const hudOn = statsHudOn || normalizeStatusHudSettings((snap.readerSettings || {}).statusHud).enabled;
+                const hudOn = normalizeStatusHudSettings((snap.readerSettings || {}).statusHud).enabled;
                 for (const line of statsNoticeLines(hudOn ? fx : { ...fx, growth: [] })) {
                     try { notice.call(app.igsUi, 'info', line); } catch (error) { /* 细线出错不影响结算 */ }
                 }
@@ -1449,6 +1449,9 @@ export function bootstrapIGS(options = {}) {
         let readerSettingsByMode = { ...(currentLegacy.readerSettingsByMode || {}),
             ...cloneData(payload.readerSettingsByMode || {}) };
         const hasValues = value => value && typeof value === 'object' && Object.keys(value).length > 0;
+        const prevReaderSettings = [currentLegacy.readerSettingsByMode?.default, currentLegacy.readerSettingsByMode?.pc, currentLegacy.readerSettingsByMode?.mobile, currentLegacy.readerSettings].find(hasValues) || {};
+        const prevStatsOn = Boolean((currentLegacy.bridge && currentLegacy.bridge.stats && currentLegacy.bridge.stats.enabled === true)
+            || combatExpansionEnabled(prevReaderSettings));
         if (!hasValues(readerSettingsByMode.default)) readerSettingsByMode.default = cloneData(
             [readerSettingsByMode.pc, readerSettingsByMode.mobile, currentLegacy.readerSettings].find(hasValues) || {});
         // v0.21.4 起全模式共用一套设置，统一存取 'default' 桶。
@@ -1462,6 +1465,12 @@ export function bootstrapIGS(options = {}) {
         // 保存战斗开启设置时持久化自动启用数值系统，不只改界面草稿。
         if (combatExpansionEnabled(readerSettingsByMode['default']) && nextBridge.stats?.enabled !== true) {
             nextBridge.stats = { ...(nextBridge.stats || {}), enabled: true };
+        }
+        // 数值系统由关转开时同步打开状态栏开关；若数值本就开着或本次显式关闭状态栏，则保留用户的独立选择。
+        const nextStatsOn = Boolean(nextBridge.stats?.enabled === true || combatExpansionEnabled(readerSettingsByMode['default']));
+        if (!prevStatsOn && nextStatsOn && payload.readerSettings?.statusHud?.enabled !== false) {
+            const prevHud = readerSettingsByMode['default'].statusHud;
+            readerSettingsByMode['default'].statusHud = { ...(prevHud && typeof prevHud === 'object' ? prevHud : {}), enabled: true };
         }
         // 自动分段一次性覆盖迁移：旧配置尚未带迁移版本时默认补开并落盘版本标记，显式传入的用户开关值优先保留。
         if (!Number.isInteger(nextBridge.sentencePagingMigrationVersion)
